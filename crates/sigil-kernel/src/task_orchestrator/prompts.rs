@@ -13,7 +13,7 @@ pub fn task_planner_system_prompt_contract_material() -> &'static str {
 /// Stable system-level contract for one accepted task-plan participant.
 #[must_use]
 pub fn task_participant_system_prompt_contract_material() -> &'static str {
-    "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
+    "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. When the host supplies direct dependency results, treat them as the authoritative handoff; do not search for or invent result files. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
 }
 
 pub(super) fn planner_prompt(objective: &str) -> String {
@@ -89,6 +89,7 @@ pub(super) fn executor_step_prompt(
     objective: &str,
     plan_version: u32,
     step: &TaskStepSpec,
+    dependency_results: Option<&str>,
     guidance: Option<&str>,
 ) -> String {
     role_step_prompt(
@@ -96,6 +97,7 @@ pub(super) fn executor_step_prompt(
         objective,
         plan_version,
         step,
+        dependency_results,
         guidance,
     )
 }
@@ -104,6 +106,7 @@ pub(super) fn subagent_step_prompt(
     objective: &str,
     plan_version: u32,
     step: &TaskStepSpec,
+    dependency_results: Option<&str>,
     guidance: Option<&str>,
 ) -> String {
     role_step_prompt(
@@ -111,8 +114,96 @@ pub(super) fn subagent_step_prompt(
         objective,
         plan_version,
         step,
+        dependency_results,
         guidance,
     )
+}
+
+const TASK_STEP_DEPENDENCY_CONTEXT_MAX_CHARS: usize = 16_000;
+const TASK_STEP_DEPENDENCY_CONTEXT_TRUNCATION_MARKER: &str =
+    "\n[additional dependency results truncated by host]";
+
+pub(super) fn task_step_dependency_result_context(
+    session: &Session,
+    task_id: &TaskId,
+    plan_version: u32,
+    step: &TaskStepSpec,
+) -> Result<Option<String>> {
+    if step.depends_on.is_empty() {
+        return Ok(None);
+    }
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("task is missing before dependency result assembly"))?;
+    let plan = task
+        .plans
+        .get(&plan_version)
+        .filter(|plan| plan.status == TaskPlanStatus::Accepted)
+        .ok_or_else(|| anyhow!("task has no accepted plan before dependency result assembly"))?;
+    let mut results = Vec::with_capacity(step.depends_on.len());
+    for dependency_id in &step.depends_on {
+        let dependency = plan
+            .steps
+            .iter()
+            .find(|candidate| candidate.step_id == *dependency_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "task step {} depends on missing step {}",
+                    step.step_id.as_str(),
+                    dependency_id.as_str()
+                )
+            })?;
+        let dependency_state = task
+            .steps
+            .get(&(plan_version, dependency_id.clone()))
+            .ok_or_else(|| {
+                anyhow!(
+                    "task dependency {} has no durable step state",
+                    dependency_id.as_str()
+                )
+            })?;
+        if dependency_state.status != TaskStepStatus::Completed {
+            bail!(
+                "task dependency {} is not completed before downstream prompt assembly",
+                dependency_id.as_str()
+            );
+        }
+        let summary = task
+            .participant_attempts_for(
+                TaskParticipantPurpose::Step,
+                Some(plan_version),
+                Some(dependency_id),
+            )
+            .into_iter()
+            .rev()
+            .find_map(|attempt| task.participant_results.get(&attempt.attempt_id))
+            .map(|result| result.summary.as_str())
+            .or(dependency_state.summary.as_deref())
+            .unwrap_or("completed without a retained summary");
+        results.push(format!(
+            "- {} [{}]\n  summary: {}",
+            dependency.title,
+            dependency_id.as_str(),
+            summary
+        ));
+    }
+    let context = format!(
+        "Direct dependency results supplied by the host. Treat these as the handoff; do not search for or invent result files:\n{}",
+        results.join("\n")
+    );
+    if context.chars().count() <= TASK_STEP_DEPENDENCY_CONTEXT_MAX_CHARS {
+        return Ok(Some(context));
+    }
+    let retained_chars = TASK_STEP_DEPENDENCY_CONTEXT_MAX_CHARS.saturating_sub(
+        TASK_STEP_DEPENDENCY_CONTEXT_TRUNCATION_MARKER
+            .chars()
+            .count(),
+    );
+    let mut bounded = context.chars().take(retained_chars).collect::<String>();
+    bounded.push_str(TASK_STEP_DEPENDENCY_CONTEXT_TRUNCATION_MARKER);
+    Ok(Some(bounded))
 }
 
 pub(super) fn task_synthesis_prompt(
@@ -212,6 +303,7 @@ pub(super) fn role_step_prompt(
     objective: &str,
     plan_version: u32,
     step: &TaskStepSpec,
+    dependency_results: Option<&str>,
     guidance: Option<&str>,
 ) -> String {
     let detail = step
@@ -225,6 +317,10 @@ pub(super) fn role_step_prompt(
         step.title,
         step.role.as_str()
     );
+    if let Some(dependency_results) = dependency_results.filter(|value| !value.trim().is_empty()) {
+        prompt.push_str("\n\n");
+        prompt.push_str(dependency_results.trim());
+    }
     if let Some(guidance) = guidance.filter(|value| !value.trim().is_empty()) {
         prompt.push_str("\n\nUser guidance for this continuation:\n");
         prompt.push_str(guidance.trim());

@@ -755,6 +755,12 @@ where
                 let mut batch_requests = Vec::with_capacity(runnable.steps.len());
                 let mut child_effects = Vec::with_capacity(runnable.steps.len());
                 for step in runnable.steps {
+                    let dependency_results = task_step_dependency_result_context(
+                        session,
+                        &request.task_id,
+                        plan_version,
+                        &step,
+                    )?;
                     let step_options = match step.role {
                         AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
                         AgentRole::SubagentRead => subagent_read_options.clone(),
@@ -784,6 +790,7 @@ where
                             &request.objective,
                             plan_version,
                             &step,
+                            dependency_results.as_deref(),
                             guidance_for_step(
                                 guidance.as_deref(),
                                 guidance_target_step_ids.as_ref(),
@@ -795,6 +802,7 @@ where
                             &request.objective,
                             plan_version,
                             &step,
+                            dependency_results.as_deref(),
                             guidance_for_step(
                                 guidance.as_deref(),
                                 guidance_target_step_ids.as_ref(),
@@ -1691,10 +1699,28 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let dependency_results = task_step_dependency_result_context(
+            parent_session,
+            &request.task_id,
+            plan_version,
+            step,
+        )?;
         let prompt = if step.role == AgentRole::Executor {
-            executor_step_prompt(&request.objective, plan_version, step, guidance)
+            executor_step_prompt(
+                &request.objective,
+                plan_version,
+                step,
+                dependency_results.as_deref(),
+                guidance,
+            )
         } else {
-            subagent_step_prompt(&request.objective, plan_version, step, guidance)
+            subagent_step_prompt(
+                &request.objective,
+                plan_version,
+                step,
+                dependency_results.as_deref(),
+                guidance,
+            )
         };
         let child_input =
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(prompt)])
@@ -2789,11 +2815,14 @@ pub(super) fn participant_result_entry(
     verification_refs: Vec<String>,
 ) -> Result<TaskParticipantResultEntry> {
     let safe_final_text = crate::safe_persistence_text(final_text);
-    let summary = if safe_final_text.is_empty() {
+    let normalized_final_text = safe_final_text.trim();
+    let summary = if normalized_final_text.is_empty() {
         "participant produced no final text".to_owned()
     } else {
         bounded_task_participant_summary(&safe_final_text)
     };
+    let summary_truncated =
+        normalized_final_text.chars().count() > crate::TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS;
     if final_answer_ref
         .as_ref()
         .is_some_and(|reference| reference.session_ref != attempt.child_session_ref)
@@ -2825,6 +2854,7 @@ pub(super) fn participant_result_entry(
         attempt_id: attempt.attempt_id.clone(),
         task_id: attempt.task_id.clone(),
         summary,
+        summary_truncated,
         summary_hash,
         output_hash,
         terminal_status: None,

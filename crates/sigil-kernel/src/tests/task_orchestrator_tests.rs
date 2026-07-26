@@ -56,7 +56,7 @@ use super::{
     subagent_step_prompt, task_participant_system_prompt_contract_material,
     task_planner_prompt_contract_material, task_planner_system_prompt_contract_material,
     task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
-    task_step_readiness,
+    task_step_dependency_result_context, task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -139,6 +139,7 @@ fn seed_completed_synthesis_prefix(
             attempt_id: attempt_id.clone(),
             task_id: task_id.clone(),
             summary: final_text.to_owned(),
+            summary_truncated: false,
             summary_hash: output_hash.clone(),
             output_hash: output_hash.clone(),
             terminal_status: Some(TaskParticipantAttemptStatus::Completed),
@@ -923,7 +924,94 @@ fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
     assert!(participant.contains("exactly one accepted durable task-plan step"));
     assert!(participant.contains("Use only tool names explicitly advertised"));
     assert!(participant.contains("never /workspace"));
+    assert!(participant.contains("authoritative handoff"));
     assert!(participant.contains("report that limitation without guessing"));
+}
+
+#[test]
+fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files() -> Result<()> {
+    let task_id = TaskId::new("task_dependency_handoff")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let upstream = read_executor_step("inspect_parser", "Inspect parser", Vec::new())?;
+    let downstream = read_executor_step(
+        "consolidate",
+        "Consolidate review",
+        vec![upstream.step_id.clone()],
+    )?;
+    let mut session = Session::new("planner", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref,
+        objective: "review parser and formatter".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![upstream.clone(), downstream.clone()],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: upstream.step_id.clone(),
+        role: upstream.role,
+        status: TaskStepStatus::Completed,
+        title: Some(upstream.title.clone()),
+        summary: Some("legacy fallback".to_owned()),
+        reason: None,
+    }))?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&upstream.step_id),
+        1,
+    )?;
+    let mut attempt = TaskParticipantAttemptEntry {
+        attempt_id: attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(upstream.step_id.clone()),
+        role: upstream.role,
+        child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+    let mut result = participant_result_entry(
+        &attempt,
+        "Parser returns an owned normalized String from src/parser.rs.",
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
+    session.append_control(ControlEntry::TaskParticipantResult(result))?;
+    attempt.status = TaskParticipantAttemptStatus::Completed;
+    session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
+
+    let context = task_step_dependency_result_context(&session, &task_id, 1, &downstream)?
+        .expect("dependent step should receive a host-owned handoff");
+    assert!(context.contains("Direct dependency results supplied by the host"));
+    assert!(context.contains("Inspect parser [inspect_parser]"));
+    assert!(context.contains("owned normalized String from src/parser.rs"));
+    assert!(context.contains("do not search for or invent result files"));
+
+    let prompt = subagent_step_prompt(
+        "review parser and formatter",
+        1,
+        &downstream,
+        Some(&context),
+        None,
+    );
+    assert!(prompt.contains(&context));
+    Ok(())
 }
 
 #[test]
@@ -1007,6 +1095,53 @@ fn participant_result_constructor_bounds_parent_reference_lists() -> Result<()> 
             .iter()
             .all(|path| path.chars().count() <= crate::TASK_PARTICIPANT_RESULT_REF_MAX_CHARS)
     );
+    result.validate_shape()?;
+    Ok(())
+}
+
+#[test]
+fn participant_result_constructor_marks_and_stably_trims_oversized_summary() -> Result<()> {
+    let task_id = TaskId::new("task_summary_bound")?;
+    let step_id = TaskStepId::new("inspect")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        1,
+    )?;
+    let attempt = TaskParticipantAttemptEntry {
+        attempt_id: attempt_id.clone(),
+        task_id: task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(step_id),
+        role: crate::AgentRole::SubagentRead,
+        child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
+    let final_text = format!(
+        "{} trailing material",
+        "x".repeat(crate::TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS - 1)
+    );
+
+    let result = participant_result_entry(
+        &attempt,
+        &final_text,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+
+    assert!(result.summary_truncated);
+    assert_eq!(
+        result.summary.chars().count(),
+        crate::TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS - 1
+    );
+    assert!(!result.summary.ends_with(char::is_whitespace));
     result.validate_shape()?;
     Ok(())
 }
@@ -1793,7 +1928,7 @@ async fn continue_consumes_one_durable_retry_schedule_after_restart() -> Result<
         2,
     )?;
     let expected_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-        subagent_step_prompt(objective, 1, &step, None),
+        subagent_step_prompt(objective, 1, &step, None, None),
     )]);
     let mut session = Session::new("fixture", "model");
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {

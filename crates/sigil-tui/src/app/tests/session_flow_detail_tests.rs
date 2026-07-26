@@ -381,6 +381,7 @@ fn participant_result_audit_line_distinguishes_terminal_and_legacy_results() -> 
         attempt_id,
         task_id,
         summary: "bounded result".to_owned(),
+        summary_truncated: false,
         summary_hash: format!("sha256:{}", "1".repeat(64)),
         output_hash: format!("sha256:{}", "2".repeat(64)),
         terminal_status: Some(sigil_kernel::TaskParticipantAttemptStatus::Completed),

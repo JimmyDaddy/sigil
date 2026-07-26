@@ -105,7 +105,8 @@ use evidence::{
 };
 use prompts::{
     executor_step_prompt, normalize_task_guidance, planner_prompt, subagent_step_prompt,
-    task_continue_reason, task_guidance_assessment_prompt, task_synthesis_prompt,
+    task_continue_reason, task_guidance_assessment_prompt, task_step_dependency_result_context,
+    task_synthesis_prompt,
 };
 pub use prompts::{
     task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,

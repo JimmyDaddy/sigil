@@ -237,11 +237,12 @@ pub fn task_final_message_id(task_id: &TaskId, attempt_id: &TaskParticipantAttem
 /// Produces the bounded, persistence-safe result summary stored in the parent control log.
 #[must_use]
 pub fn bounded_task_participant_summary(value: &str) -> String {
-    crate::safe_persistence_text(value)
+    let bounded = crate::safe_persistence_text(value)
         .trim()
         .chars()
         .take(TASK_PARTICIPANT_RESULT_SUMMARY_MAX_CHARS)
-        .collect()
+        .collect::<String>();
+    bounded.trim_end().to_owned()
 }
 
 /// Stable identifier for an approval or elicitation route.
@@ -1389,6 +1390,8 @@ pub struct TaskParticipantResultEntry {
     pub attempt_id: TaskParticipantAttemptId,
     pub task_id: TaskId,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub summary_truncated: bool,
     pub summary_hash: String,
     pub output_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
