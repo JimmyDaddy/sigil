@@ -2116,21 +2116,22 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let _thread_release = TaskChildThreadReleaseGuard::new(&self.supervisor, &child_thread);
         let planner_run = {
             let mut participant_handler = TaskParticipantEventHandler { inner: handler };
+            let tools = planner_tools_with_discovery(
+                planner.tool_registry(),
+                self.planner_discovery_max_probes,
+            );
             if self.planner_discovery_max_probes == 0 {
                 planner
-                    .run_with_approval_input(
+                    .run_with_approval_input_and_tool_registry(
                         &mut child_session,
                         request.child_input.clone(),
                         request.options.clone(),
+                        tools,
                         &mut participant_handler,
                         approval_handler,
                     )
                     .await
             } else {
-                let tools = planner_tools_with_discovery(
-                    planner.tool_registry(),
-                    self.planner_discovery_max_probes,
-                );
                 let mut discovery_delegate = TaskDiscoveryDelegate::new(
                     self.supervisor.clone(),
                     parent_session,

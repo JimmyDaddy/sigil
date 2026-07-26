@@ -13,7 +13,11 @@ scripts/run-evals.sh --model \
   --output-dir .repo-local-dev/evals/model-smoke
 ```
 
-The active provider credential must be supplied through its normal environment or secret source. The generated isolated config removes inline secret fields and disables Web, MCP, skills, memory, task delegation, and unrelated providers.
+The active provider credential must be supplied through that provider's environment variable
+(`SIGIL_API_KEY` for DeepSeek). The generated isolated config removes inline secret fields and
+disables Web, MCP, skills, memory, task delegation, and unrelated providers, so an inline key in
+the source config is never used as the evaluation credential. A missing environment credential
+fails before output-directory creation or provider dispatch.
 
 `--max-cost-usd` is a local admission and stop budget. It cannot enforce a provider-side billing cap for an already dispatched request. A single repetition is smoke evidence only; trend eligibility requires at least three provider-admitted repetitions with identical fixture, provider, model parameters, normalized config, tool schema, sandbox backend, OS, and toolchain identities.
 
@@ -43,8 +47,9 @@ The hidden release-owner command requires the complete frozen corpus, creates a 
 without replacing an existing candidate artifact, and currently admits only the pinned official
 DeepSeek V4 Flash route. It derives prompt and tool/profile digests from production material in the
 candidate binary. The routing digest binds both the model-visible semantic routing system prompt and
-the internal `request_task_planning` schema; the host does not use a prompt keyword classifier. The
-embedded CLI/runtime commit identities must agree.
+the internal `request_task_planning` schema; the planner digest binds the planner system/user
+contract, and the system digest also binds the participant execution contract. The host does not
+use a prompt keyword classifier. The embedded CLI/runtime commit identities must agree.
 
 The provider kind, endpoint family, canonical model version, routing/planner/system prompt digests,
 tool/profile contract digest, Sigil commit, and build must all come from the same candidate build

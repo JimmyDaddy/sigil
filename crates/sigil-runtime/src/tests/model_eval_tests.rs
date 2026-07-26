@@ -546,6 +546,49 @@ fn model_eval_reservation_keeps_non_divisible_budget_admissible() {
 }
 
 #[test]
+fn model_eval_campaign_requires_environment_credential_before_output_creation() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_campaign_requires_environment_credential_before_output_creation",
+        "SIGIL_TEST_MODEL_EVAL_MISSING_CREDENTIAL_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    let _api_key = EnvironmentGuard::unset("SIGIL_API_KEY");
+    let temp = tempdir().expect("temp dir");
+    let config_path = temp.path().join("source.toml");
+    write_source_config(&config_path, "http://127.0.0.1:9", "auto-edit");
+    let output_dir = temp.path().join("campaign");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+
+    let error = runtime
+        .block_on(run_model_eval_campaign(
+            ModelEvalCampaignRequest {
+                config_path,
+                fixture_roots: vec![fixture_root("small-code-edit")],
+                orchestration_route_contract: None,
+                repetitions: 1,
+                max_cost_microusd: 500_000,
+                campaign_timeout: Duration::from_secs(10),
+                output_dir: output_dir.clone(),
+            },
+            &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+        ))
+        .expect_err("source-config credentials must not silently enter isolated evals");
+
+    assert!(
+        error
+            .to_string()
+            .contains("model eval requires SIGIL_API_KEY")
+    );
+    assert!(error.to_string().contains("exclude provider credentials"));
+    assert!(!output_dir.exists());
+}
+
+#[test]
 fn model_eval_campaign_uses_production_run_constraints_and_budget() {
     if !enter_isolated_environment_test(
         "model_eval_tests::model_eval_campaign_uses_production_run_constraints_and_budget",
@@ -1187,6 +1230,13 @@ impl EnvironmentGuard {
         let previous = env::var_os(name);
         // SAFETY: runtime tests serialize environment mutation through `test_env::lock`.
         unsafe { env::set_var(name, value) };
+        Self { name, previous }
+    }
+
+    fn unset(name: &'static str) -> Self {
+        let previous = env::var_os(name);
+        // SAFETY: runtime tests serialize environment mutation through `test_env::lock`.
+        unsafe { env::remove_var(name) };
         Self { name, previous }
     }
 }

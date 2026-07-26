@@ -50,8 +50,8 @@ use super::{
     AgentBudgetPolicy, AgentChatChildStart, AgentMailboxMessage, AgentProfileRegistry,
     AgentResultMaterialization, AgentSupervisor, AgentSupervisorTaskChildRunner,
     AgentTaskChildStart, REQUEST_TASK_DISCOVERY_TOOL_NAME, agent_terminal_status_from_task_child,
-    task_child_status_from_outcome, task_runner::bind_child_integration_facts,
-    tool_scope_is_write_capable,
+    planner_tools_with_discovery, task_child_status_from_outcome,
+    task_runner::bind_child_integration_facts, tool_scope_is_write_capable,
 };
 use crate::{AgentToolRuntime, EXPLORE_PROFILE_ID};
 
@@ -2773,6 +2773,29 @@ fn provider_background_resume_defaults_to_interrupted() -> Result<()> {
 
     assert!(!supervisor.supports_background_resume());
     Ok(())
+}
+
+#[test]
+fn planner_runtime_tool_view_exposes_only_bounded_discovery() {
+    let mut base = ToolRegistry::new();
+    base.register(Arc::new(ApprovalRouteTool));
+
+    let without_discovery = planner_tools_with_discovery(&base, 0);
+    assert!(without_discovery.specs().is_empty());
+
+    let with_discovery = planner_tools_with_discovery(&base, 2);
+    assert_eq!(with_discovery.specs().len(), 1);
+    assert!(
+        with_discovery
+            .spec_for(REQUEST_TASK_DISCOVERY_TOOL_NAME)
+            .is_some()
+    );
+    assert!(with_discovery.spec_for("read_file").is_none());
+    assert!(base.spec_for("read_file").is_some());
+    assert!(
+        base.spec_for(REQUEST_TASK_DISCOVERY_TOOL_NAME).is_none(),
+        "temporary planner tools must not mutate the role registry"
+    );
 }
 
 #[tokio::test]

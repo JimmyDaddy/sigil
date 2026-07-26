@@ -535,7 +535,8 @@ pub use task_orchestrator::{
     changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
     changeset_only_child_tool_scope, decode_changeset_only_child_output,
     reconcile_task_final_answer_prefix, rerun_task_verification_check, task_participant_input_hash,
-    task_planner_prompt_contract_material, task_step_owner_agent_id,
+    task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
+    task_planner_system_prompt_contract_material, task_step_owner_agent_id,
     validate_isolated_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{

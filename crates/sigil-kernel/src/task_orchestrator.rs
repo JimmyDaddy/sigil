@@ -103,10 +103,13 @@ use evidence::{
     changed_files_mutation_evidence, durable_mutation_replay_failed_evidence,
     durable_workspace_mutation_evidence,
 };
-pub use prompts::task_planner_prompt_contract_material;
 use prompts::{
     executor_step_prompt, normalize_task_guidance, planner_prompt, subagent_step_prompt,
     task_continue_reason, task_guidance_assessment_prompt, task_synthesis_prompt,
+};
+pub use prompts::{
+    task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
+    task_planner_system_prompt_contract_material,
 };
 pub use readiness::rerun_task_verification_check;
 use readiness::{

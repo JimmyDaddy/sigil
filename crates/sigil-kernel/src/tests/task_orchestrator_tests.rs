@@ -53,8 +53,10 @@ use super::{
     record_isolated_child_output, relevant_verification_receipts, rerun_task_verification_check,
     route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
     step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
-    subagent_step_prompt, task_status_from_step_status, task_step_auto_run_policy,
-    task_step_default_policy, task_step_readiness,
+    subagent_step_prompt, task_participant_system_prompt_contract_material,
+    task_planner_prompt_contract_material, task_planner_system_prompt_contract_material,
+    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
+    task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -906,6 +908,22 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     assert!(prompt.contains("role subagent_write with isolation changeset_only"));
     assert!(prompt.contains("isolation worktree"));
     assert!(prompt.contains("do not pair subagent_write with sequential_workspace_write"));
+}
+
+#[test]
+fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
+    let planner = task_planner_system_prompt_contract_material();
+    assert!(planner.contains("overrides the ordinary instruction to inspect the workspace"));
+    assert!(planner.contains("request_task_discovery at most once"));
+    assert!(planner.contains("do not add a generic repository-overview step"));
+    assert!(planner.contains("do not add a separate summary"));
+    assert!(task_planner_prompt_contract_material().contains(planner));
+
+    let participant = task_participant_system_prompt_contract_material();
+    assert!(participant.contains("exactly one accepted durable task-plan step"));
+    assert!(participant.contains("Use only tool names explicitly advertised"));
+    assert!(participant.contains("never /workspace"));
+    assert!(participant.contains("report that limitation without guessing"));
 }
 
 #[test]

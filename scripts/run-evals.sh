@@ -11,6 +11,8 @@ Usage:
 
 Deterministic mode uses fake provider/tool plumbing only. Model mode is an explicit,
 cost-bounded provider-backed acceptance campaign and may perform network requests.
+Model mode requires the provider-specific API-key environment variable because
+retained isolated configs intentionally exclude credentials from the source config.
 
 Options:
   --deterministic   Run deterministic conformance evals.

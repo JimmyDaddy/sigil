@@ -15,8 +15,8 @@ use sigil_kernel::{
     SequentialTaskRequest, Session, SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode,
     TaskParticipantAttemptId, TaskStepId, TaskStepMode, TaskStepSpec, Tool, ToolAccess,
     ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudget,
-    child_session_ref,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    WebTaskTreeBudget, child_session_ref,
 };
 
 use crate::{
@@ -40,10 +40,19 @@ const MAX_DISCOVERY_PATH_CHARS: usize = 512;
 
 pub(crate) fn planner_tools_with_discovery(base: &ToolRegistry, max_probes: usize) -> ToolRegistry {
     let mut registry = base.snapshot();
-    registry.register(Arc::new(TaskDiscoveryTool {
-        max_probes: max_probes.min(MAX_TASK_DISCOVERY_PROBES),
-    }));
+    let max_probes = max_probes.min(MAX_TASK_DISCOVERY_PROBES);
+    let allowed_names = if max_probes == 0 {
+        Vec::new()
+    } else {
+        registry.register(Arc::new(TaskDiscoveryTool { max_probes }));
+        vec![REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned()]
+    };
     registry
+        .scoped(ToolRegistryScope::from_names_and_prefixes(
+            allowed_names,
+            std::iter::empty::<String>(),
+        ))
+        .into_registry()
 }
 
 pub(super) struct TaskDiscoveryDelegate<'a> {

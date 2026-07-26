@@ -1193,6 +1193,12 @@ spawn admission。
   使用通用 `spawn_agent` / `spawn_agents` / `wait_agent`，每个 planning attempt 最多提交一个
   probe batch。默认 3、硬上限 4；`multi_agent_mode=none` 或
   `max_planning_research_agents=0` 会隐藏该能力。
+- Planner 临时 registry 不再继承普通 read-only 文件/搜索工具：启用 discovery 时只暴露
+  `request_task_discovery`，关闭时为空；`task_plan_update` 仍由 kernel 作为 typed internal tool
+  注入。Planner 与 participant 还分别获得 system-level role contract，要求 planner 最小化计划、
+  不重复 host synthesis，participant 只执行一个 accepted step、只使用当前 schema 中真实存在的
+  tool，并使用绑定 workspace root 的相对路径。相关 prompt 与 tool surface 均进入 exact route
+  identity，避免评测报告跨协议误复用。
 - 每个 probe 的 id、objective 和 workspace-relative path hints 必须唯一且结构不重叠；整批固定
   绑定 trusted built-in Explore、read-only effective registry 和继承的 root cancellation/web
   budget。Runtime 先完成全量 preflight 和 supervisor 原子 slot reservation，再写 child Started

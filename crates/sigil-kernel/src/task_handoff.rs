@@ -30,7 +30,9 @@ Call request_task_planning when fulfilling the goal clearly requires one or more
 - long-running or multi-part verification;
 - high-risk execution that benefits from a durable reviewed plan.
 
-Call continue_without_task_planning for an explanation, one symbol lookup, one read-only query, or a small single-file edit that does not meet any task-planning criterion.
+Call continue_without_task_planning for an explanation, one symbol lookup, one narrow read-only query about a single concern, or a small single-file edit that does not meet any task-planning criterion.
+
+Read-only does not automatically mean simple. Comparative research across multiple components, independent investigations that should run concurrently, or a consolidated review built from multiple work streams still requires request_task_planning.
 
 Do not inspect files, run commands, edit code, start solving the task, or produce free text in this routing microturn. The host will either start the durable planner or begin an ordinary conversation turn after your typed decision."#
 }
@@ -216,7 +218,7 @@ pub fn request_task_planning_tool_spec() -> ToolSpec {
 pub fn continue_without_task_planning_tool_spec() -> ToolSpec {
     ToolSpec {
         name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-        description: "Continue with an ordinary conversation turn only when the current goal is an explanation, one symbol lookup, one read-only query, or a small single-file edit and does not require coordinated multi-stage work, cross-layer changes, parallel work streams, long verification, or high-risk execution."
+        description: "Continue with an ordinary conversation turn only when the current goal is an explanation, one symbol lookup, one narrow read-only query about a single concern, or a small single-file edit and does not require coordinated multi-stage work, cross-layer changes, parallel or comparative research, long verification, or high-risk execution. Read-only multi-component research is not a simple query."
             .to_owned(),
         input_schema: json!({
             "type": "object",

@@ -1,5 +1,21 @@
 use super::*;
 
+/// Stable system-level contract for the isolated task planner.
+///
+/// The ordinary coding-agent system prompt encourages repository inspection. Planning is a
+/// different host-owned phase: direct inspection would bypass the bounded discovery batch and can
+/// consume the planner's turn budget before it commits a plan.
+#[must_use]
+pub fn task_planner_system_prompt_contract_material() -> &'static str {
+    "You are the isolated planner for one durable task. This planning phase overrides the ordinary instruction to inspect the workspace directly: do not call repository, shell, terminal, generic task, or agent tools. If repository facts are genuinely required, call request_task_discovery at most once with bounded non-overlapping probes; otherwise call task_plan_update immediately. Use only tool names advertised in the current request and stop as soon as task_plan_update succeeds.\n\nCreate the smallest executable plan that satisfies the objective. When the objective already names exact modules, files, or independent workstreams, do not add a generic repository-overview step. The host performs final synthesis after all plan steps, so do not add a separate summary, report-writing, or synthesis step. Keep independent read-only investigations dependency-free and assign them to subagent_read when parallel exploration is useful. Use executor for ordinary main-workspace reads and edits. Use subagent_write only for changeset_only proposals or worktree-isolated edits. Add verification steps only when they are executable with the participant tool contract; never invent a tool name."
+}
+
+/// Stable system-level contract for one accepted task-plan participant.
+#[must_use]
+pub fn task_participant_system_prompt_contract_material() -> &'static str {
+    "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
+}
+
 pub(super) fn planner_prompt(objective: &str) -> String {
     format!(
         "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution. After task_plan_update succeeds, stop; do not inspect files, execute steps, or summarize execution progress. Do not call generic task, spawn_agent, spawn_agents, or wait_agent tools. When independent repository facts are genuinely needed before planning, you may call planner-only request_task_discovery exactly once with non-overlapping probes; the host returns all bounded results automatically, so never poll. Use role executor for ordinary task-participant reads and edits, including sequential_workspace_write steps. To delegate read-only research or verification during execution, add role subagent_read steps. Use role subagent_write with isolation changeset_only for proposal-only work, or isolation worktree when the child must edit and test inside a physical isolated checkout; do not pair subagent_write with sequential_workspace_write. If the objective contains a user-approved plan, preserve its stated scope and order; only add, remove, or reorder steps when needed for correctness, and include the reason in the affected step detail.\n\nObjective:\n{objective}"
@@ -12,7 +28,11 @@ pub(super) fn planner_prompt(objective: &str) -> String {
 /// evaluation case's user data into release metadata.
 #[must_use]
 pub fn task_planner_prompt_contract_material() -> String {
-    planner_prompt("<objective>")
+    format!(
+        "system:\n{}\n\nuser:\n{}",
+        task_planner_system_prompt_contract_material(),
+        planner_prompt("<objective>")
+    )
 }
 
 pub(super) fn normalize_task_guidance(guidance: Option<String>) -> Option<String> {

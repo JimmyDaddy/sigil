@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -17,6 +17,7 @@ use crate::application_run::{
     ApplicationRunConstraints, ApplicationRunEventHandler, ApplicationRunOutput,
     ApplicationRunRequest, ApplicationRunServices, prepare_application_run,
 };
+use crate::provider_api_key_env_name;
 
 use super::{
     LoadedModelEvalFixture, MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION,
@@ -408,7 +409,22 @@ fn preflight_campaign(
     {
         bail!("model eval campaign timeout is outside the V1 bound");
     }
-    RootConfig::load(&request.config_path).context("model eval source config preflight failed")?;
+    let config = RootConfig::load(&request.config_path)
+        .context("model eval source config preflight failed")?;
+    let credential_env = provider_api_key_env_name(&config.agent.provider).with_context(|| {
+        format!(
+            "model eval provider {} has no runtime credential environment mapping",
+            config.agent.provider
+        )
+    })?;
+    let credential_is_present = env::var_os(credential_env)
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    if !credential_is_present {
+        bail!(
+            "model eval requires {credential_env}; isolated eval configs intentionally exclude provider credentials from retained artifacts"
+        );
+    }
     let mut fixtures = request
         .fixture_roots
         .iter()

@@ -13,7 +13,10 @@ scripts/run-evals.sh --model \
   --output-dir .repo-local-dev/evals/model-smoke
 ```
 
-active provider 的 credential 必须通过正常环境变量或 secret source 提供。生成的隔离配置会移除内联 secret 字段，并关闭 Web、MCP、skills、memory、task delegation 和非 active provider。
+active provider 的 credential 必须通过该 provider 对应的环境变量提供（DeepSeek 为
+`SIGIL_API_KEY`）。生成的隔离配置会移除内联 secret 字段，并关闭 Web、MCP、skills、memory、
+task delegation 和非 active provider；因此 source config 中即使存在内联 AK，也不会作为评测
+credential 使用。缺少环境变量时 campaign 会在创建输出目录和 provider dispatch 前失败。
 
 `--max-cost-usd` 只是本地准入与停止预算，不能对已经发出的请求形成 provider-side billing cap。单次 repetition 只属于 smoke evidence；只有至少三次 provider-admitted repetition 且 fixture、provider、模型参数、归一化配置、tool schema、sandbox backend、OS 与 toolchain identity 全部一致时，才能进入 trend。
 
@@ -31,7 +34,9 @@ model alias 或评测结果反推；其中 provider kind、endpoint family、can
 routing/planner/system prompt digest、tool/profile contract digest、Sigil commit 与 build 必须来自
 同一候选构建的发布元数据。占位值、旧 build 的 digest 或可漂移 alias 会让报告失去 rollout
 资格。routing digest 同时绑定模型可见的语义路由 system prompt 与内部
-`request_task_planning` schema；host 不使用 prompt 关键词分类器。文件使用以下 V1 字段：
+`request_task_planning` schema；planner digest 绑定 planner 的 system/user contract，system
+digest 还绑定 participant execution contract；host 不使用 prompt 关键词分类器。文件使用以下
+V1 字段：
 
 ```toml
 schema_version = 1

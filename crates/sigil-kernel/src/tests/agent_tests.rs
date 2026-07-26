@@ -32,16 +32,17 @@ use crate::{
     ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session,
     SessionLogEntry, SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
     TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceApplyReason,
-    TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry,
-    TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
-    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
-    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    plan_text_hash, task_routing_system_prompt_contract_material,
+    TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskParticipantAttemptId,
+    TaskParticipantContext, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
+    TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
+    ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
+    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
+    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected, plan_text_hash,
+    task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
 };
 
 use super::{
@@ -4970,6 +4971,67 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
             && tool.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
     }));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let step_prompt = "Edit src/lib.rs for the accepted parser step.";
+    let input =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(step_prompt)])
+            .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+                task_id: TaskId::new("task-participant-contract")?,
+                plan_version: 1,
+                step_id: TaskStepId::new("parser-step")?,
+                attempt_id: TaskParticipantAttemptId::new("participant-attempt-1")?,
+            }));
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    let request = requests.first().expect("participant request");
+    let contract_index = request
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.as_deref() == Some(task_participant_system_prompt_contract_material())
+        })
+        .expect("participant request should include its system contract");
+    let prompt_index = request
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some(step_prompt))
+        .expect("participant request should include the step prompt");
+    assert!(contract_index < prompt_index);
     Ok(())
 }
 

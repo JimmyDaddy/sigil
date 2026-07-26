@@ -35,6 +35,10 @@ use crate::{
         continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
         task_routing_system_prompt_contract_material,
     },
+    task_orchestrator::{
+        task_participant_system_prompt_contract_material,
+        task_planner_system_prompt_contract_material,
+    },
     tool::{
         PreparedToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
         ToolProgressSink, ToolRegistry, ToolResult, ToolSpec, ToolSubject,
@@ -1316,6 +1320,19 @@ where
                 0,
                 ModelMessage::system(task_routing_system_prompt_contract_material()),
             );
+        }
+        match purpose.as_ref() {
+            Some(AgentRunPurpose::TaskPlanner(_)) => transient_context.insert(
+                0,
+                ModelMessage::system(task_planner_system_prompt_contract_material()),
+            ),
+            Some(AgentRunPurpose::TaskParticipant(_)) => transient_context.insert(
+                0,
+                ModelMessage::system(task_participant_system_prompt_contract_material()),
+            ),
+            Some(AgentRunPurpose::Conversation(_))
+            | Some(AgentRunPurpose::TaskSynthesis(_))
+            | None => {}
         }
         if task_guidance_assessment.is_some()
             && tools.spec_for(TASK_GUIDANCE_APPLY_TOOL_NAME).is_some()

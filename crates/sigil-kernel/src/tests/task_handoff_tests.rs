@@ -57,6 +57,8 @@ fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
     assert!(prompt.contains("Call continue_without_task_planning"));
     assert!(prompt.contains("Do not inspect files, run commands, edit code"));
     assert!(prompt.contains("small single-file edit"));
+    assert!(prompt.contains("one narrow read-only query about a single concern"));
+    assert!(prompt.contains("Comparative research across multiple components"));
 }
 
 #[test]

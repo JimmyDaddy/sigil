@@ -12,8 +12,8 @@ use sigil_kernel::{
     OrchestrationEvalCaseClass, RootConfig, ToolRegistry, ToolRegistryScope, ToolSpec,
     WorkspaceTrust, changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
     request_task_planning_tool_spec, runtime_context_v1_system_prompt_contract_material,
-    task_plan_update_tool_spec, task_planner_prompt_contract_material,
-    task_routing_system_prompt_contract_material,
+    task_participant_system_prompt_contract_material, task_plan_update_tool_spec,
+    task_planner_prompt_contract_material, task_routing_system_prompt_contract_material,
 };
 use sigil_provider_deepseek::{
     DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT, DEFAULT_DEEPSEEK_V4_FLASH_MODEL,
@@ -120,6 +120,7 @@ pub fn build_model_eval_orchestration_route_contract(
             "runtime_context": runtime_context_v1_system_prompt_contract_material(),
             "changeset_only_child": changeset_only_child_contract_prompt(),
             "planner_discovery": task_discovery_system_prompt(),
+            "task_participant": task_participant_system_prompt_contract_material(),
         }),
     )?;
     let tool_profile_contract_digest = tool_profile_contract_digest(
