@@ -1877,6 +1877,59 @@ model = "deepseek-v4-flash"
             AssistantMessageKind::FinalAnswer,
         ))
         .expect("durable assistant should append");
+    let task_id = TaskId::new("task-restart-control").expect("task id should be valid");
+    let step_id = TaskStepId::new("inspect-code").expect("step id should be valid");
+    let private_objective = "private restart objective with /private/worktree";
+    session
+        .append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")
+                .expect("session ref should be valid"),
+            objective: private_objective.to_owned(),
+            status: TaskRunStatus::Started,
+            reason: None,
+        }))
+        .expect("task run should append");
+    session
+        .append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Inspect durable state".to_owned(),
+                display_name: None,
+                detail: Some("private planner detail".to_owned()),
+                role: AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: None,
+            }],
+            reason: None,
+        }))
+        .expect("task plan should append");
+    session
+        .append_control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Interrupted,
+            title: None,
+            summary: Some("private participant summary".to_owned()),
+            reason: None,
+        }))
+        .expect("task step should append");
+    session
+        .append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")
+                .expect("session ref should be valid"),
+            objective: private_objective.to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: None,
+        }))
+        .expect("paused task run should append");
     let durable_session_id = session.session_scope_id().to_owned();
     drop(session);
 
@@ -1940,16 +1993,27 @@ model = "deepseek-v4-flash"
         .conversation_display_page(&opened.id, None, 50)
         .expect("production canonical display should project");
     assert_eq!(display.request_scope, opened.id);
-    assert_eq!(display.through_session_stream_sequence, "3");
+    assert_eq!(display.through_session_stream_sequence, "7");
     assert_eq!(display.total_items, "2");
     assert_eq!(display.items.len(), 2);
     assert_eq!(display.items[1].display_order.session_stream_sequence, "2");
     assert!(display.live_provisional_anchor.is_none());
-    assert!(
-        !serde_json::to_string(&display)
-            .expect("canonical display should serialize")
-            .contains(&durable_session_id)
-    );
+    let task = display
+        .task_control
+        .as_ref()
+        .expect("paused Task controls should restore from durable truth");
+    assert_eq!(task.task_id, task_id.as_str());
+    assert_eq!(task.status, "paused");
+    assert_eq!(task.plan_version, Some(1));
+    assert_eq!(task.steps[0].status.as_deref(), Some("interrupted"));
+    assert!(task.can_continue);
+    let serialized_display =
+        serde_json::to_string(&display).expect("canonical display should serialize");
+    assert!(!serialized_display.contains(&durable_session_id));
+    assert!(!serialized_display.contains(private_objective));
+    assert!(!serialized_display.contains("private planner detail"));
+    assert!(!serialized_display.contains("private participant summary"));
+    assert!(!serialized_display.contains("parent.jsonl"));
     assert_eq!(
         registry.conversation_display_page(&opened.id, Some("e30"), 50),
         Err(crate::HttpRegistryError::ConversationDisplayCursorInvalid)

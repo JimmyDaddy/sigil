@@ -1763,6 +1763,16 @@
             "const": 1,
             "type": "integer"
           },
+          "task_control": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConversationTaskControl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "terminal_frontier": {
             "oneOf": [
               {
@@ -2562,6 +2572,162 @@
           "checkpoints",
           "fork_points",
           "through_stream_sequence"
+        ],
+        "type": "object"
+      },
+      "ConversationTaskControl": {
+        "additionalProperties": false,
+        "description": "Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority.",
+        "properties": {
+          "active_children": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "can_continue": {
+            "type": "boolean"
+          },
+          "completed_children": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "failed_children": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationTaskLane"
+            },
+            "maxItems": 128,
+            "type": "array"
+          },
+          "lanes_truncated": {
+            "type": "boolean"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/PublicTaskPhase"
+          },
+          "plan_status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "plan_version": {
+            "format": "uint32",
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationTaskPlanStep"
+            },
+            "maxItems": 128,
+            "type": "array"
+          },
+          "steps_truncated": {
+            "type": "boolean"
+          },
+          "task_id": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "task_id",
+          "phase",
+          "status",
+          "steps",
+          "steps_truncated",
+          "active_children",
+          "completed_children",
+          "failed_children",
+          "lanes",
+          "lanes_truncated",
+          "can_continue"
+        ],
+        "type": "object"
+      },
+      "ConversationTaskLane": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts": {
+            "items": {
+              "maxLength": 512,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "lane_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "plan_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane_id",
+          "status",
+          "conflicts"
+        ],
+        "type": "object"
+      },
+      "ConversationTaskPlanStep": {
+        "additionalProperties": false,
+        "properties": {
+          "depends_on": {
+            "items": {
+              "maxLength": 512,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "isolation": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "mode": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "role": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "step_id": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "title",
+          "role",
+          "depends_on",
+          "mode",
+          "isolation"
         ],
         "type": "object"
       },

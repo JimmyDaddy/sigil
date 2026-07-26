@@ -237,6 +237,30 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
             "durable_frontier": "9007199254740993",
             "run_id": "run-live",
             "run_sequence": "9007199254740998"
+        },
+        "task_control": {
+            "schema_version": 1,
+            "task_id": "task-restart-control",
+            "phase": "execution",
+            "status": "paused",
+            "plan_version": 1,
+            "plan_status": "accepted",
+            "steps": [{
+                "step_id": "inspect-code",
+                "title": "Inspect code",
+                "role": "subagent_read",
+                "depends_on": [],
+                "mode": "read",
+                "isolation": "shared_read_only",
+                "status": "interrupted"
+            }],
+            "steps_truncated": false,
+            "active_children": 0,
+            "completed_children": 0,
+            "failed_children": 1,
+            "lanes": [],
+            "lanes_truncated": false,
+            "can_continue": true
         }
     }))
     .expect("canonical display page should decode");
@@ -258,6 +282,41 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
             .map(|anchor| anchor.run_sequence.as_str()),
         Some("9007199254740998")
     );
+    let task = page
+        .task_control
+        .as_ref()
+        .expect("durable task control should decode");
+    assert_eq!(task.task_id, "task-restart-control");
+    assert_eq!(task.status, "paused");
+    assert_eq!(task.steps[0].status.as_deref(), Some("interrupted"));
+    assert!(task.can_continue);
+    validate_conversation_display_page(&page, "http-session-1")
+        .expect("bounded durable task control should validate");
+
+    let mut oversized = page.clone();
+    let task = oversized
+        .task_control
+        .as_mut()
+        .expect("task control should remain present");
+    let template = task.steps[0].clone();
+    while task.steps.len() <= MAX_CONVERSATION_TASK_CONTROL_ITEMS {
+        task.steps.push(template.clone());
+    }
+    assert!(matches!(
+        validate_conversation_display_page(&oversized, "http-session-1"),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
+    let mut terminal = page;
+    terminal
+        .task_control
+        .as_mut()
+        .expect("task control should remain present")
+        .status = "completed".to_owned();
+    assert!(matches!(
+        validate_conversation_display_page(&terminal, "http-session-1"),
+        Err(DesktopClientError::InvalidResponse)
+    ));
 }
 
 #[test]

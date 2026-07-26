@@ -11,10 +11,12 @@ use sigil_desktop::{
     DesktopConversationQueueGeneration,
     DesktopConversationQueueItem as NativeConversationQueueItem, DesktopConversationQueueItemKind,
     DesktopConversationQueueItemStatus, DesktopConversationQueuePromptMaterial,
-    DesktopConversationQueueView as NativeConversationQueueView,
+    DesktopConversationQueueView as NativeConversationQueueView, DesktopConversationTaskControl,
+    DesktopConversationTaskLane, DesktopConversationTaskPlanStep,
     DesktopConversationTerminalFrontier, DesktopDurableSessionFrontier, DesktopForegroundRunOwner,
-    DesktopSessionContinuityView, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
-    DesktopSessionTranscriptPage, DesktopTranscriptAssistantKind, DesktopTranscriptRole,
+    DesktopPublicTaskPhase, DesktopSessionContinuityView, DesktopSessionSnapshot,
+    DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage, DesktopTranscriptAssistantKind,
+    DesktopTranscriptRole,
 };
 
 #[test]
@@ -384,6 +386,35 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                 run_id: "run-live".to_owned(),
                 run_sequence: "9007199254740998".to_owned(),
             }),
+            task_control: Some(DesktopConversationTaskControl {
+                schema_version: 1,
+                task_id: "task-restart".to_owned(),
+                phase: DesktopPublicTaskPhase::Execution,
+                status: "paused".to_owned(),
+                plan_version: Some(2),
+                plan_status: Some("accepted".to_owned()),
+                steps: vec![DesktopConversationTaskPlanStep {
+                    step_id: "step-safe".to_owned(),
+                    title: "Resume the bounded task".to_owned(),
+                    role: "executor".to_owned(),
+                    depends_on: Vec::new(),
+                    mode: "write".to_owned(),
+                    isolation: "worktree".to_owned(),
+                    status: Some("interrupted".to_owned()),
+                }],
+                steps_truncated: false,
+                active_children: 0,
+                completed_children: 1,
+                failed_children: 0,
+                lanes: vec![DesktopConversationTaskLane {
+                    lane_id: "lane-safe".to_owned(),
+                    plan_id: Some("plan-safe".to_owned()),
+                    status: "ready".to_owned(),
+                    conflicts: Vec::new(),
+                }],
+                lanes_truncated: false,
+                can_continue: true,
+            }),
         });
     let json = serde_json::to_value(projected).expect("display page should serialize");
 
@@ -411,6 +442,9 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
     );
     assert_eq!(json["items"][0]["reconciles"][0], "live-1");
     assert_eq!(json["nextCursor"], "opaque_CURSOR-1");
+    assert_eq!(json["taskControl"]["taskId"], "task-restart");
+    assert_eq!(json["taskControl"]["phase"], "execution");
+    assert_eq!(json["taskControl"]["steps"][0]["status"], "interrupted");
     assert!(json.get("durableSessionScopeId").is_none());
     assert!(json.get("sessionLogPath").is_none());
     assert!(json.get("bearer").is_none());

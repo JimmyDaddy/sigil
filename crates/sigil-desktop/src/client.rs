@@ -48,6 +48,10 @@ const RUN_EVENT_NAME: &str = "run_event";
 const MAX_CONVERSATION_QUEUE_ITEMS: usize = 100;
 const MAX_CONVERSATION_QUEUE_PROMPT_PREVIEW_CHARS: usize = 240;
 const MAX_CONVERSATION_QUEUE_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_CONVERSATION_TASK_CONTROL_ITEMS: usize = 128;
+const MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS: usize = 32;
+const MAX_CONVERSATION_TASK_CONTROL_TITLE_CHARS: usize = 4 * 1024;
+const CONVERSATION_TASK_CONTROL_SCHEMA_VERSION: u16 = 1;
 
 /// Authenticated typed client for one desktop-owned loopback server.
 ///
@@ -299,16 +303,7 @@ impl DesktopHttpClient {
             }
         }
         let page: DesktopConversationDisplayPage = self.get_json(url, StatusCode::OK).await?;
-        if page.request_scope != session_id
-            || page.schema_version != DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION
-            || page
-                .items
-                .iter()
-                .any(|item| item.schema_version != DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION)
-            || page.has_more != page.next_cursor.is_some()
-        {
-            return Err(DesktopClientError::InvalidResponse);
-        }
+        validate_conversation_display_page(&page, session_id)?;
         Ok(page)
     }
 
@@ -1047,6 +1042,84 @@ fn validate_conversation_queue_view(
         }
     }
     Ok(())
+}
+
+fn validate_conversation_display_page(
+    page: &DesktopConversationDisplayPage,
+    session_id: &str,
+) -> Result<(), DesktopClientError> {
+    if page.request_scope != session_id
+        || page.schema_version != DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION
+        || page
+            .items
+            .iter()
+            .any(|item| item.schema_version != DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION)
+        || page.has_more != page.next_cursor.is_some()
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    let Some(task) = page.task_control.as_ref() else {
+        return Ok(());
+    };
+    if task.schema_version != CONVERSATION_TASK_CONTROL_SCHEMA_VERSION
+        || task.steps.len() > MAX_CONVERSATION_TASK_CONTROL_ITEMS
+        || task.lanes.len() > MAX_CONVERSATION_TASK_CONTROL_ITEMS
+        || task
+            .plan_version
+            .is_some_and(|plan_version| plan_version == 0)
+        || matches!(task.status.as_str(), "completed" | "cancelled")
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    for value in [
+        task.task_id.as_str(),
+        task.status.as_str(),
+        task.plan_status.as_deref().unwrap_or("accepted"),
+    ] {
+        validate_task_control_label(value)?;
+    }
+    for step in &task.steps {
+        for value in [
+            step.step_id.as_str(),
+            step.role.as_str(),
+            step.mode.as_str(),
+            step.isolation.as_str(),
+            step.status.as_deref().unwrap_or("pending"),
+        ] {
+            validate_task_control_label(value)?;
+        }
+        if step.title.trim().is_empty()
+            || step.title.chars().count() > MAX_CONVERSATION_TASK_CONTROL_TITLE_CHARS
+            || step.depends_on.len() > MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        for dependency in &step.depends_on {
+            validate_task_control_label(dependency)?;
+        }
+    }
+    for lane in &task.lanes {
+        validate_task_control_label(&lane.lane_id)?;
+        validate_task_control_label(&lane.status)?;
+        if let Some(plan_id) = lane.plan_id.as_deref() {
+            validate_task_control_label(plan_id)?;
+        }
+        if lane.conflicts.len() > MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        for conflict in &lane.conflicts {
+            validate_task_control_label(conflict)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_task_control_label(value: &str) -> Result<(), DesktopClientError> {
+    if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        Err(DesktopClientError::InvalidResponse)
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_conversation_recovery_view(

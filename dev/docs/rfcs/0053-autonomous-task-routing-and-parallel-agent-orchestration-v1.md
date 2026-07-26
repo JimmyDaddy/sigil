@@ -1,6 +1,6 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a implemented；O8b public protocol、O8c harness、typed routing microturn 与 confirmed-pre-dispatch connect retry implemented，O8b application parity、O8c qualified real-model evidence、O8d deferred
+状态：accepted / O0、O1a-O1e、O2-O5b2、O6a、O6b1、O6b2a-O6g、O7、O8a-O8b implemented；O8c harness、typed routing microturn 与 confirmed-pre-dispatch connect retry implemented，O8c qualified real-model evidence、O8d deferred
 
 创建日期：2026-07-22
 
@@ -1004,7 +1004,7 @@ allow_write_subagents = true
   revalidation 必须在默认切换前完成。
 - O1c 已落地：proactive Explore 基于冻结 registry 的实际 ToolSpec、network effect 和 `ToolMutationTracking` 证明；Custom/MCP 默认 unknown，已审计的本地只读 Custom tool 显式声明 `None`；detachable 分支复用同一证明。
 - O1d 已落地配置基础：新增 `routing_policy = "manual" | "auto"`，缺字段保持 `manual`；O2 已接入生产 consumer，兼容迁移 warning 和新安装默认值仍留待 O8。
-- O2 已落地 runtime-owned `ConversationCoordinator`、host-owned `AgentRunPurpose`、内部 `request_task_planning`、typed `AgentRunDisposition` 和 recovery-critical handoff events。TUI direct chat 与 queued follow-up 均绑定精确 source turn，并在同一 cancellation/approval root 内接管 durable task。后续 O8 runtime slice 已让 production HTTP/Desktop 附加同一 foreground executor/synthesis contract；完整 Task control/recovery parity 仍由 O8b 收口。
+- O2 已落地 runtime-owned `ConversationCoordinator`、host-owned `AgentRunPurpose`、内部 `request_task_planning`、typed `AgentRunDisposition` 和 recovery-critical handoff events。TUI direct chat 与 queued follow-up 均绑定精确 source turn，并在同一 cancellation/approval root 内接管 durable task。O8b 已让 production HTTP/Desktop 附加同一 foreground executor/synthesis、typed control 与 restart recovery contract。
 - `/task` 已复用相同 admission service；planner prompt 改为 transient context，orchestrator 会复用既有 `TaskRun::Started` 和 accepted plan，不重复 admission 或 replan。
 - TUI 启动及 session switch 都执行本地 handoff reconciliation；Requested→Resolved→TaskRun 的 crash gap 不重放 provider。只有可证明未发起不确定 planner/participant 的 admission gap 才自动接管；stale Running step/lease 先记为 Interrupted、task 置 Paused，等待显式 continue。
 - direct chat 与 queued follow-up 的 task handoff 会在 `TaskHandoffRequested` / `Resolved` / `TaskRun::Started` 之前追加 `TaskRunCancellationScopeBound`，把 task 绑定到继承的 root run scope，避免 admission→binding 崩溃窗口。恢复只认可最新绑定 scope 上的 `Run` 或同 task `Task` cancellation；后续显式 continue 使用新 scope，因此旧取消不会永久污染 task。
@@ -1728,7 +1728,7 @@ O8b：typed public protocol 与 application parity。
   持有的 `sigil serve` child 复用该路径。显式 `routing_policy=auto` 的 uninterrupted run 可以
   进入 planner/executor/synthesis，不再产生无人执行的 Started task。
 
-这不代表 O8b application parity 完成：shared application control 已经复用 TUI 的 exact
+Shared application control 已经复用 TUI 的 exact
 `TaskPauseRequest` 校验、root cancellation scope 与单一有序 Task stop writer batch。Pause 在请求前和
 quiescence 后分别校验 task/plan/scope；只有 execution join、child/effect permit 与 cleanup
 全部确认后才追加 `Paused`，否则追加 `Interrupted`。Application cancel 也只关闭当前 scope
@@ -1750,9 +1750,25 @@ client 在 native trust boundary 根据 task id 与 plan version 生成相同的
 application control 会负责解除该 wait。`paused` / `pause_requested` 已进入 native 与 renderer
 run status，Task 的 `TaskRunFinished(paused)` 仍是可继续性的 durable product truth。
 
-O8b 仍缺 task-targeted guidance、integration review/accept 与 restart control 的完整
-application parity。显式 `auto` 在需要这些动作时仍会停在 blocked/paused terminal，因此这是
-必须收口的 interim gap；兼容默认值继续为 manual，本 slice 也不授权 O8d 默认切换。
+2026-07-26 已完成 O8b application parity：
+
+- application `POST /sessions/{session_id}/runs` 以 typed `TaskContinuationRequest` 绑定 exact
+  task id 与可选 guidance；shared preparer 复用 TUI 的 guidance microturn、typed
+  `task_guidance_apply` / `task_plan_update` 决策和 transient request context，不用 host
+  关键词分类，也不把 guidance 写成普通 user history。
+- authenticated integration review/accept route、幂等 command receipt、native typed client、
+  Tauri allowlist command 与 Desktop inspector 复用 exact task/plan/preview digest、promotion
+  authority 和 parent verification gate；stale response 不能作用到新 plan。
+- canonical conversation display 在固定 durable frontier 上投影当前可继续 Task 的 bounded
+  `task_control`。它最多返回 128 个 plan steps 和 integration lanes，并显式报告 truncation；
+  objective、raw prompt/transcript、participant summary、workspace path、private ref 与 mutation
+  authority 不进入 HTTP/Desktop。Desktop 没有 process-local live event（包括应用重启后 reopen）
+  时从该 projection 恢复 Continue、guidance 与 integration controls；terminal Task 不再恢复。
+- runtime fixed-frontier、production session reopen、OpenAPI snapshot/generated TypeScript、
+  native client、Tauri IPC 与 renderer interaction tests 共同覆盖该路径。
+
+至此 O8b application parity 完成。兼容默认值仍为 `manual`；是否切换 `auto` 只由 O8c qualified
+real-model evidence 与 O8d rollout decision 决定。
 
 O8c：deterministic、real-model 与 chaos acceptance。
 

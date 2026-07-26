@@ -1,7 +1,7 @@
 //! Canonical, provider-neutral display projection for durable conversation history.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::Path,
 };
 
@@ -13,9 +13,10 @@ use sigil_kernel::{
     AssistantMessageKind, CheckpointRestoreConflictReason, CheckpointRestored, CompactionAppliedV2,
     ControlEntry, ConversationForked, ConversationInputPromotedEntry,
     ConversationRunLifecycleRecordV1, ConversationRunTerminalStatusV1, DurableEventType,
-    JsonlSessionStore, MessageRole, ModelMessage, SessionLogEntry, SessionStreamRecord,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, TypedDomainEvent,
-    conversation_run_lifecycle_record_from_stream, safe_persistence_text,
+    JsonlSessionStore, MessageRole, ModelMessage, PublicRunEventKind, PublicTaskEventProjector,
+    PublicTaskPhase, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, TypedDomainEvent, conversation_run_lifecycle_record_from_stream,
+    safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -29,6 +30,12 @@ pub const MAX_CONVERSATION_DISPLAY_PAGE_SIZE: usize = 100;
 pub const MAX_CONVERSATION_DISPLAY_CONTENT_BYTES: usize = 64 * 1024;
 /// Hard serialized-content budget for one projected page.
 pub const MAX_CONVERSATION_DISPLAY_PAGE_BYTES: usize = 512 * 1024;
+/// Hard item limit for one durable Task control collection.
+pub const MAX_CONVERSATION_TASK_CONTROL_ITEMS: usize = 128;
+/// Hard dependency/conflict detail limit within one durable Task control row.
+pub const MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS: usize = 32;
+/// Hard byte limit for one durable Task control step title.
+pub const MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES: usize = 4 * 1024;
 const MAX_CONVERSATION_DISPLAY_CURSOR_BYTES: usize = 4 * 1024;
 const MAX_CONVERSATION_DISPLAY_IDENTITY_BYTES: usize = 512;
 
@@ -259,6 +266,59 @@ pub struct ConversationTerminalFrontierV1 {
     pub status: ConversationDisplayStatusV1,
 }
 
+/// Bounded plan-step state needed to restore Task controls after an application restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationTaskPlanStepV1 {
+    pub step_id: String,
+    pub title: String,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub mode: String,
+    pub isolation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// Bounded integration-lane state without a private workspace, ref, path, or mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationTaskLaneV1 {
+    pub lane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+}
+
+/// Current durable Task state required by application control surfaces.
+///
+/// The projection deliberately omits the Task objective because it can contain raw user text.
+/// It exposes only bounded public identities, plan summaries, counts, and renderer-safe status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationTaskControlV1 {
+    pub schema_version: u16,
+    pub task_id: String,
+    pub phase: PublicTaskPhase,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_status: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<ConversationTaskPlanStepV1>,
+    pub steps_truncated: bool,
+    pub active_children: u32,
+    pub completed_children: u32,
+    pub failed_children: u32,
+    #[serde(default)]
+    pub lanes: Vec<ConversationTaskLaneV1>,
+    pub lanes_truncated: bool,
+    pub can_continue: bool,
+}
+
 /// Opaque-cursor page over the canonical display projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -273,6 +333,8 @@ pub struct ConversationDisplayPageV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_control: Option<ConversationTaskControlV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +362,240 @@ struct ActiveRunProjection {
 struct ToolProjection {
     name: String,
     requested_display_id: String,
+}
+
+#[derive(Debug, Default)]
+struct ConversationTaskControlProjection {
+    events: PublicTaskEventProjector,
+    tasks: BTreeMap<String, ConversationTaskControlV1>,
+    last_seen_order: BTreeMap<String, u64>,
+    next_order: u64,
+}
+
+impl ConversationTaskControlProjection {
+    fn apply_control(&mut self, control: &ControlEntry) {
+        for event in self.events.project_control(control) {
+            self.apply_event(event);
+        }
+    }
+
+    fn latest_unfinished(&self) -> Option<ConversationTaskControlV1> {
+        self.last_seen_order
+            .iter()
+            .filter_map(|(task_id, order)| {
+                self.tasks.get(task_id).and_then(|task| {
+                    (!matches!(task.status.as_str(), "completed" | "cancelled"))
+                        .then_some((order, task))
+                })
+            })
+            .max_by_key(|(order, _)| *order)
+            .map(|(_, task)| task.clone())
+    }
+
+    fn apply_event(&mut self, event: PublicRunEventKind) {
+        match event {
+            PublicRunEventKind::TaskPhaseChanged {
+                task_id: Some(task_id),
+                phase,
+                status,
+            } => {
+                let is_final = matches!(status.as_str(), "completed" | "cancelled");
+                {
+                    let task = self.task(&task_id);
+                    if matches!(task.status.as_str(), "completed" | "cancelled")
+                        && task.status != status
+                    {
+                        return;
+                    }
+                    task.phase = phase;
+                    task.can_continue = !is_final;
+                    task.status = status;
+                    if is_final {
+                        task.steps.clear();
+                        task.lanes.clear();
+                    }
+                }
+            }
+            PublicRunEventKind::TaskPlanUpdated {
+                task_id,
+                plan_version,
+                status,
+                steps,
+            } => {
+                let task = self.task(&task_id);
+                if matches!(task.status.as_str(), "completed" | "cancelled") {
+                    return;
+                }
+                if task
+                    .plan_version
+                    .is_some_and(|current| plan_version < current)
+                {
+                    return;
+                }
+                let previous_statuses = if task.plan_version == Some(plan_version) {
+                    task.steps
+                        .iter()
+                        .filter_map(|step| {
+                            step.status
+                                .clone()
+                                .map(|status| (step.step_id.clone(), status))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                } else {
+                    BTreeMap::new()
+                };
+                task.plan_version = Some(plan_version);
+                task.plan_status = Some(status);
+                task.steps_truncated = steps.len() > MAX_CONVERSATION_TASK_CONTROL_ITEMS
+                    || steps.iter().any(|step| {
+                        step.depends_on.len() > MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS
+                            || step.title.len() > MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES
+                    });
+                task.steps = steps
+                    .into_iter()
+                    .take(MAX_CONVERSATION_TASK_CONTROL_ITEMS)
+                    .map(|step| ConversationTaskPlanStepV1 {
+                        status: previous_statuses.get(&step.step_id).cloned(),
+                        step_id: step.step_id,
+                        title: truncate_utf8(
+                            &step.title,
+                            MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES,
+                        )
+                        .0,
+                        role: step.role,
+                        depends_on: step
+                            .depends_on
+                            .into_iter()
+                            .take(MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS)
+                            .collect(),
+                        mode: step.mode,
+                        isolation: step.isolation,
+                    })
+                    .collect();
+            }
+            PublicRunEventKind::TaskBatchChanged {
+                task_id,
+                plan_version,
+                active,
+                completed,
+                failed,
+                ..
+            } => {
+                let task = self.task(&task_id);
+                if matches!(task.status.as_str(), "completed" | "cancelled") {
+                    return;
+                }
+                if task
+                    .plan_version
+                    .is_some_and(|current| plan_version < current)
+                {
+                    return;
+                }
+                task.plan_version = Some(plan_version);
+                task.active_children = active;
+                task.completed_children = completed;
+                task.failed_children = failed;
+            }
+            PublicRunEventKind::TaskStepChanged {
+                task_id,
+                plan_version,
+                step_id,
+                status,
+                ..
+            } => {
+                let task = self.task(&task_id);
+                if matches!(task.status.as_str(), "completed" | "cancelled") {
+                    return;
+                }
+                if task
+                    .plan_version
+                    .is_some_and(|current| plan_version < current)
+                {
+                    return;
+                }
+                task.plan_version = Some(plan_version);
+                if let Some(step) = task.steps.iter_mut().find(|step| step.step_id == step_id) {
+                    step.status = Some(status);
+                } else if task.steps.len() < MAX_CONVERSATION_TASK_CONTROL_ITEMS {
+                    task.steps.push(ConversationTaskPlanStepV1 {
+                        title: step_id.clone(),
+                        step_id,
+                        role: "unknown".to_owned(),
+                        depends_on: Vec::new(),
+                        mode: "unknown".to_owned(),
+                        isolation: "unknown".to_owned(),
+                        status: Some(status),
+                    });
+                } else {
+                    task.steps_truncated = true;
+                }
+            }
+            PublicRunEventKind::IntegrationLaneChanged {
+                task_id,
+                plan_version,
+                plan_id,
+                lane_id,
+                status,
+                conflicts,
+            } => {
+                let task = self.task(&task_id);
+                if matches!(task.status.as_str(), "completed" | "cancelled") {
+                    return;
+                }
+                if task
+                    .plan_version
+                    .is_some_and(|current| plan_version < current)
+                {
+                    return;
+                }
+                task.plan_version = Some(plan_version);
+                let conflicts_truncated =
+                    conflicts.len() > MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS;
+                let lane = ConversationTaskLaneV1 {
+                    lane_id: lane_id.clone(),
+                    plan_id: Some(plan_id),
+                    status,
+                    conflicts: conflicts
+                        .into_iter()
+                        .take(MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS)
+                        .collect(),
+                };
+                task.lanes_truncated |= conflicts_truncated;
+                if let Some(existing) = task.lanes.iter_mut().find(|lane| lane.lane_id == lane_id) {
+                    *existing = lane;
+                } else if task.lanes.len() < MAX_CONVERSATION_TASK_CONTROL_ITEMS {
+                    task.lanes.push(lane);
+                } else {
+                    task.lanes_truncated = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn task(&mut self, task_id: &str) -> &mut ConversationTaskControlV1 {
+        self.next_order = self.next_order.saturating_add(1);
+        self.last_seen_order
+            .insert(task_id.to_owned(), self.next_order);
+        self.tasks
+            .entry(task_id.to_owned())
+            .or_insert_with(|| ConversationTaskControlV1 {
+                schema_version: 1,
+                task_id: task_id.to_owned(),
+                phase: PublicTaskPhase::Planning,
+                status: "started".to_owned(),
+                plan_version: None,
+                plan_status: None,
+                steps: Vec::new(),
+                steps_truncated: false,
+                active_children: 0,
+                completed_children: 0,
+                failed_children: 0,
+                lanes: Vec::new(),
+                lanes_truncated: false,
+                can_continue: true,
+            })
+    }
 }
 
 /// Derives an opaque renderer identity for one live semantic slot.
@@ -401,6 +697,7 @@ pub fn conversation_display_page_from_records(
     let mut tools = HashMap::<String, ToolProjection>::new();
     let mut approval_items = HashMap::<String, String>::new();
     let mut terminal_frontier = None;
+    let mut task_control = ConversationTaskControlProjection::default();
     let mut total_items = 0_u64;
     let mut eligible_items = 0_u64;
     let mut cursor_boundary_found = decoded_cursor.is_none();
@@ -416,6 +713,7 @@ pub fn conversation_display_page_from_records(
             &mut tools,
             &mut approval_items,
             &mut terminal_frontier,
+            &mut task_control,
         )?;
         projected.sort_by_key(|item| item.display_order);
         for item in projected {
@@ -492,6 +790,7 @@ pub fn conversation_display_page_from_records(
         items,
         next_cursor,
         has_more,
+        task_control: task_control.latest_unfinished(),
     })
 }
 
@@ -591,6 +890,7 @@ fn project_record(
     tools: &mut HashMap<String, ToolProjection>,
     approval_items: &mut HashMap<String, String>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
+    task_control: &mut ConversationTaskControlProjection,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     if let Some(lifecycle) = conversation_run_lifecycle_record_from_stream(record)? {
         return project_lifecycle(
@@ -605,6 +905,9 @@ fn project_record(
     }
 
     if let Some(entry) = record.session_log_entry()? {
+        if let SessionLogEntry::Control(control) = &entry {
+            task_control.apply_control(control);
+        }
         return project_session_entry(
             record,
             expected_scope,

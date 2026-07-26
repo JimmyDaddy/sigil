@@ -26,10 +26,13 @@ use sigil_desktop::{
     DesktopConversationRecoveryCommandActionKind as NativeConversationRecoveryCommandActionKind,
     DesktopConversationRecoveryCommandReceipt as NativeConversationRecoveryCommandReceipt,
     DesktopConversationRecoveryView as NativeConversationRecoveryView,
+    DesktopConversationTaskControl as NativeConversationTaskControl,
+    DesktopConversationTaskLane as NativeConversationTaskLane,
+    DesktopConversationTaskPlanStep as NativeConversationTaskPlanStep,
     DesktopIntegrationLaneCandidateKind, DesktopIntegrationPromotionStatus,
     DesktopIntegrationPromotionTargetKind, DesktopModelSelectionPolicy, DesktopPermissionMode,
-    DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus,
-    DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
+    DesktopPublicTaskPhase, DesktopReasoningEffort, DesktopRunContextView, DesktopRunSnapshot,
+    DesktopRunStatus, DesktopSessionCatalogBatchAction, DesktopSessionCatalogBatchOutcome,
     DesktopSessionCatalogBatchPlan, DesktopSessionCatalogBatchPlanStatus,
     DesktopSessionCatalogBatchReceipt, DesktopSessionCatalogEntry, DesktopSessionCatalogPage,
     DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
@@ -864,6 +867,52 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) gap_facts: Vec<DesktopConversationDisplayGapFact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) live_provisional_anchor: Option<DesktopConversationLiveProvisionalAnchor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_control: Option<DesktopConversationTaskControl>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationTaskControl {
+    pub(crate) schema_version: u16,
+    pub(crate) task_id: String,
+    pub(crate) phase: &'static str,
+    pub(crate) status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_status: Option<String>,
+    pub(crate) steps: Vec<DesktopConversationTaskPlanStep>,
+    pub(crate) steps_truncated: bool,
+    pub(crate) active_children: u32,
+    pub(crate) completed_children: u32,
+    pub(crate) failed_children: u32,
+    pub(crate) lanes: Vec<DesktopConversationTaskLane>,
+    pub(crate) lanes_truncated: bool,
+    pub(crate) can_continue: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationTaskPlanStep {
+    pub(crate) step_id: String,
+    pub(crate) title: String,
+    pub(crate) role: String,
+    pub(crate) depends_on: Vec<String>,
+    pub(crate) mode: String,
+    pub(crate) isolation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopConversationTaskLane {
+    pub(crate) lane_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_id: Option<String>,
+    pub(crate) status: String,
+    pub(crate) conflicts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1919,6 +1968,60 @@ impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
                     run_sequence: anchor.run_sequence,
                 }
             }),
+            task_control: value.task_control.map(Into::into),
+        }
+    }
+}
+
+impl From<NativeConversationTaskControl> for DesktopConversationTaskControl {
+    fn from(value: NativeConversationTaskControl) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            task_id: value.task_id,
+            phase: match value.phase {
+                DesktopPublicTaskPhase::Routing => "routing",
+                DesktopPublicTaskPhase::Planning => "planning",
+                DesktopPublicTaskPhase::Execution => "execution",
+                DesktopPublicTaskPhase::Integration => "integration",
+                DesktopPublicTaskPhase::Synthesis => "synthesis",
+                DesktopPublicTaskPhase::Terminal => "terminal",
+            },
+            status: value.status,
+            plan_version: value.plan_version,
+            plan_status: value.plan_status,
+            steps: value.steps.into_iter().map(Into::into).collect(),
+            steps_truncated: value.steps_truncated,
+            active_children: value.active_children,
+            completed_children: value.completed_children,
+            failed_children: value.failed_children,
+            lanes: value.lanes.into_iter().map(Into::into).collect(),
+            lanes_truncated: value.lanes_truncated,
+            can_continue: value.can_continue,
+        }
+    }
+}
+
+impl From<NativeConversationTaskPlanStep> for DesktopConversationTaskPlanStep {
+    fn from(value: NativeConversationTaskPlanStep) -> Self {
+        Self {
+            step_id: value.step_id,
+            title: value.title,
+            role: value.role,
+            depends_on: value.depends_on,
+            mode: value.mode,
+            isolation: value.isolation,
+            status: value.status,
+        }
+    }
+}
+
+impl From<NativeConversationTaskLane> for DesktopConversationTaskLane {
+    fn from(value: NativeConversationTaskLane) -> Self {
+        Self {
+            lane_id: value.lane_id,
+            plan_id: value.plan_id,
+            status: value.status,
+            conflicts: value.conflicts,
         }
     }
 }

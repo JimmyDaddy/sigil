@@ -4,14 +4,16 @@ use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
-    ApprovalMode, AssistantMessageKind, ControlEntry, ConversationForked, ConversationInputKind,
-    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
-    ConversationInputTarget, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
-    ModelMessage, PermissionRisk, SecretRedactor, Session, SessionLogEntry, SessionStreamRecord,
-    StoredEvent, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
-    ToolCall, ToolOperation, conversation_promotion_capability_digest,
-    project_conversation_prompt_for_persistence,
+    AgentRole, ApprovalMode, AssistantMessageKind, ControlEntry, ConversationForked,
+    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
+    ConversationInputQueuedEntry, ConversationInputTarget, ConversationRunFinalizedEntryV1,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
+    JsonlSessionStore, MessageRole, ModelMessage, PermissionRisk, SecretRedactor, Session,
+    SessionLogEntry, SessionRef, SessionStreamRecord, StoredEvent, TaskId, TaskIsolationMode,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
 use crate::conversation_display::{
@@ -20,8 +22,9 @@ use crate::conversation_display::{
     ConversationDisplayProjectionError, ConversationDisplayStatusV1,
     ConversationLiveProvisionalSlotV1, MAX_CONVERSATION_DISPLAY_CONTENT_BYTES,
     MAX_CONVERSATION_DISPLAY_PAGE_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
-    conversation_display_page, conversation_display_page_from_records,
-    conversation_live_provisional_id,
+    MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS, MAX_CONVERSATION_TASK_CONTROL_ITEMS,
+    MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES, conversation_display_page,
+    conversation_display_page_from_records, conversation_live_provisional_id,
 };
 
 fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
@@ -764,5 +767,227 @@ fn message_content_role_remains_provider_neutral() -> Result<()> {
             ..
         }
     ));
+    Ok(())
+}
+
+#[test]
+fn durable_task_control_restores_paused_task_without_private_objective() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let task_id = TaskId::new("task-restart-control")?;
+    let step_id = TaskStepId::new("inspect-code")?;
+    let secret_objective = "private objective with AK-DO-NOT-EXPOSE and /private/worktree";
+
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: secret_objective.to_owned(),
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: step_id.clone(),
+            title: "Inspect the durable state".to_owned(),
+            display_name: None,
+            detail: Some("private planner detail".to_owned()),
+            role: AgentRole::SubagentRead,
+            depends_on: Vec::new(),
+            mode: Some(TaskStepMode::Read),
+            isolation: Some(TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id,
+        role: AgentRole::SubagentRead,
+        status: TaskStepStatus::Interrupted,
+        title: Some("private runtime title".to_owned()),
+        summary: Some("private transcript summary".to_owned()),
+        reason: Some("private interruption reason".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: secret_objective.to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: Some("private pause reason".to_owned()),
+    }))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let task = page
+        .task_control
+        .as_ref()
+        .expect("paused task control should survive restart");
+    assert_eq!(task.task_id, task_id.as_str());
+    assert_eq!(task.status, "paused");
+    assert_eq!(task.phase, sigil_kernel::PublicTaskPhase::Execution);
+    assert_eq!(task.plan_version, Some(1));
+    assert_eq!(task.plan_status.as_deref(), Some("accepted"));
+    assert_eq!(task.steps.len(), 1);
+    assert_eq!(task.steps[0].status.as_deref(), Some("interrupted"));
+    assert!(!task.steps_truncated);
+    assert!(!task.lanes_truncated);
+    assert!(task.can_continue);
+
+    let serialized = serde_json::to_string(&page)?;
+    assert!(!serialized.contains(secret_objective));
+    assert!(!serialized.contains("private planner detail"));
+    assert!(!serialized.contains("private runtime title"));
+    assert!(!serialized.contains("private transcript summary"));
+    assert!(!serialized.contains("private interruption reason"));
+    assert!(!serialized.contains("parent.jsonl"));
+
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: secret_objective.to_owned(),
+        status: TaskRunStatus::Completed,
+        reason: None,
+    }))?;
+    let completed = conversation_display_page(store.path(), &scope, None, 20)?;
+    assert!(completed.task_control.is_none());
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: TaskId::new("task-restart-control")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("inspect-code")?,
+        role: AgentRole::SubagentRead,
+        status: TaskStepStatus::Running,
+        title: None,
+        summary: None,
+        reason: None,
+    }))?;
+    let late_step = conversation_display_page(store.path(), &scope, None, 20)?;
+    assert!(late_step.task_control.is_none());
+    Ok(())
+}
+
+#[test]
+fn durable_task_control_truncates_oversized_plan_summary_explicitly() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let task_id = TaskId::new("task-bounded-control")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "bounded projection".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+    let steps = (0..=MAX_CONVERSATION_TASK_CONTROL_ITEMS)
+        .map(|index| {
+            Ok(TaskStepSpec {
+                step_id: TaskStepId::new(format!("step-{index}"))?,
+                title: if index == 0 {
+                    "x".repeat(MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES + 1)
+                } else {
+                    format!("Step {index}")
+                },
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: if index == 0 {
+                    (1..=MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS + 1)
+                        .map(|dependency| TaskStepId::new(format!("step-{dependency}")))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    Vec::new()
+                },
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps,
+        reason: None,
+    }))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let task = page
+        .task_control
+        .expect("paused Task control should project");
+    assert_eq!(task.steps.len(), MAX_CONVERSATION_TASK_CONTROL_ITEMS);
+    assert_eq!(
+        task.steps[0].title.len(),
+        MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES
+    );
+    assert_eq!(
+        task.steps[0].depends_on.len(),
+        MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS
+    );
+    assert!(task.steps_truncated);
+    Ok(())
+}
+
+#[test]
+fn durable_task_control_does_not_carry_step_status_across_plan_versions() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let task_id = TaskId::new("task-plan-version-control")?;
+    let step_id = TaskStepId::new("shared-step-id")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "replan safely".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+    for plan_version in [1, 2] {
+        session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: format!("Plan {plan_version} step"),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            }],
+            reason: None,
+        }))?;
+        if plan_version == 1 {
+            session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version,
+                step_id: step_id.clone(),
+                role: AgentRole::Executor,
+                status: TaskStepStatus::Completed,
+                title: None,
+                summary: None,
+                reason: None,
+            }))?;
+        }
+    }
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id,
+        plan_version: 1,
+        step_id,
+        role: AgentRole::Executor,
+        status: TaskStepStatus::Interrupted,
+        title: None,
+        summary: None,
+        reason: None,
+    }))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let task = page
+        .task_control
+        .expect("paused Task control should project");
+    assert_eq!(task.plan_version, Some(2));
+    assert_eq!(task.steps[0].title, "Plan 2 step");
+    assert!(task.steps[0].status.is_none());
     Ok(())
 }

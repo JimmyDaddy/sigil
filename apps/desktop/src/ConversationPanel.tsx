@@ -33,6 +33,7 @@ import type {
   CheckpointRestoreReview,
   CheckpointView,
   ConversationRecoveryView,
+  ConversationTaskControl,
   PermissionMode,
   ReasoningEffort,
   RunContext,
@@ -154,6 +155,7 @@ export function ConversationPanel({
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
   const [taskControlBusy, setTaskControlBusy] = useState(false);
+  const [durableTaskControl, setDurableTaskControl] = useState<ConversationTaskControl>();
   const [taskIntegrationReview, setTaskIntegrationReview] = useState<TaskIntegrationReview>();
   const [taskIntegrationAcceptance, setTaskIntegrationAcceptance] =
     useState<TaskIntegrationAcceptance>();
@@ -349,6 +351,7 @@ export function ConversationPanel({
     setStreamStatus(undefined);
     setVerification(undefined);
     setTaskControlBusy(false);
+    setDurableTaskControl(undefined);
     setTaskIntegrationReview(undefined);
     setTaskIntegrationAcceptance(undefined);
     setTaskIntegrationLoading(false);
@@ -501,6 +504,7 @@ export function ConversationPanel({
           sessionId: session.id,
           anchor: canonicalPage.liveProvisionalAnchor,
         });
+        setDurableTaskControl(canonicalPage.taskControl);
         setDisplayError(false);
       })
       .catch(() => {
@@ -847,6 +851,7 @@ export function ConversationPanel({
             sessionId: session.id,
             anchor: page.liveProvisionalAnchor,
           });
+          setDurableTaskControl(page.taskControl);
           if (canonicalPageCoversTerminal(page, {
             runId: pendingRunId,
             status: observed?.status,
@@ -918,13 +923,18 @@ export function ConversationPanel({
     () => projectCurrentTask(selectTaskEvents(liveEventState)),
     [liveEventState],
   );
+  const durableTask = useMemo<TaskProductProjection | undefined>(
+    () => durableTaskControl,
+    [durableTaskControl],
+  );
   const taskProjection = useMemo<TaskProductProjection | undefined>(() => {
+    const currentTask = eventTask ?? durableTask;
     if (
       taskIntegrationReview === undefined
-      || eventTask?.taskId === taskIntegrationReview.request.taskId
-    ) return eventTask;
+      || currentTask?.taskId === taskIntegrationReview.request.taskId
+    ) return currentTask;
     return integrationReviewTaskProjection(taskIntegrationReview);
-  }, [eventTask, taskIntegrationReview]);
+  }, [durableTask, eventTask, taskIntegrationReview]);
   const active = run !== undefined && !isTerminal(run.status) && streamStatus?.state !== "terminal";
   const submissionBlocked = continuityState.contractError !== undefined
     || (continuityState.lifecycle !== "idle" && continuityState.lifecycle !== "live");

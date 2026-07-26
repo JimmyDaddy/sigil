@@ -620,6 +620,54 @@ pub struct DesktopConversationLiveProvisionalAnchor {
     pub run_sequence: String,
 }
 
+/// Bounded durable plan-step state used to restore Task controls.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationTaskPlanStep {
+    pub step_id: String,
+    pub title: String,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub mode: String,
+    pub isolation: String,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Bounded durable integration-lane state without private physical identities.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationTaskLane {
+    pub lane_id: String,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+}
+
+/// Current durable Task control state at the canonical display frontier.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopConversationTaskControl {
+    pub schema_version: u16,
+    pub task_id: String,
+    pub phase: crate::DesktopPublicTaskPhase,
+    pub status: String,
+    #[serde(default)]
+    pub plan_version: Option<u32>,
+    #[serde(default)]
+    pub plan_status: Option<String>,
+    pub steps: Vec<DesktopConversationTaskPlanStep>,
+    pub steps_truncated: bool,
+    pub active_children: u32,
+    pub completed_children: u32,
+    pub failed_children: u32,
+    pub lanes: Vec<DesktopConversationTaskLane>,
+    pub lanes_truncated: bool,
+    pub can_continue: bool,
+}
+
 /// Opaque-cursor page over canonical durable conversation display items.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -641,6 +689,8 @@ pub struct DesktopConversationDisplayPage {
     pub gap_facts: Vec<DesktopConversationDisplayGapFact>,
     #[serde(default)]
     pub live_provisional_anchor: Option<DesktopConversationLiveProvisionalAnchor>,
+    #[serde(default)]
+    pub task_control: Option<DesktopConversationTaskControl>,
 }
 
 /// Bounded query for one canonical conversation display page.

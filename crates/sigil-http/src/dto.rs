@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Policy identity bound to every V1 HTTP approval request.
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
-    TaskIntegrationReviewRequest, TaskPauseRequest, TaskVerificationRerunRequest,
+    PublicTaskPhase, TaskIntegrationReviewRequest, TaskPauseRequest, TaskVerificationRerunRequest,
     ToolApprovalUserDecision, VerificationProductView,
 };
 use sigil_runtime::application_compaction::{
@@ -23,7 +23,8 @@ use sigil_runtime::conversation_display::{
     ConversationDisplayCheckpointConflictReasonV1, ConversationDisplayCheckpointOutcomeV1,
     ConversationDisplayContentV1, ConversationDisplayItemKindV1, ConversationDisplayItemV1,
     ConversationDisplayMessageRoleV1, ConversationDisplayPageV1, ConversationDisplaySourceV1,
-    ConversationDisplayStatusV1, ConversationTerminalFrontierV1,
+    ConversationDisplayStatusV1, ConversationTaskControlV1, ConversationTaskLaneV1,
+    ConversationTaskPlanStepV1, ConversationTerminalFrontierV1,
 };
 use sigil_runtime::support::{
     DoctorSupportReportV1, SupportDoctorCheckV1, SupportDoctorStatus, SupportEnvironmentV1,
@@ -858,6 +859,100 @@ pub struct HttpConversationLiveProvisionalAnchor {
     pub run_sequence: String,
 }
 
+/// Bounded durable plan-step state used to restore application Task controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationTaskPlanStep {
+    pub step_id: String,
+    pub title: String,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub mode: String,
+    pub isolation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+impl From<ConversationTaskPlanStepV1> for HttpConversationTaskPlanStep {
+    fn from(step: ConversationTaskPlanStepV1) -> Self {
+        Self {
+            step_id: step.step_id,
+            title: step.title,
+            role: step.role,
+            depends_on: step.depends_on,
+            mode: step.mode,
+            isolation: step.isolation,
+            status: step.status,
+        }
+    }
+}
+
+/// Bounded durable integration-lane state with no private workspace or ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationTaskLane {
+    pub lane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+}
+
+impl From<ConversationTaskLaneV1> for HttpConversationTaskLane {
+    fn from(lane: ConversationTaskLaneV1) -> Self {
+        Self {
+            lane_id: lane.lane_id,
+            plan_id: lane.plan_id,
+            status: lane.status,
+            conflicts: lane.conflicts,
+        }
+    }
+}
+
+/// Current durable Task control state at the canonical display frontier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpConversationTaskControl {
+    pub schema_version: u16,
+    pub task_id: String,
+    pub phase: PublicTaskPhase,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_status: Option<String>,
+    pub steps: Vec<HttpConversationTaskPlanStep>,
+    pub steps_truncated: bool,
+    pub active_children: u32,
+    pub completed_children: u32,
+    pub failed_children: u32,
+    pub lanes: Vec<HttpConversationTaskLane>,
+    pub lanes_truncated: bool,
+    pub can_continue: bool,
+}
+
+impl From<ConversationTaskControlV1> for HttpConversationTaskControl {
+    fn from(task: ConversationTaskControlV1) -> Self {
+        Self {
+            schema_version: task.schema_version,
+            task_id: task.task_id,
+            phase: task.phase,
+            status: task.status,
+            plan_version: task.plan_version,
+            plan_status: task.plan_status,
+            steps: task.steps.into_iter().map(Into::into).collect(),
+            steps_truncated: task.steps_truncated,
+            active_children: task.active_children,
+            completed_children: task.completed_children,
+            failed_children: task.failed_children,
+            lanes: task.lanes.into_iter().map(Into::into).collect(),
+            lanes_truncated: task.lanes_truncated,
+            can_continue: task.can_continue,
+        }
+    }
+}
+
 /// Opaque-cursor page over canonical durable conversation display items.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -877,6 +972,8 @@ pub struct HttpConversationDisplayPage {
     pub gap_facts: Vec<HttpConversationDisplayGapFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_provisional_anchor: Option<HttpConversationLiveProvisionalAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_control: Option<HttpConversationTaskControl>,
 }
 
 impl HttpConversationDisplayPage {
@@ -892,6 +989,7 @@ impl HttpConversationDisplayPage {
             has_more: page.has_more,
             gap_facts: Vec::new(),
             live_provisional_anchor: None,
+            task_control: page.task_control.map(Into::into),
         }
     }
 }

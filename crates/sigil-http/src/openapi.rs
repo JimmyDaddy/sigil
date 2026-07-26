@@ -1330,6 +1330,53 @@ pub fn http_openapi_document() -> Value {
                         "run_sequence": { "$ref": "#/components/schemas/DecimalSequence" }
                     }
                 },
+                "ConversationTaskPlanStep": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["step_id", "title", "role", "depends_on", "mode", "isolation"],
+                    "properties": {
+                        "step_id": { "type": "string", "maxLength": 512 },
+                        "title": { "type": "string", "maxLength": 4096 },
+                        "role": { "type": "string", "maxLength": 512 },
+                        "depends_on": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 512 } },
+                        "mode": { "type": "string", "maxLength": 512 },
+                        "isolation": { "type": "string", "maxLength": 512 },
+                        "status": { "type": "string", "maxLength": 512 }
+                    }
+                },
+                "ConversationTaskLane": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["lane_id", "status", "conflicts"],
+                    "properties": {
+                        "lane_id": { "type": "string", "maxLength": 512 },
+                        "plan_id": { "type": "string", "maxLength": 512 },
+                        "status": { "type": "string", "maxLength": 512 },
+                        "conflicts": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 512 } }
+                    }
+                },
+                "ConversationTaskControl": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority.",
+                    "required": ["schema_version", "task_id", "phase", "status", "steps", "steps_truncated", "active_children", "completed_children", "failed_children", "lanes", "lanes_truncated", "can_continue"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "task_id": { "type": "string", "maxLength": 512 },
+                        "phase": { "$ref": "#/components/schemas/PublicTaskPhase" },
+                        "status": { "type": "string", "maxLength": 512 },
+                        "plan_version": { "type": "integer", "format": "uint32" },
+                        "plan_status": { "type": "string", "maxLength": 512 },
+                        "steps": { "type": "array", "maxItems": 128, "items": { "$ref": "#/components/schemas/ConversationTaskPlanStep" } },
+                        "steps_truncated": { "type": "boolean" },
+                        "active_children": { "type": "integer", "format": "uint32" },
+                        "completed_children": { "type": "integer", "format": "uint32" },
+                        "failed_children": { "type": "integer", "format": "uint32" },
+                        "lanes": { "type": "array", "maxItems": 128, "items": { "$ref": "#/components/schemas/ConversationTaskLane" } },
+                        "lanes_truncated": { "type": "boolean" },
+                        "can_continue": { "type": "boolean" }
+                    }
+                },
                 "ConversationDisplayPage": {
                     "type": "object",
                     "additionalProperties": false,
@@ -1344,7 +1391,8 @@ pub fn http_openapi_document() -> Value {
                         "next_cursor": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$" },
                         "has_more": { "type": "boolean" },
                         "gap_facts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/ConversationDisplayGapFact" } },
-                        "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] }
+                        "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] },
+                        "task_control": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTaskControl" }, { "type": "null" }] }
                     }
                 },
                 "ConversationQueueGeneration": {

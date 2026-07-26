@@ -3755,6 +3755,78 @@ describe("desktop workspace and history shell", () => {
     ));
   });
 
+  it("restores paused Task controls from the canonical durable display without live events", async () => {
+    const user = userEvent.setup();
+    const continueTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      _taskId: string,
+      permissionMode: PermissionMode,
+    ) => ({
+      id: "run-task-restarted",
+      sessionId,
+      status: "running" as const,
+      permissionMode,
+      streamSequence: 0,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      display: async () => ({
+        schemaVersion: 1,
+        requestScope: "http-session-new",
+        throughSessionStreamSequence: "17",
+        totalItems: "0",
+        items: [],
+        hasMore: false,
+        gapFacts: [],
+        taskControl: {
+          schemaVersion: 1,
+          taskId: "task-restart-control",
+          phase: "execution",
+          status: "paused",
+          planVersion: 3,
+          planStatus: "accepted",
+          steps: [{
+            stepId: "resume-step",
+            title: "Resume after application restart",
+            role: "executor",
+            dependsOn: [],
+            mode: "write",
+            isolation: "worktree",
+            status: "interrupted",
+          }],
+          stepsTruncated: false,
+          activeChildren: 0,
+          completedChildren: 1,
+          failedChildren: 0,
+          lanes: [],
+          lanesTruncated: false,
+          canContinue: true,
+        },
+      }),
+      continueTask,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+
+    expect(await screen.findByText("task-restart-control")).toBeTruthy();
+    expect(screen.getByText("Resume after application restart")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Continue Task" }));
+    await waitFor(() => expect(continueTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "task-restart-control",
+      "manual",
+      undefined,
+    ));
+  });
+
   it("pauses the exact active Task plan without using ordinary run cancellation", async () => {
     const user = userEvent.setup();
     let eventListener: ((event: TimelineEvent) => void) | undefined;

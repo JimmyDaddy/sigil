@@ -45,6 +45,7 @@ pub use dto::{
     DesktopConversationQueuePromptMaterial, DesktopConversationQueueView,
     DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandActionKind,
     DesktopConversationRecoveryCommandReceipt, DesktopConversationRecoveryView,
+    DesktopConversationTaskControl, DesktopConversationTaskLane, DesktopConversationTaskPlanStep,
     DesktopConversationTerminalFrontier, DesktopDurableSessionFrontier, DesktopForegroundRunOwner,
     DesktopIntegrationLaneCandidateKind, DesktopIntegrationPromotionStatus,
     DesktopIntegrationPromotionTargetKind, DesktopModelSelectionPolicy, DesktopPendingApproval,

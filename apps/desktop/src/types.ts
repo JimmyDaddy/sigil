@@ -634,6 +634,35 @@ export interface ConversationDisplayPage {
     runId: string;
     runSequence: string;
   };
+  taskControl?: ConversationTaskControl;
+}
+
+export interface ConversationTaskPlanStep extends TimelineTaskPlanStep {
+  status?: string;
+}
+
+export interface ConversationTaskLane {
+  laneId: string;
+  planId?: string;
+  status: string;
+  conflicts: string[];
+}
+
+export interface ConversationTaskControl {
+  schemaVersion: number;
+  taskId: string;
+  phase: TimelineTaskPhase;
+  status: string;
+  planVersion?: number;
+  planStatus?: string;
+  steps: ConversationTaskPlanStep[];
+  stepsTruncated: boolean;
+  activeChildren: number;
+  completedChildren: number;
+  failedChildren: number;
+  lanes: ConversationTaskLane[];
+  lanesTruncated: boolean;
+  canContinue: boolean;
 }
 
 export interface ConversationDisplayRequest {

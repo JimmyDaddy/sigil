@@ -2088,6 +2088,7 @@ export interface components {
             request_scope: string;
             /** @constant */
             schema_version: 1;
+            task_control?: components["schemas"]["ConversationTaskControl"] | null;
             terminal_frontier?: components["schemas"]["ConversationTerminalFrontier"] | null;
             through_session_stream_sequence: components["schemas"]["DecimalSequence"];
             total_items: components["schemas"]["DecimalSequence"];
@@ -2256,6 +2257,43 @@ export interface components {
             fork_points: components["schemas"]["ConversationForkPointView"][];
             /** Format: uint64 */
             through_stream_sequence: number;
+        };
+        /** @description Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority. */
+        ConversationTaskControl: {
+            /** Format: uint32 */
+            active_children: number;
+            can_continue: boolean;
+            /** Format: uint32 */
+            completed_children: number;
+            /** Format: uint32 */
+            failed_children: number;
+            lanes: components["schemas"]["ConversationTaskLane"][];
+            lanes_truncated: boolean;
+            phase: components["schemas"]["PublicTaskPhase"];
+            plan_status?: string;
+            /** Format: uint32 */
+            plan_version?: number;
+            /** @constant */
+            schema_version: 1;
+            status: string;
+            steps: components["schemas"]["ConversationTaskPlanStep"][];
+            steps_truncated: boolean;
+            task_id: string;
+        };
+        ConversationTaskLane: {
+            conflicts: string[];
+            lane_id: string;
+            plan_id?: string;
+            status: string;
+        };
+        ConversationTaskPlanStep: {
+            depends_on: string[];
+            isolation: string;
+            mode: string;
+            role: string;
+            status?: string;
+            step_id: string;
+            title: string;
         };
         ConversationTerminalFrontier: {
             run_id: string;

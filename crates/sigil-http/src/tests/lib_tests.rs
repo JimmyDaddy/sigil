@@ -1204,6 +1204,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
         has_more: true,
         gap_facts: Vec::new(),
         live_provisional_anchor: None,
+        task_control: None,
     });
 
     let path = format!("/sessions/{session_id}/display?limit=1");
@@ -2475,6 +2476,42 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["components"]["schemas"]["ConversationDisplayPage"]["properties"]["items"]["maxItems"],
         100
     );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationDisplayPage"]["properties"]["task_control"]
+            ["oneOf"][0]["$ref"],
+        "#/components/schemas/ConversationTaskControl"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationTaskControl"]["properties"]["steps"]["maxItems"],
+        128
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationTaskControl"]["properties"]["lanes"]["maxItems"],
+        128
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationTaskPlanStep"]["properties"]["depends_on"]["maxItems"],
+        32
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ConversationTaskPlanStep"]["properties"]["title"]["maxLength"],
+        4096
+    );
+    for private_field in [
+        "objective",
+        "prompt",
+        "transcript",
+        "workspace",
+        "path",
+        "private_ref",
+        "authority",
+    ] {
+        assert!(
+            document["components"]["schemas"]["ConversationTaskControl"]["properties"]
+                .get(private_field)
+                .is_none()
+        );
+    }
     assert!(
         document["components"]["schemas"]["ConversationDisplayPage"]["properties"]
             .get("durable_session_scope_id")
