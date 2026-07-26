@@ -59,7 +59,7 @@ scripts/run-evals.sh --model \
   --case orchestration-v1 \
   --repetitions 3 \
   --max-cost-usd 5.00 \
-  --timeout-secs 3600 \
+  --timeout-secs 7200 \
   --output-dir .repo-local-dev/evals/orchestration-candidate \
   --orchestration-route-contract .repo-local-dev/evals/route.toml
 ```

@@ -143,7 +143,7 @@ for (let index = 1; index <= 4; index += 1) {
     id: `orch-pos-cross-layer-${String(index).padStart(2, "0")}`,
     caseClass: "positive",
     prompt:
-      "Implement the normalization change across the parser and formatter: lowercase parsed values, then wrap rendered values in square brackets. Coordinate the cross-module work and keep the public facade compiling.",
+      "Implement the normalization change across the parser and formatter: ASCII-lowercase parsed values with str::to_ascii_lowercase, then wrap rendered values in square brackets. Coordinate the cross-module work and keep the public facade compiling.",
     allowedTools: ["read_file", "edit_file"],
     sources: unchangedSources,
     assertions: [
