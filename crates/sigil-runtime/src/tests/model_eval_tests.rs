@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     path::Path,
+    process::Command,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -29,9 +30,9 @@ use crate::{
         ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalOrchestrationRouteContractV1,
         ModelEvalRouteContractBuildRequest, ModelEvalRunExecutionStatus,
         build_model_eval_orchestration_route_contract, load_model_eval_fixture,
-        materialize_model_eval_fixture, model_eval_reservation_microusd,
-        orchestration_eval_observation, run_model_eval_campaign, verify_model_eval_run,
-        write_isolated_model_eval_config,
+        materialize_model_eval_fixture, materialized_model_eval_fixture_file_matches_source,
+        model_eval_reservation_microusd, orchestration_eval_observation, run_model_eval_campaign,
+        verify_model_eval_run, write_isolated_model_eval_config,
     },
 };
 
@@ -297,6 +298,22 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
     for path in fixture_paths {
         let fixture = load_model_eval_fixture(&path).expect("load orchestration fixture");
         assert!(ids.insert(fixture.manifest.id.clone()));
+        if fixture.manifest.id.starts_with("orch-pos-cross-layer-") {
+            assert!(
+                fixture
+                    .manifest
+                    .checks
+                    .iter()
+                    .any(|check| { check.command == ["cargo", "test", "--quiet"] })
+            );
+            assert!(fixture.manifest.assertions.iter().any(|assertion| {
+                matches!(
+                    &assertion.assertion,
+                    crate::model_eval::ModelEvalFixtureAssertionKind::FileUnchanged { path }
+                        if path == Path::new("tests/acceptance.rs")
+                )
+            }));
+        }
         let orchestration = fixture
             .manifest
             .orchestration
@@ -311,6 +328,75 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
     assert_eq!(negative, 20);
     assert_eq!(positive, 10);
     assert_eq!(ids.len(), 30);
+}
+
+#[test]
+fn cross_layer_acceptance_is_semantic_and_keeps_the_oracle_immutable() {
+    let fixture = load_model_eval_fixture(fixture_root(
+        "orchestration-v1/positive/orch-pos-cross-layer-01",
+    ))
+    .expect("load cross-layer fixture");
+    let temp = tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    let materialized =
+        materialize_model_eval_fixture(&fixture, &workspace).expect("materialize fixture");
+    assert!(
+        materialized_model_eval_fixture_file_matches_source(
+            &materialized,
+            Path::new("tests/acceptance.rs")
+        )
+        .expect("compare acceptance oracle")
+    );
+    fs::write(
+        workspace.join("src/parser.rs"),
+        "pub fn parse(input: &str) -> String {\n    input.trim().to_ascii_lowercase()\n}\n",
+    )
+    .expect("write parser implementation");
+
+    for formatter in [
+        "pub fn render(value: &str) -> String {\n    format!(\"[{value}]\")\n}\n",
+        "pub fn render(value: &str) -> String {\n    format!(\"[{}]\", value)\n}\n",
+    ] {
+        fs::write(workspace.join("src/formatter.rs"), formatter)
+            .expect("write formatter implementation");
+        let status = Command::new("cargo")
+            .args(["test", "--quiet"])
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", temp.path().join("cargo-target"))
+            .env("CARGO_INCREMENTAL", "0")
+            .status()
+            .expect("run semantic acceptance test");
+        assert!(status.success(), "semantic formatter variant must pass");
+        assert_eq!(
+            fs::read(workspace.join("tests/acceptance.rs"))
+                .expect("read materialized acceptance oracle"),
+            fs::read(fixture.source_root.join("files/tests/acceptance.rs"))
+                .expect("read committed acceptance oracle")
+        );
+    }
+    fs::write(
+        workspace.join("tests/acceptance.rs"),
+        "#[test]\nfn weakened_oracle() {}\n",
+    )
+    .expect("tamper acceptance oracle");
+    assert!(
+        !materialized_model_eval_fixture_file_matches_source(
+            &materialized,
+            Path::new("tests/acceptance.rs")
+        )
+        .expect("compare tampered acceptance oracle")
+    );
+    assert_eq!(
+        materialized
+            .fixture_file_digests
+            .get(Path::new("tests/acceptance.rs")),
+        fixture
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.path == Path::new("tests/acceptance.rs"))
+            .map(|file| &file.sha256)
+    );
 }
 
 #[test]

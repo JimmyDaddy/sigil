@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
@@ -124,6 +124,9 @@ pub enum ModelEvalFixtureAssertionKind {
         path: PathBuf,
         text: String,
     },
+    FileUnchanged {
+        path: PathBuf,
+    },
     ToolStatus {
         tool_name: String,
         status: ModelEvalExpectedToolStatus,
@@ -190,6 +193,7 @@ pub struct MaterializedModelEvalFixture {
     pub checks: Vec<ModelEvalFixtureCheck>,
     pub assertions: Vec<ModelEvalFixtureAssertion>,
     pub fixture_files: Vec<PathBuf>,
+    pub fixture_file_digests: BTreeMap<PathBuf, String>,
     pub expected_terminal: Vec<ModelEvalExpectedTerminal>,
     pub expected_verification: Vec<ModelEvalExpectedVerification>,
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
@@ -316,6 +320,12 @@ pub fn materialize_model_eval_fixture(
             .files
             .iter()
             .map(|file| file.path.clone())
+            .collect(),
+        fixture_file_digests: fixture
+            .manifest
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file.sha256.clone()))
             .collect(),
         expected_terminal: fixture.manifest.expected_terminal.clone(),
         expected_verification: fixture.manifest.expected_verification.clone(),
@@ -457,6 +467,12 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
                 validate_relative_path("assertion file path", path)?;
                 if !destinations.contains(path) || text.is_empty() || text.len() > 4096 {
                     bail!("model eval file assertion is invalid");
+                }
+            }
+            ModelEvalFixtureAssertionKind::FileUnchanged { path } => {
+                validate_relative_path("assertion unchanged file path", path)?;
+                if !destinations.contains(path) {
+                    bail!("model eval unchanged-file assertion is invalid");
                 }
             }
             ModelEvalFixtureAssertionKind::ToolStatus { tool_name, .. } => {
@@ -685,6 +701,22 @@ pub fn current_model_eval_fixture_tree_digest(
         tree_hasher.update(&bytes);
     }
     Ok(format!("sha256:{:x}", tree_hasher.finalize()))
+}
+
+pub(crate) fn materialized_model_eval_fixture_file_matches_source(
+    fixture: &MaterializedModelEvalFixture,
+    path: &Path,
+) -> Result<bool> {
+    let expected = fixture
+        .fixture_file_digests
+        .get(path)
+        .with_context(|| format!("fixture source digest is missing for {}", path.display()))?;
+    let content = read_bounded_regular_file(
+        &fixture.workspace_root.join(path),
+        MODEL_EVAL_MAX_TOTAL_SOURCE_BYTES,
+        "materialized model eval fixture assertion source",
+    )?;
+    Ok(sha256_digest(&content) == *expected)
 }
 
 #[cfg(unix)]

@@ -20,7 +20,7 @@ use super::{
     ModelEvalCampaignExecution, ModelEvalCostConfidence, ModelEvalExpectedTerminal,
     ModelEvalExpectedToolStatus, ModelEvalExpectedVerification, ModelEvalFixtureAssertionKind,
     ModelEvalRunExecution, ModelEvalRunExecutionStatus, current_model_eval_fixture_tree_digest,
-    sha256_digest,
+    materialized_model_eval_fixture_file_matches_source, sha256_digest,
 };
 
 /// Builds and writes report schema V3 for a completed model evaluation campaign.
@@ -429,6 +429,25 @@ fn evaluate_fixture_assertions(
                         Ok(_) => (
                             false,
                             format!("{} does not contain expected text", path.display()),
+                        ),
+                        Err(_) => (false, format!("{} is unreadable", path.display())),
+                    }
+                }
+                ModelEvalFixtureAssertionKind::FileUnchanged { path } => {
+                    match materialized_model_eval_fixture_file_matches_source(
+                        &execution.materialized_fixture,
+                        path,
+                    ) {
+                        Ok(true) => (
+                            true,
+                            format!("{} matches its committed fixture source", path.display()),
+                        ),
+                        Ok(false) => (
+                            false,
+                            format!(
+                                "{} differs from its committed fixture source",
+                                path.display()
+                            ),
                         ),
                         Err(_) => (false, format!("{} is unreadable", path.display())),
                     }

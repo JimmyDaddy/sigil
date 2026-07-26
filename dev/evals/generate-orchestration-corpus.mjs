@@ -65,6 +65,14 @@ pub fn render_record(input: &str) -> String {
 `,
 };
 
+const crossLayerAcceptanceTest = (id) => `use sigil_eval_${id.replaceAll("-", "_")}::render_record;
+
+#[test]
+fn normalizes_then_wraps_the_public_result() {
+    assert_eq!(render_record("  MiXeD-42  "), "[mixed-42]");
+}
+`;
+
 const questionPrompts = [
   "Explain how render_record transforms its input. Do not modify any files.",
   "Which module removes surrounding whitespace, and how is it called? Do not edit the workspace.",
@@ -139,13 +147,17 @@ for (let index = 1; index <= 6; index += 1) {
 }
 
 for (let index = 1; index <= 4; index += 1) {
+  const id = `orch-pos-cross-layer-${String(index).padStart(2, "0")}`;
   cases.push({
-    id: `orch-pos-cross-layer-${String(index).padStart(2, "0")}`,
+    id,
     caseClass: "positive",
     prompt:
       "Implement the normalization change across the parser and formatter: ASCII-lowercase parsed values with str::to_ascii_lowercase, then wrap rendered values in square brackets. Coordinate the cross-module work and keep the public facade compiling.",
     allowedTools: ["read_file", "edit_file"],
-    sources: unchangedSources,
+    sources: {
+      ...unchangedSources,
+      "tests/acceptance.rs": crossLayerAcceptanceTest(id),
+    },
     assertions: [
       {
         kind: "file_contains",
@@ -153,11 +165,11 @@ for (let index = 1; index <= 4; index += 1) {
         text: ".to_ascii_lowercase()",
       },
       {
-        kind: "file_contains",
-        path: "src/formatter.rs",
-        text: 'format!("[{value}]")',
+        kind: "file_unchanged",
+        path: "tests/acceptance.rs",
       },
     ],
+    checkCommand: ["cargo", "test", "--quiet"],
   });
 }
 
@@ -268,9 +280,14 @@ for (const item of cases) {
       manifest.push("");
     });
 
+  const checkCommand = item.checkCommand ?? ["cargo", "check", "--quiet"];
   manifest.push("[[checks]]");
-  manifest.push('id = "cargo-check"');
-  manifest.push('command = ["cargo", "check", "--quiet"]');
+  manifest.push(
+    `id = ${JSON.stringify(checkCommand[1] === "test" ? "cargo-test" : "cargo-check")}`,
+  );
+  manifest.push(
+    `command = [${checkCommand.map((value) => JSON.stringify(value)).join(", ")}]`,
+  );
   manifest.push("timeout_ms = 30000");
   manifest.push("");
 

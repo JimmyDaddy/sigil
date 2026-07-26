@@ -20,9 +20,8 @@ text = ".to_ascii_lowercase()"
 
 [[assertions]]
 id = "acceptance-2"
-kind = "file_contains"
-path = "src/formatter.rs"
-text = "format!(\"[{value}]\")"
+kind = "file_unchanged"
+path = "tests/acceptance.rs"
 
 [[files]]
 path = "Cargo.lock"
@@ -49,7 +48,12 @@ path = "src/parser.rs"
 source = "files/src/parser.rs"
 sha256 = "sha256:5ccbce1958df9f7a5961e167efb05e925beda13a8051a91371ae805a32900492"
 
+[[files]]
+path = "tests/acceptance.rs"
+source = "files/tests/acceptance.rs"
+sha256 = "sha256:d68782b3a475762d019025bbafdf6addcca923be3869d8c0ff6cb58de31ed72d"
+
 [[checks]]
-id = "cargo-check"
-command = ["cargo", "check", "--quiet"]
+id = "cargo-test"
+command = ["cargo", "test", "--quiet"]
 timeout_ms = 30000
