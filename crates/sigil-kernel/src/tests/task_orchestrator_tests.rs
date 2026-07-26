@@ -904,6 +904,8 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
 
     assert!(prompt.contains("request_task_discovery exactly once"));
     assert!(prompt.contains("spawn_agents, or wait_agent"));
+    assert!(prompt.contains("Bind every planned path and target"));
+    assert!(prompt.contains("omit speculative test-writing"));
     assert!(prompt.contains("role executor for ordinary task-participant reads and edits"));
     assert!(prompt.contains("role subagent_read"));
     assert!(prompt.contains("role subagent_write with isolation changeset_only"));
@@ -916,6 +918,9 @@ fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
     let planner = task_planner_system_prompt_contract_material();
     assert!(planner.contains("overrides the ordinary instruction to inspect the workspace"));
     assert!(planner.contains("request_task_discovery at most once"));
+    assert!(planner.contains("must come from the objective or a completed discovery result"));
+    assert!(planner.contains("configured acceptance checks"));
+    assert!(planner.contains("only when the objective explicitly requests test changes"));
     assert!(planner.contains("do not add a generic repository-overview step"));
     assert!(planner.contains("do not add a separate summary"));
     assert!(task_planner_prompt_contract_material().contains(planner));
