@@ -17,7 +17,14 @@ use sigil_kernel::{
     TaskRoutingPolicy, stable_event_hash,
 };
 
-use crate::{ORCHESTRATION_RUNTIME_BUILD_ID, provider_config_key, resolve_deepseek_config};
+use crate::{
+    ORCHESTRATION_RUNTIME_BUILD_ID, provider_config_key,
+    provider_connections::{
+        ConfigMode, ProviderConnectionConfig, ProviderFamily, ProviderProtocol,
+        load_provider_connections, runtime_provider_name,
+    },
+    provider_factory::exact_connection_provider_config,
+};
 
 /// Release sidecar consumed by Quick Setup for qualified new-install defaults.
 pub const ORCHESTRATION_ROLLOUT_MANIFEST_FILE_NAME: &str = "sigil-orchestration-rollout-v1.json";
@@ -271,15 +278,52 @@ fn new_install_orchestration_rollout_decision_for_config_and_task(
     root_config: &RootConfig,
     task: &TaskConfig,
 ) -> NewInstallOrchestrationRolloutDecision {
-    let endpoint_family = exact_endpoint_family(root_config).ok();
-    let candidate = RolloutRouteCandidate {
-        provider_adapter: provider_config_key(&root_config.agent.provider).to_owned(),
-        provider_kind: provider_config_key(&root_config.agent.provider).to_owned(),
-        endpoint_family,
-        canonical_model_id: root_config.agent.model.trim().to_owned(),
-        task_config_digest: orchestration_task_config_digest(task).ok(),
+    let candidate = match rollout_route_candidate(root_config, task) {
+        Ok(candidate) => candidate,
+        Err(_) => RolloutRouteCandidate {
+            provider_adapter: String::new(),
+            provider_kind: String::new(),
+            endpoint_family: None,
+            canonical_model_id: root_config.agent.model.trim().to_owned(),
+            task_config_digest: orchestration_task_config_digest(task).ok(),
+        },
     };
     resolve_rollout_decision(candidate)
+}
+
+fn rollout_route_candidate(
+    root_config: &RootConfig,
+    task: &TaskConfig,
+) -> Result<RolloutRouteCandidate> {
+    let loaded = load_provider_connections(root_config);
+    if matches!(
+        loaded.mode,
+        ConfigMode::Mixed | ConfigMode::UnsupportedFuture
+    ) {
+        bail!("provider connection configuration is not eligible for rollout");
+    }
+    let model_ref = loaded
+        .default_model
+        .as_ref()
+        .context("default model route is not configured")?;
+    if loaded.issues.iter().any(|issue| {
+        issue.connection_id.is_none()
+            || issue.connection_id.as_deref() == Some(model_ref.connection_id.as_str())
+    }) {
+        bail!("default model route is invalid");
+    }
+    let connection = loaded
+        .connections
+        .get(&model_ref.connection_id)
+        .context("default provider connection is missing")?;
+
+    Ok(RolloutRouteCandidate {
+        provider_adapter: runtime_provider_name(&connection.config).to_owned(),
+        provider_kind: connection.config.provider.as_str().to_owned(),
+        endpoint_family: exact_endpoint_family(&connection.config).ok(),
+        canonical_model_id: model_ref.model_id.trim().to_owned(),
+        task_config_digest: orchestration_task_config_digest(task).ok(),
+    })
 }
 
 #[derive(Debug)]
@@ -353,11 +397,14 @@ fn resolve_rollout_decision(
     }
 }
 
-fn exact_endpoint_family(root_config: &RootConfig) -> Result<String> {
-    if provider_config_key(&root_config.agent.provider) != "deepseek" {
+fn exact_endpoint_family(connection: &ProviderConnectionConfig) -> Result<String> {
+    if (connection.provider, connection.protocol)
+        != (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek)
+    {
         bail!("provider endpoint family is not qualified by this release");
     }
-    let config = resolve_deepseek_config(root_config)?;
+    let config: sigil_provider_deepseek::DeepSeekProviderConfig =
+        exact_connection_provider_config(connection, None)?;
     if config.base_url.trim_end_matches('/') != DEEPSEEK_PRIMARY_BASE_URL
         || config.beta_base_url.trim_end_matches('/') != DEEPSEEK_BETA_BASE_URL
     {

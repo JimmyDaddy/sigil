@@ -80,6 +80,32 @@ model = "deepseek-v4-flash"
     Ok(config)
 }
 
+fn v2_setup_config() -> Result<RootConfig> {
+    Ok(toml::from_str(
+        r#"
+config_version = 2
+
+[agent]
+connection = "deepseek-default"
+model = "deepseek-v4-flash"
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[connections.deepseek-default.options]
+beta_base_url = "https://api.deepseek.com/beta"
+anthropic_base_url = "https://api.deepseek.com/anthropic"
+user_id_strategy = "stable_per_end_user"
+strict_tools_mode = "auto"
+fim_model = "deepseek-v4-pro"
+"#,
+    )?)
+}
+
 fn write_rollout_manifest(path: &Path, task_digest: String) -> Result<()> {
     let report = qualified_report(task_digest);
     let manifest = build_orchestration_rollout_manifest(&report)?;
@@ -130,6 +156,32 @@ fn quick_setup_applies_only_the_exact_qualified_auto_proactive_route() -> Result
     assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
     assert_eq!(config.task.multi_agent_mode, MultiAgentMode::Proactive);
     assert!(decision.route_identity_digest.is_some());
+    Ok(())
+}
+
+#[test]
+fn quick_setup_applies_the_qualified_route_after_v2_materialization() -> Result<()> {
+    let _lock = crate::test_env::lock();
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join(ORCHESTRATION_ROLLOUT_MANIFEST_FILE_NAME);
+    let mut config = v2_setup_config()?;
+    let mut target_task = config.task.clone();
+    target_task.routing_policy = TaskRoutingPolicy::Auto;
+    target_task.multi_agent_mode = MultiAgentMode::Proactive;
+    write_rollout_manifest(&path, orchestration_task_config_digest(&target_task)?)?;
+    let _manifest =
+        crate::test_env::EnvScope::set(SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST_ENV, path.as_os_str());
+
+    let decision = apply_new_install_orchestration_rollout(&mut config);
+
+    assert!(decision.is_qualified());
+    assert!(config.agent.provider.is_empty());
+    assert_eq!(
+        config.agent.connection.as_ref().map(|id| id.as_str()),
+        Some("deepseek-default")
+    );
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
+    assert_eq!(config.task.multi_agent_mode, MultiAgentMode::Proactive);
     Ok(())
 }
 
