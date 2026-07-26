@@ -41,6 +41,7 @@ pub(crate) struct GrepTool;
 
 enum ReadFileLoad {
     File { content: String, bytes: u64 },
+    Missing,
     NotAFile,
 }
 
@@ -80,8 +81,16 @@ impl Tool for ReadFileTool {
             .min(HARD_READ_LIMIT_LINES);
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
         let loaded = run_blocking_io("read_file", move || {
-            let metadata = fs::metadata(&resolved)
-                .with_context(|| format!("failed to inspect {}", resolved.display()))?;
+            let metadata = match fs::metadata(&resolved) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(ReadFileLoad::Missing);
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to inspect {}", resolved.display()));
+                }
+            };
             if !metadata.is_file() {
                 return Ok(ReadFileLoad::NotAFile);
             }
@@ -95,6 +104,16 @@ impl Tool for ReadFileTool {
         .await?;
         let (content, bytes) = match loaded {
             ReadFileLoad::File { content, bytes } => (content, bytes),
+            ReadFileLoad::Missing => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    self.spec().name,
+                    ToolErrorKind::NotFound,
+                    format!(
+                        "read_file path {path:?} does not exist; use a workspace-relative file path returned by list or glob"
+                    ),
+                ));
+            }
             ReadFileLoad::NotAFile => {
                 return Ok(ToolResult::error(
                     call_id,

@@ -134,16 +134,11 @@ pub(super) fn tool_call_context(call: &ToolCall, subjects: &[ToolSubject]) -> Op
 }
 
 fn tool_subject_context_label(subject: &ToolSubject) -> String {
-    let target = subject
-        .canonical_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| subject.normalized.clone());
     truncate_context_value(&format!(
         "{}:{}:{}",
         subject.scope.as_str(),
         subject.kind.as_str(),
-        target
+        subject.normalized
     ))
 }
 

@@ -9171,6 +9171,7 @@ fn agent_context_helpers_attach_and_truncate_metadata() {
     assert_eq!(context["path"], "notes/file.txt");
     assert_eq!(context["pattern"], "needle");
     assert_eq!(context["subjects"].as_array().map(Vec::len), Some(6));
+    assert_eq!(context["subjects"][0], "workspace:path:notes/file.txt");
     assert!(
         context["summary"]
             .as_str()

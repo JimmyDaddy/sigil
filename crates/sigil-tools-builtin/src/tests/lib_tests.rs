@@ -3682,6 +3682,32 @@ async fn read_file_reports_directory_as_safe_invalid_input() -> Result<()> {
 }
 
 #[tokio::test]
+async fn read_file_reports_missing_path_without_disclosing_host_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+
+    let result = ReadFileTool
+        .execute(
+            ctx,
+            "read-missing".to_owned(),
+            json!({ "path": "missing/review.md" }),
+        )
+        .await?;
+
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("missing file read should return a structured tool error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::NotFound);
+    assert!(error.message.contains("missing/review.md"));
+    assert!(error.message.contains("list or glob"));
+    assert!(
+        !error.message.contains(&temp.path().display().to_string()),
+        "model-visible missing-file error must not disclose the absolute host workspace"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_glob_and_grep_report_limit_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     for index in 0..5 {
