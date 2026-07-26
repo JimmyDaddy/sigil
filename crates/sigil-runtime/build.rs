@@ -34,11 +34,9 @@ fn track_git_head() {
         Ok(value) => PathBuf::from(value),
         Err(_) => return,
     };
-    let git_dir = manifest_dir.join("../../.git");
-    let git_head = git_dir.join("HEAD");
-    if !git_head.exists() {
+    let Some(git_head) = git_path(&manifest_dir, Path::new("HEAD")) else {
         return;
-    }
+    };
     println!("cargo:rerun-if-changed={}", git_head.display());
 
     let Ok(head) = fs::read_to_string(&git_head) else {
@@ -51,8 +49,33 @@ fn track_git_head() {
     if ref_path.is_absolute() {
         return;
     }
-    let git_ref = git_dir.join(ref_path);
-    if git_ref.exists() {
+    if let Some(git_ref) = git_path(&manifest_dir, ref_path) {
         println!("cargo:rerun-if-changed={}", git_ref.display());
     }
+    if let Some(packed_refs) = git_path(&manifest_dir, Path::new("packed-refs")) {
+        println!("cargo:rerun-if-changed={}", packed_refs.display());
+    }
+}
+
+fn git_path(manifest_dir: &Path, path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(["rev-parse", "--git-path"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let resolved = PathBuf::from(raw.trim());
+    if resolved.as_os_str().is_empty() {
+        return None;
+    }
+    Some(if resolved.is_absolute() {
+        resolved
+    } else {
+        manifest_dir.join(resolved)
+    })
 }
