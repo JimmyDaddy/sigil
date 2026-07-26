@@ -4515,6 +4515,33 @@ fn builtin_argument_helpers_validate_types_and_sizes() {
         super::optional_usize(&json!({ "limit": 3 }), "limit").expect("limit"),
         Some(3)
     );
+    assert_eq!(
+        super::optional_usize(&json!({ "limit": null }), "limit").expect("nullable limit"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn read_file_treats_nullable_bounds_as_omitted() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("note.txt"), "first\nsecond\n")?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+
+    let result = ReadFileTool
+        .execute(
+            ctx,
+            "read-nullable-bounds".to_owned(),
+            json!({ "path": "note.txt", "offset": null, "limit": null }),
+        )
+        .await?;
+
+    assert_eq!(result.content, "first\nsecond");
+    assert_eq!(result.metadata.details["offset"], json!(0));
+    assert_eq!(
+        result.metadata.limit_lines,
+        Some(super::DEFAULT_READ_LIMIT_LINES as u64)
+    );
+    Ok(())
 }
 
 #[tokio::test]

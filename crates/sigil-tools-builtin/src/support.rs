@@ -18,6 +18,7 @@ pub(crate) fn optional_string<'a>(args: &'a Value, key: &str) -> Option<&'a str>
 
 pub(crate) fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
     args.get(key)
+        .filter(|value| !value.is_null())
         .map(|value| {
             value
                 .as_u64()
