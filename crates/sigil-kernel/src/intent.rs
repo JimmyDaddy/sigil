@@ -325,6 +325,34 @@ pub struct IntentPlanProposalV1 {
 }
 
 impl IntentPlanProposalV1 {
+    /// Creates a digest-bound provider proposal without granting acceptance authority.
+    ///
+    /// Runtime identities and the proposal digest are always derived by the host. Provider output
+    /// supplies only display-local aliases and descriptive intent content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the proposal contract is malformed.
+    pub fn new(
+        proposal_id: impl Into<String>,
+        source_turn_id: impl Into<String>,
+        intents: Vec<IntentProposalUnitV1>,
+    ) -> Result<Self> {
+        let mut proposal = Self {
+            schema_version: INTENT_CONTRACT_SCHEMA_VERSION,
+            proposal_id: proposal_id.into(),
+            source_turn_id: source_turn_id.into(),
+            intents,
+            proposal_digest: canonical_intent_digest(
+                IntentDigestDomain::Proposal,
+                &serde_json::json!({}),
+            )?,
+        };
+        proposal.proposal_digest = proposal.computed_digest()?;
+        proposal.validate_contract()?;
+        Ok(proposal)
+    }
+
     /// Computes the canonical proposal digest with the digest field omitted.
     ///
     /// # Errors

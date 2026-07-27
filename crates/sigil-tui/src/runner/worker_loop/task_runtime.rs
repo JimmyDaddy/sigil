@@ -1252,7 +1252,15 @@ pub(in crate::runner) fn create_task_from_plan(
         None
     };
     let (task_plan, step_mapping) = match promoted {
-        Some((plan, mapping)) => (Some(plan), mapping),
+        Some(promotion) if promotion.intent_alias_bindings.is_empty() => {
+            (Some(promotion.task_plan), promotion.step_mapping)
+        }
+        Some(_) => {
+            return Err(format!(
+                "plan {} carries an Intent proposal that requires explicit Intent admission",
+                plan_id.as_str()
+            ));
+        }
         None => (None, Vec::new()),
     };
     let existing_accepted_plan = session

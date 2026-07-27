@@ -247,8 +247,10 @@ fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
         task_id_from_plan_draft(&draft)?
     );
 
-    let (task_plan, mapping) = task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?
+    let promotion = task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?
         .expect("v2 plan should promote directly");
+    let task_plan = promotion.task_plan;
+    let mapping = promotion.step_mapping;
     assert_eq!(task_plan.steps.len(), 2);
     assert_eq!(mapping.len(), 2);
     assert_eq!(task_plan.steps[1].depends_on[0].as_str(), "inspect");
@@ -258,6 +260,99 @@ fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
         TaskIsolationMode::SharedReadOnly
     );
     Ok(())
+}
+
+#[test]
+fn sigil_plan_v2_carries_digest_bound_intent_proposal_without_runtime_authority() -> Result<()> {
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Implement and verify retry behavior",
+  "intents": [
+    {
+      "intent_alias": "retry",
+      "title": "Retry behavior",
+      "statement": "Retries preserve the original operation semantics.",
+      "acceptance_criteria": [
+        {
+          "criterion_alias": "retry-test",
+          "statement": "The retry regression test passes.",
+          "required": true
+        }
+      ],
+      "depends_on_aliases": []
+    }
+  ],
+  "steps": [
+    {
+      "id": "implement-retry",
+      "title": "Implement retry behavior",
+      "role": "executor",
+      "depends_on": [],
+      "intent_aliases": ["retry"],
+      "mode": "write",
+      "isolation": "sequential_workspace_write",
+      "target_paths": ["src/retry.rs"]
+    }
+  ],
+  "target_paths": ["src/retry.rs"]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("intent-enabled plan should create a durable draft");
+
+    let proposal = draft
+        .intent_proposal
+        .as_ref()
+        .expect("provider intent proposal should remain explicit and unaccepted");
+    proposal.validate_contract()?;
+    assert_eq!(proposal.intents[0].intent_alias, "retry");
+    assert_eq!(
+        proposal.proposal_digest,
+        proposal.computed_digest()?,
+        "the host must bind the exact provider proposal"
+    );
+    let promotion = task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?
+        .expect("v2 plan should promote directly");
+    assert!(promotion.task_plan.steps[0].intent_refs.is_empty());
+    assert_eq!(
+        promotion.intent_alias_bindings[0].intent_aliases,
+        vec!["retry"]
+    );
+    Ok(())
+}
+
+#[test]
+fn sigil_plan_v2_rejects_intent_aliases_without_matching_proposal() {
+    let error = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Unsafe partial intent plan",
+  "steps": [{
+    "id": "write",
+    "title": "Write file",
+    "role": "executor",
+    "depends_on": [],
+    "intent_aliases": ["missing"],
+    "mode": "write",
+    "isolation": "sequential_workspace_write"
+  }]
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("unknown provider alias must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("require a top-level intent proposal")
+    );
 }
 
 #[test]

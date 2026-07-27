@@ -8,6 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    IntentPlanProposalV1, IntentProposalUnitV1, TaskStepIntentAliasBindingV1,
     session::{ControlEntry, SessionLogEntry},
     task::{
         AgentRole, TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
@@ -84,6 +85,9 @@ pub struct PlanDraftStep {
     pub role: Option<AgentRole>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// Provider-local aliases resolved only after explicit plan acceptance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intent_aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<TaskStepMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +116,9 @@ pub struct PlanDraftCreatedEntry {
     pub inline_text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<PlanDraftStep>,
+    /// Unaccepted, digest-bound provider suggestion carried by the durable plan artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_proposal: Option<IntentPlanProposalV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -439,6 +446,7 @@ pub fn plan_draft_created_entry(
         plan_text_hash(&inline_plan_text)
     };
     let plan_id = plan_id_from_hash(&plan_hash)?;
+    let intent_proposal = intent_proposal_from_structured(&structured, &plan_hash)?;
     let inline_text =
         (inline_plan_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_plan_text);
     Ok(Some(PlanDraftCreatedEntry {
@@ -449,6 +457,7 @@ pub fn plan_draft_created_entry(
         summary: structured.summary,
         inline_text,
         steps: structured.steps,
+        intent_proposal,
         target_paths: structured.target_paths,
         suggested_checks: structured.suggested_checks,
         risk: structured.risk,
@@ -468,6 +477,11 @@ pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
             schema_version: entry.schema_version,
             summary: entry.summary.clone(),
             steps: entry.steps.clone(),
+            intents: entry
+                .intent_proposal
+                .as_ref()
+                .map(|proposal| proposal.intents.clone())
+                .unwrap_or_default(),
             target_paths: entry.target_paths.clone(),
             suggested_checks: entry.suggested_checks.clone(),
             risk: entry.risk.clone(),
@@ -494,7 +508,7 @@ pub fn task_plan_from_plan_draft(
     entry: &PlanDraftCreatedEntry,
     task_id: TaskId,
     plan_version: u32,
-) -> Result<Option<(TaskPlanEntry, Vec<PlanToTaskStepMapping>)>> {
+) -> Result<Option<PlanTaskPromotion>> {
     if entry.schema_version != 2
         || entry.steps.is_empty()
         || entry
@@ -550,7 +564,30 @@ pub fn task_plan_from_plan_draft(
             title: step.title.clone(),
         })
         .collect();
-    Ok(Some((plan, mapping)))
+    let intent_alias_bindings = entry
+        .steps
+        .iter()
+        .filter(|step| !step.intent_aliases.is_empty())
+        .map(|step| {
+            Ok(TaskStepIntentAliasBindingV1 {
+                step_id: TaskStepId::new(step.step_id.clone())?,
+                intent_aliases: step.intent_aliases.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(PlanTaskPromotion {
+        task_plan: plan,
+        step_mapping: mapping,
+        intent_alias_bindings,
+    }))
+}
+
+/// Executable task promotion plus the still-unresolved provider-local intent aliases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanTaskPromotion {
+    pub task_plan: TaskPlanEntry,
+    pub step_mapping: Vec<PlanToTaskStepMapping>,
+    pub intent_alias_bindings: Vec<TaskStepIntentAliasBindingV1>,
 }
 
 /// Returns the retry-stable task identity owned by one durable plan artifact.
@@ -666,6 +703,7 @@ struct StructuredPlanDraft {
     schema_version: u32,
     summary: String,
     steps: Vec<PlanDraftStep>,
+    intents: Vec<IntentProposalUnitV1>,
     target_paths: Vec<String>,
     suggested_checks: Vec<PlanSuggestedCheck>,
     risk: Option<String>,
@@ -691,6 +729,13 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> StructuredPlanDr
         .into_iter()
         .filter_map(safe_plan_suggested_check)
         .collect();
+    for intent in &mut plan.intents {
+        intent.title = crate::safe_persistence_text(&intent.title);
+        intent.statement = crate::safe_persistence_text(&intent.statement);
+        for criterion in &mut intent.acceptance_criteria {
+            criterion.statement = crate::safe_persistence_text(&criterion.statement);
+        }
+    }
 
     let mut step_ids = BTreeSet::new();
     for (index, step) in plan.steps.iter_mut().enumerate() {
@@ -712,6 +757,11 @@ fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> StructuredPlanDr
             .iter()
             .map(|dependency| crate::safe_persistence_text(dependency))
             .filter(|dependency| validate_plan_stable_id("plan dependency", dependency).is_ok())
+            .collect();
+        step.intent_aliases = step
+            .intent_aliases
+            .iter()
+            .map(|alias| crate::safe_persistence_text(alias))
             .collect();
         step.risk = step.risk.as_deref().map(crate::safe_persistence_text);
         step.target_paths.retain(|path| {
@@ -798,6 +848,8 @@ struct RawStructuredPlanDraft {
     #[serde(default)]
     steps: Vec<RawPlanDraftStep>,
     #[serde(default)]
+    intents: Vec<IntentProposalUnitV1>,
+    #[serde(default)]
     target_paths: Vec<String>,
     #[serde(default)]
     suggested_checks: Vec<RawPlanSuggestedCheck>,
@@ -821,6 +873,8 @@ struct RawPlanDraftStep {
     role: Option<String>,
     #[serde(default)]
     depends_on: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
+    intent_aliases: Vec<String>,
     #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
@@ -995,6 +1049,7 @@ fn materialize_structured_plan(
         schema_version,
         summary,
         steps,
+        intents: raw.intents,
         target_paths: collapse_plan_workspace_paths(target_paths),
         suggested_checks: suggested_checks.into_values().collect(),
         risk: raw.risk.and_then(nonempty_trimmed),
@@ -1048,6 +1103,11 @@ fn materialize_plan_step(
         role: raw_step.role.as_deref().and_then(parse_plan_agent_role),
         depends_on: raw_step
             .depends_on
+            .into_iter()
+            .filter_map(nonempty_trimmed)
+            .collect(),
+        intent_aliases: raw_step
+            .intent_aliases
             .into_iter()
             .filter_map(nonempty_trimmed)
             .collect(),
@@ -1219,6 +1279,12 @@ fn render_structured_plan_text(plan: &StructuredPlanDraft) -> String {
         if !step.depends_on.is_empty() {
             lines.push(format!("   Depends on: {}", step.depends_on.join(", ")));
         }
+        if !step.intent_aliases.is_empty() {
+            lines.push(format!(
+                "   Intent aliases: {}",
+                step.intent_aliases.join(", ")
+            ));
+        }
         if let Some(mode) = step.mode {
             lines.push(format!("   Mode: {}", mode.as_str()));
         }
@@ -1245,6 +1311,28 @@ fn render_structured_plan_text(plan: &StructuredPlanDraft) -> String {
             lines.push(format!("   Note: {note}"));
         }
     }
+    if !plan.intents.is_empty() {
+        lines.push(String::new());
+        lines.push("Intents:".to_owned());
+        for intent in &plan.intents {
+            lines.push(format!(
+                "- {} [{}]: {}",
+                intent.title, intent.intent_alias, intent.statement
+            ));
+            if !intent.depends_on_aliases.is_empty() {
+                lines.push(format!(
+                    "  Depends on: {}",
+                    intent.depends_on_aliases.join(", ")
+                ));
+            }
+            for criterion in &intent.acceptance_criteria {
+                lines.push(format!(
+                    "  Criterion {} (required={}): {}",
+                    criterion.criterion_alias, criterion.required, criterion.statement
+                ));
+            }
+        }
+    }
     if !plan.target_paths.is_empty() {
         lines.push(String::new());
         lines.push("Target paths:".to_owned());
@@ -1269,6 +1357,53 @@ fn render_structured_plan_text(plan: &StructuredPlanDraft) -> String {
         lines.extend(plan.notes.iter().map(|note| format!("- {note}")));
     }
     lines.join("\n")
+}
+
+fn intent_proposal_from_structured(
+    plan: &StructuredPlanDraft,
+    plan_hash: &str,
+) -> Result<Option<IntentPlanProposalV1>> {
+    if plan.intents.is_empty() {
+        if plan
+            .steps
+            .iter()
+            .any(|step| !step.intent_aliases.is_empty())
+        {
+            bail!("plan step intent aliases require a top-level intent proposal");
+        }
+        return Ok(None);
+    }
+    if plan.schema_version != 2 {
+        bail!("intent proposals require sigil-plan-v2");
+    }
+    let aliases = plan
+        .intents
+        .iter()
+        .map(|intent| intent.intent_alias.as_str())
+        .collect::<BTreeSet<_>>();
+    if aliases.len() != plan.intents.len() {
+        bail!("structured plan intent proposal contains duplicate aliases");
+    }
+    for step in &plan.steps {
+        let mut step_aliases = BTreeSet::new();
+        for alias in &step.intent_aliases {
+            if !aliases.contains(alias.as_str()) {
+                bail!("plan step references unknown intent alias {alias}");
+            }
+            if !step_aliases.insert(alias.as_str()) {
+                bail!("plan step repeats intent alias {alias}");
+            }
+        }
+        if step.mode == Some(TaskStepMode::Write) && step.intent_aliases.len() != 1 {
+            bail!(
+                "Intent-enabled write plan step {} must bind exactly one intent alias",
+                step.step_id
+            );
+        }
+    }
+    let source_turn_id = crate::stable_event_uuid("sigil-plan-intent-source-v1", plan_hash);
+    let proposal_id = crate::stable_event_uuid("sigil-plan-intent-proposal-v1", plan_hash);
+    IntentPlanProposalV1::new(proposal_id, source_turn_id, plan.intents.clone()).map(Some)
 }
 
 fn render_plan_check_command(check: &PlanSuggestedCheck) -> String {

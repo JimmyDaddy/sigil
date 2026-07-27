@@ -193,8 +193,10 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
-    let (promoted, step_mapping) = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
+    let promotion = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
         .expect("v2 plan should promote");
+    let promoted = promotion.task_plan;
+    let step_mapping = promotion.step_mapping;
     session.append_control(ControlEntry::TaskPlan(promoted))?;
     session.append_control(ControlEntry::TaskCreatedFromPlan(
         TaskCreatedFromPlanEntry {
@@ -369,8 +371,9 @@ fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Resu
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
-    let (promoted, _) = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
-        .expect("v2 plan should promote");
+    let promoted = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
+        .expect("v2 plan should promote")
+        .task_plan;
     session.append_control(ControlEntry::TaskPlan(promoted))?;
     fs::write(workspace_root.join("README.md"), "snapshot b\n")?;
     let mut current_session = Some(session);
