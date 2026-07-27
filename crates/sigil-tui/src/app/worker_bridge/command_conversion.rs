@@ -195,6 +195,23 @@ impl AppState {
                 request_id,
                 request,
             },
+            AppAction::LoadIntentStack { request_id } => {
+                WorkerCommand::LoadIntentStack { request_id }
+            }
+            AppAction::PreviewIntentDrop {
+                request_id,
+                intent_ref,
+            } => WorkerCommand::PreviewIntentDrop {
+                request_id,
+                intent_ref,
+            },
+            AppAction::ExecuteIntentDrop {
+                request_id,
+                request,
+            } => WorkerCommand::ExecuteIntentDrop {
+                request_id,
+                request,
+            },
             AppAction::InspectLocalSession {
                 request_id,
                 source_path,

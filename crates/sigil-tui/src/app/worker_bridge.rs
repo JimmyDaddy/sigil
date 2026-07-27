@@ -554,6 +554,62 @@ impl AppState {
             } => {
                 self.apply_checkpoint_restore_preview(request_id, preview);
             }
+            WorkerMessage::IntentStackLoaded {
+                request_id,
+                stack_state,
+            } => {
+                if !self.apply_intent_stack_loaded(request_id, stack_state) {
+                    self.push_event(
+                        "intent:stack",
+                        format!("ignored stale load response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::IntentDropPreviewed {
+                request_id,
+                preview,
+            } => {
+                if !self.apply_intent_drop_preview(request_id, preview) {
+                    self.push_event(
+                        "intent:stack",
+                        format!("ignored stale Drop preview {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::IntentDropCompleted {
+                request_id,
+                execution,
+                stack_state,
+                entries,
+            } => {
+                if self.apply_intent_drop_completed(request_id, &execution, stack_state) {
+                    self.sync_current_session_state(entries);
+                    self.push_event(
+                        "intent:stack",
+                        format!(
+                            "Drop {} resolved {:?}",
+                            execution.preview.operation_id.as_str(),
+                            execution.resolution
+                        ),
+                    );
+                } else {
+                    self.push_event(
+                        "intent:stack",
+                        format!("ignored stale Drop completion {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::IntentStackOperationFailed { request_id, error } => {
+                let summary = summarize_error(&error);
+                if self.apply_intent_stack_operation_failed(request_id, &summary) {
+                    self.push_event("intent:stack:error", error);
+                } else {
+                    self.push_event(
+                        "intent:stack",
+                        format!("ignored stale failure response {request_id}"),
+                    );
+                }
+            }
             WorkerMessage::TaskIntegrationReviewLoaded {
                 request,
                 aggregate_diff,

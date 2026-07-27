@@ -20,6 +20,37 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if self.intent_stack_modal_open() {
+            let target = layout.hit_target(input.column, input.row);
+            return Ok(match (input.kind, target) {
+                (crate::mouse::MouseInputKind::ScrollUp, _) => {
+                    self.scroll_intent_stack_detail(true, 3);
+                    crate::mouse::AppMouseOutcome::Redraw
+                }
+                (crate::mouse::MouseInputKind::ScrollDown, _) => {
+                    self.scroll_intent_stack_detail(false, 3);
+                    crate::mouse::AppMouseOutcome::Redraw
+                }
+                (
+                    crate::mouse::MouseInputKind::LeftDown,
+                    crate::mouse::HitTarget::IntentStackRow { index },
+                ) => {
+                    if self.select_intent_stack_row(index) {
+                        crate::mouse::AppMouseOutcome::Redraw
+                    } else {
+                        crate::mouse::AppMouseOutcome::Noop
+                    }
+                }
+                (
+                    crate::mouse::MouseInputKind::LeftDown,
+                    crate::mouse::HitTarget::IntentStackPrimaryAction,
+                ) => self.handle_intent_stack_primary_action().map_or(
+                    crate::mouse::AppMouseOutcome::Redraw,
+                    crate::mouse::AppMouseOutcome::Action,
+                ),
+                _ => crate::mouse::AppMouseOutcome::Noop,
+            });
+        }
         if self.checkpoint_restore_modal_open() {
             return Ok(match input.kind {
                 crate::mouse::MouseInputKind::ScrollUp => {
@@ -496,7 +527,10 @@ impl AppState {
             | crate::mouse::HitTarget::SetupField { .. }
             | crate::mouse::HitTarget::ConfigSection { .. }
             | crate::mouse::HitTarget::ConfigField { .. }
-            | crate::mouse::HitTarget::ConfigFooterAction { .. } => {
+            | crate::mouse::HitTarget::ConfigFooterAction { .. }
+            | crate::mouse::HitTarget::IntentStackModal
+            | crate::mouse::HitTarget::IntentStackRow { .. }
+            | crate::mouse::HitTarget::IntentStackPrimaryAction => {
                 Ok(crate::mouse::AppMouseOutcome::Noop)
             }
             crate::mouse::HitTarget::SessionModal

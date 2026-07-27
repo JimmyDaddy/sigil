@@ -78,6 +78,15 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         client_action: Some(ApplicationClientAction::OpenSupport),
     },
     ApplicationCommandSpec {
+        canonical: "/intents",
+        aliases: &[],
+        label: "Intent Stack",
+        description: "review durable intents and exact Drop previews",
+        argument_hint: None,
+        completes_with_space: false,
+        client_action: None,
+    },
+    ApplicationCommandSpec {
         canonical: "/effort",
         aliases: &["/e"],
         label: "Change effort",

@@ -6,6 +6,7 @@ mod diff;
 mod egress_disclosure;
 mod geometry;
 mod info_rail;
+mod intent_stack;
 mod layout_snapshot;
 mod live_panel;
 mod markdown;

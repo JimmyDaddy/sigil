@@ -52,6 +52,7 @@ pub struct LayoutSnapshot {
     pub approval_modal: Option<Rect>,
     pub approval_modal_hit_areas: Option<ApprovalModalHitAreas>,
     pub(crate) session_modal_hit_areas: Option<SessionModalHitAreas>,
+    pub(crate) intent_stack_modal_hit_areas: Option<IntentStackModalHitAreas>,
     pub setup_hit_areas: Option<SetupHitAreas>,
     pub config_hit_areas: Option<ConfigHitAreas>,
 }
@@ -137,6 +138,19 @@ pub(crate) struct SessionModalActionHitArea {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntentStackModalHitAreas {
+    pub(crate) modal: Rect,
+    pub(crate) rows: Vec<IntentStackRowHitArea>,
+    pub(crate) primary_action: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IntentStackRowHitArea {
+    pub(crate) index: usize,
+    pub(crate) area: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupHitAreas {
     pub fields: Vec<SetupFieldHitArea>,
 }
@@ -187,12 +201,14 @@ impl LayoutSnapshot {
             let mut snapshot = Self::single(screen, LayoutMode::Setup);
             snapshot.setup_hit_areas = setup_hit_areas(screen, app);
             snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
+            snapshot.intent_stack_modal_hit_areas = intent_stack_modal_hit_areas(screen, app);
             return snapshot;
         }
         if app.is_config_mode() {
             let mut snapshot = Self::single(screen, LayoutMode::Config);
             snapshot.config_hit_areas = config_hit_areas(screen, app);
             snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
+            snapshot.intent_stack_modal_hit_areas = intent_stack_modal_hit_areas(screen, app);
             return snapshot;
         }
 
@@ -230,10 +246,12 @@ impl LayoutSnapshot {
                 .approval_modal_view()
                 .and_then(|view| approval_modal_hit_areas(screen, &view)),
             session_modal_hit_areas: None,
+            intent_stack_modal_hit_areas: None,
             setup_hit_areas: None,
             config_hit_areas: None,
         };
         snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
+        snapshot.intent_stack_modal_hit_areas = intent_stack_modal_hit_areas(screen, app);
         snapshot
     }
 
@@ -257,12 +275,28 @@ impl LayoutSnapshot {
             approval_modal: None,
             approval_modal_hit_areas: None,
             session_modal_hit_areas: None,
+            intent_stack_modal_hit_areas: None,
             setup_hit_areas: None,
             config_hit_areas: None,
         }
     }
 
     pub(crate) fn hit_target(&self, column: u16, row: u16) -> HitTarget {
+        if let Some(areas) = &self.intent_stack_modal_hit_areas {
+            if contains(areas.primary_action, column, row) {
+                return HitTarget::IntentStackPrimaryAction;
+            }
+            for intent_row in &areas.rows {
+                if contains(intent_row.area, column, row) {
+                    return HitTarget::IntentStackRow {
+                        index: intent_row.index,
+                    };
+                }
+            }
+            if contains(areas.modal, column, row) {
+                return HitTarget::IntentStackModal;
+            }
+        }
         if let Some(areas) = &self.session_modal_hit_areas {
             for action in &areas.actions {
                 if contains(action.area, column, row) {
@@ -472,6 +506,20 @@ fn session_modal_hit_areas(screen: Rect, app: &AppState) -> Option<SessionModalH
     Some(SessionModalHitAreas {
         modal: geometry.area,
         actions,
+    })
+}
+
+fn intent_stack_modal_hit_areas(screen: Rect, app: &AppState) -> Option<IntentStackModalHitAreas> {
+    let view = app.intent_stack_modal_view()?;
+    let layout = super::intent_stack::intent_stack_modal_layout(screen, &view);
+    Some(IntentStackModalHitAreas {
+        modal: layout.area,
+        rows: layout
+            .row_areas
+            .into_iter()
+            .map(|(index, area)| IntentStackRowHitArea { index, area })
+            .collect(),
+        primary_action: layout.primary_action,
     })
 }
 

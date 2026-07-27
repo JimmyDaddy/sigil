@@ -31,6 +31,7 @@ pub(in crate::runner) struct WorkerCommandContext<'a, P> {
 }
 
 mod agent_task;
+mod intent_stack;
 mod maintenance;
 mod provider_mcp;
 mod queue_compaction;
@@ -48,6 +49,7 @@ pub(in crate::runner) enum WorkerCommandDomain {
     Session,
     QueueCompaction,
     AgentTask,
+    IntentStack,
     VerificationCheckpoint,
     ProviderMcp,
     Maintenance,
@@ -59,6 +61,7 @@ pub(in crate::runner) enum ClassifiedWorkerCommand {
     Session(SessionCommand),
     QueueCompaction(QueueCompactionCommand),
     AgentTask(AgentTaskCommand),
+    IntentStack(IntentStackCommand),
     VerificationCheckpoint(VerificationCheckpointCommand),
     ProviderMcp(ProviderMcpCommand),
     Maintenance(MaintenanceCommand),
@@ -72,6 +75,7 @@ impl ClassifiedWorkerCommand {
             Self::Session(_) => WorkerCommandDomain::Session,
             Self::QueueCompaction(_) => WorkerCommandDomain::QueueCompaction,
             Self::AgentTask(_) => WorkerCommandDomain::AgentTask,
+            Self::IntentStack(_) => WorkerCommandDomain::IntentStack,
             Self::VerificationCheckpoint(_) => WorkerCommandDomain::VerificationCheckpoint,
             Self::ProviderMcp(_) => WorkerCommandDomain::ProviderMcp,
             Self::Maintenance(_) => WorkerCommandDomain::Maintenance,
@@ -279,6 +283,21 @@ pub(in crate::runner) enum VerificationCheckpointCommand {
     ForkConversationAtCheckpoint {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
+    },
+}
+
+#[derive(Debug)]
+pub(in crate::runner) enum IntentStackCommand {
+    Load {
+        request_id: u64,
+    },
+    PreviewDrop {
+        request_id: u64,
+        intent_ref: sigil_kernel::IntentVersionRef,
+    },
+    ExecuteDrop {
+        request_id: u64,
+        request: sigil_kernel::IntentDropRequestV1,
     },
 }
 
@@ -642,6 +661,23 @@ pub(in crate::runner) fn classify_worker_command(
                 request,
             },
         ),
+        WorkerCommand::LoadIntentStack { request_id } => {
+            ClassifiedWorkerCommand::IntentStack(IntentStackCommand::Load { request_id })
+        }
+        WorkerCommand::PreviewIntentDrop {
+            request_id,
+            intent_ref,
+        } => ClassifiedWorkerCommand::IntentStack(IntentStackCommand::PreviewDrop {
+            request_id,
+            intent_ref,
+        }),
+        WorkerCommand::ExecuteIntentDrop {
+            request_id,
+            request,
+        } => ClassifiedWorkerCommand::IntentStack(IntentStackCommand::ExecuteDrop {
+            request_id,
+            request,
+        }),
         WorkerCommand::RefreshProviderBalance {
             request_id,
             provider_config,
@@ -714,6 +750,9 @@ where
         }
         ClassifiedWorkerCommand::AgentTask(command) => {
             agent_task::dispatch_agent_task_command(context, command)
+        }
+        ClassifiedWorkerCommand::IntentStack(command) => {
+            intent_stack::dispatch_intent_stack_command(context, command)
         }
         ClassifiedWorkerCommand::VerificationCheckpoint(command) => {
             verification_checkpoint::dispatch_verification_checkpoint_command(context, command)

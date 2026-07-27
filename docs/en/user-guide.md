@@ -26,7 +26,7 @@ Type ordinary tasks in the composer. Use slash commands for a small set of contr
 
 ## Common Controls
 
-Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, and `Ctrl-T` to expand or collapse thinking and activity. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
+Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, `Alt-S` for the current Intent Stack, and `Ctrl-T` to expand or collapse thinking and activity. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
 
 The info rail is enabled by default when the terminal is wide enough. `F2` changes only the current run. To change the startup default, open `/config`, choose **Appearance**, toggle **Info rail**, and save with `Ctrl-S`; narrow terminals still collapse it automatically.
 
@@ -114,6 +114,10 @@ Open `/resume` and select a row. `Enter` resumes it. `Ctrl-O` or right-click ope
 ### Controlled checkpoints and conversation forks
 
 When the latest completed turn contains supported file edits, press `Ctrl-R` to review the reverse diff. `Enter` restores the reviewed files; `F` forks the conversation without changing files. A stale or changed file blocks the restore. Shell commands, remote services, directories, renames, symlinks, and other outside effects are not undone. Rerun verification after a successful restore.
+
+### Intent Stack review
+
+When the current session has accepted Intent Stack history, press `Alt-S` or run `/intents` to review each intent, its dependencies, verification state, retained artifacts, and conflicts. Select an intent with `Up/Down`; `D` creates an exact Drop preview, and `Enter` confirms only that reviewed preview. Shared, drifted, unavailable, read-only, or out-of-scope contributions remain visible but cannot be dropped. Shell, network, remote, and other unsupported side effects are never undone. Older sessions without durable intent history show an explicit unavailable state rather than a guessed stack.
 
 ## Long Context and Compaction
 

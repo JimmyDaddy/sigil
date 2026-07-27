@@ -28,6 +28,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |
+| Open Intent Stack review | `Alt-S`; `Up/Down` selects, `D` previews Drop, `Enter` confirms |
 | Open saved-session actions | Select `/resume` row, then `Ctrl-O` or right-click |
 | Toggle latest Mermaid source | `Ctrl-O` when no saved-session, tool-card, or other higher-priority action is active |
 | Cycle visible agent transcript | Agent panel, `Alt-A`, `Shift-Alt-A` |
@@ -57,6 +58,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | `/model <model-id|connection-id/model-id>` | Switch to an exact ready route and start a fresh session; in the selector, `D` changes only the saved default |
 | `/effort <low|medium|high|max>` | Change reasoning effort for the next run |
 | `/compact` | Review and, when ready, apply one context reduction |
+| `/intents` | Review durable intent status, artifacts, conflicts, and exact Drop previews |
 | `/quit` | Quit the TUI |
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`. Candidate commands use `Up/Down`, `Tab`, and `Enter`.

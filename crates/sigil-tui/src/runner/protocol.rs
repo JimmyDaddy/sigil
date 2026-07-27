@@ -5,9 +5,10 @@ use sigil_kernel::{
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
     ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
+    IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
     MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
-    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort,
-    ResolvedModelRoute, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
+    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1,
+    ReasoningEffort, ResolvedModelRoute, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
     TaskIntegrationReviewRequest, TaskPauseRequest, TaskRunStatus, TaskVerificationRerunRequest,
     TerminalTaskEntry, V2CompactionPreview,
 };
@@ -278,6 +279,17 @@ pub enum WorkerCommand {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
+    LoadIntentStack {
+        request_id: u64,
+    },
+    PreviewIntentDrop {
+        request_id: u64,
+        intent_ref: IntentVersionRef,
+    },
+    ExecuteIntentDrop {
+        request_id: u64,
+        request: IntentDropRequestV1,
+    },
     InspectLocalSession {
         request_id: u64,
         source_path: PathBuf,
@@ -517,6 +529,24 @@ pub enum WorkerMessage {
         preview: ControlledCheckpointRestorePreview,
         batch_id: String,
         entries: Vec<SessionLogEntry>,
+    },
+    IntentStackLoaded {
+        request_id: u64,
+        stack_state: PublicIntentStackStateV1,
+    },
+    IntentDropPreviewed {
+        request_id: u64,
+        preview: IntentOperationPreviewV1,
+    },
+    IntentDropCompleted {
+        request_id: u64,
+        execution: IntentOperationExecutionV1,
+        stack_state: PublicIntentStackStateV1,
+        entries: Vec<SessionLogEntry>,
+    },
+    IntentStackOperationFailed {
+        request_id: u64,
+        error: String,
     },
     ConversationForked {
         request_id: u64,

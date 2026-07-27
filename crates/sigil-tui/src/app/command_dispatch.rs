@@ -133,7 +133,10 @@ impl AppState {
         if command == UiCommand::FocusVerificationCard {
             return self.focus_verification_card();
         }
-        if command == UiCommand::OpenCheckpointRestore {
+        if matches!(
+            command,
+            UiCommand::OpenCheckpointRestore | UiCommand::OpenIntentStack
+        ) {
             return false;
         }
         if command == UiCommand::CycleAgentView {
@@ -188,7 +191,9 @@ impl AppState {
             | UiCommand::CycleAgentView
             | UiCommand::CycleAgentViewPrevious
             | UiCommand::CheckChangedFilesDiagnostics => false,
-            UiCommand::FocusVerificationCard | UiCommand::OpenCheckpointRestore => false,
+            UiCommand::FocusVerificationCard
+            | UiCommand::OpenCheckpointRestore
+            | UiCommand::OpenIntentStack => false,
         }
     }
 }

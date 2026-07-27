@@ -6,6 +6,7 @@ mod diagnostics_tests;
 mod edge_worker_loop_tests;
 mod elicitation_tests;
 mod event_bridge_tests;
+mod intent_stack_runtime_tests;
 mod plan_handoff_e2e_tests;
 mod session_lifecycle_runtime_tests;
 mod session_tests;

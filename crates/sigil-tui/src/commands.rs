@@ -23,6 +23,7 @@ pub(crate) enum UiCommand {
     CheckChangedFilesDiagnostics,
     FocusVerificationCard,
     OpenCheckpointRestore,
+    OpenIntentStack,
     FocusLatestToolCard,
     SelectNextToolCard,
     SelectPreviousToolCard,
@@ -124,6 +125,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: None,
         label: "Restore checkpoint",
         help: "Open the latest controlled checkpoint in an exact restore preview dialog.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::OpenIntentStack,
+        keys: &[KeyBinding { label: "Alt-S" }],
+        slash: Some("/intents"),
+        label: "Intent Stack",
+        help: "Review durable intent ownership, verification, retention, conflicts, and exact Drop previews.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -308,6 +317,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::OpenCheckpointRestore)
         }
+        KeyCode::Char('s') | KeyCode::Char('S') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::OpenIntentStack)
+        }
         KeyCode::Char('i') | KeyCode::Char('I') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::ToggleInfoRailDetail)
         }
@@ -351,6 +363,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
             String::new()
         },
         control_hint(UiCommand::OpenCheckpointRestore).expect("checkpoint metadata exists"),
+        control_hint(UiCommand::OpenIntentStack).expect("Intent Stack metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());
     hints
@@ -397,9 +410,10 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         UiCommand::CheckChangedFilesDiagnostics,
         UiCommand::FocusVerificationCard,
         UiCommand::OpenCheckpointRestore,
+        UiCommand::OpenIntentStack,
     ]));
     lines.push(
-        "Checkpoint dialog: Ctrl-R opens and refreshes the exact reverse diff; Enter restores controlled files; F forks the conversation without changing files; Esc closes. Shell and remote effects are never undone."
+        "Review dialogs require an exact preview before file changes; shell and remote effects are never undone."
             .to_owned(),
     );
     if include_tool_cards {

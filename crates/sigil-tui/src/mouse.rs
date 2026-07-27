@@ -34,6 +34,9 @@ pub enum AppMouseOutcome {
 pub(crate) enum HitTarget {
     SessionModal,
     SessionModalAction { action: SessionModalAction },
+    IntentStackModal,
+    IntentStackRow { index: usize },
+    IntentStackPrimaryAction,
     ApprovalModal,
     ApprovalDiffArea,
     ApprovalFileRow { index: usize },

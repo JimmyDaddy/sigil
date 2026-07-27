@@ -28,6 +28,7 @@
 | 聚焦任务验证 | `Alt-V`；`Enter` 运行，`I` 查看 |
 | 在安全边界暂停当前精确任务 | `Alt-P`；之后用 `/task continue` 恢复 |
 | 打开最近一次检查点恢复 | `Ctrl-R`；`Enter` 恢复，`F` 分叉会话，`Esc` 关闭 |
+| 打开 Intent Stack 检查 | `Alt-S`；`Up/Down` 选择，`D` 预览 Drop，`Enter` 确认 |
 | 打开已保存会话的操作菜单 | 选择 `/resume` 行，再按 `Ctrl-O` 或右键 |
 | 切换最近一张 Mermaid 图表源码 | 没有已保存会话、工具卡片或其他更高优先级操作时按 `Ctrl-O` |
 | 切换可见的子智能体会话 | 子智能体面板、`Alt-A`、`Shift-Alt-A` |
@@ -57,6 +58,7 @@
 | `/model <model-id|connection-id/model-id>` | 切换到准确的 ready route 并新建会话；在选择器中按 `D` 只修改保存默认值 |
 | `/effort <low|medium|high|max>` | 修改下一轮的推理强度 |
 | `/compact` | 检查上下文精简方案，并在就绪时应用一次 |
+| `/intents` | 检查 durable intent 状态、artifact、冲突与精确 Drop 预览 |
 | `/quit` | 退出 TUI |
 
 别名：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。候选命令使用 `Up/Down`、`Tab` 与 `Enter`。

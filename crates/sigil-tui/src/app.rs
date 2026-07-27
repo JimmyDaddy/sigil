@@ -19,6 +19,7 @@ mod formatting;
 mod image_attachment_flow;
 mod input_flow;
 mod input_history;
+mod intent_stack_flow;
 mod key_router;
 mod mcp_oauth_flow;
 mod modal_flow;
@@ -86,6 +87,9 @@ pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 pub(crate) use self::checkpoint_flow::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
 pub(crate) use self::egress_disclosure_flow::EGRESS_DISCLOSURE_HEIGHT;
 use self::formatting::*;
+#[cfg(test)]
+pub(crate) use self::intent_stack_flow::IntentStackRowView;
+pub(crate) use self::intent_stack_flow::{IntentStackModalPhase, IntentStackModalView};
 use self::modal_flow::{ModalState, ModelPickerRefresh};
 use self::runtime_status::McpProgressState;
 pub(crate) use self::runtime_status::{
@@ -499,6 +503,17 @@ pub enum AppAction {
     ForkConversationAtCheckpoint {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
+    },
+    LoadIntentStack {
+        request_id: u64,
+    },
+    PreviewIntentDrop {
+        request_id: u64,
+        intent_ref: sigil_kernel::IntentVersionRef,
+    },
+    ExecuteIntentDrop {
+        request_id: u64,
+        request: sigil_kernel::IntentDropRequestV1,
     },
     InspectLocalSession {
         request_id: u64,
@@ -1049,9 +1064,9 @@ impl AppState {
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.checkpoint_mutation_pending() {
+            if self.checkpoint_mutation_pending() || self.intent_drop_applying() {
                 self.last_notice = Some(
-                    "checkpoint operation is already applying; wait for completion before quitting"
+                    "a reviewed workspace operation is applying; wait for completion before quitting"
                         .to_owned(),
                 );
                 return Ok(None);
@@ -1070,6 +1085,9 @@ impl AppState {
         }
         if self.checkpoint_restore_modal_open() {
             return Ok(self.handle_checkpoint_restore_modal_key_event(key));
+        }
+        if self.intent_stack_modal_open() {
+            return Ok(self.handle_intent_stack_modal_key_event(key));
         }
         if self.feedback_modal_open() {
             return Ok(self.handle_feedback_modal_key_event(key));
@@ -1189,6 +1207,9 @@ impl AppState {
         if let Some(command) = command_for_key_event(key) {
             if command == UiCommand::OpenCheckpointRestore {
                 return Ok(self.open_checkpoint_restore_modal());
+            }
+            if command == UiCommand::OpenIntentStack {
+                return Ok(self.open_intent_stack_modal());
             }
             if command == UiCommand::CheckChangedFilesDiagnostics {
                 return Ok(self.request_changed_files_diagnostics());

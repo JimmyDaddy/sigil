@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.5 complete，R51.6 next）
+状态：proposed / implementation active（R51.0-R51.6 complete，R51.7 next）
 
 创建日期：2026-07-22
 
@@ -838,6 +838,37 @@ exact supersede suffix、crash-prefix restart、workspace out-of-scope、branch/
 retention transition。R51.5 不开放 replace mutation、semantic merge、shared-hunk
 rematerialization 或外部副作用补偿；TUI 和 typed adapter action 分别留给 R51.6/R51.7。
 
+### 12.7 R51.6 implementation checkpoint（2026-07-27）
+
+R51.6 已完成，落点为 `sigil-tui` 的独立 Intent Stack modal、app/worker typed command
+bridge、responsive layout 与 mouse hit-area projection。本切片提供：
+
+- `Alt-S` 与 `/intents` 打开专用 Intent Stack review surface；renderer 只消费
+  `PublicIntentStackStateV1`，默认展示 intent 状态、依赖、artifact/verification 规模和一个
+  `Preview Drop` 主动作，展开区展示 acceptance criteria、retained artifact
+  ownership/availability 与可解释 conflict；
+- destructive flow 固定为 `PreviewIntentDrop -> IntentOperationPreviewV1 ->
+  ExecuteIntentDrop(IntentDropRequestV1)`。renderer 提交的最终 request 只含 operation id、
+  stack version 与 preview digest，不能携带 path、patch、hash、permission policy 或 approval
+  authority；有 conflict 时确认动作禁用；
+- worker 在 preview 和 execute 时都拒绝 active run；execute 额外核对 read-only permission
+  mode 与 durable workspace trust，再在 host 内生成绑定当前 permission policy、operation id 和
+  五分钟 TTL 的不可序列化 authority，之后才调用 kernel exact drop；
+- TUI 对 load/preview/execute/failure 都绑定单调 request id、预期 intent ref、stack version
+  与 preview digest。过期响应只写入 bounded audit event；切换或新建会话会关闭旧 Intent
+  Stack modal，旧会话的迟到响应不能污染新会话；
+- wide terminal 使用 list/detail 双栏，narrow terminal 改为上下堆叠；极小终端的 modal、action
+  和 hit area 不越界。键盘 selection/detail scroll、鼠标行选择与主动作共用同一 app state
+  machine，不存在旁路 mutation；
+- legacy/旧 session 在 restart 前后稳定显示 `HistoryUnavailable`，read-only provenance 和
+  out-of-scope projection 不开放 Drop。TUI 不从 Git diff、当前文件或模型输出猜测 Intent
+  Stack，也不在旧历史缺失时伪造空 stack。
+
+完成证据覆盖 render、Alt-S/D/Enter input、narrow/tiny layout、mouse、retention/conflict
+detail、session switch、worker restart、read-only permission denial，以及 stale load/preview
+response。`sigil-tui` 全量测试、all-target check、Clippy 和 format gate 共同覆盖本切片；
+HTTP/Desktop/automation adapter 与 real cross-surface conformance 仍属于 R51.7。
+
 依赖顺序：
 
 ```text
@@ -940,5 +971,6 @@ materializer、content-addressed patch/hunk artifact、保守 ownership、retent
 inspect projection；R51.4 已接入 host-authorized exact drop、RFC-0002 batch apply、
 no-replay recovery、verification invalidation、checkpoint conflict 与 retention transition。
 R51.5 已接入 dependency closure、read-only revise/replace impact、immutable supersession、
-多版本恢复和 exact fork/workspace adoption。TUI 与 typed adapter operation 仍必须等待
-R51.6/R51.7 的独立门禁完成。
+多版本恢复和 exact fork/workspace adoption；R51.6 已接入 bounded TUI review、exact Drop
+确认、retention/conflict、responsive/mouse 与 stale-response/session-switch 防护。typed
+HTTP/Desktop/automation adapter 仍必须等待 R51.7 的独立门禁完成。

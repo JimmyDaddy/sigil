@@ -19,6 +19,7 @@ use super::{
     egress_disclosure::{egress_disclosure_layout, render_active_egress_disclosure_card},
     geometry::inset_rect,
     info_rail::render_info_rail_with_theme,
+    intent_stack::render_intent_stack_modal,
     layout_snapshot::shell_layout,
     live_panel::{
         LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, render_live_panel_with_theme,
@@ -99,6 +100,8 @@ pub fn render(frame: &mut Frame, app: &AppState) {
 
     if app.checkpoint_restore_modal_open() {
         render_checkpoint_restore_modal(frame, app);
+    } else if app.intent_stack_modal_open() {
+        render_intent_stack_modal(frame, app);
     } else {
         render_modal(frame, app);
     }

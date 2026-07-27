@@ -29,6 +29,17 @@ fn agent_command_opens_the_shared_agent_workbench() {
 }
 
 #[test]
+fn intent_stack_command_is_shared_but_keeps_graphical_routing_deferred() {
+    let command = APPLICATION_COMMANDS
+        .iter()
+        .find(|command| command.canonical == "/intents")
+        .expect("Intent Stack command");
+
+    assert_eq!(command.client_action, None);
+    assert!(!command.completes_with_space);
+}
+
+#[test]
 fn desktop_equivalent_commands_have_explicit_client_routes() {
     let compact = APPLICATION_COMMANDS
         .iter()

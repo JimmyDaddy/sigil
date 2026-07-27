@@ -478,7 +478,7 @@ impl AppState {
         self.review.checkpoint_request_id = None;
         self.review.checkpoint_action_pending = false;
         self.clear_integration_review();
-        if self.checkpoint_restore_modal_open() {
+        if self.checkpoint_restore_modal_open() || self.intent_stack_modal_open() {
             self.modal_state = None;
         }
         self.session_log_path = session_log_path;

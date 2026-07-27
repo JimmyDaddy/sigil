@@ -307,6 +307,7 @@ pub(super) enum ModalState {
     McpElicitation(McpElicitationModalState),
     McpOAuth(super::mcp_oauth_flow::McpOAuthModalState),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
+    IntentStack(Box<super::intent_stack_flow::IntentStackModalState>),
     V2CompactionPreview(Box<super::compaction_flow::V2CompactionPreviewModalState>),
     SessionActions(Box<super::session_lifecycle_flow::SessionActionsModalState>),
     SessionRetention(Box<super::session_lifecycle_flow::SessionRetentionModalState>),
@@ -355,6 +356,7 @@ impl AppState {
             ModalState::McpElicitation(_) => Some("MCP Elicitation"),
             ModalState::McpOAuth(_) => Some("MCP Authentication"),
             ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
+            ModalState::IntentStack(_) => Some("Intent Stack"),
             ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
             ModalState::SessionActions(_) => Some("Session Actions"),
             ModalState::SessionRetention(_) => Some("Storage Maintenance"),
@@ -506,6 +508,7 @@ impl AppState {
             }
             Some(ModalState::McpOAuth(state)) => super::mcp_oauth_flow::modal_lines(state),
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
+            Some(ModalState::IntentStack(_)) => Vec::new(),
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::SessionActions(state)) => state.lines(),
             Some(ModalState::SessionRetention(state)) => state.lines(),
@@ -575,6 +578,7 @@ impl AppState {
             }),
             ModalState::ConnectionPicker(_) | ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
+            ModalState::IntentStack(_) => None,
             ModalState::V2CompactionPreview(_) => None,
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
             ModalState::Feedback(_) => None,
@@ -1488,6 +1492,7 @@ impl AppState {
             ModalState::McpElicitation(_) => ModalOutcome::None,
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
+            ModalState::IntentStack(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => match key.code {
                 KeyCode::Esc => {
                     let request_id = state.request_id();
@@ -1567,6 +1572,7 @@ impl AppState {
             | ModalState::ModelPicker(_)
             | ModalState::McpElicitation(_)
             | ModalState::CheckpointRestore(_)
+            | ModalState::IntentStack(_)
             | ModalState::V2CompactionPreview(_)
             | ModalState::SessionActions(_)
             | ModalState::SessionRetention(_)
@@ -1649,6 +1655,7 @@ impl AppState {
             ModalState::McpElicitation(_) => self.accept_mcp_elicitation(),
             ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
+            ModalState::IntentStack(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => {
                 if state.is_admitted() {
                     let request_id = state.request_id();

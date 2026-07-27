@@ -293,6 +293,10 @@ fn worker_commands_are_routed_to_explicit_domains() {
             WorkerCommandDomain::AgentTask,
         ),
         (
+            WorkerCommand::LoadIntentStack { request_id: 9 },
+            WorkerCommandDomain::IntentStack,
+        ),
+        (
             WorkerCommand::CheckChangedFilesDiagnostics,
             WorkerCommandDomain::VerificationCheckpoint,
         ),

@@ -421,6 +421,51 @@ fn plan_actions_map_to_worker_commands() {
 }
 
 #[test]
+fn intent_stack_actions_map_to_bounded_worker_commands() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let intent_ref = sigil_kernel::IntentVersionRef::new(
+        sigil_kernel::IntentId::new("intent_leaf").expect("intent id"),
+        1,
+    )
+    .expect("intent ref");
+    let request = sigil_kernel::IntentDropRequestV1 {
+        operation_id: sigil_kernel::IntentOperationId::new("operation_drop_leaf")
+            .expect("operation id"),
+        stack_version: sigil_kernel::IntentStackVersion::new(7).expect("stack version"),
+        preview_digest: sigil_kernel::IntentDigest::new(format!(
+            "sha256:jcs-v1:{}",
+            "a".repeat(64)
+        ))
+        .expect("preview digest"),
+    };
+
+    assert!(matches!(
+        app.into_worker_command(AppAction::LoadIntentStack { request_id: 10 }),
+        WorkerCommand::LoadIntentStack { request_id: 10 }
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::PreviewIntentDrop {
+            request_id: 11,
+            intent_ref: intent_ref.clone(),
+        }),
+        WorkerCommand::PreviewIntentDrop {
+            request_id: 11,
+            intent_ref: converted,
+        } if converted == intent_ref
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::ExecuteIntentDrop {
+            request_id: 12,
+            request: request.clone(),
+        }),
+        WorkerCommand::ExecuteIntentDrop {
+            request_id: 12,
+            request: converted,
+        } if converted == request
+    ));
+}
+
+#[test]
 fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(

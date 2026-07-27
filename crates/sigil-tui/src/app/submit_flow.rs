@@ -194,6 +194,7 @@ impl AppState {
                 self.open_feedback_modal();
                 Ok(None)
             }
+            "/intents" => Ok(self.open_intent_stack_modal()),
             "@agent" => self.execute_agent_slash_command(&command, &prompt),
             "/agent" => self.activate_agent_from_command(&command.arg),
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
