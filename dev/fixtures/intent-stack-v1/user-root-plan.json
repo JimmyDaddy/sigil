@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "stack_id": "stack-chat-1",
+  "stack_version": 1,
+  "workspace_id": "workspace-demo",
+  "source_session_id": "session-chat",
+  "kind": "user_declared_root",
+  "intents": [
+    {
+      "intent_ref": {
+        "intent_id": "root-edit",
+        "version": 1
+      },
+      "title": "Fix retry timeout",
+      "statement": "Fix the retry timeout in the existing request path.",
+      "acceptance_criteria": [
+        {
+          "criterion_id": "root-check",
+          "statement": "The retry timeout is applied and the relevant check passes.",
+          "required": true
+        }
+      ],
+      "source": {
+        "kind": "user_turn",
+        "source_turn_id": "turn-chat-1"
+      }
+    }
+  ],
+  "plan_digest": "sha256:jcs-v1:73a183f674dada905ef5ff796286d4480a865ca8e4eb8d1c5706534ea2fe35a9"
+}

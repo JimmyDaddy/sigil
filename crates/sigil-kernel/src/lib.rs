@@ -18,6 +18,7 @@ pub mod external;
 pub mod hosted;
 pub mod image_attachment;
 pub mod integration;
+pub mod intent;
 pub mod memory;
 pub mod model_route;
 pub mod mutation;
@@ -272,6 +273,26 @@ pub use integration::{
     TaskPromotionLaneCandidate, TaskPromotionPreview, TaskPromotionPreviewInput,
     TaskPromotionPreviewRecorded, build_integration_plan, build_task_promotion_preview,
     task_integration_review_product,
+};
+pub use intent::{
+    BoundedIntentArtifactSubjectV1, INTENT_CANONICAL_DIGEST_PREFIX, INTENT_CONTRACT_SCHEMA_VERSION,
+    INTENT_PUBLIC_DTO_SCHEMA_VERSION, IntentAcceptanceCriterionV1, IntentAcceptanceKind,
+    IntentApplicationState, IntentArtifactAvailability, IntentArtifactBindingV1, IntentArtifactId,
+    IntentArtifactKind, IntentArtifactManifestV1, IntentArtifactOwnership,
+    IntentArtifactProvenanceV1, IntentAuthorityState, IntentByteRangeV1, IntentConflictV1,
+    IntentContentDigest, IntentCriterionEvidenceLevel, IntentCriterionEvidenceV1,
+    IntentCriterionId, IntentDefinitionState, IntentDefinitionV1, IntentDigest, IntentDigestDomain,
+    IntentEventV1, IntentExecutionBindingKind, IntentExecutionBindingV1, IntentExecutionId,
+    IntentExecutionOriginV1, IntentId, IntentLayerCoreV1, IntentLayerManifestV1,
+    IntentOperationErrorCode, IntentOperationFileAction, IntentOperationFileSummaryV1,
+    IntentOperationId, IntentOperationKind, IntentOperationPreviewV1, IntentOperationResolution,
+    IntentPlanKind, IntentPlanProposalV1, IntentPlanV1, IntentProposalCriterionV1,
+    IntentProposalUnitV1, IntentSourceV1, IntentStackId, IntentStackVersion,
+    IntentVerificationImpact, IntentVerificationImpactV1, IntentVersionRef, MAX_INTENT_CRITERIA,
+    MAX_INTENT_DEPENDENCIES, MAX_INTENT_REASON_BYTES, MAX_INTENT_STATEMENT_BYTES,
+    MAX_INTENT_TITLE_BYTES, MAX_INTENTS_PER_PLAN, PublicIntentArtifactSummaryV1,
+    PublicIntentOperationErrorV1, PublicIntentSourceV1, PublicIntentStackStateV1,
+    PublicIntentStackV1, PublicIntentV1, canonical_intent_digest,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use model_route::{ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute};

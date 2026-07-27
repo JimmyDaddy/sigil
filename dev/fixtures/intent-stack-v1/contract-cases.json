@@ -1,0 +1,188 @@
+{
+  "plan_accepted": {
+    "record": "plan_accepted",
+    "schema_version": 1,
+    "stack_id": "stack-demo-1",
+    "stack_version": 1,
+    "plan_digest": "sha256:jcs-v1:2222222222222222222222222222222222222222222222222222222222222222",
+    "acceptance_kind": "explicit_user_confirmation",
+    "source_turn_id": "turn-1"
+  },
+  "task_execution_bound": {
+    "record": "execution_bound",
+    "schema_version": 1,
+    "stack_id": "stack-demo-1",
+    "stack_version": 1,
+    "binding": {
+      "execution_id": "execution-task-1",
+      "intent_ref": {
+        "intent_id": "retry",
+        "version": 1
+      },
+      "origin": {
+        "kind": "task",
+        "task_id": "task-1",
+        "task_plan_version": 1,
+        "step_id": "implement-retry",
+        "attempt_id": "attempt-1"
+      },
+      "binding_kind": "mutation",
+      "source_event_id": "event-task-bind-1"
+    }
+  },
+  "chat_execution_bound": {
+    "record": "execution_bound",
+    "schema_version": 1,
+    "stack_id": "stack-chat-1",
+    "stack_version": 1,
+    "binding": {
+      "execution_id": "execution-chat-1",
+      "intent_ref": {
+        "intent_id": "root-edit",
+        "version": 1
+      },
+      "origin": {
+        "kind": "chat",
+        "root_logical_run_id": "logical-run-1",
+        "source_turn_id": "turn-chat-1",
+        "attempt_id": "attempt-chat-1"
+      },
+      "binding_kind": "mutation",
+      "source_event_id": "event-chat-bind-1"
+    }
+  },
+  "file_hunk_artifact": {
+    "artifact_id": "artifact-hunk-1",
+    "artifact_kind": "file_hunk",
+    "subject": {
+      "kind": "file_hunk",
+      "normalized_relative_path": "src/retry.rs",
+      "before_file_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "after_file_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "old_range": {
+        "start": 12,
+        "end": 24
+      },
+      "new_range": {
+        "start": 12,
+        "end": 48
+      },
+      "old_content_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "new_content_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "layer_core_digest": "sha256:jcs-v1:7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    "ownership": "exclusive",
+    "availability": "available",
+    "before_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "after_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "provenance": {
+      "source_event_id": "event-mutation-1",
+      "execution_id": "execution-task-1",
+      "mutation_batch_id": "mutation-batch-1",
+      "changeset_id": "changeset-1"
+    }
+  },
+  "shared_artifact_conflict": {
+    "code": "shared_artifact",
+    "intent_ref": {
+      "intent_id": "telemetry",
+      "version": 1
+    },
+    "artifact_id": "artifact-hunk-shared",
+    "safe_reason": "The normalized file is owned by more than one active intent."
+  },
+  "verification_linked": {
+    "record": "verification_linked",
+    "schema_version": 1,
+    "evidence": [
+      {
+        "intent_ref": {
+          "intent_id": "operations-docs",
+          "version": 1
+        },
+        "criterion_id": "docs-review",
+        "level": "advisory",
+        "receipt_id": "receipt-docs-1",
+        "parent_snapshot_id": "snapshot-parent-1",
+        "verification_policy_digest": "sha256:jcs-v1:9999999999999999999999999999999999999999999999999999999999999999",
+        "changeset_ids": [
+          "changeset-docs-1"
+        ],
+        "source_event_id": "event-verification-1"
+      },
+      {
+        "intent_ref": {
+          "intent_id": "retry",
+          "version": 1
+        },
+        "criterion_id": "retry-test",
+        "level": "system_verified",
+        "receipt_id": "receipt-retry-1",
+        "parent_snapshot_id": "snapshot-parent-1",
+        "verification_policy_digest": "sha256:jcs-v1:9999999999999999999999999999999999999999999999999999999999999999",
+        "changeset_ids": [
+          "changeset-retry-1"
+        ],
+        "source_event_id": "event-verification-2"
+      }
+    ]
+  },
+  "read_only_public_stack": {
+    "schema_version": 1,
+    "stack_id": "stack-fork-1",
+    "stack_version": 1,
+    "authority_state": "read_only_provenance",
+    "plan_digest": "sha256:jcs-v1:8888888888888888888888888888888888888888888888888888888888888888",
+    "intents": [
+      {
+        "intent_ref": {
+          "intent_id": "retry",
+          "version": 1
+        },
+        "title": "Retry failed requests",
+        "statement": "Retry transient API request failures.",
+        "acceptance_criteria": [
+          {
+            "criterion_id": "retry-test",
+            "statement": "Transient failures are retried.",
+            "required": true
+          }
+        ],
+        "depends_on": [],
+        "source": {
+          "kind": "accepted_suggestion",
+          "source_turn_id": "turn-1"
+        },
+        "definition_state": "accepted",
+        "application_state": "read_only",
+        "exclusive_artifact_count": 1,
+        "shared_artifact_count": 0,
+        "unowned_artifact_count": 0,
+        "drifted_artifact_count": 0,
+        "unavailable_artifact_count": 0,
+        "advisory_criterion_count": 0,
+        "system_verified_criterion_count": 1,
+        "artifacts": [
+          {
+            "artifact_id": "artifact-hunk-1",
+            "artifact_kind": "file_hunk",
+            "ownership": "exclusive",
+            "availability": "available",
+            "normalized_relative_path": "src/retry.rs"
+          }
+        ],
+        "available_actions": []
+      }
+    ],
+    "conflicts": []
+  },
+  "artifact_unavailable_conflict": {
+    "code": "artifact_unavailable",
+    "intent_ref": {
+      "intent_id": "retry",
+      "version": 1
+    },
+    "artifact_id": "artifact-deleted-1",
+    "safe_reason": "The retained mutation artifact was deleted and cannot regain authority."
+  }
+}

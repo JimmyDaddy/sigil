@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "proposal_id": "proposal-demo-1",
+  "source_turn_id": "turn-1",
+  "intents": [
+    {
+      "intent_alias": "retry",
+      "title": "Retry failed requests",
+      "statement": "Retry transient API request failures.",
+      "acceptance_criteria": [
+        {
+          "criterion_alias": "retry-test",
+          "statement": "Transient failures are retried and covered by a policy-qualified check.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "intent_alias": "telemetry",
+      "title": "Add retry telemetry",
+      "statement": "Record bounded telemetry for retry attempts.",
+      "acceptance_criteria": [
+        {
+          "criterion_alias": "telemetry-test",
+          "statement": "Retry attempts emit the documented telemetry fields.",
+          "required": true
+        }
+      ],
+      "depends_on_aliases": [
+        "retry"
+      ]
+    }
+  ],
+  "proposal_digest": "sha256:jcs-v1:3a789c36cf41af813e17b47617567e5801da7b7eeb33cab700c480ebbae98984"
+}

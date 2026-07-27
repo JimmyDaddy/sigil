@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / execution plan hardened / implementation deferred
+状态：proposed / implementation active（R51.0 complete，R51.1 next）
 
 创建日期：2026-07-22
 
@@ -27,7 +27,7 @@ Intent Stack 把用户认可的变更意图提升为一等、可持久化、可�
 
 > 撤销一个需求，而不是回到一个时间点。
 
-本 RFC 只冻结语义、所有权和安全边界，**不授权当前变更进入实现**。V1 后续实施也只覆盖归属明确、跨 intent 文件互斥、由 Sigil 受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、未知副作用或依赖歧义必须 fail closed。
+本 RFC 冻结语义、所有权和安全边界，并已由明确实施任务完成 R51.0 契约切片。后续切片仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil 受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、未知副作用或依赖歧义必须 fail closed。
 
 ## 2. Problem statement
 
@@ -620,7 +620,7 @@ Intent Stack · 3 changes
 
 ## 12. Execution slices
 
-本 RFC 保存后保持 implementation deferred。未来只有在单独排期并通过 contract review 后，才按以下顺序实施：
+本 RFC 按以下顺序实施；每个切片必须单独收口并通过对应 completion evidence：
 
 | Slice | Scope | Completion evidence |
 | --- | --- | --- |
@@ -632,6 +632,23 @@ Intent Stack · 3 changes
 | R51.5 | dependency closure、revise/replace 的 read-only impact preview 与 fork/branch/worktree adoption | DAG cycle/leaf/supersede/replan/out-of-scope/adoption tests；仍不开放 replace mutation |
 | R51.6 | TUI Intent Stack review/drop/retention/conflict surface | render/input/narrow-layout/mouse/session-switch/restart/stale-request tests；一个清晰主动作 |
 | R51.7 | typed HTTP/Desktop/automation adapter 与 canonical dogfood | same-command/projection conformance；real worker-loop E2E；§13 全门槛；无 P1/P2 |
+
+### 12.1 R51.0 implementation checkpoint（2026-07-27）
+
+R51.0 已完成，落点为 `sigil-kernel::intent` 与
+`dev/fixtures/intent-stack-v1`。本切片冻结：
+
+- provider/model proposal 与 runtime-resolved accepted plan 的独立 schema；proposal 只携带临时 alias，不能携带 runtime intent id、stack version 或 acceptance authority；
+- 独立 `IntentPlanAccepted` payload、Task/Chat execution origin、definition/application/authority 分层和 13 个 recovery-critical event wire name；
+- `sha256:jcs-v1:` canonical contract digest 与 `sha256:` exact byte/content digest 的类型分离；
+- cycle-free layer digest 图：先冻结 layer core digest，再生成引用该 core 的 artifact manifest，最终 layer manifest 单向绑定 artifact manifest；
+- artifact ownership/availability、Advisory/SystemVerified evidence、exact operation preview、public available/history-unavailable DTO 和 operation error taxonomy；
+- §15 八项锁定决策、全部枚举 token、event type、plan/proposal/layer/artifact/preview digest 的 golden corpus。
+
+R51.0 只增加纯 contract validation、canonical digest 与 fixture tests。它没有注册
+`DurableEventType` / `ControlEntry`，没有接入 session writer/reducer、Task/Chat admission、
+artifact materializer、operation apply、TUI、HTTP、Desktop 或 automation；这些仍由
+R51.1-R51.7 分别负责。
 
 依赖顺序：
 
@@ -727,6 +744,7 @@ replace/rebase mutation 不再混入 V1 active slices；它们必须在 R51.4 do
 完成 R51.0-R51.7 后，Intent Stack V1 的 accepted-plan、provenance、read-only review 与安全
 selective drop 闭环完成；它仍不等于通用语义 merge、外部副作用补偿或项目级长期记忆。
 
-本 RFC 当前仍为 `proposed / implementation deferred`。本次变更不新增代码、事件 schema、
-命令、UI 或用户文档入口；后续实施必须由新的明确任务启动。R51.0 只需重新核对当时的 live
-contracts、冻结具体 Rust/DTO 命名与 golden fixtures，不再重新打开 §15 已冻结的产品语义。
+本 RFC 当前为 `proposed / implementation active`。R51.0 已冻结具体 Rust/DTO 命名、digest
+算法、错误 taxonomy 与 golden fixtures，但没有改变生产运行行为。R51.1 起才允许在对应切片
+内接入 append-only admission/projection；任何 TUI 或 destructive operation 仍必须等待其依赖
+切片和独立门禁完成。

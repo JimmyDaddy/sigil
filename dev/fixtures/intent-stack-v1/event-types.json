@@ -1,0 +1,15 @@
+[
+  "intent_stack_created",
+  "intent_plan_recorded",
+  "intent_plan_accepted",
+  "intent_execution_bound",
+  "intent_change_set_bound",
+  "intent_layer_manifest_recorded",
+  "intent_artifact_bindings_recorded",
+  "intent_verification_linked",
+  "intent_operation_requested",
+  "intent_operation_prepared",
+  "intent_operation_resolved",
+  "intent_conflict_recorded",
+  "intent_version_superseded"
+]

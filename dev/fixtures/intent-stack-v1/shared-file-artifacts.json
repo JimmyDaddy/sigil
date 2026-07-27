@@ -1,0 +1,64 @@
+[
+  {
+    "artifact_id": "artifact-shared-retry",
+    "artifact_kind": "file_hunk",
+    "subject": {
+      "kind": "file_hunk",
+      "normalized_relative_path": "src/retry.rs",
+      "before_file_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "after_file_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "old_range": {
+        "start": 10,
+        "end": 20
+      },
+      "new_range": {
+        "start": 10,
+        "end": 30
+      },
+      "old_content_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "new_content_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "layer_core_digest": "sha256:jcs-v1:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "ownership": "shared",
+    "availability": "available",
+    "before_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "after_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "provenance": {
+      "source_event_id": "event-retry-mutation",
+      "execution_id": "execution-retry",
+      "mutation_batch_id": "mutation-retry",
+      "changeset_id": "changeset-retry"
+    }
+  },
+  {
+    "artifact_id": "artifact-shared-telemetry",
+    "artifact_kind": "file_hunk",
+    "subject": {
+      "kind": "file_hunk",
+      "normalized_relative_path": "src/retry.rs",
+      "before_file_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "after_file_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "old_range": {
+        "start": 80,
+        "end": 90
+      },
+      "new_range": {
+        "start": 90,
+        "end": 110
+      },
+      "old_content_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "new_content_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "layer_core_digest": "sha256:jcs-v1:9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    "ownership": "shared",
+    "availability": "available",
+    "before_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "after_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+    "provenance": {
+      "source_event_id": "event-telemetry-mutation",
+      "execution_id": "execution-telemetry",
+      "mutation_batch_id": "mutation-telemetry",
+      "changeset_id": "changeset-telemetry"
+    }
+  }
+]

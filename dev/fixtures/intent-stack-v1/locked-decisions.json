@@ -1,0 +1,34 @@
+[
+  {
+    "decision": "acceptance_is_independent",
+    "fixture": "proposal.json + user-root-plan.json + contract-cases.plan_accepted"
+  },
+  {
+    "decision": "task_and_chat_provenance_are_explicit",
+    "fixture": "contract-cases.task_execution_bound + contract-cases.chat_execution_bound"
+  },
+  {
+    "decision": "file_hunk_identity_is_layer_local_canonical_bytes",
+    "fixture": "contract-cases.file_hunk_artifact"
+  },
+  {
+    "decision": "same_file_across_intents_is_shared_read_only",
+    "fixture": "shared-file-artifacts.json + contract-cases.shared_artifact_conflict"
+  },
+  {
+    "decision": "criterion_evidence_has_advisory_and_system_verified_levels",
+    "fixture": "contract-cases.verification_linked"
+  },
+  {
+    "decision": "fork_and_workspace_switch_do_not_inherit_mutation_authority",
+    "fixture": "authority-boundaries.json + contract-cases.read_only_public_stack"
+  },
+  {
+    "decision": "deleted_artifact_permanently_downgrades_operations",
+    "fixture": "deleted-artifact.json + contract-cases.artifact_unavailable_conflict"
+  },
+  {
+    "decision": "contract_is_provider_and_adapter_neutral",
+    "fixture": "all"
+  }
+]

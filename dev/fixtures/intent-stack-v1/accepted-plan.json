@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "stack_id": "stack-demo-1",
+  "stack_version": 1,
+  "workspace_id": "workspace-demo",
+  "source_session_id": "session-demo",
+  "kind": "suggested_decomposition",
+  "intents": [
+    {
+      "intent_ref": {
+        "intent_id": "retry",
+        "version": 1
+      },
+      "title": "Retry failed requests",
+      "statement": "Retry transient API request failures.",
+      "acceptance_criteria": [
+        {
+          "criterion_id": "retry-test",
+          "statement": "Transient failures are retried and covered by a policy-qualified check.",
+          "required": true
+        }
+      ],
+      "source": {
+        "kind": "accepted_suggestion",
+        "source_turn_id": "turn-1",
+        "proposal_digest": "sha256:jcs-v1:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "intent_ref": {
+        "intent_id": "telemetry",
+        "version": 1
+      },
+      "title": "Add retry telemetry",
+      "statement": "Record bounded telemetry for retry attempts.",
+      "acceptance_criteria": [
+        {
+          "criterion_id": "telemetry-test",
+          "statement": "Retry attempts emit the documented telemetry fields.",
+          "required": true
+        }
+      ],
+      "depends_on": [
+        "retry"
+      ],
+      "source": {
+        "kind": "accepted_suggestion",
+        "source_turn_id": "turn-1",
+        "proposal_digest": "sha256:jcs-v1:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "intent_ref": {
+        "intent_id": "operations-docs",
+        "version": 1
+      },
+      "title": "Document operations guidance",
+      "statement": "Document retry and telemetry operations guidance.",
+      "acceptance_criteria": [
+        {
+          "criterion_id": "docs-review",
+          "statement": "Operations guidance describes retry and telemetry behavior.",
+          "required": true
+        }
+      ],
+      "depends_on": [
+        "retry",
+        "telemetry"
+      ],
+      "source": {
+        "kind": "accepted_suggestion",
+        "source_turn_id": "turn-1",
+        "proposal_digest": "sha256:jcs-v1:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  ],
+  "plan_digest": "sha256:jcs-v1:4f2919a904a0a10b566ba43d8f9800f4b9a63f211237d7295b8c9ca225e776b1"
+}

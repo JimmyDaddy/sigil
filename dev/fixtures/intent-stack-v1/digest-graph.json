@@ -1,0 +1,138 @@
+{
+  "layer_core": {
+    "schema_version": 1,
+    "intent_ref": {
+      "intent_id": "retry",
+      "version": 1
+    },
+    "execution_id": "execution-task-1",
+    "execution_origin": {
+      "kind": "task",
+      "task_id": "task-1",
+      "task_plan_version": 1,
+      "step_id": "implement-retry",
+      "attempt_id": "attempt-1"
+    },
+    "base_snapshot_id": "snapshot-base-1",
+    "result_snapshot_id": "snapshot-result-1",
+    "changeset_ids": [
+      "changeset-1"
+    ],
+    "operation_ids": [],
+    "forward_patch_artifact_id": "patch-forward-1",
+    "reverse_patch_artifact_id": "patch-reverse-1",
+    "core_digest": "sha256:jcs-v1:c46a870e49741c34b1a080fc16ac22c82fe3e389aa724630c4a926f27981bb31"
+  },
+  "artifact_manifest": {
+    "schema_version": 1,
+    "intent_ref": {
+      "intent_id": "retry",
+      "version": 1
+    },
+    "execution_id": "execution-task-1",
+    "layer_core_digest": "sha256:jcs-v1:c46a870e49741c34b1a080fc16ac22c82fe3e389aa724630c4a926f27981bb31",
+    "artifacts": [
+      {
+        "artifact_id": "artifact-hunk-1",
+        "artifact_kind": "file_hunk",
+        "subject": {
+          "kind": "file_hunk",
+          "normalized_relative_path": "src/retry.rs",
+          "before_file_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "after_file_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "old_range": {
+            "start": 10,
+            "end": 20
+          },
+          "new_range": {
+            "start": 10,
+            "end": 30
+          },
+          "old_content_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "new_content_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "layer_core_digest": "sha256:jcs-v1:c46a870e49741c34b1a080fc16ac22c82fe3e389aa724630c4a926f27981bb31"
+        },
+        "ownership": "exclusive",
+        "availability": "available",
+        "before_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "after_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "provenance": {
+          "source_event_id": "event-mutation-1",
+          "execution_id": "execution-task-1",
+          "mutation_batch_id": "mutation-batch-1",
+          "changeset_id": "changeset-1"
+        }
+      }
+    ],
+    "manifest_digest": "sha256:jcs-v1:4966942125ccf69c8f47dd24b7f213f403546152a8614863cb17b626e8ec467b"
+  },
+  "layer_manifest": {
+    "schema_version": 1,
+    "core": {
+      "schema_version": 1,
+      "intent_ref": {
+        "intent_id": "retry",
+        "version": 1
+      },
+      "execution_id": "execution-task-1",
+      "execution_origin": {
+        "kind": "task",
+        "task_id": "task-1",
+        "task_plan_version": 1,
+        "step_id": "implement-retry",
+        "attempt_id": "attempt-1"
+      },
+      "base_snapshot_id": "snapshot-base-1",
+      "result_snapshot_id": "snapshot-result-1",
+      "changeset_ids": [
+        "changeset-1"
+      ],
+      "operation_ids": [],
+      "forward_patch_artifact_id": "patch-forward-1",
+      "reverse_patch_artifact_id": "patch-reverse-1",
+      "core_digest": "sha256:jcs-v1:c46a870e49741c34b1a080fc16ac22c82fe3e389aa724630c4a926f27981bb31"
+    },
+    "artifact_manifest_id": "artifact-manifest-1",
+    "artifact_manifest_digest": "sha256:jcs-v1:4966942125ccf69c8f47dd24b7f213f403546152a8614863cb17b626e8ec467b",
+    "manifest_digest": "sha256:jcs-v1:d797655d20f990096753225d72637b2cf41649f9603a74fbe2dd6b88738d4942"
+  },
+  "operation_preview": {
+    "schema_version": 1,
+    "operation_id": "operation-drop-1",
+    "operation_kind": "drop",
+    "stack_id": "stack-demo-1",
+    "stack_version": 1,
+    "target_intents": [
+      {
+        "intent_id": "telemetry",
+        "version": 1
+      }
+    ],
+    "target_is_leaf": true,
+    "workspace_revision": 7,
+    "expires_at_ms": 1000,
+    "file_effects": [
+      {
+        "normalized_relative_path": "src/retry.rs",
+        "action": "update",
+        "artifact_ids": [
+          "artifact-hunk-1"
+        ]
+      }
+    ],
+    "retained_intents": [
+      {
+        "intent_id": "retry",
+        "version": 1
+      }
+    ],
+    "verification_impacts": [
+      {
+        "receipt_id": "receipt-1",
+        "impact": "rerun_required"
+      }
+    ],
+    "conflicts": [],
+    "preview_digest": "sha256:jcs-v1:a02994df53933e5da1cc4dd15dc972ba3b5d35965ed582dfafdefb26c85ad712"
+  }
+}

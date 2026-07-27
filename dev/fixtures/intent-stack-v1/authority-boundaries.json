@@ -1,0 +1,11 @@
+{
+  "resume": "active",
+  "fork": "read_only_provenance",
+  "worktree_child": "read_only_provenance",
+  "workspace_switch": "out_of_scope",
+  "old_session": {
+    "status": "history_unavailable",
+    "schema_version": 1,
+    "safe_message": "Intent history unavailable"
+  }
+}

@@ -1,0 +1,92 @@
+{
+  "plan_kind": [
+    "user_declared_root",
+    "suggested_decomposition"
+  ],
+  "digest_domain": [
+    "plan",
+    "proposal",
+    "layer_core",
+    "layer_manifest",
+    "artifact_manifest",
+    "operation_preview"
+  ],
+  "acceptance_kind": [
+    "user_declared_root_admission",
+    "explicit_user_confirmation",
+    "content_bound_spec_decision"
+  ],
+  "definition_state": [
+    "proposed",
+    "accepted",
+    "superseded",
+    "invalid"
+  ],
+  "application_state": [
+    "unapplied",
+    "applied",
+    "dropped",
+    "needs_review",
+    "needs_rebuild",
+    "read_only",
+    "out_of_scope"
+  ],
+  "authority_state": [
+    "active",
+    "read_only_provenance",
+    "out_of_scope"
+  ],
+  "execution_binding_kind": [
+    "admission",
+    "mutation",
+    "review",
+    "verification"
+  ],
+  "artifact_kind": [
+    "file_hunk",
+    "test_evidence",
+    "documentation",
+    "change_set",
+    "verification_receipt",
+    "unsupported_side_effect"
+  ],
+  "artifact_ownership": [
+    "exclusive",
+    "shared",
+    "unowned",
+    "drifted"
+  ],
+  "artifact_availability": [
+    "available",
+    "deleted",
+    "expired",
+    "corrupted"
+  ],
+  "criterion_evidence_level": [
+    "advisory",
+    "system_verified"
+  ],
+  "operation_kind": [
+    "drop",
+    "revise_impact_preview",
+    "replace_impact_preview",
+    "adopt"
+  ],
+  "operation_resolution": [
+    "committed",
+    "rejected",
+    "cancelled",
+    "conflicted",
+    "partially_applied",
+    "interrupted"
+  ],
+  "file_action": [
+    "create",
+    "update",
+    "delete"
+  ],
+  "verification_impact": [
+    "becomes_stale",
+    "rerun_required"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "artifact_id": "artifact-deleted-1",
+  "artifact_kind": "change_set",
+  "subject": {
+    "kind": "evidence",
+    "reference_id": "changeset-deleted-1"
+  },
+  "ownership": "exclusive",
+  "availability": "deleted",
+  "after_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provenance": {
+    "source_event_id": "event-artifact-created",
+    "execution_id": "execution-retry",
+    "mutation_batch_id": "mutation-retry",
+    "changeset_id": "changeset-deleted-1"
+  }
+}
