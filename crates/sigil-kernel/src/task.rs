@@ -798,7 +798,7 @@ pub(crate) fn task_plan_update_tool_spec_for_worktree(
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
         description: format!(
-            "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must come from explicit objective paths or completed planner discovery; never guess files or report artifacts. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only investigation or advisory review. Verification checks are system-owned and must not be represented as participant steps. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation only when the host capability allows it. Worktree planning capability: {}",
+            "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must be grounded in explicit objective paths or completed planner discovery; never guess files or report artifacts. Paths in step details must be relative to the bound workspace root and must not begin with a slash. Normalize a presentation-only leading slash from discovery prose, but never use an absolute host path. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only investigation or advisory review. Verification checks are system-owned and must not be represented as participant steps. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation only when the host capability allows it. Worktree planning capability: {}",
             worktree_availability.planner_material()
         ),
         input_schema: json!({
@@ -826,7 +826,10 @@ pub(crate) fn task_plan_update_tool_spec_for_worktree(
                                 "type": "string",
                                 "description": "Optional short presentation-only name for a child agent spawned from this step. Prefer explicit configured agent or nickname names; do not use this as an identifier."
                             },
-                            "detail": {"type": "string"},
+                            "detail": {
+                                "type": "string",
+                                "description": "Bounded execution instructions. Any repository path must be workspace-relative and must not begin with a slash."
+                            },
                             "role": {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],

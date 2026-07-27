@@ -21,18 +21,18 @@ pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 pub fn task_routing_system_prompt_contract_material() -> &'static str {
     r#"You are the semantic task router for the current user turn. This is a routing-only microturn: do not answer the user or use ordinary tools.
 
-Classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned tasks, plans, or agents. Call exactly one of the two routing tools and then stop.
+Classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned tasks, plans, or agents. Judge the structure of the requested outcome, not its estimated effort or the number of files that may need to be read. Call exactly one of the two routing tools and then stop.
 
 Call request_task_planning when fulfilling the goal clearly requires one or more of:
-- coordinated changes across multiple files, components, or architectural layers;
-- independent work streams that benefit from parallel investigation or implementation;
+- coordinated changes across multiple files, components, or architectural layers that must land consistently;
+- two or more independently useful requested outcomes or work streams that can be investigated or implemented separately and then combined, even when each part is small;
 - a multi-stage implementation whose stages have dependencies;
 - long-running or multi-part verification;
 - high-risk execution that benefits from a durable reviewed plan.
 
-Call continue_without_task_planning for an explanation, one symbol lookup, one narrow read-only query about a single concern, or a small single-file edit that does not meet any task-planning criterion.
+Call continue_without_task_planning for one bounded outcome: an explanation, one symbol lookup, one linear call-flow trace or summary of connected code, one narrow read-only query about a single concern, or a small single-file edit that does not meet any task-planning criterion.
 
-Read-only does not automatically mean simple. Comparative research across multiple components, independent investigations that should run concurrently, or a consolidated review built from multiple work streams still requires request_task_planning.
+Multiple files alone do not require planning. A single bounded explanation, trace, or summary remains an ordinary conversation when every file read is only supporting evidence for that one result. Conversely, read-only work requires planning when the requested product contains separate component investigations, a comparison across those investigations, or a synthesis of independently useful results. If two requested parts could each produce a useful standalone result before being combined, treat them as independent work streams.
 
 Do not inspect files, run commands, edit code, start solving the task, or produce free text in this routing microturn. The host will either start the durable planner or begin an ordinary conversation turn after your typed decision."#
 }
@@ -187,7 +187,7 @@ pub struct TaskPlanningHandoffBinding {
 pub fn request_task_planning_tool_spec() -> ToolSpec {
     ToolSpec {
         name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-        description: "Request durable task planning for the current user turn only when the goal requires coordinated multi-stage work, cross-layer changes, parallel research, long verification, or high-risk execution. Do not call this for simple questions, one symbol lookup, one read-only query, or a small local edit. The host owns the objective, task identity, permissions, and plan."
+        description: "Request durable task planning for the current user turn only when the goal requires coordinated cross-file or cross-layer changes, dependent stages, long verification, high-risk execution, or two or more independently useful work streams whose results must be combined. Do not infer complexity from file count alone: one bounded explanation, linear trace, or summary of connected code remains an ordinary conversation. The host owns the objective, task identity, permissions, and plan."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -224,7 +224,7 @@ pub fn request_task_planning_tool_spec() -> ToolSpec {
 pub fn continue_without_task_planning_tool_spec() -> ToolSpec {
     ToolSpec {
         name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-        description: "Continue with an ordinary conversation turn only when the current goal is an explanation, one symbol lookup, one narrow read-only query about a single concern, or a small single-file edit and does not require coordinated multi-stage work, cross-layer changes, parallel or comparative research, long verification, or high-risk execution. Read-only multi-component research is not a simple query."
+        description: "Continue with an ordinary conversation turn only when the current goal has one bounded outcome, such as an explanation, one symbol lookup, one linear trace or summary of connected code, one narrow read-only query about a single concern, or a small single-file edit. Reading multiple files as evidence for that one result is still ordinary. Do not use this when separate investigations or independently useful requested results must later be compared, synthesized, or integrated, or when the goal otherwise requires coordinated stages, long verification, or high-risk execution."
             .to_owned(),
         input_schema: json!({
             "type": "object",

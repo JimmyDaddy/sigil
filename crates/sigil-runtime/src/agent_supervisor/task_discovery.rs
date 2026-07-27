@@ -430,7 +430,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
 }
 
 pub(crate) fn task_discovery_system_prompt() -> &'static str {
-    "You are a read-only planner discovery probe. Investigate only the assigned objective and path hints. Do not modify files, spawn agents, create plans, or poll background work. Return concise factual findings, uncertainties, and relevant paths."
+    "You are a read-only planner discovery probe. Investigate only the assigned objective and path hints. Do not modify files, spawn agents, create plans, or poll background work. Return concise factual findings, uncertainties, and relevant paths. Report every repository path relative to the bound workspace root, for example `src/lib.rs`; never add a leading slash, workspace-directory prefix, absolute host path, or environment-variable placeholder."
 }
 
 #[async_trait]

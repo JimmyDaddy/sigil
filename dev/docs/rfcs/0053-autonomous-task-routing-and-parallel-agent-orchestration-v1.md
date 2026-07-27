@@ -252,9 +252,11 @@ continue_without_task_planning {
 
 模型 routing instruction 是位于当前 user turn 之前的 transient system message，要求模型按语义
 先分类并给出正向或负向 typed decision；它还应明确 negative examples：简单问答、单文件小改、
-一次只读查询不应建 task。host 不扫描 prompt 关键词，可靠性通过 route contract 绑定该
-instruction 与两个 tool schema，并由 model eval 约束。独立 microturn 避免普通工具面和直接
-作答与 task admission 在同一模型回合竞争。
+一次只读查询不应建 task。判断边界基于 requested outcome 的结构而非文件数量：多个连接文件只为
+一个线性 call-flow、解释或摘要提供证据时仍走普通 conversation；两个可分别形成独立结果、之后
+还需比较、综合或一致集成的 workstream 才进入 Task。host 不扫描 prompt 关键词，可靠性通过
+route contract 绑定该 instruction 与两个 tool schema，并由 model eval 约束。独立 microturn
+避免普通工具面和直接作答与 task admission 在同一模型回合竞争。
 
 ### 6.2 Durable handoff records
 
@@ -1217,6 +1219,10 @@ spawn admission。
   不重复 host synthesis，participant 只执行一个 accepted step、只使用当前 schema 中真实存在的
   tool，并使用绑定 workspace root 的相对路径。相关 prompt 与 tool surface 均进入 exact route
   identity，避免评测报告跨协议误复用。
+- discovery 与 planner 的路径契约只接受绑定 workspace root 下的相对表示；probe 输出不得添加
+  leading slash、workspace 目录前缀、绝对 host path 或环境变量占位符。若 discovery prose
+  仅把 workspace-relative path 装饰成 `/src/lib.rs`，planner 必须规范化为 `src/lib.rs` 后再写入
+  step detail；该规范化不授予外部目录权限，真正绝对路径仍保持拒绝。
 - 每个 probe 的 id、objective 和 workspace-relative path hints 必须唯一且结构不重叠；整批固定
   绑定 trusted built-in Explore、read-only effective registry 和继承的 root cancellation/web
   budget。Runtime 先完成全量 preflight 和 supervisor 原子 slot reservation，再写 child Started

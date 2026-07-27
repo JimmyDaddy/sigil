@@ -58,7 +58,10 @@ fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
     assert!(prompt.contains("Do not inspect files, run commands, edit code"));
     assert!(prompt.contains("small single-file edit"));
     assert!(prompt.contains("one narrow read-only query about a single concern"));
-    assert!(prompt.contains("Comparative research across multiple components"));
+    assert!(prompt.contains("Multiple files alone do not require planning"));
+    assert!(prompt.contains("one linear call-flow trace"));
+    assert!(prompt.contains("independently useful requested outcomes"));
+    assert!(prompt.contains("could each produce a useful standalone result"));
 }
 
 #[test]

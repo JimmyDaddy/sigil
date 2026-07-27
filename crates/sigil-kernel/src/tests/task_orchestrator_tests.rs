@@ -907,7 +907,9 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
 
     assert!(prompt.contains("request_task_discovery exactly once"));
     assert!(prompt.contains("spawn_agents, or wait_agent"));
-    assert!(prompt.contains("Bind every planned path and target verbatim"));
+    assert!(prompt.contains("Ground every planned path and target"));
+    assert!(prompt.contains("must not begin with `/`"));
+    assert!(prompt.contains("presentation-only leading slash"));
     assert!(prompt.contains("never poll or guess a language"));
     assert!(prompt.contains("direct durable handoffs"));
     assert!(prompt.contains("analysis-only or no-modification"));
@@ -936,7 +938,9 @@ fn task_role_system_prompts_bind_planning_and_participant_capabilities() {
     assert!(planner.contains("overrides the ordinary instruction to inspect the workspace"));
     assert!(planner.contains("request_task_discovery exactly once"));
     assert!(planner.contains("A component, subsystem, feature, language, or workstream name"));
-    assert!(planner.contains("come verbatim from the objective or a completed discovery result"));
+    assert!(planner.contains("grounded in the objective or a completed discovery result"));
+    assert!(planner.contains("must never start with a slash"));
+    assert!(planner.contains("normalize `'/src/lib.rs'` to `'src/lib.rs'`"));
     assert!(planner.contains("returned directly and durably to the host"));
     assert!(planner.contains("analysis-only or no-modification objective"));
     assert!(planner.contains("shared_read_only isolation"));

@@ -264,6 +264,7 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
         first.system_prompt_digest,
         format!("sha256:{:x}", Sha256::digest(expected_system_material))
     );
+    assert!(task_discovery_system_prompt().contains("never add a leading slash"));
     assert!(first.sigil_build.ends_with(&first.sigil_commit));
 }
 
