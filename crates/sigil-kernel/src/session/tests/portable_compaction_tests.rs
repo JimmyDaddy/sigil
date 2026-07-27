@@ -362,19 +362,35 @@ fn portable_executor_pins_cjk_user_constraints_and_projects_checkpoint_after_app
 
 #[test]
 fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -> Result<()> {
-    let (_temp, store, mut session) = setup_session()?;
+    let (temp, store, mut session) = setup_session()?;
     let task_id = crate::TaskId::new("task-compact-survival")?;
     let inspect_step_id = crate::TaskStepId::new("inspect")?;
     let implement_step_id = crate::TaskStepId::new("implement")?;
-    session.append_controls(vec![
-        crate::ControlEntry::TaskRun(crate::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
-            objective: "Preserve the active task across automatic compaction".to_owned(),
-            status: crate::TaskRunStatus::Paused,
-            reason: Some("waiting for continuation".to_owned()),
-        }),
-        crate::ControlEntry::TaskPlan(crate::TaskPlanEntry {
+    let admission = crate::admit_user_declared_root(
+        &crate::IntentAdmissionContextV1::initial(
+            crate::IntentStackId::new("stack-compact-survival")?,
+            crate::stable_workspace_id(temp.path())?,
+            session.session_scope_id(),
+        )?,
+        crate::UserDeclaredIntentV1 {
+            title: "Preserve the accepted task and Intent".to_owned(),
+            statement: "Retain executable task and Intent identity across automatic compaction."
+                .to_owned(),
+            acceptance_criteria: vec![crate::IntentProposalCriterionV1 {
+                criterion_alias: "compact-survival".to_owned(),
+                statement: "Task and Intent projections reload from the durable source.".to_owned(),
+                required: true,
+            }],
+        },
+        &crate::IntentAcceptanceAuthorityV1::user_declared_root(
+            "turn-compact-survival",
+            "event-compact-survival",
+        )?,
+    )?;
+    let accepted_intent_ref = admission.plan().intents[0].intent_ref.clone();
+    let task_plan = crate::bind_task_plan_intents(
+        &admission,
+        crate::TaskPlanEntry {
             task_id: task_id.clone(),
             plan_version: 3,
             status: crate::TaskPlanStatus::Accepted,
@@ -403,7 +419,27 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
                 },
             ],
             reason: None,
-        }),
+        },
+        &[
+            crate::TaskStepIntentAliasBindingV1 {
+                step_id: inspect_step_id.clone(),
+                intent_aliases: vec![crate::USER_DECLARED_ROOT_INTENT_ALIAS.to_owned()],
+            },
+            crate::TaskStepIntentAliasBindingV1 {
+                step_id: implement_step_id.clone(),
+                intent_aliases: vec![crate::USER_DECLARED_ROOT_INTENT_ALIAS.to_owned()],
+            },
+        ],
+    )?;
+    session.append_control(crate::ControlEntry::TaskRun(crate::TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
+        objective: "Preserve the active task across automatic compaction".to_owned(),
+        status: crate::TaskRunStatus::Paused,
+        reason: Some("waiting for continuation".to_owned()),
+    }))?;
+    crate::append_task_intent_plan_admission(&mut session, &admission, task_plan)?;
+    session.append_controls(vec![
         crate::ControlEntry::TaskStep(crate::TaskStepEntry {
             task_id: task_id.clone(),
             plan_version: 3,
@@ -452,6 +488,31 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
                     && protected.reason == CompactionFoldProtectionReason::ControlState
             }),
             "task control {event_id} must never be folded"
+        );
+    }
+    let intent_event_ids = store
+        .read_event_records_writer()?
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.stored_event().event_kind(),
+                Some(
+                    DurableEventType::IntentStackCreated
+                        | DurableEventType::IntentPlanRecorded
+                        | DurableEventType::IntentPlanAccepted
+                )
+            )
+        })
+        .map(|record| record.event_id().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(intent_event_ids.len(), 3);
+    for event_id in &intent_event_ids {
+        assert!(
+            request.plan.protected_events.iter().any(|protected| {
+                protected.event.event_id == *event_id
+                    && protected.reason == CompactionFoldProtectionReason::NonMessageDurableEvent
+            }),
+            "Intent event {event_id} must never be folded"
         );
     }
 
@@ -506,6 +567,11 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         Some(crate::TaskIsolationMode::Worktree)
     );
     assert_eq!(
+        plan.steps[1].intent_refs,
+        vec![accepted_intent_ref.clone()],
+        "Task to Intent binding must survive automatic compaction"
+    );
+    assert_eq!(
         task.steps
             .get(&(3, implement_step_id))
             .map(|step| step.status),
@@ -516,6 +582,12 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         task_projection,
         "the reloaded entry list forwarded to TUI must match durable Task replay"
     );
+    let intent_state = reloaded.public_intent_stack_state_for_workspace(temp.path())?;
+    let crate::PublicIntentStackStateV1::Available { stack, .. } = intent_state else {
+        panic!("accepted Intent history must survive automatic compaction");
+    };
+    assert_eq!(stack.intents.len(), 1);
+    assert_eq!(stack.intents[0].intent_ref, accepted_intent_ref);
     Ok(())
 }
 

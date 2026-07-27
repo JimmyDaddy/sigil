@@ -122,6 +122,11 @@ It should not replay every old tool output into transcript.
   dependency、role、mode、isolation 和生命周期仍以 append-only Task control events 为唯一调度
   authority。fold plan 必须把这些 control events 标为 `ControlState` 且永不折叠；自动 apply
   后 host 必须从完整 durable stream reload，并据此重建 continue 选择与 TUI task list。
+- RFC-0051 Intent admission events 同样不进入 checkpoint authority：fold plan 必须把
+  `IntentStackCreated`、`IntentPlanRecorded` 与 `IntentPlanAccepted` 标为
+  `NonMessageDurableEvent`。automatic apply 后 reload 必须保留 TaskPlan 中的 immutable
+  Intent refs，并从 durable Intent lineage 重建 public Intent Stack；模型摘要不能补写、
+  改写或取代这些绑定。
 - Model-assisted task memory import preserves `model_generated=true`,
   `verified=false`, confidence and source event metadata instead of creating
   evidence.

@@ -913,8 +913,29 @@ camelCase IPC、conflict-disable、`/intents` local routing、narrow CSS、Safar
 Desktop 244 个前端测试、两侧 Rust crate 全量测试、all-target check、Clippy、UI system 和
 generated contract drift。
 
-本 checkpoint 尚未宣告 R51.7 完成；CLI automation、automatic compaction 后的任务/Intent
-存续、canonical dogfood、real worker-loop E2E 与 §13 全门槛将在后续批次继续收口。
+R51.7 第三批已完成 CLI automation 与 automatic compaction 存续边界：
+
+- `sigil intent --session <exact-id> inspect|drop-preview|drop` 只接受当前 workspace catalog
+  中的 exact durable session identity；CLI 不接受 session path、workspace root、permission
+  policy 或 approval authority。stdout 始终是一条 versioned typed JSON result/error，内部
+  path 和底层错误不进入 automation record；
+- inspect、exact preview 与 digest-bound execute 继续复用
+  `ApplicationIntentStackCommandV1`。automation confirmation namespace 由 host 构造；Drop
+  只能提交 operation id、stack version 和 preview digest；
+- out-of-process preview/execute 会先验证 regular non-symlink durable source，并在仍有
+  foreground run 时 fail closed；inspect 仍可供恢复 UI 读取。exact request 的 frontier CAS
+  继续阻止检查后发生的 durable stream 竞争；
+- idle automatic compaction 的回归测试同时冻结 Task 与 Intent：TaskPlan/TaskStep control
+  保持 `ControlState`，Intent admission event 保持 `NonMessageDurableEvent`，apply 后从完整
+  durable stream reload，Task→Intent immutable ref、可执行 Task projection 和 public Intent
+  Stack projection 必须全部恢复，checkpoint 文本不成为第二套 authority。
+
+完成证据覆盖 CLI Clap shape、host-authority negative contract、真实子进程 JSON 输出、
+unknown-session/path disclosure、active-run recovery gate，以及 kernel/TUI automatic
+compaction reload。
+
+本 checkpoint 尚未宣告 R51.7 完成；canonical dogfood、real worker-loop E2E 与 §13 全门槛
+将在后续批次继续收口。
 
 依赖顺序：
 
