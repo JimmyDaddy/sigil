@@ -1305,7 +1305,7 @@ where
         H: EventHandler + Send,
     {
         let initial_status = step_status_from_outcome(&output);
-        let participant_status = participant_status_from_step_status(initial_status);
+        let participant_status = participant_status_from_step_output(initial_status, &output);
         let participant_result = participant_result_entry(
             attempt,
             &output.final_text,
@@ -1602,7 +1602,7 @@ where
             handler,
             &attempt,
             participant_result,
-            participant_status_from_step_status(initial_status),
+            participant_status_from_step_output(initial_status, &output),
             step_reason_from_output(initial_status, &output),
         )?;
         release_task_write_lease(
@@ -3300,6 +3300,21 @@ fn participant_status_from_step_status(status: TaskStepStatus) -> TaskParticipan
         TaskStepStatus::Pending | TaskStepStatus::Running => {
             TaskParticipantAttemptStatus::Interrupted
         }
+    }
+}
+
+fn participant_status_from_step_output(
+    status: TaskStepStatus,
+    output: &StepRunOutput,
+) -> TaskParticipantAttemptStatus {
+    if status == TaskStepStatus::Blocked
+        && output.changeset_proposal.is_some()
+        && output.outcome.approval_denials == 0
+        && output.outcome.tool_errors.is_empty()
+    {
+        TaskParticipantAttemptStatus::Completed
+    } else {
+        participant_status_from_step_status(status)
     }
 }
 

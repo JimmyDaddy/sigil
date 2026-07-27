@@ -3991,6 +3991,19 @@ async fn changeset_only_ready_steps_batch_proposals_without_parent_workspace_mut
             .iter()
             .filter(|entry| matches!(
                 entry,
+                SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
+                    if attempt.status == TaskParticipantAttemptStatus::Completed
+            ))
+            .count(),
+        2,
+        "a clean isolated proposal completes the participant even while its Task step waits for integration"
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
                 SessionLogEntry::Control(ControlEntry::MergeReviewRequested(_))
             ))
             .count(),
