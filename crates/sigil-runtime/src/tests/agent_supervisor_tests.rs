@@ -6005,6 +6005,10 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
         .as_ref()
         .expect("ready lanes should produce one exact promotion preview");
     assert_eq!(preview.plan_id, plan.plan_id);
+    assert!(
+        preview.intent_binding.is_none(),
+        "a legacy integration plan without accepted Intent authority stays unbound"
+    );
     assert_eq!(
         preview.target,
         sigil_kernel::IntegrationPromotionTarget::WorkspaceApply {

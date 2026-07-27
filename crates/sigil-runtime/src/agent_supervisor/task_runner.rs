@@ -1417,6 +1417,17 @@ pub(crate) fn task_intent_promotion_binding(
     parent_session: &Session,
     integration_plan: &sigil_kernel::IntegrationPlan,
 ) -> Result<(Option<String>, bool)> {
+    let intent_projection = parent_session.intent_stack_projection()?;
+    let Some(accepted) = intent_projection.latest_accepted_plan() else {
+        return Ok((None, false));
+    };
+    let expected_binding = sigil_kernel::IntentTaskPlanBindingV1 {
+        task_id: integration_plan.task_id.as_str().to_owned(),
+        task_plan_version: integration_plan.plan_version,
+    };
+    if accepted.task_plan_binding.as_ref() != Some(&expected_binding) {
+        return Ok((None, false));
+    }
     let task_projection = parent_session.task_state_projection();
     let task = task_projection
         .tasks
@@ -1468,17 +1479,6 @@ pub(crate) fn task_intent_promotion_binding(
         .any(|binding| binding["intent_ref"].is_null())
     {
         anyhow::bail!("Intent-enabled integration plan contains an unbound write proposal");
-    }
-    let intent_projection = parent_session.intent_stack_projection()?;
-    let accepted = intent_projection
-        .latest_accepted_plan()
-        .ok_or_else(|| anyhow::anyhow!("Intent-bound integration has no accepted IntentPlan"))?;
-    let expected_binding = sigil_kernel::IntentTaskPlanBindingV1 {
-        task_id: integration_plan.task_id.as_str().to_owned(),
-        task_plan_version: integration_plan.plan_version,
-    };
-    if accepted.task_plan_binding.as_ref() != Some(&expected_binding) {
-        anyhow::bail!("Intent-bound integration does not match accepted TaskPlan authority");
     }
     let payload = serde_json::json!({
         "schema_version": 1,
