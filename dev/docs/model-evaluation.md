@@ -122,7 +122,14 @@ python3 scripts/real-provider-dogfood-campaign.py \
 
 The runner admits and freezes the binary before dispatch, partitions one local cost budget across all planned repetitions, and keeps aggregate evidence free of prompt, provider, config, and session content. `plan-only` drives the production TUI `/plan` path in a PTY with a generated secret-free config, a four-turn fuse, read-only permissions, and Web/MCP/skills/memory/task disabled. It requires one durable structured Plan draft, a visible Plan review surface, persisted usage, no plan-to-task handoff, and an unchanged workspace.
 
-The source config is read only to select the active provider/model and secret-free provider options. The active credential must be present in that provider's documented environment variable; inline keys are never copied into the generated Plan config. Raw PTY/session/model artifacts stay under the selected ignored local output. The aggregate budget remains an admission/accounting limit, not a provider-side billing cap for a request already in flight.
+The source config is read only to select the active provider/model and secret-free provider options.
+Both legacy provider blocks and V2 connection routes are accepted. The Plan harness retains only
+the active route, replaces stored credential references with an environment reference, and never
+copies connection labels, credential IDs, inline keys, or inactive connections into the generated
+config. The active credential must be present in its configured environment variable. Raw
+PTY/session/model artifacts stay under the selected ignored local output. The aggregate budget
+remains an admission/accounting limit, not a provider-side billing cap for a request already in
+flight.
 
 ## Artifacts
 

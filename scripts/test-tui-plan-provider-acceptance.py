@@ -38,6 +38,53 @@ model = "deepseek-chat"
     )
 
 
+def write_v2_config(
+    path: Path,
+    *,
+    credential_source: str = "stored",
+    credential_name: str = "SIGIL_API_KEY",
+) -> None:
+    credential = (
+        f'source = "environment"\nname = "{credential_name}"'
+        if credential_source == "environment"
+        else 'source = "stored"\nid = "00000000-0000-4000-8000-000000000001"'
+    )
+    path.write_text(
+        f'''config_version = 2
+
+[workspace]
+root = "/private/project"
+
+[agent]
+connection = "deepseek-default"
+model = "deepseek-v4-flash"
+
+[connections.deepseek-default]
+label = "Private Team Route"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.example.test"
+
+[connections.deepseek-default.credential]
+{credential}
+
+[connections.deepseek-default.options]
+strict_tools_mode = "auto"
+
+[connections.unused]
+label = "Unused"
+provider = "openai"
+protocol = "responses"
+base_url = "https://unused.example.test"
+
+[connections.unused.credential]
+source = "environment"
+name = "UNUSED_API_KEY"
+''',
+        encoding="utf-8",
+    )
+
+
 def write_audit(path: Path, *, tool_name: str = "read_file", target: str = "README.md") -> None:
     records = [
         {
@@ -198,6 +245,96 @@ allowed_tools = ["read_file"]
             with mock.patch.dict(os.environ, {}, clear=True):
                 with self.assertRaisesRegex(MODULE.PlanAcceptanceError, "credential"):
                     MODULE.validate_source_config(config)
+
+    def test_v2_source_config_is_reduced_to_one_environment_backed_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "sigil.toml"
+            write_v2_config(config)
+            with mock.patch.dict(os.environ, {"SIGIL_API_KEY": "environment-key"}, clear=False):
+                source = MODULE.validate_source_config(config)
+                isolated = MODULE.write_isolated_config(source, root / "case")
+            rendered = isolated.read_text(encoding="utf-8")
+            payload = MODULE.tomllib.loads(rendered)
+            self.assertEqual(source.provider, "deepseek")
+            self.assertEqual(source.connection_id, "deepseek-default")
+            self.assertEqual(source.credential_env, "SIGIL_API_KEY")
+            self.assertEqual(payload["config_version"], 2)
+            self.assertEqual(
+                payload["agent"]["connection"],
+                MODULE.ISOLATED_CONNECTION_ID,
+            )
+            self.assertEqual(
+                set(payload["connections"]),
+                {MODULE.ISOLATED_CONNECTION_ID},
+            )
+            self.assertEqual(
+                payload["connections"][MODULE.ISOLATED_CONNECTION_ID]["credential"],
+                {"source": "environment", "name": "SIGIL_API_KEY"},
+            )
+            self.assertNotIn("deepseek-default", rendered)
+            self.assertNotIn("Private Team Route", rendered)
+            self.assertNotIn("00000000-0000-4000-8000-000000000001", rendered)
+            self.assertNotIn("UNUSED_API_KEY", rendered)
+
+    def test_v2_source_config_uses_exact_configured_credential_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "sigil.toml"
+            write_v2_config(
+                config,
+                credential_source="environment",
+                credential_name="CUSTOM_DEEPSEEK_KEY",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"CUSTOM_DEEPSEEK_KEY": "environment-key"},
+                clear=True,
+            ):
+                source = MODULE.validate_source_config(config)
+                environment = MODULE.provider_environment(
+                    root / "case",
+                    source.provider,
+                    source.credential_env,
+                )
+            self.assertEqual(source.credential_env, "CUSTOM_DEEPSEEK_KEY")
+            self.assertEqual(environment["CUSTOM_DEEPSEEK_KEY"], "environment-key")
+
+    def test_v2_source_config_rejects_mixed_or_unsupported_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "sigil.toml"
+            write_v2_config(config)
+            rendered = config.read_text(encoding="utf-8")
+            with mock.patch.dict(os.environ, {"SIGIL_API_KEY": "environment-key"}, clear=False):
+                config.write_text(
+                    rendered.replace(
+                        'connection = "deepseek-default"',
+                        'provider = "deepseek"\nconnection = "deepseek-default"',
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(MODULE.PlanAcceptanceError, "mixed"):
+                    MODULE.validate_source_config(config)
+                config.write_text(
+                    rendered.replace('protocol = "deepseek"', 'protocol = "responses"', 1),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(MODULE.PlanAcceptanceError, "support"):
+                    MODULE.validate_source_config(config)
+
+    def test_v2_runtime_provider_mapping_matches_production_routes(self) -> None:
+        expected = {
+            ("deepseek", "deepseek"): "deepseek",
+            ("openai", "responses"): "openai_responses",
+            ("custom", "responses"): "openai_responses",
+            ("custom", "chat_completions"): "openai_compat",
+            ("anthropic", "anthropic_messages"): "anthropic",
+            ("gemini", "generate_content"): "gemini",
+        }
+        for route, provider in expected.items():
+            with self.subTest(route=route):
+                self.assertEqual(MODULE._runtime_provider_name(*route), provider)
 
     def test_environment_keeps_only_explicit_provider_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

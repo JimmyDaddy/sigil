@@ -101,7 +101,12 @@ python3 scripts/real-provider-dogfood-campaign.py \
 
 Runner 在发出请求前准入并冻结 binary，把一个本地成本预算分配给全部计划 repetition，并保证 aggregate evidence 不包含 prompt、provider、config 或 session 内容。`plan-only` 通过 PTY 驱动 production TUI `/plan` 路径；其生成配置不含 secret，设置四轮保险丝与 read-only 权限，并关闭 Web、MCP、skills、memory 和 task。案例必须得到一个 durable structured Plan draft、可见的 Plan review surface 和持久化 usage，同时不得发生 plan-to-task handoff，workspace 也必须保持不变。
 
-Source config 只用于选择 active provider/model 和无 secret 的 provider 选项。Active credential 必须位于该 provider 文档规定的环境变量中；inline key 永远不会复制到生成的 Plan config。Raw PTY/session/model artifact 只保留在显式选择且已忽略的本地 output。Aggregate budget 仍只是准入与记账限制，不能充当已经发出请求的 provider-side billing cap。
+Source config 只用于选择 active provider/model 和无 secret 的 provider 选项，legacy provider
+block 与 V2 connection route 均可作为输入。Plan harness 只保留 active route，把 stored credential
+reference 替换为 environment reference，并且不会把 connection label、credential ID、inline key
+或 inactive connection 复制到生成配置。Active credential 必须位于其配置的环境变量中。Raw
+PTY/session/model artifact 只保留在显式选择且已忽略的本地 output。Aggregate budget 仍只是准入
+与记账限制，不能充当已经发出请求的 provider-side billing cap。
 
 ## 产物
 

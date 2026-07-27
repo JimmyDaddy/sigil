@@ -182,9 +182,18 @@ def terminal_status(
     )
 
 
-def child_environment(case_root: Path, provider: str) -> dict[str, str]:
+def child_environment(
+    case_root: Path,
+    provider: str,
+    credential_env: str | None = None,
+) -> dict[str, str]:
     environment = SUPPORT.identity_environment(os.environ)
     allowed_names = PLAN.COMMON_PROVIDER_ENV_NAMES | PLAN.PROVIDER_ENV_BY_NAME.get(provider, set())
+    if credential_env is not None:
+        if not PLAN.ENVIRONMENT_NAME.fullmatch(credential_env):
+            raise CampaignError("active provider credential environment is invalid")
+        allowed_names.add(credential_env)
+    case_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     for name in allowed_names:
         if name in os.environ:
             environment[name] = os.environ[name]
@@ -577,6 +586,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     environment = child_environment(
                         temporary_root / f"plan-child-{repetition}",
                         source_config.provider,
+                        source_config.credential_env,
                     )
                     child = run_child(
                         command,
@@ -643,6 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     environment = child_environment(
                         temporary_root / "model-child",
                         source_config.provider,
+                        source_config.credential_env,
                     )
                     model_child = run_child(
                         command,

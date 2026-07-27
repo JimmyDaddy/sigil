@@ -101,6 +101,24 @@ class AdmissionTests(unittest.TestCase):
             self.assertNotIn("SIGIL_CONFIG", environment)
             self.assertNotIn("UNRELATED_SECRET", environment)
 
+    def test_environment_keeps_exact_v2_credential_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CUSTOM_DEEPSEEK_KEY": "provider-key",
+                    "UNRELATED_SECRET": "drop-me",
+                },
+                clear=True,
+            ):
+                environment = MODULE.child_environment(
+                    Path(temporary),
+                    "deepseek",
+                    "CUSTOM_DEEPSEEK_KEY",
+                )
+            self.assertEqual(environment["CUSTOM_DEEPSEEK_KEY"], "provider-key")
+            self.assertNotIn("UNRELATED_SECRET", environment)
+
 
 class EvidenceTests(unittest.TestCase):
     def test_model_result_projection_drops_provider_and_session_content(self) -> None:

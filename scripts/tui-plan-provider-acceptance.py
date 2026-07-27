@@ -72,6 +72,9 @@ PROVIDER_ENV_BY_NAME = {
     },
 }
 TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CONNECTION_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+ISOLATED_CONNECTION_ID = "plan-eval-active"
 
 
 class PlanAcceptanceError(RuntimeError):
@@ -94,6 +97,8 @@ class SourceConfig:
     provider: str
     model: str
     provider_config: dict[str, object]
+    connection_id: str | None
+    credential_env: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -229,13 +234,44 @@ def validate_source_config(path: Path) -> SourceConfig:
     resolved = path.expanduser().resolve(strict=True)
     payload = tomllib.loads(resolved.read_text(encoding="utf-8"))
     agent = payload.get("agent")
-    if (
-        not isinstance(agent, dict)
-        or not isinstance(agent.get("provider"), str)
-        or not isinstance(agent.get("model"), str)
-    ):
-        raise PlanAcceptanceError("Plan acceptance requires explicit [agent] provider and model")
-    provider = agent["provider"]
+    if not isinstance(agent, dict) or not isinstance(agent.get("model"), str):
+        raise PlanAcceptanceError("Plan acceptance requires an explicit [agent] model route")
+    model = agent["model"].strip()
+    if not model:
+        raise PlanAcceptanceError("Plan acceptance requires an explicit [agent] model route")
+    if payload.get("config_version") == 2:
+        return _validate_v2_source_config(resolved, payload, agent, model)
+    return _validate_legacy_source_config(resolved, payload, agent, model)
+
+
+def _require_credential_environment(provider: str, configured: object = None) -> str:
+    required_credential = PROVIDER_CREDENTIAL_ENV.get(provider)
+    if isinstance(configured, dict) and configured.get("source") == "environment":
+        configured_name = configured.get("name")
+        if not isinstance(configured_name, str) or not ENVIRONMENT_NAME.fullmatch(
+            configured_name
+        ):
+            raise PlanAcceptanceError("active provider credential environment is invalid")
+        required_credential = configured_name
+    if required_credential is None:
+        raise PlanAcceptanceError("Plan acceptance does not recognize the active provider credential")
+    if not os.environ.get(required_credential, "").strip():
+        raise PlanAcceptanceError(
+            "Plan acceptance requires the active provider credential in its configured environment variable"
+        )
+    return required_credential
+
+
+def _validate_legacy_source_config(
+    resolved: Path,
+    payload: dict[str, object],
+    agent: dict[str, object],
+    model: str,
+) -> SourceConfig:
+    provider_value = agent.get("provider")
+    if not isinstance(provider_value, str) or not provider_value.strip():
+        raise PlanAcceptanceError("Plan acceptance requires an explicit legacy [agent] provider")
+    provider = provider_value.strip()
     providers = payload.get("providers")
     provider_value = providers.get(provider) if isinstance(providers, dict) else None
     if not isinstance(provider_value, dict):
@@ -243,12 +279,66 @@ def validate_source_config(path: Path) -> SourceConfig:
     scrubbed = _scrub_provider_config(provider_value)
     if not isinstance(scrubbed, dict):
         raise PlanAcceptanceError("active provider config could not be normalized")
-    required_credential = PROVIDER_CREDENTIAL_ENV.get(provider)
-    if required_credential is None:
-        raise PlanAcceptanceError("Plan acceptance does not recognize the active provider credential")
-    if not os.environ.get(required_credential, "").strip():
-        raise PlanAcceptanceError("Plan acceptance requires the active provider credential in its documented environment variable")
-    return SourceConfig(resolved, provider, agent["model"], scrubbed)
+    credential_env = _require_credential_environment(provider)
+    return SourceConfig(resolved, provider, model, scrubbed, None, credential_env)
+
+
+def _runtime_provider_name(provider: object, protocol: object) -> str:
+    names = {
+        ("deepseek", "deepseek"): "deepseek",
+        ("openai", "responses"): "openai_responses",
+        ("custom", "responses"): "openai_responses",
+        ("custom", "chat_completions"): "openai_compat",
+        ("anthropic", "anthropic_messages"): "anthropic",
+        ("gemini", "generate_content"): "gemini",
+    }
+    runtime_name = names.get((provider, protocol))
+    if runtime_name is None:
+        raise PlanAcceptanceError("Plan acceptance does not support the active provider route")
+    return runtime_name
+
+
+def _validate_v2_source_config(
+    resolved: Path,
+    payload: dict[str, object],
+    agent: dict[str, object],
+    model: str,
+) -> SourceConfig:
+    if isinstance(agent.get("provider"), str) and agent["provider"].strip():
+        raise PlanAcceptanceError("Plan acceptance rejects mixed legacy and V2 provider routes")
+    connection_value = agent.get("connection")
+    if not isinstance(connection_value, str) or not CONNECTION_ID.fullmatch(connection_value):
+        raise PlanAcceptanceError("Plan acceptance requires a valid [agent] connection")
+    connections = payload.get("connections")
+    connection = (
+        connections.get(connection_value) if isinstance(connections, dict) else None
+    )
+    if not isinstance(connection, dict):
+        raise PlanAcceptanceError("Plan acceptance requires the active connection config block")
+    provider = _runtime_provider_name(
+        connection.get("provider"),
+        connection.get("protocol"),
+    )
+    credential_env = _require_credential_environment(
+        provider,
+        connection.get("credential"),
+    )
+    scrubbed = _scrub_provider_config(connection)
+    if not isinstance(scrubbed, dict):
+        raise PlanAcceptanceError("active connection config could not be normalized")
+    scrubbed["label"] = "Plan evaluation"
+    scrubbed["credential"] = {
+        "source": "environment",
+        "name": credential_env,
+    }
+    return SourceConfig(
+        resolved,
+        provider,
+        model,
+        scrubbed,
+        connection_value,
+        credential_env,
+    )
 
 
 def _toml_scalar(value: object) -> str:
@@ -280,8 +370,28 @@ def _render_toml_table(path: tuple[str, ...], value: dict[str, object], lines: l
             _render_toml_table((*path, key), child, lines)
 
 
+def _contains_secret_capable_field(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for key, child in value.items():
+        normalized = key.lower()
+        if any(
+            marker in normalized
+            for marker in ("api_key", "password", "authorization", "secret")
+        ):
+            return True
+        if _contains_secret_capable_field(child):
+            return True
+    return False
+
+
 def write_isolated_config(source: SourceConfig, case_root: Path) -> Path:
     case_root.mkdir(parents=True, exist_ok=True)
+    agent_route = (
+        {"connection": ISOLATED_CONNECTION_ID, "model": source.model}
+        if source.connection_id is not None
+        else {"provider": source.provider, "model": source.model}
+    )
     config: dict[str, dict[str, object]] = {
         "workspace": {"root": "."},
         "storage": {
@@ -290,8 +400,7 @@ def write_isolated_config(source: SourceConfig, case_root: Path) -> Path:
         },
         "session": {"log_dir": "sessions"},
         "agent": {
-            "provider": source.provider,
-            "model": source.model,
+            **agent_route,
             "max_turns": 4,
             "tool_timeout_secs": 15,
         },
@@ -312,21 +421,33 @@ def write_isolated_config(source: SourceConfig, case_root: Path) -> Path:
             "mouse_capture": False,
             "osc52_clipboard": False,
         },
-        "providers": {source.provider: source.provider_config},
     }
+    if source.connection_id is not None:
+        config["connections"] = {ISOLATED_CONNECTION_ID: source.provider_config}
+    else:
+        config["providers"] = {source.provider: source.provider_config}
     lines: list[str] = []
+    if source.connection_id is not None:
+        lines.extend(("config_version = 2", ""))
     for table, values in config.items():
         _render_toml_table((table,), values, lines)
     rendered = "\n".join(lines)
-    lowered = rendered.lower()
-    if any(marker in lowered for marker in ("api_key", "password", "authorization", "secret")):
+    if _contains_secret_capable_field(config):
         raise PlanAcceptanceError("isolated Plan config retained a secret-capable field")
     config_path = case_root / "config.toml"
     config_path.write_text(rendered, encoding="utf-8")
     round_trip = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    agent = round_trip.get("agent", {})
+    route_matches = (
+        round_trip.get("config_version") == 2
+        and agent.get("connection") == ISOLATED_CONNECTION_ID
+        and set(round_trip.get("connections", {})) == {ISOLATED_CONNECTION_ID}
+        if source.connection_id is not None
+        else agent.get("provider") == source.provider
+    )
     if (
-        round_trip.get("agent", {}).get("provider") != source.provider
-        or round_trip.get("agent", {}).get("max_turns") != 4
+        not route_matches
+        or agent.get("max_turns") != 4
         or round_trip.get("permission", {}).get("mode") != "read-only"
         or round_trip.get("web", {}).get("enabled") is not False
     ):
@@ -362,9 +483,18 @@ def workspace_digest(workspace: Path) -> str:
     return digest.hexdigest()
 
 
-def provider_environment(case_root: Path, provider: str) -> dict[str, str]:
+def provider_environment(
+    case_root: Path,
+    provider: str,
+    credential_env: str | None = None,
+) -> dict[str, str]:
     environment = SUPPORT.identity_environment(os.environ)
     allowed_names = COMMON_PROVIDER_ENV_NAMES | PROVIDER_ENV_BY_NAME.get(provider, set())
+    if credential_env is not None:
+        if not ENVIRONMENT_NAME.fullmatch(credential_env):
+            raise PlanAcceptanceError("active provider credential environment is invalid")
+        allowed_names.add(credential_env)
+    case_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     for name in allowed_names:
         if name in os.environ:
             environment[name] = os.environ[name]
@@ -665,7 +795,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_path = write_isolated_config(source_config, fixture_root)
         workspace = fixture_root / "workspace"
         before_digest = materialize_fixture(fixture, workspace)
-        environment = provider_environment(fixture_root, source_config.provider)
+        environment = provider_environment(
+            fixture_root,
+            source_config.provider,
+            source_config.credential_env,
+        )
         raw_log = output_dir / "plan-process.log"
         runner = SUPPORT.PtyRunner(
             [str(frozen_binary), "--config", str(config_path)],
