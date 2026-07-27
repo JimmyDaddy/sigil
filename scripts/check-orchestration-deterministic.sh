@@ -39,6 +39,10 @@ run_case \
   "sigil-kernel" \
   "compaction_extraction_keeps_active_task_objective_and_accepted_plan"
 run_case \
+  "automatic compaction task survival" \
+  "sigil-kernel" \
+  "idle_auto_compaction_preserves_task_list_memory_and_executable_projection"
+run_case \
   "model-owned guidance" \
   "sigil-kernel" \
   "guidance_review_replans_and_carries_completed_steps_forward"

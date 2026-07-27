@@ -3365,6 +3365,105 @@ fn idle_auto_compaction_renders_an_automatic_notice_without_an_assistant_reply()
 }
 
 #[test]
+fn idle_auto_compaction_rebuilds_the_visible_task_list_from_reloaded_controls() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let task_id = sigil_kernel::TaskId::new("task_compact_survival")?;
+    let inspect_step_id = sigil_kernel::TaskStepId::new("inspect")?;
+    let implement_step_id = sigil_kernel::TaskStepId::new("implement")?;
+    let entries = vec![
+        SessionLogEntry::User(ModelMessage::user("continue after automatic compaction")),
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "Preserve the visible task list".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Paused,
+            reason: Some("waiting for continue".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![
+                sigil_kernel::TaskStepSpec {
+                    step_id: inspect_step_id.clone(),
+                    title: "Inspect compacted state".to_owned(),
+                    display_name: Some("explorer".to_owned()),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::SubagentRead,
+                    depends_on: Vec::new(),
+                    mode: Some(sigil_kernel::TaskStepMode::Read),
+                    isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+                },
+                sigil_kernel::TaskStepSpec {
+                    step_id: implement_step_id.clone(),
+                    title: "Resume implementation".to_owned(),
+                    display_name: Some("implementer".to_owned()),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::SubagentWrite,
+                    depends_on: vec![inspect_step_id.clone()],
+                    mode: Some(sigil_kernel::TaskStepMode::Write),
+                    isolation: Some(sigil_kernel::TaskIsolationMode::Worktree),
+                },
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            step_id: inspect_step_id,
+            role: sigil_kernel::AgentRole::SubagentRead,
+            status: sigil_kernel::TaskStepStatus::Completed,
+            title: Some("Inspect compacted state".to_owned()),
+            summary: Some("controls retained".to_owned()),
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id,
+            plan_version: 3,
+            step_id: implement_step_id,
+            role: sigil_kernel::AgentRole::SubagentWrite,
+            status: sigil_kernel::TaskStepStatus::Pending,
+            title: Some("Resume implementation".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+    ];
+
+    app.handle_worker_message(WorkerMessage::V2CompactionApplied {
+        request_id: 0,
+        source: crate::runner::V2CompactionApplySource::IdleAutomatic,
+        compaction_id: "portable-idle-task-survival".to_owned(),
+        folded_event_count: 8,
+        entries,
+    })?;
+
+    let strip = app
+        .task_strip_view()
+        .expect("automatic compaction should retain the task strip");
+    assert_eq!(strip.title, "Task task_compact_survival");
+    assert!(strip.detail.contains("paused"));
+    assert!(strip.detail.contains("1/2 done"));
+    assert!(
+        strip
+            .rows
+            .iter()
+            .any(|row| row.label.contains("Inspect compacted state"))
+    );
+    assert!(
+        strip
+            .rows
+            .iter()
+            .any(|row| row.label.contains("Resume implementation"))
+    );
+    assert!(
+        app.task_sidebar_lines()
+            .iter()
+            .any(|line| line.contains("Resume implementation"))
+    );
+    Ok(())
+}
+
+#[test]
 fn pre_turn_compaction_renders_a_lifecycle_notice_before_queue_dispatch() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let assistant_count = app

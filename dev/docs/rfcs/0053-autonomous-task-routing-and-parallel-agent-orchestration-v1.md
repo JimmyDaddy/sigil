@@ -1934,7 +1934,7 @@ O8 退出条件：满足第 22 节 Definition of Done 和上述冻结阈值；�
 | Public protocol | replay/live DTO parity；OpenAPI/generated schema；private path/ref redaction；real serve/Desktop contract |
 | Negative eval | simple Q&A、single lookup、one-line edit 不建 task；overlapping work不重复 spawn；no parent-child duplicate investigation |
 | Positive eval | cross-layer implementation builds task；planner fans out Explore；independent read/write scopes use concurrency |
-| Recovery E2E | 429、provider disconnect、compaction、process restart、task continue 不重复 task/step/spawn/merge |
+| Recovery E2E | 429、provider disconnect、process restart、task continue 不重复 task/step/spawn/merge；自动 compaction 后 active/paused task list、step status、dependency 与 isolation 从 durable controls 原样恢复 |
 
 验证顺序：
 
@@ -1964,7 +1964,9 @@ RFC-0053 只有同时满足以下条件才算完成：
 11. Workspace promotion 使用 snapshot/revision CAS，Git ref promotion 使用 object CAS；两种 target
     互斥，冲突/stale proposal 不会静默覆盖。
 12. Task 最终只写一个 parent final answer。
-13. crash、429、cancel、continue 和 compaction 不会重复 task、attempt、spawn、continuation 或 merge。
+13. crash、429、cancel、continue 和 compaction 不会重复 task、attempt、spawn、continuation 或 merge；
+    自动 compaction 后 active/paused task 的完整 task list 仍可见且可继续，`TaskMemory.active_plan`
+    只服务模型上下文，不替代 durable Task projection 的调度 authority。
 14. task、live progress 和 follow-ups 在 TUI 中有清晰边界；dispatched follow-up 不留在 pending list。
 15. public protocol、用户文档、核心技术方案和真实实现一致。
 16. TUI、HTTP 和 Desktop 在声明 auto 支持时消费同一 coordinator/executor/synthesis contract，

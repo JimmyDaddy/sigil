@@ -117,6 +117,11 @@ It should not replay every old tool output into transcript.
   an old representation as current state.
 - Deterministic extraction builds `TaskMemoryV1` from durable/control events
   without inventing verification evidence from model text.
+- 自动 compaction 不会把 `TaskMemoryV1.active_plan` 变成第二套可执行 task graph：
+  checkpoint 只保留供模型续接的 objective、step title 与 latest status；Task 的 plan version、
+  dependency、role、mode、isolation 和生命周期仍以 append-only Task control events 为唯一调度
+  authority。fold plan 必须把这些 control events 标为 `ControlState` 且永不折叠；自动 apply
+  后 host 必须从完整 durable stream reload，并据此重建 continue 选择与 TUI task list。
 - Model-assisted task memory import preserves `model_generated=true`,
   `verified=false`, confidence and source event metadata instead of creating
   evidence.
@@ -287,6 +292,7 @@ Recommended checks:
 
 ```bash
 cargo test -p sigil-kernel compaction
+cargo test -p sigil-kernel idle_auto_compaction_preserves_task_list_memory_and_executable_projection
 cargo test -p sigil-tui session
 ```
 

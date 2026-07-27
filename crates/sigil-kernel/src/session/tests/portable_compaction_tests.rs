@@ -361,6 +361,163 @@ fn portable_executor_pins_cjk_user_constraints_and_projects_checkpoint_after_app
 }
 
 #[test]
+fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -> Result<()> {
+    let (_temp, store, mut session) = setup_session()?;
+    let task_id = crate::TaskId::new("task-compact-survival")?;
+    let inspect_step_id = crate::TaskStepId::new("inspect")?;
+    let implement_step_id = crate::TaskStepId::new("implement")?;
+    session.append_controls(vec![
+        crate::ControlEntry::TaskRun(crate::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
+            objective: "Preserve the active task across automatic compaction".to_owned(),
+            status: crate::TaskRunStatus::Paused,
+            reason: Some("waiting for continuation".to_owned()),
+        }),
+        crate::ControlEntry::TaskPlan(crate::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            status: crate::TaskPlanStatus::Accepted,
+            steps: vec![
+                crate::TaskStepSpec {
+                    step_id: inspect_step_id.clone(),
+                    title: "Inspect durable task controls".to_owned(),
+                    display_name: Some("explorer".to_owned()),
+                    detail: Some("Confirm the append-only source of truth".to_owned()),
+                    role: crate::AgentRole::SubagentRead,
+                    depends_on: Vec::new(),
+                    mode: Some(crate::TaskStepMode::Read),
+                    isolation: Some(crate::TaskIsolationMode::SharedReadOnly),
+                },
+                crate::TaskStepSpec {
+                    step_id: implement_step_id.clone(),
+                    title: "Continue the isolated implementation".to_owned(),
+                    display_name: Some("implementer".to_owned()),
+                    detail: Some("Resume only after inspection completes".to_owned()),
+                    role: crate::AgentRole::SubagentWrite,
+                    depends_on: vec![inspect_step_id.clone()],
+                    mode: Some(crate::TaskStepMode::Write),
+                    isolation: Some(crate::TaskIsolationMode::Worktree),
+                },
+            ],
+            reason: None,
+        }),
+        crate::ControlEntry::TaskStep(crate::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            step_id: inspect_step_id.clone(),
+            role: crate::AgentRole::SubagentRead,
+            status: crate::TaskStepStatus::Completed,
+            title: Some("Inspect durable task controls".to_owned()),
+            summary: Some("Task controls remain append-only".to_owned()),
+            reason: None,
+        }),
+        crate::ControlEntry::TaskStep(crate::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 3,
+            step_id: implement_step_id.clone(),
+            role: crate::AgentRole::SubagentWrite,
+            status: crate::TaskStepStatus::Pending,
+            title: Some("Continue the isolated implementation".to_owned()),
+            summary: None,
+            reason: Some("dependency completed; awaiting continue".to_owned()),
+        }),
+    ])?;
+
+    let session_scope_id = session_scope_id(&store)?;
+    let mut request = request(
+        &store,
+        "idle-task-survival-attempt",
+        "idle-task-survival-compaction",
+        None,
+    )?;
+    request.initiation = CompactionInitiation::IdleAutomatic {
+        scope_fingerprint: "idle-task-survival-scope".to_owned(),
+    };
+    let task_control_event_ids = store
+        .read_event_records_writer()?
+        .into_iter()
+        .filter(|record| {
+            record.stored_event().event_kind() == Some(DurableEventType::TaskStatusChanged)
+        })
+        .map(|record| record.event_id().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(task_control_event_ids.len(), 4);
+    for event_id in &task_control_event_ids {
+        assert!(
+            request.plan.protected_events.iter().any(|protected| {
+                protected.event.event_id == *event_id
+                    && protected.reason == CompactionFoldProtectionReason::ControlState
+            }),
+            "task control {event_id} must never be folded"
+        );
+    }
+
+    execute_with_target(&store, request, |checkpoint, task_memory, candidate| {
+        target_material(&session_scope_id, checkpoint, task_memory, candidate)
+    })?;
+
+    let reloaded = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let context = reloaded
+        .try_context_projection_from_durable()?
+        .expect("store-backed session has a durable context projection");
+    let active_plan = context
+        .task_memory
+        .as_ref()
+        .and_then(|memory| memory.active_plan.as_ref())
+        .expect("automatic compaction should retain an active plan for model continuation");
+    assert_eq!(active_plan.task_id, task_id.as_str());
+    assert_eq!(active_plan.plan_version, 3);
+    assert_eq!(active_plan.steps.len(), 2);
+    assert_eq!(
+        active_plan.steps[0].status,
+        crate::TaskStepStatus::Completed
+    );
+    assert_eq!(active_plan.steps[1].status, crate::TaskStepStatus::Pending);
+    let model_messages = context.model_messages();
+    let checkpoint = model_messages
+        .first()
+        .and_then(|message| message.content.as_deref())
+        .expect("portable checkpoint should be the first model-visible message");
+    assert!(checkpoint.contains("Active Plan"));
+    assert!(checkpoint.contains("[Completed] Inspect durable task controls"));
+    assert!(checkpoint.contains("[Pending] Continue the isolated implementation"));
+
+    let task_projection = reloaded
+        .try_task_state_projection_from_durable()?
+        .expect("store-backed session has a durable task projection");
+    let task = task_projection
+        .tasks
+        .get(&task_id)
+        .expect("active task should remain available for continuation");
+    assert_eq!(task.status, crate::TaskRunStatus::Paused);
+    let plan = task
+        .plans
+        .get(&3)
+        .expect("accepted executable plan should survive compaction");
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(plan.steps[1].depends_on, vec![inspect_step_id]);
+    assert_eq!(plan.steps[1].role, crate::AgentRole::SubagentWrite);
+    assert_eq!(plan.steps[1].mode, Some(crate::TaskStepMode::Write));
+    assert_eq!(
+        plan.steps[1].isolation,
+        Some(crate::TaskIsolationMode::Worktree)
+    );
+    assert_eq!(
+        task.steps
+            .get(&(3, implement_step_id))
+            .map(|step| step.status),
+        Some(crate::TaskStepStatus::Pending)
+    );
+    assert_eq!(
+        reloaded.task_state_projection(),
+        task_projection,
+        "the reloaded entry list forwarded to TUI must match durable Task replay"
+    );
+    Ok(())
+}
+
+#[test]
 fn portable_executor_persists_idle_auto_initiation_for_failure_latch_replay() -> Result<()> {
     let (_temp, store, _session) = setup_session()?;
     let session_scope_id = session_scope_id(&store)?;
