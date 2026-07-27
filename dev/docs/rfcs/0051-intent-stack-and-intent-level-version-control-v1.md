@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.6 complete，R51.7 in progress）
+状态：accepted / implementation complete（R51.0-R51.7 complete）
 
 创建日期：2026-07-22
 
@@ -869,7 +869,7 @@ detail、session switch、worker restart、read-only permission denial，以及 
 response。`sigil-tui` 全量测试、all-target check、Clippy 和 format gate 共同覆盖本切片；
 HTTP/Desktop/automation adapter 与 real cross-surface conformance 仍属于 R51.7。
 
-### 12.8 R51.7 implementation checkpoint（in progress，2026-07-27）
+### 12.8 R51.7 implementation checkpoint（complete，2026-07-27）
 
 R51.7 第一批已将 TUI、HTTP 与后续 Desktop/automation 所需的 application boundary 收敛为
 `ApplicationIntentStackCommandV1`。该 command 只有 inspect、exact preview 和
@@ -934,8 +934,29 @@ R51.7 第三批已完成 CLI automation 与 automatic compaction 存续边界：
 unknown-session/path disclosure、active-run recovery gate，以及 kernel/TUI automatic
 compaction reload。
 
-本 checkpoint 尚未宣告 R51.7 完成；canonical dogfood、real worker-loop E2E 与 §13 全门槛
-将在后续批次继续收口。
+R51.7 第四批已完成 canonical dogfood、real worker-loop E2E 与 §13 收口：
+
+- Plan V2 的 fenced proposal 可携带严格、无 authority 的 Intent proposal；用户接受时，TUI
+  通过同一 durable batch 接受 IntentPlan/TaskPlan，并把 exact `intent_refs` 带入 runtime
+  Task execution；
+- accepted `workspace_edits` grant 只按同一 Task identity 精确继承到 child session；三个
+  write participant 在独立 Git worktree 中真实并发运行，无重复 child approval，随后通过
+  integration lane 提升到 parent workspace；
+- worktree ChangeSet digest 统一使用 canonical `sha256:` 表示。只有 exact accepted Intent
+  binding 才要求完整 Task projection 与 promotion lineage；没有 accepted IntentPlan 的 legacy
+  integration 保持 intent-unbound，不被新协议误拒绝；
+- successful workspace promotion 同批记录 exact `ChangeSetApplied`，再 materialize promoted
+  Intent layer。测试随后从 durable session 重载 Intent Stack，精确 Drop Telemetry leaf，
+  验证 Retry 与 Operations docs 保留、parent mutation evidence 可追溯且 stack version 前进；
+- clean isolated ChangeSet proposal 会把对应 participant attempt 收口为 terminal
+  `Completed`，但 Task step 在 integration 前仍保持 `Blocked`，避免把“child 已完成”和
+  “parent 已应用”混为同一状态。
+
+完成证据包括 canonical worker-loop dogfood、automatic compaction 后 Task/Intent 双 projection
+恢复、全 workspace Rust tests、Clippy、format/check、Desktop generated-contract/UI system/
+typecheck/244 tests/build，以及 deterministic eval campaign。§13 的 admission、lineage、shared/
+drift fail-closed、drop/recovery、provider/renderer authority negative cases 均由 typed deterministic
+evidence 验证；真实 provider smoke 不作为 Intent ownership 或 mutation authority 的 oracle。
 
 依赖顺序：
 
@@ -1031,7 +1052,7 @@ replace/rebase mutation 不再混入 V1 active slices；它们必须在 R51.4 do
 完成 R51.0-R51.7 后，Intent Stack V1 的 accepted-plan、provenance、read-only review 与安全
 selective drop 闭环完成；它仍不等于通用语义 merge、外部副作用补偿或项目级长期记忆。
 
-本 RFC 当前为 `proposed / implementation active`。R51.0 已冻结具体 Rust/DTO 命名、digest
+本 RFC 当前为 `accepted / implementation complete`。R51.0 已冻结具体 Rust/DTO 命名、digest
 算法、错误 taxonomy 与 golden fixtures；R51.1 已接入 host-authorized append-only
 admission/projection 和 TaskPlan mixed writer batch；R51.2 已接入 Task/Chat exact execution、
 ChangeSet、parent mutation 与 criterion verification lineage；R51.3 已接入 canonical layer
@@ -1040,5 +1061,6 @@ inspect projection；R51.4 已接入 host-authorized exact drop、RFC-0002 batch
 no-replay recovery、verification invalidation、checkpoint conflict 与 retention transition。
 R51.5 已接入 dependency closure、read-only revise/replace impact、immutable supersession、
 多版本恢复和 exact fork/workspace adoption；R51.6 已接入 bounded TUI review、exact Drop
-确认、retention/conflict、responsive/mouse 与 stale-response/session-switch 防护。typed
-HTTP/Desktop/automation adapter 仍必须等待 R51.7 的独立门禁完成。
+确认、retention/conflict、responsive/mouse 与 stale-response/session-switch 防护；R51.7 已完成
+typed HTTP/Desktop/automation adapter、Plan-to-Intent admission、Task child grant/lineage、
+promotion materialization、automatic compaction 存续与 canonical real worker-loop dogfood。
