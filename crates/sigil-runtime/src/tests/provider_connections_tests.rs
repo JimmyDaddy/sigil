@@ -1832,7 +1832,9 @@ async fn cancelled_connection_inventory_does_not_start_stored_credential_work() 
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn catalog_is_connection_scoped_single_flight_and_uses_exact_offline_cache() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, request_count, server) = spawn_catalog_server(
         200,
         r#"{"data":[{"id":"local-alpha"},{"id":"local-beta"},{"id":"local-alpha"}]}"#,
@@ -2034,7 +2036,9 @@ async fn catalog_honors_standard_proxy_environment() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn catalog_single_flight_waiters_inherit_auth_failure_instead_of_stale_ready_cache() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, request_count, server) = spawn_catalog_sequence_server(vec![
         (
             200,
@@ -2087,7 +2091,9 @@ async fn catalog_single_flight_waiters_inherit_auth_failure_instead_of_stale_rea
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn process_staged_catalog_cache_isolated_by_secret_account() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, request_count, server) = spawn_catalog_server(
         200,
         r#"{"data":[{"id":"private-deployment"}]}"#,
@@ -2371,7 +2377,9 @@ fn catalog_cache_rejects_symlink_ancestor_without_mutating_the_target_tree() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn catalog_distinguishes_empty_auth_unsupported_and_malformed() {
+    let _environment_guard = crate::test_env::lock();
     for (status, body, expected) in [
         (200, r#"{"data":[]}"#, ModelCatalogState::Empty),
         (
@@ -2419,7 +2427,9 @@ async fn catalog_distinguishes_empty_auth_unsupported_and_malformed() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn staged_and_environment_catalogs_remain_process_memory_only() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, request_count, server) = spawn_catalog_server(
         200,
         r#"{"data":[{"id":"private-deployment"}]}"#,
