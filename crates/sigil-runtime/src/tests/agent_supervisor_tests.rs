@@ -27,8 +27,9 @@ use sigil_kernel::{
     IntegrationContentClass, IntegrationEffect, IntegrationObservedEffect, IntegrationPlanId,
     IntegrationProposalFacts, IntegrationProposalSpec, InteractionMode,
     IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
-    ModelRef, MultiAgentMode, NetworkPolicy, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError,
+    ModelRef, MultiAgentMode, NetworkPolicy, PermissionConfig, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanId, PlanPermissionGrantedEntry, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError,
     ProviderRequestRejection, ReasoningStreamSupport, ResolvedModelRoute, RootConfig,
     RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
     TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact,
@@ -53,7 +54,8 @@ use super::{
     AgentResultMaterialization, AgentSupervisor, AgentSupervisorTaskChildRunner,
     AgentTaskChildStart, REQUEST_TASK_DISCOVERY_TOOL_NAME, agent_terminal_status_from_task_child,
     planner_tools_with_discovery, task_child_status_from_outcome,
-    task_runner::bind_child_integration_facts, tool_scope_is_write_capable,
+    task_runner::{bind_child_integration_facts, inherit_task_plan_permission_grant},
+    tool_scope_is_write_capable,
 };
 use crate::{AgentToolRuntime, EXPLORE_PROFILE_ID};
 
@@ -118,6 +120,51 @@ fn participant_session_ref_for(step_id: &str) -> Result<SessionRef> {
     let task_id = TaskId::new("task_1")?;
     let attempt_id = participant_attempt_id_for(step_id)?;
     task_participant_session_ref(&task_id, &attempt_id)
+}
+
+#[test]
+fn task_child_inherits_only_its_exact_plan_permission_grant_once() -> Result<()> {
+    let task_id = TaskId::new("task_granted")?;
+    let grant = PlanPermissionGrantedEntry {
+        plan_id: PlanId::new("plan_granted")?,
+        plan_hash: format!("sha256:{}", "a".repeat(64)),
+        task_id: task_id.clone(),
+        workspace_snapshot_id: Some("snapshot-granted".to_owned()),
+        permission: PlanApprovalPermission::WorkspaceEdits,
+        scope: PlanApprovalScope {
+            summary: "edit the accepted task paths".to_owned(),
+            workspace_paths: vec!["src/lib.rs".to_owned()],
+        },
+        expires: PlanApprovalExpiry::Session,
+        granted_at_ms: 42,
+    };
+    let mut parent = Session::new("provider", "model");
+    parent.append_control(ControlEntry::PlanPermissionGranted(grant.clone()))?;
+    let mut child = Session::new("provider", "model");
+
+    inherit_task_plan_permission_grant(&parent, &mut child, &task_id)?;
+    inherit_task_plan_permission_grant(&parent, &mut child, &task_id)?;
+
+    assert_eq!(
+        child
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(inherited))
+                    if inherited == &grant
+            ))
+            .count(),
+        1
+    );
+    let mut other_child = Session::new("provider", "model");
+    inherit_task_plan_permission_grant(
+        &parent,
+        &mut other_child,
+        &TaskId::new("task_not_granted")?,
+    )?;
+    assert!(other_child.entries().is_empty());
+    Ok(())
 }
 
 struct TextProvider {

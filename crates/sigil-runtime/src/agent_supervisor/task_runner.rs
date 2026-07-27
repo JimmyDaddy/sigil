@@ -199,7 +199,8 @@ impl AgentSupervisorTaskChildRunner {
         H: EventHandler + Send,
     {
         let child_task_id = task_participant_child_task_id(&task.task_id, &attempt_id)?;
-        let child_session = build_child_session(parent_session, &child_session_ref)?;
+        let mut child_session = build_child_session(parent_session, &child_session_ref)?;
+        inherit_task_plan_permission_grant(parent_session, &mut child_session, &task.task_id)?;
         let child_thread = self.supervisor.begin_task_child_thread(
             parent_session,
             handler,
@@ -460,7 +461,12 @@ impl AgentSupervisorTaskChildRunner {
         let child_task_id =
             task_participant_child_task_id(&request.task.task_id, &request.attempt_id)?;
         let child_session_ref = request.child_session_ref.clone();
-        let child_session = build_child_session(parent_session, &child_session_ref)?;
+        let mut child_session = build_child_session(parent_session, &child_session_ref)?;
+        inherit_task_plan_permission_grant(
+            parent_session,
+            &mut child_session,
+            &request.task.task_id,
+        )?;
         if let Err(error) = self
             .provider_pressure
             .check(agent.provider().name(), child_session.model_name())
@@ -2455,6 +2461,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     return Err(error);
                 }
             };
+            inherit_task_plan_permission_grant(
+                parent_session,
+                &mut child_session,
+                &request.task.task_id,
+            )?;
             let mut route_handler = SupervisorTaskApprovalRouteHandler {
                 inner: approval_handler,
                 parent_session,
@@ -3687,6 +3698,33 @@ pub(super) fn build_child_session(
     let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
     crate::attach_session_url_capability_store(&mut session)?;
     Ok(session)
+}
+
+pub(crate) fn inherit_task_plan_permission_grant(
+    parent_session: &Session,
+    child_session: &mut Session,
+    task_id: &TaskId,
+) -> Result<()> {
+    let grant = parent_session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) = entry else {
+            return None;
+        };
+        (&grant.task_id == task_id).then(|| grant.clone())
+    });
+    let Some(grant) = grant else {
+        return Ok(());
+    };
+    let already_inherited = child_session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(existing))
+                if existing == &grant
+        )
+    });
+    if !already_inherited {
+        child_session.append_control(ControlEntry::PlanPermissionGranted(grant))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn task_child_status_from_outcome(
