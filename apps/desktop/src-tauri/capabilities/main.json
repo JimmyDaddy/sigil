@@ -20,6 +20,7 @@
     "allow-desktop-conversation-recovery",
     "allow-desktop-approval",
     "allow-desktop-verification",
+    "allow-desktop-intent-stack",
     "allow-desktop-support",
     "allow-desktop-provider-setup",
     "core:event:allow-listen",

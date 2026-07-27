@@ -706,6 +706,17 @@ export function createCatalogWorkbenchBridge(
     acceptTaskIntegration: async () => {
       throw new Error("no integration review");
     },
+    intentStack: async () => ({
+      status: "history_unavailable",
+      schemaVersion: 1,
+      safeMessage: "No durable intents were recorded.",
+    }),
+    previewIntentDrop: async () => {
+      throw new Error("no Intent Drop preview");
+    },
+    executeIntentDrop: async () => {
+      throw new Error("no Intent Drop preview");
+    },
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     subscribeAppearance: async () => () => undefined,

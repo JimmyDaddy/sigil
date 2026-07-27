@@ -62,6 +62,11 @@ import type {
   TaskIntegrationAcceptance,
   TaskIntegrationReview,
   TaskIntegrationReviewBinding,
+  IntentDropBinding,
+  IntentDropExecution,
+  IntentDropPreview,
+  IntentStackState,
+  IntentVersionRef,
   TaskPauseBinding,
   SupportDoctorReport,
   SupportSaveSummary,
@@ -197,6 +202,17 @@ export interface DesktopBridge {
     sessionId: string,
     request: TaskIntegrationReviewBinding,
   ): Promise<TaskIntegrationAcceptance>;
+  intentStack(workspaceId: string, sessionId: string): Promise<IntentStackState>;
+  previewIntentDrop(
+    workspaceId: string,
+    sessionId: string,
+    intentRef: IntentVersionRef,
+  ): Promise<IntentDropPreview>;
+  executeIntentDrop(
+    workspaceId: string,
+    sessionId: string,
+    request: IntentDropBinding,
+  ): Promise<IntentDropExecution>;
   subscribeRunEvents(listener: (event: TimelineEvent) => void): Promise<() => void>;
   subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
   subscribeAppearance(listener: (snapshot: AppearanceSnapshot) => void): Promise<() => void>;
@@ -376,6 +392,18 @@ export const desktopBridge: DesktopBridge = {
     }),
   acceptTaskIntegration: (workspaceId, sessionId, request) =>
     invoke<TaskIntegrationAcceptance>("desktop_accept_task_integration", {
+      workspaceId,
+      input: { sessionId, request },
+    }),
+  intentStack: (workspaceId, sessionId) =>
+    invoke<IntentStackState>("desktop_intent_stack", { workspaceId, sessionId }),
+  previewIntentDrop: (workspaceId, sessionId, intentRef) =>
+    invoke<IntentDropPreview>("desktop_preview_intent_drop", {
+      workspaceId,
+      input: { sessionId, intentRef },
+    }),
+  executeIntentDrop: (workspaceId, sessionId, request) =>
+    invoke<IntentDropExecution>("desktop_execute_intent_drop", {
       workspaceId,
       input: { sessionId, request },
     }),

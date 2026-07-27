@@ -29,11 +29,12 @@ use crate::{
         desktop_conversation_compaction_preview, desktop_conversation_queue,
         desktop_conversation_recovery, desktop_create_session,
         desktop_delete_invalid_session_source, desktop_delete_session, desktop_display,
-        desktop_execute_session_catalog_batch, desktop_export_support_bundle,
+        desktop_execute_intent_drop, desktop_execute_session_catalog_batch,
+        desktop_export_support_bundle, desktop_intent_stack,
         desktop_migrate_legacy_provider_connections, desktop_open_external_url,
         desktop_open_recent_workspace, desktop_open_session, desktop_pause_task,
-        desktop_pick_workspace, desktop_plan_session_catalog_batch, desktop_provider_connections,
-        desktop_provider_setup_catalog, desktop_quarantine_session,
+        desktop_pick_workspace, desktop_plan_session_catalog_batch, desktop_preview_intent_drop,
+        desktop_provider_connections, desktop_provider_setup_catalog, desktop_quarantine_session,
         desktop_recheck_legacy_provider_migration, desktop_rename_session,
         desktop_rerun_verification, desktop_resolve_approval, desktop_run_context,
         desktop_save_provider_setup, desktop_set_appearance, desktop_start_run,
@@ -151,6 +152,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_rerun_verification,
             desktop_task_integration_review,
             desktop_accept_task_integration,
+            desktop_intent_stack,
+            desktop_preview_intent_drop,
+            desktop_execute_intent_drop,
             desktop_set_appearance
         ])
         .build(tauri::generate_context!())?;

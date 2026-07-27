@@ -60,6 +60,7 @@ export function Composer({
   onOpenAgentWorkbench,
   onOpenQueue,
   onPreviewCompaction,
+  onOpenIntentStack,
   onNotice,
   onSubmit,
   onInterruptAndRunNext,
@@ -94,6 +95,7 @@ export function Composer({
   onOpenAgentWorkbench: (query: string) => void;
   onOpenQueue: () => void;
   onPreviewCompaction: () => void;
+  onOpenIntentStack: () => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
   onInterruptAndRunNext: (prompt: string) => Promise<boolean>;
@@ -231,6 +233,9 @@ export function Composer({
     switch (suggestion.clientAction) {
       case "preview_compaction":
         onPreviewCompaction();
+        return true;
+      case "open_intent_stack":
+        onOpenIntentStack();
         return true;
       case "new_session":
         return onNewSession();

@@ -891,8 +891,30 @@ V12，OpenAPI 与 Desktop 生成契约同步冻结 Intent Stack 的 bounded DTO�
 absolute path、raw patch、file content、permission policy 与 approval authority。
 
 TUI worker 已改为调用同一 application command，不再私有重建 permission/authority 逻辑。
-本 checkpoint 尚未宣告 R51.7 完成；Desktop 操作面、CLI automation、canonical dogfood、
-real worker-loop E2E 与 §13 全门槛将在后续批次继续收口。
+
+R51.7 第二批已完成 Desktop typed surface：
+
+- `sigil-desktop` 只定义独立、bounded、`deny_unknown_fields` 的 Intent Stack wire DTO 和
+  typed local HTTP client；crate 不依赖 kernel/runtime/http，也不向 renderer 投影 bearer、
+  session path、workspace root、raw patch、file content、permission policy 或 approval
+  authority；
+- Tauri IPC 只开放 inspect、exact preview 和 digest-bound execute 三个 allowlist command，
+  native host 重新校验 session/Intent identity、stack version 与 canonical digest。renderer
+  的 execute input 只能包含 `operationId`、`stackVersion` 和 `previewDigest`；
+- Desktop 会话页提供独立 Intent Stack 抽屉和 `/intents` application command，支持
+  list/detail、acceptance criteria、bounded artifact、retention/conflict、exact file effect
+  review。active run、pending approval、read-only provenance、out-of-scope、non-leaf 或任一
+  serialized conflict 都会 fail closed；
+- wide viewport 使用 list/detail 双栏，narrow viewport 上下堆叠；一个清晰 destructive
+  confirmation 作为主动作。legacy session 保持 `HistoryUnavailable`，不会伪造空 stack。
+
+完成证据覆盖 typed DTO/private-field rejection、path traversal、exact command binding、
+camelCase IPC、conflict-disable、`/intents` local routing、narrow CSS、Safari 13 runtime floor、
+Desktop 244 个前端测试、两侧 Rust crate 全量测试、all-target check、Clippy、UI system 和
+generated contract drift。
+
+本 checkpoint 尚未宣告 R51.7 完成；CLI automation、automatic compaction 后的任务/Intent
+存续、canonical dogfood、real worker-loop E2E 与 §13 全门槛将在后续批次继续收口。
 
 依赖顺序：
 

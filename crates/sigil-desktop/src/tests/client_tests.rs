@@ -18,6 +18,103 @@ fn event_stream_owner_revision_requires_exact_opaque_format() {
 }
 
 #[test]
+fn intent_stack_projection_accepts_only_bounded_private_free_contract() {
+    let state: DesktopIntentStackState = serde_json::from_value(serde_json::json!({
+        "status": "available",
+        "schema_version": 1,
+        "stack": {
+            "schema_version": 1,
+            "stack_id": "stack-main",
+            "stack_version": 7,
+            "authority_state": "active",
+            "plan_digest": format!("sha256:jcs-v1:{}", "a".repeat(64)),
+            "intents": [{
+                "intent_ref": {"intent_id": "intent-core", "version": 2},
+                "title": "Implement exact drop",
+                "statement": "Bind the renderer to a fresh exact preview.",
+                "acceptance_criteria": [{
+                    "criterion_id": "criterion-exact-binding",
+                    "statement": "Only exact operation bindings cross IPC.",
+                    "required": true
+                }],
+                "depends_on": [],
+                "source": {"kind": "user_turn", "source_turn_id": "turn-17"},
+                "definition_state": "accepted",
+                "application_state": "applied",
+                "exclusive_artifact_count": 1,
+                "shared_artifact_count": 0,
+                "unowned_artifact_count": 0,
+                "drifted_artifact_count": 0,
+                "unavailable_artifact_count": 0,
+                "advisory_criterion_count": 0,
+                "system_verified_criterion_count": 1,
+                "artifacts": [{
+                    "artifact_id": "artifact-client",
+                    "artifact_kind": "file_hunk",
+                    "ownership": "exclusive",
+                    "availability": "available",
+                    "normalized_relative_path": "apps/desktop/src/bridge.ts"
+                }],
+                "available_actions": ["drop"]
+            }],
+            "conflicts": []
+        }
+    }))
+    .expect("bounded stack should decode");
+
+    validate_intent_stack_state(&state).expect("bounded stack should validate");
+
+    let with_private_field = serde_json::json!({
+        "status": "history_unavailable",
+        "schema_version": 1,
+        "safe_message": "No durable Intent history is available.",
+        "session_path": "/private/session.jsonl"
+    });
+    assert!(serde_json::from_value::<DesktopIntentStackState>(with_private_field).is_err());
+}
+
+#[test]
+fn intent_drop_preview_rejects_path_escape_and_command_has_only_exact_binding() {
+    let preview: DesktopIntentOperationPreview = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "operation_id": "operation-drop-core",
+        "operation_kind": "drop",
+        "stack_id": "stack-main",
+        "stack_version": 7,
+        "target_intents": [{"intent_id": "intent-core", "version": 2}],
+        "target_is_leaf": true,
+        "workspace_revision": 19,
+        "file_effects": [{
+            "normalized_relative_path": "../private-key",
+            "action": "update",
+            "artifact_ids": ["artifact-client"]
+        }],
+        "retained_intents": [],
+        "verification_impacts": [],
+        "conflicts": [],
+        "preview_digest": format!("sha256:jcs-v1:{}", "b".repeat(64))
+    }))
+    .expect("wire shape should decode before path validation");
+    assert!(validate_intent_drop_preview(&preview).is_err());
+
+    let request = DesktopIntentDropRequest {
+        operation_id: "operation-drop-core".to_owned(),
+        stack_version: 7,
+        preview_digest: format!("sha256:jcs-v1:{}", "b".repeat(64)),
+    };
+    validate_intent_drop_request(&request).expect("exact binding should validate");
+    let value = serde_json::to_value(request).expect("request should encode");
+    let object = value.as_object().expect("request should be an object");
+    assert_eq!(object.len(), 3);
+    assert!(object.contains_key("operation_id"));
+    assert!(object.contains_key("stack_version"));
+    assert!(object.contains_key("preview_digest"));
+    assert!(!object.contains_key("path"));
+    assert!(!object.contains_key("authority"));
+    assert!(!object.contains_key("policy"));
+}
+
+#[test]
 fn typed_client_debug_never_projects_transport_or_bearer_material() {
     let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));
     let client = DesktopHttpClient::new(
@@ -81,7 +178,17 @@ fn run_context_decodes_exact_typed_server_contract() {
         "last_prompt_tokens": 42_000,
         "context_window_source": "provider",
         "extension_catalog": {
-            "commands": [],
+            "commands": [{
+                "canonical": "/intents",
+                "aliases": [],
+                "label": "Intent Stack",
+                "description": "Review durable intents",
+                "argument_hint": null,
+                "completes_with_space": false,
+                "client_action": "open_intent_stack",
+                "available": true,
+                "unavailable_reason": null
+            }],
             "skills": [],
             "agents": []
         }
@@ -105,6 +212,10 @@ fn run_context_decodes_exact_typed_server_contract() {
     assert_eq!(
         context.model_selection,
         crate::DesktopModelSelectionPolicy::FreshSession
+    );
+    assert_eq!(
+        context.extension_catalog.commands[0].client_action,
+        Some(crate::DesktopApplicationClientAction::OpenIntentStack)
     );
 }
 

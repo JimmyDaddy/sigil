@@ -58,6 +58,9 @@ use crate::{
     run_streams::DesktopRunStreamState,
 };
 
+mod intent_stack;
+pub(crate) use intent_stack::*;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopBootstrap {
@@ -2827,6 +2830,7 @@ fn agent_handoff_status_label(status: DesktopAgentHandoffStatus) -> &'static str
 fn application_client_action_label(value: DesktopApplicationClientAction) -> &'static str {
     match value {
         DesktopApplicationClientAction::PreviewCompaction => "preview_compaction",
+        DesktopApplicationClientAction::OpenIntentStack => "open_intent_stack",
         DesktopApplicationClientAction::NewSession => "new_session",
         DesktopApplicationClientAction::FocusEffort => "focus_effort",
         DesktopApplicationClientAction::FocusModel => "focus_model",

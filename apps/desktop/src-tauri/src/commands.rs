@@ -39,6 +39,8 @@ use crate::{
         DesktopConversationQueueCommandReceipt, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandInput, DesktopConversationRecoveryCommandReceipt,
         DesktopConversationRecoveryView, DesktopExternalUrlInput,
+        DesktopIntentDropExecutionSummary, DesktopIntentDropInput, DesktopIntentDropPreviewInput,
+        DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
         DesktopProviderConnectionInventorySummary, DesktopProviderLegacyMigrationSummary,
         DesktopProviderSetupCatalogInput, DesktopProviderSetupCatalogSummary,
         DesktopProviderSetupSaveInput, DesktopProviderSetupSaveSummary, DesktopRunAttachInput,
@@ -1272,6 +1274,71 @@ pub(crate) async fn desktop_accept_task_integration(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_intent_stack(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopIntentStackSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .intent_stack(&session_id)
+        .await
+        .map(Into::into)
+        .map_err(project_intent_stack_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_preview_intent_drop(
+    workspace_id: String,
+    input: DesktopIntentDropPreviewInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopIntentDropPreviewSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_intent_version_binding(&input.intent_ref)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .preview_intent_drop(&input.session_id, input.intent_ref.into())
+        .await
+        .map(Into::into)
+        .map_err(project_intent_stack_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_execute_intent_drop(
+    workspace_id: String,
+    input: DesktopIntentDropInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopIntentDropExecutionSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_intent_drop_binding(&input.request)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .execute_intent_drop(&input.session_id, input.request.into())
+        .await
+        .map(|receipt| receipt.execution.into())
+        .map_err(project_intent_stack_client_error)
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_catalog(
     workspace_id: String,
     request: DesktopCatalogRequest,
@@ -1999,6 +2066,50 @@ fn validate_task_integration_acceptance(
     Ok(())
 }
 
+fn validate_intent_version_binding(
+    intent_ref: &crate::ipc::DesktopIntentVersionBinding,
+) -> Result<(), DesktopCommandError> {
+    if intent_ref.version == 0 || !valid_intent_identity(&intent_ref.intent_id) {
+        return Err(DesktopCommandError::new(
+            "intent_stack_request_invalid",
+            "The selected Intent identity is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_intent_drop_binding(
+    request: &crate::ipc::DesktopIntentDropBinding,
+) -> Result<(), DesktopCommandError> {
+    if request.stack_version == 0
+        || !valid_intent_identity(&request.operation_id)
+        || !valid_intent_digest(&request.preview_digest)
+    {
+        return Err(DesktopCommandError::new(
+            "intent_stack_request_invalid",
+            "The Intent Drop preview binding is invalid or stale.",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_intent_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_intent_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:jcs-v1:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
 fn workspace_display_name(path: &Path) -> Result<String, DesktopCommandError> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -2173,6 +2284,45 @@ fn project_task_control_client_error(error: DesktopClientError) -> DesktopComman
                 "The Task changed or another foreground operation is active.",
             )
             .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            _ => return project_client_error(error),
+        };
+        return projected;
+    }
+    project_client_error(error)
+}
+
+fn project_intent_stack_client_error(error: DesktopClientError) -> DesktopCommandError {
+    if let DesktopClientError::Rejected {
+        code: Some(code), ..
+    } = &error
+    {
+        let projected = match code.as_str() {
+            "invalid_intent_stack_request" => DesktopCommandError::new(
+                "intent_stack_request_invalid",
+                "The selected Intent operation is invalid.",
+            ),
+            "intent_stack_stale" => DesktopCommandError::new(
+                "intent_stack_stale",
+                "The Intent Stack changed. Review a fresh preview before confirming.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "intent_stack_permission_required" => DesktopCommandError::new(
+                "intent_stack_permission_required",
+                "Current permission mode or workspace trust does not allow Intent Drop.",
+            ),
+            "intent_stack_conflict" => DesktopCommandError::new(
+                "intent_stack_conflict",
+                "The Intent contribution is shared, drifted, unavailable, or no longer exact.",
+            )
+            .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
+            "intent_stack_unavailable" => DesktopCommandError::new(
+                "intent_stack_unavailable",
+                "Durable Intent history is temporarily unavailable.",
+            )
+            .with_recovery_actions([
+                DesktopRecoveryAction::RetryCurrent,
+                DesktopRecoveryAction::OpenDiagnostics,
+            ]),
             _ => return project_client_error(error),
         };
         return projected;

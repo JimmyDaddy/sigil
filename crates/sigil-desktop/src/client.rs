@@ -16,7 +16,10 @@ use crate::{
         DesktopConversationQueueCommandAction, DesktopConversationQueueCommandReceipt,
         DesktopConversationQueueCommandRequest, DesktopConversationQueueView,
         DesktopConversationRecoveryCommandAction, DesktopConversationRecoveryCommandReceipt,
-        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopProviderConnectionInventory,
+        DesktopConversationRecoveryView, DesktopErrorResponse, DesktopIntentDropCommandReceipt,
+        DesktopIntentDropPreviewRequest, DesktopIntentDropRequest, DesktopIntentOperationKind,
+        DesktopIntentOperationPreview, DesktopIntentSource, DesktopIntentStackState,
+        DesktopIntentVersionRef, DesktopProviderConnectionInventory,
         DesktopProviderLegacyMigrationResult, DesktopProviderSetupCatalog,
         DesktopProviderSetupCatalogRequest, DesktopProviderSetupSaveRequest,
         DesktopProviderSetupSaveResult, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
@@ -44,6 +47,13 @@ const MAX_TASK_INTEGRATION_REVIEW_RESPONSE_BYTES: usize =
     MAX_TASK_INTEGRATION_DIFF_BYTES * 6 + 1024 * 1024;
 const MAX_TASK_INTEGRATION_ROWS: usize = 512;
 const DESKTOP_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION: u16 = 1;
+const DESKTOP_INTENT_STACK_SCHEMA_VERSION: u16 = 1;
+const MAX_DESKTOP_INTENTS: usize = 64;
+const MAX_DESKTOP_INTENT_CRITERIA: usize = 64;
+const MAX_DESKTOP_INTENT_DEPENDENCIES: usize = 64;
+const MAX_DESKTOP_INTENT_ARTIFACTS: usize = 512;
+const MAX_DESKTOP_INTENT_CONFLICTS: usize = 512;
+const MAX_DESKTOP_INTENT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_SSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RUN_EVENT_NAME: &str = "run_event";
@@ -693,6 +703,79 @@ impl DesktopHttpClient {
         .await
     }
 
+    /// Projects the bounded adapter-neutral Intent Stack for one durable session.
+    pub async fn intent_stack(
+        &self,
+        session_id: &str,
+    ) -> Result<DesktopIntentStackState, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let state = self
+            .get_json(
+                self.route(["sessions", session_id, "intents"])?,
+                StatusCode::OK,
+            )
+            .await?;
+        validate_intent_stack_state(&state).map_err(|_| DesktopClientError::InvalidResponse)?;
+        Ok(state)
+    }
+
+    /// Produces one fresh exact Intent Drop preview.
+    pub async fn preview_intent_drop(
+        &self,
+        session_id: &str,
+        intent_ref: DesktopIntentVersionRef,
+    ) -> Result<DesktopIntentOperationPreview, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_intent_version_ref(&intent_ref)?;
+        let request = DesktopIntentDropPreviewRequest {
+            intent_ref: intent_ref.clone(),
+        };
+        let preview = self
+            .post_json(
+                self.route(["sessions", session_id, "intents", "drop-preview"])?,
+                &request,
+                StatusCode::OK,
+            )
+            .await?;
+        validate_intent_drop_preview(&preview).map_err(|_| DesktopClientError::InvalidResponse)?;
+        if preview.target_intents.as_slice() != [intent_ref] {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(preview)
+    }
+
+    /// Executes one exact digest-bound Intent Drop command.
+    pub async fn execute_intent_drop(
+        &self,
+        session_id: &str,
+        payload: DesktopIntentDropRequest,
+    ) -> Result<DesktopIntentDropCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_intent_drop_request(&payload)?;
+        let command = self.command(session_id, None, payload.clone());
+        let expected_command_id = command.command_id.clone();
+        let expected_client_id = command.client_id.clone();
+        let receipt: DesktopIntentDropCommandReceipt = self
+            .post_json(
+                self.route(["sessions", session_id, "intents", "drop"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != expected_command_id
+            || receipt.client_id != expected_client_id
+            || receipt.session_id != session_id
+            || receipt.execution.preview.operation_id != payload.operation_id
+            || receipt.execution.preview.stack_version != payload.stack_version
+            || receipt.execution.preview.preview_digest != payload.preview_digest
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        validate_intent_drop_preview(&receipt.execution.preview)
+            .map_err(|_| DesktopClientError::InvalidResponse)?;
+        Ok(receipt)
+    }
+
     /// Projects typed model, permission-mode, and context usage facts for one session.
     pub async fn run_context(
         &self,
@@ -1059,6 +1142,209 @@ fn validate_owner_revision(value: &str) -> Result<(), DesktopClientError> {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     {
         return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_intent_stack_state(state: &DesktopIntentStackState) -> Result<(), DesktopClientError> {
+    match state {
+        DesktopIntentStackState::HistoryUnavailable {
+            schema_version,
+            safe_message,
+        } => {
+            if *schema_version != DESKTOP_INTENT_STACK_SCHEMA_VERSION
+                || safe_message.is_empty()
+                || safe_message.len() > MAX_DESKTOP_INTENT_TEXT_BYTES
+                || safe_message.chars().any(char::is_control)
+            {
+                return Err(DesktopClientError::InvalidResponse);
+            }
+            Ok(())
+        }
+        DesktopIntentStackState::Available {
+            schema_version,
+            stack,
+        } => {
+            if *schema_version != DESKTOP_INTENT_STACK_SCHEMA_VERSION
+                || stack.schema_version != DESKTOP_INTENT_STACK_SCHEMA_VERSION
+                || stack.stack_version == 0
+                || stack.intents.len() > MAX_DESKTOP_INTENTS
+                || stack.conflicts.len() > MAX_DESKTOP_INTENT_CONFLICTS
+            {
+                return Err(DesktopClientError::InvalidResponse);
+            }
+            validate_intent_identity(&stack.stack_id)?;
+            validate_intent_digest(&stack.plan_digest)?;
+            let mut intent_refs = std::collections::BTreeSet::new();
+            for intent in &stack.intents {
+                validate_intent_version_ref(&intent.intent_ref)?;
+                if !intent_refs.insert((
+                    intent.intent_ref.intent_id.as_str(),
+                    intent.intent_ref.version,
+                )) || intent.title.is_empty()
+                    || intent.title.len() > 256
+                    || intent.statement.len() > MAX_DESKTOP_INTENT_TEXT_BYTES
+                    || intent.acceptance_criteria.len() > MAX_DESKTOP_INTENT_CRITERIA
+                    || intent.depends_on.len() > MAX_DESKTOP_INTENT_DEPENDENCIES
+                    || intent.artifacts.len() > MAX_DESKTOP_INTENT_ARTIFACTS
+                {
+                    return Err(DesktopClientError::InvalidResponse);
+                }
+                for criterion in &intent.acceptance_criteria {
+                    validate_intent_identity(&criterion.criterion_id)?;
+                    if criterion.statement.is_empty()
+                        || criterion.statement.len() > MAX_DESKTOP_INTENT_TEXT_BYTES
+                    {
+                        return Err(DesktopClientError::InvalidResponse);
+                    }
+                }
+                for dependency in &intent.depends_on {
+                    validate_intent_identity(dependency)?;
+                }
+                match &intent.source {
+                    DesktopIntentSource::UserTurn { source_turn_id }
+                    | DesktopIntentSource::AcceptedSuggestion { source_turn_id } => {
+                        validate_bounded_intent_text(source_turn_id, 512)?;
+                    }
+                    DesktopIntentSource::TrustedSpec { safe_source_label } => {
+                        validate_bounded_intent_text(
+                            safe_source_label,
+                            MAX_DESKTOP_INTENT_TEXT_BYTES,
+                        )?;
+                    }
+                }
+                for artifact in &intent.artifacts {
+                    validate_intent_identity(&artifact.artifact_id)?;
+                    if let Some(path) = artifact.normalized_relative_path.as_deref() {
+                        validate_normalized_intent_path(path)?;
+                    }
+                }
+            }
+            for conflict in &stack.conflicts {
+                validate_intent_conflict(conflict)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_intent_drop_preview(
+    preview: &DesktopIntentOperationPreview,
+) -> Result<(), DesktopClientError> {
+    if preview.schema_version != DESKTOP_INTENT_STACK_SCHEMA_VERSION
+        || preview.operation_kind != DesktopIntentOperationKind::Drop
+        || preview.stack_version == 0
+        || preview.target_intents.len() != 1
+        || preview.file_effects.len() > MAX_DESKTOP_INTENT_ARTIFACTS
+        || preview.retained_intents.len() > MAX_DESKTOP_INTENTS
+        || preview.conflicts.len() > MAX_DESKTOP_INTENT_CONFLICTS
+        || preview.expires_at_ms == Some(0)
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    validate_intent_identity(&preview.operation_id)?;
+    validate_intent_identity(&preview.stack_id)?;
+    validate_intent_digest(&preview.preview_digest)?;
+    for intent_ref in preview
+        .target_intents
+        .iter()
+        .chain(preview.retained_intents.iter())
+    {
+        validate_intent_version_ref(intent_ref)?;
+    }
+    for effect in &preview.file_effects {
+        validate_normalized_intent_path(&effect.normalized_relative_path)?;
+        if effect.artifact_ids.is_empty() {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        for artifact_id in &effect.artifact_ids {
+            validate_intent_identity(artifact_id)?;
+        }
+    }
+    for impact in &preview.verification_impacts {
+        validate_bounded_intent_text(&impact.receipt_id, 512)?;
+    }
+    for conflict in &preview.conflicts {
+        validate_intent_conflict(conflict)?;
+    }
+    Ok(())
+}
+
+fn validate_intent_drop_request(
+    request: &DesktopIntentDropRequest,
+) -> Result<(), DesktopClientError> {
+    if request.stack_version == 0 {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    validate_intent_identity(&request.operation_id)?;
+    validate_intent_digest(&request.preview_digest)
+}
+
+fn validate_intent_version_ref(
+    intent_ref: &DesktopIntentVersionRef,
+) -> Result<(), DesktopClientError> {
+    if intent_ref.version == 0 {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    validate_intent_identity(&intent_ref.intent_id)
+}
+
+fn validate_intent_conflict(
+    conflict: &crate::DesktopIntentConflict,
+) -> Result<(), DesktopClientError> {
+    if let Some(intent_ref) = conflict.intent_ref.as_ref() {
+        validate_intent_version_ref(intent_ref)?;
+    }
+    if let Some(artifact_id) = conflict.artifact_id.as_deref() {
+        validate_intent_identity(artifact_id)?;
+    }
+    validate_bounded_intent_text(&conflict.safe_reason, MAX_DESKTOP_INTENT_TEXT_BYTES)
+}
+
+fn validate_intent_identity(value: &str) -> Result<(), DesktopClientError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_bounded_intent_text(value: &str, max_bytes: usize) -> Result<(), DesktopClientError> {
+    if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_intent_digest(value: &str) -> Result<(), DesktopClientError> {
+    let Some(hash) = value.strip_prefix("sha256:jcs-v1:") else {
+        return Err(DesktopClientError::InvalidRoute);
+    };
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_normalized_intent_path(value: &str) -> Result<(), DesktopClientError> {
+    if value.is_empty()
+        || value.len() > MAX_DESKTOP_INTENT_TEXT_BYTES
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(DesktopClientError::InvalidResponse);
     }
     Ok(())
 }

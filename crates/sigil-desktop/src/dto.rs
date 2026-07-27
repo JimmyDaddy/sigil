@@ -2,6 +2,9 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+mod intent_stack;
+pub use intent_stack::*;
+
 /// Current command-envelope protocol accepted by `sigil serve`.
 pub const DESKTOP_HTTP_PROTOCOL_VERSION: u16 = 2;
 pub(crate) const DESKTOP_CONVERSATION_DISPLAY_SCHEMA_VERSION: u16 = 1;
@@ -1049,6 +1052,7 @@ pub enum DesktopContextWindowSource {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopApplicationClientAction {
     PreviewCompaction,
+    OpenIntentStack,
     NewSession,
     FocusEffort,
     FocusModel,

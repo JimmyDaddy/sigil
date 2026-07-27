@@ -693,6 +693,7 @@ export type PermissionMode = "read-only" | "manual" | "auto-edit" | "danger-full
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
 export type ApplicationClientAction =
   | "preview_compaction"
+  | "open_intent_stack"
   | "new_session"
   | "focus_effort"
   | "focus_model"
@@ -1074,6 +1075,163 @@ export interface TaskIntegrationAcceptance {
   canContinue: boolean;
   promotionCleanupError?: string;
   parentCleanupError?: string;
+}
+
+export interface IntentVersionRef {
+  intentId: string;
+  version: number;
+}
+
+export type IntentOperationErrorCode =
+  | "unsupported_schema"
+  | "intent_history_unavailable"
+  | "unknown_intent"
+  | "unknown_operation"
+  | "stale_intent_version"
+  | "stale_stack_version"
+  | "invalid_dependency_graph"
+  | "target_not_leaf"
+  | "shared_artifact"
+  | "unowned_artifact"
+  | "drifted_artifact"
+  | "artifact_unavailable"
+  | "artifact_digest_mismatch"
+  | "unsupported_artifact"
+  | "unsupported_side_effect"
+  | "missing_execution_lineage"
+  | "missing_parent_mutation_evidence"
+  | "missing_current_verification_evidence"
+  | "preview_digest_mismatch"
+  | "workspace_revision_mismatch"
+  | "permission_denied"
+  | "approval_authority_unavailable"
+  | "workspace_lease_unavailable"
+  | "workspace_out_of_scope"
+  | "operation_state_conflict"
+  | "intent_state_conflict"
+  | "partial_application"
+  | "reconciliation_required";
+
+export interface IntentAcceptanceCriterion {
+  criterionId: string;
+  statement: string;
+  required: boolean;
+}
+
+export type IntentSource =
+  | { kind: "user_turn"; sourceTurnId: string }
+  | { kind: "accepted_suggestion"; sourceTurnId: string }
+  | { kind: "trusted_spec"; safeSourceLabel: string };
+
+export interface IntentArtifactSummary {
+  artifactId: string;
+  artifactKind:
+    | "file_hunk"
+    | "test_evidence"
+    | "documentation"
+    | "change_set"
+    | "verification_receipt"
+    | "unsupported_side_effect";
+  ownership: "exclusive" | "shared" | "unowned" | "drifted";
+  availability: "available" | "deleted" | "expired" | "corrupted";
+  normalizedRelativePath?: string;
+}
+
+export interface IntentConflict {
+  code: IntentOperationErrorCode;
+  intentRef?: IntentVersionRef;
+  artifactId?: string;
+  safeReason: string;
+}
+
+export interface IntentSummary {
+  intentRef: IntentVersionRef;
+  title: string;
+  statement: string;
+  acceptanceCriteria: IntentAcceptanceCriterion[];
+  dependsOn: string[];
+  source: IntentSource;
+  definitionState: "proposed" | "accepted" | "superseded" | "invalid";
+  applicationState:
+    | "unapplied"
+    | "applied"
+    | "dropped"
+    | "needs_review"
+    | "needs_rebuild"
+    | "read_only"
+    | "out_of_scope";
+  exclusiveArtifactCount: number;
+  sharedArtifactCount: number;
+  unownedArtifactCount: number;
+  driftedArtifactCount: number;
+  unavailableArtifactCount: number;
+  advisoryCriterionCount: number;
+  systemVerifiedCriterionCount: number;
+  artifacts: IntentArtifactSummary[];
+  availableActions: Array<"drop" | "revise_impact_preview" | "replace_impact_preview" | "adopt">;
+}
+
+export interface IntentStackDetails {
+  schemaVersion: number;
+  stackId: string;
+  stackVersion: number;
+  authorityState: "active" | "read_only_provenance" | "out_of_scope";
+  planDigest: string;
+  intents: IntentSummary[];
+  conflicts: IntentConflict[];
+}
+
+export type IntentStackState =
+  | { status: "available"; schemaVersion: number; stack: IntentStackDetails }
+  | { status: "history_unavailable"; schemaVersion: number; safeMessage: string };
+
+export interface IntentFileEffect {
+  normalizedRelativePath: string;
+  action: "create" | "update" | "delete";
+  artifactIds: string[];
+}
+
+export interface IntentVerificationImpact {
+  receiptId: string;
+  impact: "becomes_stale" | "rerun_required";
+}
+
+export interface IntentDropPreview {
+  schemaVersion: number;
+  operationId: string;
+  operationKind: "drop";
+  stackId: string;
+  stackVersion: number;
+  targetIntents: IntentVersionRef[];
+  targetIsLeaf: boolean;
+  workspaceRevision: number;
+  expiresAtMs?: number;
+  fileEffects: IntentFileEffect[];
+  retainedIntents: IntentVersionRef[];
+  verificationImpacts: IntentVerificationImpact[];
+  conflicts: IntentConflict[];
+  previewDigest: string;
+}
+
+export interface IntentDropBinding {
+  operationId: string;
+  stackVersion: number;
+  previewDigest: string;
+}
+
+export interface IntentDropExecution {
+  preview: IntentDropPreview;
+  resolution:
+    | "committed"
+    | "rejected"
+    | "cancelled"
+    | "conflicted"
+    | "partially_applied"
+    | "interrupted";
+  mutationBatchId?: string;
+  committedOperationIds: string[];
+  resultSnapshotId?: string;
+  errorCode?: IntentOperationErrorCode;
 }
 
 export type TimelineEventKind =

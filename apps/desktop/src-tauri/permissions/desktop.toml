@@ -74,6 +74,11 @@ description = "Allows the main local window to inspect and rerun one exact serve
 commands.allow = ["desktop_verification", "desktop_rerun_verification"]
 
 [[permission]]
+identifier = "allow-desktop-intent-stack"
+description = "Allows the main local window to inspect bounded Intent history, preview one exact leaf Drop, and confirm its digest-bound operation."
+commands.allow = ["desktop_intent_stack", "desktop_preview_intent_drop", "desktop_execute_intent_drop"]
+
+[[permission]]
 identifier = "allow-desktop-support"
 description = "Allows the main local window to read redacted diagnostics and ask the native shell to save a private support report."
 commands.allow = ["desktop_support_doctor", "desktop_export_support_bundle"]

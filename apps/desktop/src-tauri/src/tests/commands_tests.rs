@@ -807,6 +807,82 @@ fn task_integration_ipc_projection_is_camel_case_and_private_ref_free() {
 }
 
 #[test]
+fn intent_stack_command_bindings_are_exact_and_fail_closed() {
+    let valid_ref = crate::ipc::DesktopIntentVersionBinding {
+        intent_id: "intent-core".to_owned(),
+        version: 2,
+    };
+    validate_intent_version_binding(&valid_ref).expect("valid intent version should pass");
+    assert!(
+        validate_intent_version_binding(&crate::ipc::DesktopIntentVersionBinding {
+            intent_id: "../intent".to_owned(),
+            version: 2,
+        })
+        .is_err()
+    );
+    assert!(
+        validate_intent_version_binding(&crate::ipc::DesktopIntentVersionBinding {
+            intent_id: "intent-core".to_owned(),
+            version: 0,
+        })
+        .is_err()
+    );
+
+    let request = crate::ipc::DesktopIntentDropBinding {
+        operation_id: "operation-drop-core".to_owned(),
+        stack_version: 7,
+        preview_digest: format!("sha256:jcs-v1:{}", "b".repeat(64)),
+    };
+    validate_intent_drop_binding(&request).expect("exact binding should validate");
+    let json = serde_json::to_value(&request).expect("binding should serialize");
+    let object = json.as_object().expect("binding should be an object");
+    assert_eq!(object.len(), 3);
+    assert!(object.contains_key("operationId"));
+    assert!(object.contains_key("stackVersion"));
+    assert!(object.contains_key("previewDigest"));
+    assert!(!object.contains_key("path"));
+    assert!(!object.contains_key("authority"));
+    assert!(!object.contains_key("policy"));
+
+    assert!(
+        validate_intent_drop_binding(&crate::ipc::DesktopIntentDropBinding {
+            preview_digest: "sha256:jcs-v1:not-a-digest".to_owned(),
+            ..request
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn intent_stack_ipc_projection_is_camel_case_and_host_private_free() {
+    let projected = serde_json::to_value(crate::ipc::DesktopIntentStackSummary::from(
+        sigil_desktop::DesktopIntentStackState::Available {
+            schema_version: 1,
+            stack: sigil_desktop::DesktopIntentStack {
+                schema_version: 1,
+                stack_id: "stack-main".to_owned(),
+                stack_version: 7,
+                authority_state: sigil_desktop::DesktopIntentAuthorityState::Active,
+                plan_digest: format!("sha256:jcs-v1:{}", "a".repeat(64)),
+                intents: Vec::new(),
+                conflicts: Vec::new(),
+            },
+        },
+    ))
+    .expect("Intent Stack should project");
+
+    assert_eq!(projected["schemaVersion"], 1);
+    assert_eq!(projected["stack"]["stackVersion"], 7);
+    assert_eq!(projected["stack"]["authorityState"], "active");
+    let encoded = projected.to_string();
+    assert!(!encoded.contains("workspaceRoot"));
+    assert!(!encoded.contains("sessionPath"));
+    assert!(!encoded.contains("bearer"));
+    assert!(!encoded.contains("policyDigest"));
+    assert!(!encoded.contains("approvalAuthority"));
+}
+
+#[test]
 fn support_bundle_validation_and_private_write_are_bounded() {
     assert!(validate_support_bundle("sigil-support-123.json", "{\"schema_version\":1}").is_ok());
     assert!(validate_support_bundle("../support.json", "{}").is_err());

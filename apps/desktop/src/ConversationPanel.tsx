@@ -16,6 +16,7 @@ import { ConversationQueuePanel } from "./ConversationQueuePanel";
 import { ConversationRecoveryPanel } from "./ConversationRecoveryPanel";
 import { ErrorCard } from "./ErrorCard";
 import { ExtensionWorkbench } from "./ExtensionWorkbench";
+import { IntentStackInspector } from "./IntentStackInspector";
 import { useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
 import { TaskControlPanel } from "./TaskControlPanel";
@@ -45,6 +46,11 @@ import type {
   SkillBinding,
   SkillCatalogEntry,
   TimelineEvent,
+  IntentDropBinding,
+  IntentDropExecution,
+  IntentDropPreview,
+  IntentStackState,
+  IntentVersionRef,
   TaskIntegrationAcceptance,
   TaskIntegrationReview,
   VerificationSummary,
@@ -170,6 +176,14 @@ export function ConversationPanel({
   const [taskIntegrationBusy, setTaskIntegrationBusy] = useState(false);
   const [taskIntegrationOpen, setTaskIntegrationOpen] = useState(false);
   const [taskIntegrationReload, setTaskIntegrationReload] = useState(0);
+  const [intentStack, setIntentStack] = useState<IntentStackState>();
+  const [intentDropPreview, setIntentDropPreview] = useState<IntentDropPreview>();
+  const [intentDropExecution, setIntentDropExecution] = useState<IntentDropExecution>();
+  const [intentStackLoading, setIntentStackLoading] = useState(false);
+  const [intentStackBusy, setIntentStackBusy] = useState(false);
+  const [intentStackError, setIntentStackError] = useState(false);
+  const [intentStackOpen, setIntentStackOpen] = useState(false);
+  const [intentStackReload, setIntentStackReload] = useState(0);
   const [displayBusy, setDisplayBusy] = useState(false);
   const [displayError, setDisplayError] = useState(false);
   const [displayReload, setDisplayReload] = useState(0);
@@ -212,6 +226,7 @@ export function ConversationPanel({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const taskIntegrationTriggerRef = useRef<HTMLButtonElement>(null);
+  const intentStackTriggerRef = useRef<HTMLButtonElement>(null);
   const agentActivityTriggerRef = useRef<HTMLButtonElement>(null);
   const extensionTriggerRef = useRef<HTMLButtonElement>(null);
   const recoveryTriggerRef = useRef<HTMLButtonElement>(null);
@@ -366,6 +381,14 @@ export function ConversationPanel({
     setTaskIntegrationBusy(false);
     setTaskIntegrationOpen(false);
     setTaskIntegrationReload(0);
+    setIntentStack(undefined);
+    setIntentDropPreview(undefined);
+    setIntentDropExecution(undefined);
+    setIntentStackLoading(false);
+    setIntentStackBusy(false);
+    setIntentStackError(false);
+    setIntentStackOpen(false);
+    setIntentStackReload(0);
     setDisplayError(false);
     setAttachmentGap(false);
     setContinuityMessage(undefined);
@@ -586,6 +609,33 @@ export function ConversationPanel({
   }, [bridge, session.id, taskIntegrationReload, workspaceId]);
 
   useEffect(() => {
+    if (!intentStackOpen) return;
+    let disposed = false;
+    setIntentStackLoading(true);
+    setIntentStackError(false);
+    void bridge.intentStack(workspaceId, session.id)
+      .then((state) => {
+        if (disposed) return;
+        setIntentStack(state);
+        setIntentDropPreview(undefined);
+        setIntentDropExecution(undefined);
+      })
+      .catch(() => {
+        if (disposed) return;
+        setIntentStack(undefined);
+        setIntentDropPreview(undefined);
+        setIntentDropExecution(undefined);
+        setIntentStackError(true);
+      })
+      .finally(() => {
+        if (!disposed) setIntentStackLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge, intentStackOpen, intentStackReload, session.id, workspaceId]);
+
+  useEffect(() => {
     if (!continuityState.transcriptLoaded || continuityState.contractError !== undefined) return;
     let disposed = false;
     let liveConnectionFailed = false;
@@ -671,6 +721,7 @@ export function ConversationPanel({
         pendingPromptRef.current = undefined;
         setPendingPrompt(undefined);
         setConversationQueueReload((value) => value + 1);
+        setIntentStackReload((value) => value + 1);
         dispatchContinuity({
           type: "terminal_observed",
           sessionId: session.id,
@@ -722,6 +773,7 @@ export function ConversationPanel({
           setRunContextReload((value) => value + 1);
           setAgentActivityReload((value) => value + 1);
           setTaskIntegrationReload((value) => value + 1);
+          setIntentStackReload((value) => value + 1);
           void bridge.verification(workspaceId, session.id).then(setVerification).catch(() => {
             setVerification(undefined);
           });
@@ -1355,6 +1407,68 @@ export function ConversationPanel({
     }
   };
 
+  const openIntentStack = () => {
+    setIntentStackOpen(true);
+    setIntentDropPreview(undefined);
+    setIntentDropExecution(undefined);
+    if (intentStack === undefined || intentStackError) {
+      setIntentStackReload((value) => value + 1);
+    }
+  };
+
+  const previewIntentDrop = async (intentRef: IntentVersionRef) => {
+    if (
+      intentStackBusy
+      || active
+      || submissionBlocked
+      || pendingApproval?.approval !== undefined
+    ) return;
+    setIntentStackBusy(true);
+    setIntentStackError(false);
+    setIntentDropExecution(undefined);
+    try {
+      setIntentDropPreview(await bridge.previewIntentDrop(
+        workspaceId,
+        session.id,
+        intentRef,
+      ));
+    } catch {
+      setIntentDropPreview(undefined);
+      onNotice(t("intentDropChanged"), true);
+      setIntentStackReload((value) => value + 1);
+    } finally {
+      setIntentStackBusy(false);
+    }
+  };
+
+  const executeIntentDrop = async (request: IntentDropBinding) => {
+    if (
+      intentStackBusy
+      || active
+      || submissionBlocked
+      || pendingApproval?.approval !== undefined
+    ) return;
+    setIntentStackBusy(true);
+    setIntentStackError(false);
+    try {
+      const execution = await bridge.executeIntentDrop(workspaceId, session.id, request);
+      setIntentDropExecution(execution);
+      if (execution.resolution === "committed") {
+        notify({ message: t("intentDropCompleted"), tone: "success" });
+      } else {
+        onNotice(t("intentDropChanged"), true);
+      }
+      setIntentStackReload((value) => value + 1);
+    } catch {
+      onNotice(t("intentDropChanged"), true);
+      setIntentDropPreview(undefined);
+      setIntentDropExecution(undefined);
+      setIntentStackReload((value) => value + 1);
+    } finally {
+      setIntentStackBusy(false);
+    }
+  };
+
   const decideApproval = async (decision: ApprovalAction) => {
     if (pendingApproval?.approval === undefined || continuityState.lifecycle !== "live" || controlBusy) return;
     setControlBusy(true);
@@ -1593,6 +1707,18 @@ export function ConversationPanel({
                 setConversationRecoveryOpen(true);
                 if (conversationRecovery === undefined) refreshConversationRecovery();
               }}
+            />
+          </Tooltip>
+          <Tooltip label={t("openIntentStack")}>
+            <IconButton
+              className="intent-stack-trigger"
+              ref={intentStackTriggerRef}
+              type="button"
+              aria-label={t("openIntentStack")}
+              aria-controls="intent-stack-inspector"
+              aria-expanded={intentStackOpen}
+              icon={<Icon name="stack" />}
+              onClick={openIntentStack}
             />
           </Tooltip>
           {verification !== undefined ? (
@@ -1865,6 +1991,7 @@ export function ConversationPanel({
           refreshConversationQueue();
         }}
         onPreviewCompaction={previewCompaction}
+        onOpenIntentStack={openIntentStack}
         onNotice={onNotice}
         onSubmit={submit}
         onInterruptAndRunNext={interruptAndRunNext}
@@ -1903,6 +2030,27 @@ export function ConversationPanel({
           />
         </Drawer>
       ) : null}
+      <Drawer
+        id="intent-stack-inspector"
+        open={intentStackOpen}
+        title={t("intentStack")}
+        description={t("intentStackDetail")}
+        returnFocusRef={intentStackTriggerRef}
+        onOpenChange={setIntentStackOpen}
+      >
+        <IntentStackInspector
+          state={intentStack}
+          preview={intentDropPreview}
+          execution={intentDropExecution}
+          loading={intentStackLoading}
+          busy={intentStackBusy}
+          error={intentStackError}
+          runActive={active || submissionBlocked || pendingApproval?.approval !== undefined}
+          onPreview={(intentRef) => void previewIntentDrop(intentRef)}
+          onConfirm={(request) => void executeIntentDrop(request)}
+          onRefresh={() => setIntentStackReload((value) => value + 1)}
+        />
+      </Drawer>
       <Drawer
         id="conversation-recovery-inspector"
         open={conversationRecoveryOpen}

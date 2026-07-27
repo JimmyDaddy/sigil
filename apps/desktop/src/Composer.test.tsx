@@ -141,6 +141,15 @@ const context: RunContext = {
         clientAction: "preview_compaction",
         available: true,
       },
+      {
+        canonical: "/intents",
+        aliases: [],
+        label: "Intent Stack",
+        description: "review durable intents",
+        completesWithSpace: false,
+        clientAction: "open_intent_stack",
+        available: true,
+      },
     ],
     skills: [
       {
@@ -256,6 +265,7 @@ function renderComposer(overrides: {
   onOpenSettings?: () => void;
   onOpenSupport?: () => void;
   onPreviewCompaction?: () => void;
+  onOpenIntentStack?: () => void;
   onNotice?: (message: string, error?: boolean) => void;
   activityState?: ComposerActivityState;
   runContext?: RunContext;
@@ -274,6 +284,7 @@ function renderComposer(overrides: {
   const onOpenSettings = overrides.onOpenSettings ?? vi.fn(() => undefined);
   const onOpenSupport = overrides.onOpenSupport ?? vi.fn(() => undefined);
   const onPreviewCompaction = overrides.onPreviewCompaction ?? vi.fn(() => undefined);
+  const onOpenIntentStack = overrides.onOpenIntentStack ?? vi.fn(() => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   const runContext = overrides.runContext ?? context;
   const onModelChange =
@@ -307,6 +318,7 @@ function renderComposer(overrides: {
         onOpenAgentWorkbench={onOpenAgentWorkbench}
         onOpenQueue={onOpenQueue}
         onPreviewCompaction={onPreviewCompaction}
+        onOpenIntentStack={onOpenIntentStack}
         onNotice={onNotice}
         onSubmit={onSubmit}
         onInterruptAndRunNext={onInterruptAndRunNext}
@@ -324,6 +336,7 @@ function renderComposer(overrides: {
     onOpenSettings,
     onOpenSupport,
     onPreviewCompaction,
+    onOpenIntentStack,
     onNotice,
     onModelChange,
   };
@@ -543,6 +556,18 @@ describe("structured composer", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onPreviewCompaction).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("routes /intents to the bounded Intent Stack instead of the model", async () => {
+    const user = userEvent.setup();
+    const { onOpenIntentStack, onSubmit } = renderComposer();
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+
+    await user.type(input, "/intents");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onOpenIntentStack).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
