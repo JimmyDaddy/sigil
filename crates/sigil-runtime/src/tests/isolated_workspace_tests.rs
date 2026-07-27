@@ -261,7 +261,7 @@ async fn frozen_dirty_overlay_is_shared_by_value_and_becomes_the_delta_baseline(
     ));
     assert_eq!(
         base_file.before_hash.as_deref(),
-        Some(hex_sha256(b"user edit\n").as_str())
+        Some(format!("sha256:{}", hex_sha256(b"user edit\n")).as_str())
     );
     assert!(proposal.artifact.content.contains("-user edit"));
     assert!(!proposal.artifact.content.contains("-base"));
