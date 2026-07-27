@@ -20,6 +20,7 @@ pub mod image_attachment;
 pub mod integration;
 pub mod intent;
 pub mod intent_admission;
+pub mod intent_impact;
 pub mod intent_layer;
 pub mod intent_lineage;
 pub mod intent_operation;
@@ -304,7 +305,13 @@ pub use intent_admission::{
     IntentAdmissionWriteOutcomeV1, IntentPlanAdmissionV1, IntentStackProjectionV1,
     TaskStepIntentAliasBindingV1, USER_DECLARED_ROOT_INTENT_ALIAS, UserDeclaredIntentV1,
     admit_suggested_decomposition, admit_user_declared_root, append_chat_root_intent_admission,
-    append_task_intent_plan_admission, bind_task_plan_intents,
+    append_successor_intent_plan_admission, append_task_intent_plan_admission,
+    bind_task_plan_intents,
+};
+pub use intent_impact::{
+    IntentAdoptionAuthorityV1, IntentApplicationImpactV1, IntentImpactPreviewV1,
+    IntentRevisionAuthorityV1, IntentRevisionProposalV1, accept_intent_revision,
+    adopt_forked_intent_stack, preview_intent_replace, preview_intent_revision,
 };
 pub use intent_layer::{
     EffectiveIntentArtifactV1, INTENT_LAYER_PROJECTION_SCHEMA_VERSION,

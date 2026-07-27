@@ -397,7 +397,7 @@ fn old_session_projects_explicit_history_unavailable_state() -> Result<()> {
 }
 
 #[test]
-fn durable_intent_event_decoder_registers_r51_4_and_rejects_future_slice() -> Result<()> {
+fn durable_intent_event_decoder_registers_r51_5_supersession() -> Result<()> {
     assert_eq!(
         DurableEventType::from_event_type("intent_stack_created"),
         Some(DurableEventType::IntentStackCreated)
@@ -448,7 +448,7 @@ fn durable_intent_event_decoder_registers_r51_4_and_rejects_future_slice() -> Re
     );
     assert_eq!(
         DurableEventType::from_event_type("intent_version_superseded"),
-        None
+        Some(DurableEventType::IntentVersionSuperseded)
     );
 
     let root_plan: IntentPlanV1 = serde_json::from_str(include_str!(

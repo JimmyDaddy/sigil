@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.4 complete，R51.5 next）
+状态：proposed / implementation active（R51.0-R51.5 complete，R51.6 next）
 
 创建日期：2026-07-22
 
@@ -799,6 +799,45 @@ conflict/exclusion、drop 后 retention 与 event registration/wire mismatch。R
 可执行的 intent-level version-control kernel primitive；TUI/typed adapter 与 revise/replace
 impact preview 仍分别由 R51.6/R51.7 和 R51.5 负责。
 
+### 12.6 R51.5 implementation checkpoint（2026-07-27）
+
+R51.5 已完成，落点为 `sigil-kernel::intent_impact`、多版本 admission/replay、
+workspace-scoped public projection 与 intent artifact retention。本切片提供：
+
+- `intent_version_superseded` recovery-critical event 的正式注册与 strict decoder。successor
+  writer 固定追加 `PlanRecorded -> PlanAccepted -> VersionSuperseded* -> TaskPlan?`；projection
+  只有在全部 supersession 和可选 TaskPlan suffix 完整出现后才激活新版本，任一 crash prefix
+  均保持 incomplete，旧 accepted version 继续是唯一 active predecessor；
+- runtime 只接受同 stack/workspace/session/kind、相同 IntentId 集合、单步递增
+  `IntentVersionRef` 和 exact `supersedes` 的 successor。至少一个 definition 必须发生语义或
+  provenance 变化；最终 plan 继续通过 canonical digest 与 dependency DAG validation，循环在
+  durable append 前拒绝；
+- `IntentRevisionProposalV1` 是无 authority 的 digest-bound proposal；显式用户确认由不可序列化
+  `IntentRevisionAuthorityV1` 绑定 exact proposal 和 current impact preview。revision acceptance
+  只生成 immutable plan/supersession 与可选 TaskPlan replan，不修改文件、不复用旧 receipt；
+- revise/replace read-only impact preview 计算 target 的 transitive downstream closure、
+  leaf 结果、retained intents、current verification stale impact 与 application transition。
+  revision target 为 `needs_rebuild`、未重新执行的 downstream 为 `needs_review`；replace preview
+  将整个 closure 标记 `needs_rebuild`，但 V1 仍没有 replace/rebase mutation API；
+- execution、criterion evidence、layer 与 operation replay 改为按事件自身的 accepted
+  stack version 校验。successor 不会用最新 plan 反向否定合法历史；新 layer materialization
+  又只接受 current version execution，旧 authority 不能重新激活；
+- conversation fork 只在 destination durable stream 保留 read-only provenance。显式 adoption
+  使用 host-only `IntentAdoptionAuthorityV1` 重新核对 source/destination session、source plan、
+  workspace id、branch lineage 与完整 tracked snapshot，然后在 destination 创建新 stack；
+  execution/layer/receipt/operation/mutation authority 一律不复制，未重新执行的 adopted intent
+  投影为 `read_only`；
+- current workspace id 与 accepted plan 不匹配时，bounded projection 将整个 stack 标记
+  `out_of_scope`、清空动作并清零 current verified count；相同 relative path 不构成 identity
+  继承。superseded layer 退出 active retention protected set，但历史 manifest 与 operation
+  继续可审计。
+
+完成证据覆盖 transitive closure/leaf、revise/replace state preview、Task replan、DAG cycle、
+exact supersede suffix、crash-prefix restart、workspace out-of-scope、branch/snapshot adoption
+拒绝、adopted read-only projection，以及 superseded layer + historical operation replay 和
+retention transition。R51.5 不开放 replace mutation、semantic merge、shared-hunk
+rematerialization 或外部副作用补偿；TUI 和 typed adapter action 分别留给 R51.6/R51.7。
+
 依赖顺序：
 
 ```text
@@ -900,5 +939,6 @@ ChangeSet、parent mutation 与 criterion verification lineage；R51.3 已接入
 materializer、content-addressed patch/hunk artifact、保守 ownership、retention protection 与
 inspect projection；R51.4 已接入 host-authorized exact drop、RFC-0002 batch apply、
 no-replay recovery、verification invalidation、checkpoint conflict 与 retention transition。
-R51.5 起继续补 impact/adoption 语义；任何 TUI 或 adapter operation 仍必须等待其依赖切片和
-独立门禁完成。
+R51.5 已接入 dependency closure、read-only revise/replace impact、immutable supersession、
+多版本恢复和 exact fork/workspace adoption。TUI 与 typed adapter operation 仍必须等待
+R51.6/R51.7 的独立门禁完成。

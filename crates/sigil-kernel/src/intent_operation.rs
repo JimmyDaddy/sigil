@@ -499,18 +499,12 @@ impl OperationReplay {
                 )
             )
         });
-        let Some(accepted) = admission.latest_accepted_plan() else {
+        if admission.latest_accepted_plan().is_none() {
             if has_operation_events {
                 bail!("Intent operation events exist without an accepted IntentPlan");
             }
             return Ok(Self::default());
-        };
-        let accepted_refs = accepted
-            .plan
-            .intents
-            .iter()
-            .map(|intent| intent.intent_ref.clone())
-            .collect::<BTreeSet<_>>();
+        }
         let mut replay = Self {
             batches: BatchEvidence::from_records(records)?,
             ..Self::default()
@@ -532,11 +526,18 @@ impl OperationReplay {
             let intent_event = decode_operation_event(event.clone())?;
             match intent_event {
                 IntentEventV1::OperationRequested { preview, .. } => {
+                    let accepted = admission.accepted_plan(preview.stack_version).context(
+                        "Intent operation request references an unaccepted plan version",
+                    )?;
                     if preview.operation_kind != IntentOperationKind::Drop
                         || preview.stack_id != accepted.plan.stack_id
-                        || preview.stack_version != accepted.plan.stack_version
+                        || accepted.accepted_stream_sequence >= event.stream_sequence
                         || preview.target_intents.len() != 1
-                        || !accepted_refs.contains(&preview.target_intents[0])
+                        || !accepted
+                            .plan
+                            .intents
+                            .iter()
+                            .any(|intent| intent.intent_ref == preview.target_intents[0])
                     {
                         bail!("Intent operation request references unsupported or stale authority");
                     }
@@ -655,8 +656,11 @@ impl OperationReplay {
                     conflict,
                     ..
                 } => {
+                    let accepted = admission
+                        .accepted_plan(stack_version)
+                        .context("Intent conflict references an unaccepted plan version")?;
                     if stack_id != accepted.plan.stack_id
-                        || stack_version != accepted.plan.stack_version
+                        || accepted.accepted_stream_sequence >= event.stream_sequence
                     {
                         bail!("Intent conflict references another stack version");
                     }

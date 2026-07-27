@@ -211,6 +211,7 @@ durable_event_types! {
     IntentOperationPrepared => ("intent_operation_prepared", RecoveryCritical, Critical, DirectJson, "intent_operation_prepared"),
     IntentOperationResolved => ("intent_operation_resolved", RecoveryCritical, Critical, DirectJson, "intent_operation_resolved"),
     IntentConflictRecorded => ("intent_conflict_recorded", RecoveryCritical, Critical, DirectJson, "intent_conflict_recorded"),
+    IntentVersionSuperseded => ("intent_version_superseded", RecoveryCritical, Critical, DirectJson, "intent_version_superseded"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffResolved => ("task_handoff_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -729,7 +730,8 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         | DurableEventType::IntentOperationRequested
         | DurableEventType::IntentOperationPrepared
         | DurableEventType::IntentOperationResolved
-        | DurableEventType::IntentConflictRecorded => {
+        | DurableEventType::IntentConflictRecorded
+        | DurableEventType::IntentVersionSuperseded => {
             TypedDomainEvent::Intent(decode_intent_event(&event)?)
         }
         DurableEventType::WriteLeaseAcquired
@@ -921,10 +923,7 @@ fn decode_intent_event(event: &StoredEvent) -> Result<IntentEventV1> {
         IntentEventV1::OperationPrepared { .. } => DurableEventType::IntentOperationPrepared,
         IntentEventV1::OperationResolved { .. } => DurableEventType::IntentOperationResolved,
         IntentEventV1::ConflictRecorded { .. } => DurableEventType::IntentConflictRecorded,
-        _ => bail!(
-            "{} carries an Intent event reserved for a later RFC-0051 slice",
-            event.event_type
-        ),
+        IntentEventV1::VersionSuperseded { .. } => DurableEventType::IntentVersionSuperseded,
     };
     if event.event_kind() != Some(expected_type) {
         bail!(

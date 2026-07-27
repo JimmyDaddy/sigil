@@ -47,6 +47,7 @@ pub struct IntentLineageSummaryV1 {
 /// Replayed state for one concrete Task or Chat execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentExecutionLineageV1 {
+    pub stack_version: crate::IntentStackVersion,
     pub binding: IntentExecutionBindingV1,
     pub binding_event_id: String,
     pub binding_stream_sequence: u64,
@@ -90,12 +91,6 @@ impl IntentLineageProjectionV1 {
             }
             return Ok(Self::default());
         };
-        let accepted_refs = accepted
-            .plan
-            .intents
-            .iter()
-            .map(|intent| intent.intent_ref.clone())
-            .collect::<BTreeSet<_>>();
         let mut projection = Self {
             current_parent_snapshot_id: facts.current_parent_snapshot(&accepted.plan.workspace_id),
             ..Self::default()
@@ -129,13 +124,20 @@ impl IntentLineageProjectionV1 {
                     binding,
                     ..
                 } => {
-                    if stack_id != accepted.plan.stack_id
-                        || stack_version != accepted.plan.stack_version
-                        || !accepted_refs.contains(&binding.intent_ref)
+                    let execution_plan = admission.accepted_plan(stack_version).context(
+                        "Intent execution binding references an unaccepted plan version",
+                    )?;
+                    if stack_id != execution_plan.plan.stack_id
+                        || execution_plan.accepted_stream_sequence >= event.stream_sequence
+                        || !execution_plan
+                            .plan
+                            .intents
+                            .iter()
+                            .any(|intent| intent.intent_ref == binding.intent_ref)
                     {
                         bail!("Intent execution binding references an unaccepted stack or intent");
                     }
-                    facts.validate_execution_source(&binding, accepted)?;
+                    facts.validate_execution_source(&binding, execution_plan)?;
                     if projection.executions.contains_key(&binding.execution_id) {
                         bail!("Intent execution id was bound more than once");
                     }
@@ -145,6 +147,7 @@ impl IntentLineageProjectionV1 {
                     projection.executions.insert(
                         binding.execution_id.clone(),
                         IntentExecutionLineageV1 {
+                            stack_version,
                             binding,
                             binding_event_id: event.event_id.clone(),
                             binding_stream_sequence: event.stream_sequence,
@@ -180,14 +183,18 @@ impl IntentLineageProjectionV1 {
                 }
                 IntentEventV1::VerificationLinked { evidence, .. } => {
                     for item in &evidence {
-                        if !accepted_refs.contains(&item.intent_ref)
-                            || !accepted.plan.intents.iter().any(|intent| {
-                                intent.intent_ref == item.intent_ref
-                                    && intent.acceptance_criteria.iter().any(|criterion| {
-                                        criterion.criterion_id == item.criterion_id
-                                    })
-                            })
-                        {
+                        let evidence_plan = admission
+                            .accepted_plan_for_intent_at(&item.intent_ref, event.stream_sequence)
+                            .context(
+                                "Intent verification evidence references an unaccepted intent",
+                            )?;
+                        if !evidence_plan.plan.intents.iter().any(|intent| {
+                            intent.intent_ref == item.intent_ref
+                                && intent
+                                    .acceptance_criteria
+                                    .iter()
+                                    .any(|criterion| criterion.criterion_id == item.criterion_id)
+                        }) {
                             bail!(
                                 "Intent verification evidence references an unaccepted criterion"
                             );
@@ -201,7 +208,7 @@ impl IntentLineageProjectionV1 {
                 _ => bail!("R51.2 event type carried another Intent payload"),
             }
         }
-        projection.resolve_parent_lineage(&facts, accepted)?;
+        projection.resolve_parent_lineage(&facts, admission)?;
         Ok(projection)
     }
 
@@ -331,9 +338,12 @@ impl IntentLineageProjectionV1 {
     fn resolve_parent_lineage(
         &mut self,
         facts: &DurableLineageFacts,
-        accepted: &crate::AcceptedIntentPlanProjectionV1,
+        admission: &IntentStackProjectionV1,
     ) -> Result<()> {
         for execution in self.executions.values_mut() {
+            let accepted = admission
+                .accepted_plan(execution.stack_version)
+                .context("Intent execution lineage lost its accepted plan version")?;
             if execution.changeset_ids.is_empty() {
                 execution.read_only_reason = Some(IntentLineageReadOnlyReasonV1::MissingChangeSet);
                 continue;

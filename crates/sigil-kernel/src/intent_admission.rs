@@ -224,6 +224,46 @@ impl IntentPlanAdmissionV1 {
             })
             .collect()
     }
+
+    fn successor_durable_events(
+        &self,
+        supersessions: &[(IntentVersionRef, IntentVersionRef)],
+        task_plan_binding: Option<IntentTaskPlanBindingV1>,
+    ) -> Result<Vec<(DurableEventType, EventClass, serde_json::Value)>> {
+        let mut events = vec![
+            (
+                DurableEventType::IntentPlanRecorded,
+                self.plan_recorded_event(),
+            ),
+            (
+                DurableEventType::IntentPlanAccepted,
+                self.plan_accepted_event(task_plan_binding),
+            ),
+        ];
+        events.extend(supersessions.iter().map(|(previous, replacement)| {
+            (
+                DurableEventType::IntentVersionSuperseded,
+                IntentEventV1::VersionSuperseded {
+                    schema_version: INTENT_CONTRACT_SCHEMA_VERSION,
+                    previous: previous.clone(),
+                    replacement: replacement.clone(),
+                    safe_reason: "Accepted intent definition revision".to_owned(),
+                },
+            )
+        }));
+        events
+            .into_iter()
+            .map(|(event_type, event)| {
+                event.validate_contract()?;
+                Ok((
+                    event_type,
+                    EventClass::Critical,
+                    serde_json::to_value(event)
+                        .context("failed to serialize successor Intent admission event")?,
+                ))
+            })
+            .collect()
+    }
 }
 
 /// Host-owned mapping from one Task step to provider-local intent aliases.
@@ -477,6 +517,27 @@ fn build_admission(
     })
 }
 
+pub(crate) fn build_successor_admission(
+    plan: IntentPlanV1,
+    acceptance_kind: IntentAcceptanceKind,
+    source_turn_id: String,
+    acceptance_authority_id: String,
+) -> Result<IntentPlanAdmissionV1> {
+    plan.validate_contract()?;
+    validate_admission_identity("intent successor source turn id", &source_turn_id)?;
+    validate_admission_identity(
+        "intent successor acceptance authority id",
+        &acceptance_authority_id,
+    )?;
+    Ok(IntentPlanAdmissionV1 {
+        plan,
+        acceptance_kind,
+        source_turn_id,
+        acceptance_authority_id,
+        resolved_aliases: BTreeMap::new(),
+    })
+}
+
 /// One accepted plan reconstructed from durable admission events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedIntentPlanProjectionV1 {
@@ -497,8 +558,9 @@ struct IntentStackHeaderV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingTaskIntentAcceptanceV1 {
+struct PendingIntentAcceptanceV1 {
     accepted: AcceptedIntentPlanProjectionV1,
+    remaining_supersessions: Vec<(IntentVersionRef, IntentVersionRef)>,
 }
 
 /// Append-only IntentPlan admission projection.
@@ -508,7 +570,8 @@ pub struct IntentStackProjectionV1 {
     header: Option<IntentStackHeaderV1>,
     recorded_plans: BTreeMap<u64, IntentPlanV1>,
     accepted_plans: BTreeMap<u64, AcceptedIntentPlanProjectionV1>,
-    pending_task_acceptance: Option<PendingTaskIntentAcceptanceV1>,
+    pending_acceptance: Option<PendingIntentAcceptanceV1>,
+    fork_source_session_id: Option<String>,
 }
 
 impl IntentStackProjectionV1 {
@@ -535,8 +598,66 @@ impl IntentStackProjectionV1 {
     }
 
     #[must_use]
+    pub fn accepted_plan(
+        &self,
+        stack_version: IntentStackVersion,
+    ) -> Option<&AcceptedIntentPlanProjectionV1> {
+        self.accepted_plans.get(&stack_version.get())
+    }
+
+    #[must_use]
+    pub fn accepted_plan_for_intent_at(
+        &self,
+        intent_ref: &IntentVersionRef,
+        stream_sequence: u64,
+    ) -> Option<&AcceptedIntentPlanProjectionV1> {
+        self.accepted_plans.values().rev().find(|accepted| {
+            accepted.accepted_stream_sequence < stream_sequence
+                && accepted
+                    .plan
+                    .intents
+                    .iter()
+                    .any(|intent| &intent.intent_ref == intent_ref)
+        })
+    }
+
+    #[must_use]
     pub fn has_incomplete_task_acceptance(&self) -> bool {
-        self.pending_task_acceptance.is_some()
+        self.pending_acceptance.is_some()
+            || self
+                .recorded_plans
+                .last_key_value()
+                .map(|(version, _)| version)
+                != self
+                    .accepted_plans
+                    .last_key_value()
+                    .map(|(version, _)| version)
+    }
+
+    #[must_use]
+    pub fn is_adopted_provenance(&self) -> bool {
+        self.fork_source_session_id.is_some()
+            && self
+                .accepted_plans
+                .first_key_value()
+                .is_some_and(|(_, accepted)| {
+                    accepted.plan.stack_version.get() == 1
+                        && accepted.acceptance_kind
+                            == IntentAcceptanceKind::ExplicitUserConfirmation
+                        && accepted.task_plan_binding.is_none()
+                })
+    }
+
+    #[must_use]
+    pub fn fork_source_session_id(&self) -> Option<&str> {
+        self.fork_source_session_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.header
+            .as_ref()
+            .map(|header| header.workspace_id.as_str())
     }
 
     /// Produces the bounded adapter contract without guessing legacy history or incomplete state.
@@ -587,7 +708,7 @@ impl IntentStackProjectionV1 {
                 safe_message: INTENT_HISTORY_UNAVAILABLE_MESSAGE.to_owned(),
             });
         };
-        if self.pending_task_acceptance.is_some()
+        if self.pending_acceptance.is_some()
             || self
                 .recorded_plans
                 .last_key_value()
@@ -615,7 +736,48 @@ impl IntentStackProjectionV1 {
                 )
             })
             .collect::<Vec<_>>();
+        let revised_intents = accepted
+            .plan
+            .intents
+            .iter()
+            .filter(|definition| definition.supersedes.is_some())
+            .map(|definition| {
+                (
+                    definition.intent_ref.intent_id.clone(),
+                    definition.intent_ref.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         for intent in &mut intents {
+            let dependency_revision_frontier = dependency_revision_frontier(
+                &accepted.plan,
+                &intent.intent_ref.intent_id,
+                &revised_intents,
+                self,
+            );
+            let reexecuted_after_dependency_revision = lineage
+                .and_then(|lineage| lineage.latest_execution_for(&intent.intent_ref))
+                .zip(dependency_revision_frontier)
+                .is_some_and(|(execution, frontier)| execution.binding_stream_sequence > frontier);
+            if revised_intents.contains_key(&intent.intent_ref.intent_id)
+                && intent.application_state != IntentApplicationState::Applied
+            {
+                intent.application_state = IntentApplicationState::NeedsRebuild;
+                intent.system_verified_criterion_count = 0;
+            } else if dependency_revision_frontier.is_some()
+                && !reexecuted_after_dependency_revision
+            {
+                intent.application_state = IntentApplicationState::NeedsReview;
+                intent.system_verified_criterion_count = 0;
+            }
+            if self.is_adopted_provenance()
+                && lineage.is_none_or(|lineage| {
+                    lineage.latest_execution_for(&intent.intent_ref).is_none()
+                })
+            {
+                intent.application_state = IntentApplicationState::ReadOnly;
+                intent.system_verified_criterion_count = 0;
+            }
             let is_leaf = !accepted.plan.intents.iter().any(|candidate| {
                 candidate.intent_ref != intent.intent_ref
                     && operations
@@ -660,6 +822,30 @@ impl IntentStackProjectionV1 {
         })
     }
 
+    /// Produces the public stack state for an exact current workspace identity.
+    ///
+    /// A branch/worktree/workspace switch is fail-closed: historical provenance remains visible,
+    /// but every intent becomes out of scope and all mutation actions are removed.
+    pub fn public_state_for_workspace(
+        &self,
+        current_workspace_id: &str,
+    ) -> Result<PublicIntentStackStateV1> {
+        validate_admission_identity("current Intent workspace id", current_workspace_id)?;
+        let mut state = self.public_state()?;
+        if self.workspace_id() == Some(current_workspace_id) {
+            return Ok(state);
+        }
+        if let PublicIntentStackStateV1::Available { stack, .. } = &mut state {
+            stack.authority_state = IntentAuthorityState::OutOfScope;
+            for intent in &mut stack.intents {
+                intent.application_state = IntentApplicationState::OutOfScope;
+                intent.available_actions.clear();
+                intent.system_verified_criterion_count = 0;
+            }
+        }
+        Ok(state)
+    }
+
     fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         if projection_apply_decision(self.cursor.as_ref(), event)?
@@ -670,38 +856,85 @@ impl IntentStackProjectionV1 {
         let typed = match decode_typed_stored_event(event.clone())? {
             TypedStoredEventDecode::Known(event) => *event,
             TypedStoredEventDecode::UnknownNonCritical(_) => {
-                if self.pending_task_acceptance.is_some() {
-                    bail!(
-                        "task-bound IntentPlan acceptance was not followed by its TaskPlan record"
-                    );
+                if self.pending_acceptance.is_some() {
+                    bail!("IntentPlan acceptance is missing its required durable suffix");
                 }
                 self.advance_cursor(record);
                 return Ok(());
             }
         };
 
-        if let Some(pending) = self.pending_task_acceptance.take() {
-            match typed {
-                TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskPlan(task_plan)) => {
-                    validate_pending_task_plan(&pending, &task_plan, event.stream_sequence)?;
-                    let version = pending.accepted.plan.stack_version.get();
-                    self.accepted_plans.insert(version, pending.accepted);
-                    self.advance_cursor(record);
-                    return Ok(());
-                }
-                _ => {
-                    self.pending_task_acceptance = Some(pending);
-                    bail!(
-                        "task-bound IntentPlan acceptance was not followed by its TaskPlan record"
-                    );
-                }
+        if let Some(pending) = self.pending_acceptance.take() {
+            self.apply_pending_acceptance(record, typed, pending)?;
+            self.advance_cursor(record);
+            return Ok(());
+        }
+
+        if event.event_kind() == Some(DurableEventType::ConversationForked) {
+            let fork: crate::ConversationForked = serde_json::from_value(event.payload.clone())
+                .context("failed to decode Intent adoption fork provenance")?;
+            if fork.destination_session_id != event.session_id
+                || self.fork_source_session_id.is_some()
+                || self.header.is_some()
+                || !self.recorded_plans.is_empty()
+                || !self.accepted_plans.is_empty()
+            {
+                bail!("Intent adoption fork provenance is invalid or duplicated");
             }
+            self.fork_source_session_id = Some(fork.source_session_id);
+            self.advance_cursor(record);
+            return Ok(());
         }
 
         if let TypedDomainEvent::Intent(intent_event) = typed {
             self.apply_intent_event(event, intent_event)?;
         }
         self.advance_cursor(record);
+        Ok(())
+    }
+
+    fn apply_pending_acceptance(
+        &mut self,
+        record: &SessionStreamRecord,
+        typed: TypedDomainEvent,
+        mut pending: PendingIntentAcceptanceV1,
+    ) -> Result<()> {
+        let event = record.stored_event();
+        if let Some((expected_previous, expected_replacement)) =
+            pending.remaining_supersessions.first().cloned()
+        {
+            let TypedDomainEvent::Intent(IntentEventV1::VersionSuperseded {
+                previous,
+                replacement,
+                ..
+            }) = typed
+            else {
+                self.pending_acceptance = Some(pending);
+                bail!("successor IntentPlan acceptance is missing an adjacent supersede event");
+            };
+            if previous != expected_previous || replacement != expected_replacement {
+                self.pending_acceptance = Some(pending);
+                bail!("Intent supersede event does not match the accepted successor plan");
+            }
+            pending.remaining_supersessions.remove(0);
+            if pending.remaining_supersessions.is_empty()
+                && pending.accepted.task_plan_binding.is_none()
+            {
+                let version = pending.accepted.plan.stack_version.get();
+                self.accepted_plans.insert(version, pending.accepted);
+            } else {
+                self.pending_acceptance = Some(pending);
+            }
+            return Ok(());
+        }
+
+        let TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskPlan(task_plan)) = typed else {
+            self.pending_acceptance = Some(pending);
+            bail!("task-bound IntentPlan acceptance was not followed by its TaskPlan record");
+        };
+        validate_pending_task_plan(&pending, &task_plan, event.stream_sequence)?;
+        let version = pending.accepted.plan.stack_version.get();
+        self.accepted_plans.insert(version, pending.accepted);
         Ok(())
     }
 
@@ -788,12 +1021,35 @@ impl IntentStackProjectionV1 {
                 if version != expected_version {
                     bail!("IntentPlan acceptance is not monotonic");
                 }
-                validate_acceptance_for_plan(
-                    plan,
-                    acceptance_kind,
-                    &source_turn_id,
-                    task_plan_binding.as_ref(),
-                )?;
+                let remaining_supersessions = if version == 1 {
+                    if self.fork_source_session_id.is_some()
+                        && acceptance_kind == IntentAcceptanceKind::ExplicitUserConfirmation
+                        && task_plan_binding.is_none()
+                    {
+                        validate_adoption_acceptance(plan, &source_turn_id)?;
+                    } else {
+                        validate_acceptance_for_plan(
+                            plan,
+                            acceptance_kind,
+                            &source_turn_id,
+                            task_plan_binding.as_ref(),
+                        )?;
+                    }
+                    Vec::new()
+                } else {
+                    let previous = self
+                        .accepted_plans
+                        .get(&version.saturating_sub(1))
+                        .context("successor IntentPlan has no accepted predecessor")?;
+                    validate_successor_acceptance(
+                        &previous.plan,
+                        plan,
+                        acceptance_kind,
+                        &source_turn_id,
+                        previous.task_plan_binding.as_ref(),
+                        task_plan_binding.as_ref(),
+                    )?
+                };
                 let accepted = AcceptedIntentPlanProjectionV1 {
                     plan: plan.clone(),
                     acceptance_kind,
@@ -803,8 +1059,11 @@ impl IntentStackProjectionV1 {
                     accepted_event_id: event.event_id.clone(),
                     accepted_stream_sequence: event.stream_sequence,
                 };
-                if task_plan_binding.is_some() {
-                    self.pending_task_acceptance = Some(PendingTaskIntentAcceptanceV1 { accepted });
+                if !remaining_supersessions.is_empty() || task_plan_binding.is_some() {
+                    self.pending_acceptance = Some(PendingIntentAcceptanceV1 {
+                        accepted,
+                        remaining_supersessions,
+                    });
                 } else {
                     self.accepted_plans.insert(version, accepted);
                 }
@@ -822,10 +1081,9 @@ impl IntentStackProjectionV1 {
                 // projections;
                 // admission remains an immutable view of accepted plan versions.
             }
-            _ => bail!(
-                "{} is registered by a later RFC-0051 slice",
-                intent_event.event_type()
-            ),
+            IntentEventV1::VersionSuperseded { .. } => {
+                bail!("Intent supersede event exists without a pending successor acceptance")
+            }
         }
         Ok(())
     }
@@ -838,15 +1096,15 @@ impl IntentStackProjectionV1 {
         if self.header.is_none()
             && self.recorded_plans.is_empty()
             && self.accepted_plans.is_empty()
-            && self.pending_task_acceptance.is_none()
+            && self.pending_acceptance.is_none()
         {
             if admission.plan.stack_version.get() != 1 {
                 bail!("initial IntentPlan admission must use stack version one");
             }
             return Ok(true);
         }
-        if self.pending_task_acceptance.is_some() {
-            bail!("an incomplete task-bound IntentPlan admission requires recovery");
+        if self.pending_acceptance.is_some() {
+            bail!("an incomplete IntentPlan admission requires recovery");
         }
         bail!("R51.1 does not admit a second semantic IntentPlan version")
     }
@@ -883,6 +1141,180 @@ pub struct IntentAdmissionWriteOutcomeV1 {
     pub stack_id: IntentStackId,
     pub stack_version: IntentStackVersion,
     pub plan_digest: IntentDigest,
+}
+
+/// Appends one accepted semantic successor and its deterministic supersession suffix.
+///
+/// A task-bound successor places the accepted TaskPlan last in the same mixed writer batch.
+/// The projection does not activate the new version until every supersession and optional TaskPlan
+/// record is present, so crash prefixes remain read-only.
+///
+/// # Errors
+///
+/// Returns an error for stale predecessor state, incompatible acceptance, invalid TaskPlan
+/// bindings, conflicting retry state, or a durable append failure.
+pub fn append_successor_intent_plan_admission(
+    session: &mut Session,
+    admission: &IntentPlanAdmissionV1,
+    task_plan: Option<TaskPlanEntry>,
+) -> Result<IntentAdmissionWriteOutcomeV1> {
+    ensure_admission_matches_session(session, admission)?;
+    let store = session
+        .durable_store()
+        .context("successor IntentPlan admission requires a durable session store")?;
+    let binding = task_plan
+        .as_ref()
+        .map(|task_plan| {
+            if task_plan.status != TaskPlanStatus::Accepted {
+                bail!("successor IntentPlan requires an accepted TaskPlan");
+            }
+            validate_task_plan_graph_steps(&task_plan.steps)?;
+            validate_task_plan_intent_refs(admission.plan(), task_plan)?;
+            Ok(IntentTaskPlanBindingV1 {
+                task_id: task_plan.task_id.as_str().to_owned(),
+                task_plan_version: task_plan.plan_version,
+            })
+        })
+        .transpose()?;
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let projection = IntentStackProjectionV1::from_records(&records)?;
+    if projection.has_incomplete_task_acceptance() {
+        bail!("an incomplete IntentPlan admission requires recovery");
+    }
+    let previous = projection
+        .latest_accepted_plan()
+        .context("successor IntentPlan admission requires an accepted predecessor")?;
+    if previous.plan.stack_version.get().saturating_add(1) != admission.plan.stack_version.get() {
+        if previous.plan == admission.plan
+            && previous.acceptance_kind == admission.acceptance_kind
+            && previous.source_turn_id == admission.source_turn_id
+            && previous.acceptance_authority_id == admission.acceptance_authority_id
+        {
+            if previous.task_plan_binding != binding {
+                bail!("successor IntentPlan retry has a conflicting TaskPlan binding");
+            }
+            if let (Some(binding), Some(task_plan)) = (&binding, &task_plan) {
+                let existing = durable_task_plan(&records, binding)?
+                    .context("accepted successor IntentPlan is missing its durable TaskPlan")?;
+                if &existing != task_plan {
+                    bail!("durable TaskPlan conflicts with the accepted successor IntentPlan");
+                }
+            }
+            return Ok(IntentAdmissionWriteOutcomeV1 {
+                appended: false,
+                stack_id: admission.plan.stack_id.clone(),
+                stack_version: admission.plan.stack_version,
+                plan_digest: admission.plan.plan_digest.clone(),
+            });
+        }
+        bail!("successor IntentPlan admission is stale");
+    }
+    let supersessions = validate_successor_acceptance(
+        &previous.plan,
+        &admission.plan,
+        admission.acceptance_kind,
+        &admission.source_turn_id,
+        previous.task_plan_binding.as_ref(),
+        binding.as_ref(),
+    )?;
+    let durable_events = admission.successor_durable_events(&supersessions, binding.clone())?;
+    let session_entries = task_plan
+        .as_ref()
+        .map(|task_plan| {
+            vec![SessionLogEntry::Control(ControlEntry::TaskPlan(
+                task_plan.clone(),
+            ))]
+        })
+        .unwrap_or_default();
+    let predicate_plan = admission.plan.clone();
+    let predicate_kind = admission.acceptance_kind;
+    let predicate_source_turn = admission.source_turn_id.clone();
+    let predicate_authority = admission.acceptance_authority_id.clone();
+    let predicate_binding = binding.clone();
+    let predicate_task_plan = task_plan.clone();
+    let appended = store
+        .append_events_and_session_entries_if(durable_events, &session_entries, move |records| {
+            let projection = IntentStackProjectionV1::from_records(records)?;
+            if projection.has_incomplete_task_acceptance() {
+                bail!("an incomplete IntentPlan admission requires recovery");
+            }
+            let current = projection
+                .latest_accepted_plan()
+                .context("successor IntentPlan lost its predecessor")?;
+            if current.plan == predicate_plan
+                && current.acceptance_kind == predicate_kind
+                && current.source_turn_id == predicate_source_turn
+                && current.acceptance_authority_id == predicate_authority
+            {
+                if current.task_plan_binding != predicate_binding {
+                    bail!("concurrent successor retry has a conflicting TaskPlan binding");
+                }
+                if let (Some(binding), Some(task_plan)) = (&predicate_binding, &predicate_task_plan)
+                {
+                    let existing = durable_task_plan(records, binding)?
+                        .context("concurrent accepted successor is missing its durable TaskPlan")?;
+                    if &existing != task_plan {
+                        bail!("concurrent successor retry has a conflicting durable TaskPlan");
+                    }
+                }
+                return Ok(false);
+            }
+            if current.plan.stack_version.get().saturating_add(1)
+                != predicate_plan.stack_version.get()
+            {
+                bail!("successor IntentPlan changed before append");
+            }
+            Ok(true)
+        })?
+        .is_some();
+    if let Some(task_plan) = task_plan
+        && (appended || !live_session_has_task_plan(session, &task_plan))
+    {
+        session.record_durably_appended_control(ControlEntry::TaskPlan(task_plan));
+    }
+    Ok(IntentAdmissionWriteOutcomeV1 {
+        appended,
+        stack_id: admission.plan.stack_id.clone(),
+        stack_version: admission.plan.stack_version,
+        plan_digest: admission.plan.plan_digest.clone(),
+    })
+}
+
+pub(crate) fn append_adopted_intent_plan_admission(
+    session: &Session,
+    admission: &IntentPlanAdmissionV1,
+    expected_source_session_id: &str,
+) -> Result<IntentAdmissionWriteOutcomeV1> {
+    ensure_admission_matches_session(session, admission)?;
+    if admission.plan.stack_version.get() != 1
+        || admission.acceptance_kind != IntentAcceptanceKind::ExplicitUserConfirmation
+    {
+        bail!("Intent adoption requires an explicitly confirmed initial plan");
+    }
+    let durable_events = admission.durable_events(None)?;
+    let store = session
+        .durable_store()
+        .context("Intent adoption requires a durable session store")?;
+    let predicate_admission = admission.clone();
+    let expected_source_session_id = expected_source_session_id.to_owned();
+    let appended = store
+        .append_events_and_session_entries_if(durable_events, &[], move |records| {
+            let projection = IntentStackProjectionV1::from_records(records)?;
+            if projection.fork_source_session_id() != Some(expected_source_session_id.as_str()) {
+                bail!("Intent adoption source does not match durable fork provenance");
+            }
+            if projection.is_exact_chat_admission(&predicate_admission) {
+                return Ok(false);
+            }
+            projection.validate_initial_append(&predicate_admission)
+        })?
+        .is_some();
+    Ok(IntentAdmissionWriteOutcomeV1 {
+        appended,
+        stack_id: admission.plan.stack_id.clone(),
+        stack_version: admission.plan.stack_version,
+        plan_digest: admission.plan.plan_digest.clone(),
+    })
 }
 
 /// Appends stack creation, plan recording, independent acceptance, and the accepted TaskPlan in
@@ -1023,10 +1455,38 @@ impl Session {
             crate::IntentOperationProjectionV1::from_records(&records, &admission, &layers)?;
         admission.public_state_with_operation_projection(&lineage, &layers, &operations)
     }
+
+    /// Returns the bounded Intent Stack state scoped to the caller's current workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace cannot be identified or durable projection is invalid.
+    pub fn public_intent_stack_state_for_workspace(
+        &self,
+        workspace_root: impl AsRef<std::path::Path>,
+    ) -> Result<PublicIntentStackStateV1> {
+        let current_workspace_id = crate::stable_workspace_id(workspace_root)?;
+        let state = self.public_intent_stack_state()?;
+        let PublicIntentStackStateV1::Available { mut stack, .. } = state else {
+            return Ok(state);
+        };
+        if self.intent_stack_projection()?.workspace_id() != Some(current_workspace_id.as_str()) {
+            stack.authority_state = IntentAuthorityState::OutOfScope;
+            for intent in &mut stack.intents {
+                intent.application_state = IntentApplicationState::OutOfScope;
+                intent.available_actions.clear();
+                intent.system_verified_criterion_count = 0;
+            }
+        }
+        Ok(PublicIntentStackStateV1::Available {
+            schema_version: INTENT_PUBLIC_DTO_SCHEMA_VERSION,
+            stack,
+        })
+    }
 }
 
 fn validate_pending_task_plan(
-    pending: &PendingTaskIntentAcceptanceV1,
+    pending: &PendingIntentAcceptanceV1,
     task_plan: &TaskPlanEntry,
     stream_sequence: u64,
 ) -> Result<()> {
@@ -1035,8 +1495,8 @@ fn validate_pending_task_plan(
         .task_plan_binding
         .as_ref()
         .context("pending task acceptance is missing its TaskPlan binding")?;
-    if stream_sequence != pending.accepted.accepted_stream_sequence.saturating_add(1) {
-        bail!("task-bound IntentPlan and TaskPlan are not adjacent in the durable writer batch");
+    if stream_sequence <= pending.accepted.accepted_stream_sequence {
+        bail!("task-bound IntentPlan TaskPlan must follow its acceptance");
     }
     if task_plan.status != TaskPlanStatus::Accepted
         || task_plan.task_id.as_str() != binding.task_id
@@ -1045,6 +1505,139 @@ fn validate_pending_task_plan(
         bail!("task-bound IntentPlan acceptance does not match the following TaskPlan");
     }
     validate_task_plan_graph_steps(&task_plan.steps)
+}
+
+fn validate_adoption_acceptance(plan: &IntentPlanV1, source_turn_id: &str) -> Result<()> {
+    validate_admission_identity("intent adoption source turn id", source_turn_id)?;
+    if plan.stack_version.get() != 1 {
+        bail!("Intent adoption must create the initial version of a new stack");
+    }
+    Ok(())
+}
+
+fn validate_successor_acceptance(
+    previous: &IntentPlanV1,
+    successor: &IntentPlanV1,
+    acceptance_kind: IntentAcceptanceKind,
+    source_turn_id: &str,
+    previous_task_plan_binding: Option<&IntentTaskPlanBindingV1>,
+    task_plan_binding: Option<&IntentTaskPlanBindingV1>,
+) -> Result<Vec<(IntentVersionRef, IntentVersionRef)>> {
+    validate_admission_identity("intent successor source turn id", source_turn_id)?;
+    if successor.stack_version.get() != previous.stack_version.get().saturating_add(1)
+        || successor.stack_id != previous.stack_id
+        || successor.workspace_id != previous.workspace_id
+        || successor.source_session_id != previous.source_session_id
+        || successor.kind != previous.kind
+    {
+        bail!("successor IntentPlan must preserve stack, workspace, session, and plan kind");
+    }
+    match (successor.kind, acceptance_kind, task_plan_binding) {
+        (
+            IntentPlanKind::UserDeclaredRoot,
+            IntentAcceptanceKind::ExplicitUserConfirmation,
+            None,
+        )
+        | (
+            IntentPlanKind::SuggestedDecomposition,
+            IntentAcceptanceKind::ExplicitUserConfirmation,
+            Some(_),
+        ) => {}
+        (
+            IntentPlanKind::SuggestedDecomposition,
+            IntentAcceptanceKind::ContentBoundSpecDecision,
+            Some(_),
+        ) if successor
+            .intents
+            .iter()
+            .all(|intent| matches!(intent.source, IntentSourceV1::TrustedSpec { .. })) => {}
+        _ => bail!("successor IntentPlan acceptance authority is incompatible"),
+    }
+    if let (Some(previous_binding), Some(successor_binding)) =
+        (previous_task_plan_binding, task_plan_binding)
+        && previous_binding.task_id == successor_binding.task_id
+        && successor_binding.task_plan_version <= previous_binding.task_plan_version
+    {
+        bail!("successor IntentPlan must bind a newer TaskPlan version");
+    }
+
+    let previous_by_id = previous
+        .intents
+        .iter()
+        .map(|intent| (intent.intent_ref.intent_id.clone(), intent))
+        .collect::<BTreeMap<_, _>>();
+    if successor.intents.len() != previous_by_id.len() {
+        bail!("R51.5 successor IntentPlan must preserve the exact intent id set");
+    }
+    let mut seen_ids = BTreeSet::new();
+    let mut supersessions = Vec::new();
+    for replacement in &successor.intents {
+        let intent_id = replacement.intent_ref.intent_id.clone();
+        let prior = previous_by_id
+            .get(&intent_id)
+            .context("R51.5 successor IntentPlan introduced a new intent id")?;
+        seen_ids.insert(intent_id);
+        if replacement == *prior {
+            continue;
+        }
+        if replacement.intent_ref.version != prior.intent_ref.version.saturating_add(1)
+            || replacement.supersedes.as_ref() != Some(&prior.intent_ref)
+        {
+            bail!("changed intent definition must advance exactly one version and supersede it");
+        }
+        if replacement.title == prior.title
+            && replacement.statement == prior.statement
+            && replacement.acceptance_criteria == prior.acceptance_criteria
+            && replacement.depends_on == prior.depends_on
+            && replacement.source == prior.source
+        {
+            bail!("intent version cannot advance without a semantic or provenance change");
+        }
+        supersessions.push((prior.intent_ref.clone(), replacement.intent_ref.clone()));
+    }
+    if seen_ids.len() != previous_by_id.len() || supersessions.is_empty() {
+        bail!("successor IntentPlan must supersede at least one existing intent");
+    }
+    Ok(supersessions)
+}
+
+fn dependency_revision_frontier(
+    plan: &IntentPlanV1,
+    intent_id: &IntentId,
+    revised_intents: &BTreeMap<IntentId, IntentVersionRef>,
+    admission: &IntentStackProjectionV1,
+) -> Option<u64> {
+    let by_id = plan
+        .intents
+        .iter()
+        .map(|intent| (intent.intent_ref.intent_id.clone(), intent))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = by_id
+        .get(intent_id)
+        .map(|definition| definition.depends_on.clone())
+        .unwrap_or_default();
+    let mut visited = BTreeSet::new();
+    let mut frontier = None;
+    while let Some(dependency) = pending.pop() {
+        if let Some(intent_ref) = revised_intents.get(&dependency)
+            && let Some(sequence) = admission.accepted_plans.values().find_map(|accepted| {
+                accepted
+                    .plan
+                    .intents
+                    .iter()
+                    .any(|definition| &definition.intent_ref == intent_ref)
+                    .then_some(accepted.accepted_stream_sequence)
+            })
+        {
+            frontier = Some(frontier.map_or(sequence, |current: u64| current.max(sequence)));
+        }
+        if visited.insert(dependency.clone())
+            && let Some(definition) = by_id.get(&dependency)
+        {
+            pending.extend(definition.depends_on.iter().cloned());
+        }
+    }
+    frontier
 }
 
 fn validate_plan_header(
@@ -1299,7 +1892,7 @@ fn runtime_intent_id(
     IntentId::new(runtime_id("intent", context, namespace, local_key))
 }
 
-fn runtime_criterion_id(
+pub(crate) fn runtime_criterion_id(
     context: &IntentAdmissionContextV1,
     intent_id: &str,
     local_key: &str,

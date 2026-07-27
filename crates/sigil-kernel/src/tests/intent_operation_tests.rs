@@ -1178,3 +1178,91 @@ fn dropped_layer_exits_retention_protected_set_but_history_stays_dropped() -> Re
     ));
     Ok(())
 }
+
+#[test]
+fn superseded_layer_and_historical_operation_replay_without_retention_authority() -> Result<()> {
+    let temp = tempdir()?;
+    let (_store, mut session, intent_ref, _execution_id) = setup_chat_drop(temp.path())?;
+    let workspace = temp.path().join("workspace");
+
+    let drop_preview = preview_intent_drop(&session, &workspace, &intent_ref)?;
+    let expired = IntentOperationAuthorityV1::new(
+        IntentDigest::new(format!(
+            "{}{}",
+            INTENT_CANONICAL_DIGEST_PREFIX,
+            "c".repeat(64)
+        ))?,
+        "expired-before-revision",
+        Some(1),
+    )?;
+    assert_eq!(
+        execute_intent_drop(
+            &session,
+            &workspace,
+            &request(&drop_preview),
+            &expired,
+            "retain rejected historical operation",
+        )?
+        .resolution,
+        IntentOperationResolution::Rejected
+    );
+
+    let revision = IntentRevisionProposalV1::new(
+        "revision-after-layer",
+        "turn-revision-after-layer",
+        intent_ref,
+        "Revised retry",
+        "Rebuild retry with the revised behavior.",
+        vec![IntentProposalCriterionV1 {
+            criterion_alias: "revised-retry-check".to_owned(),
+            statement: "The revised retry behavior is verified.".to_owned(),
+            required: true,
+        }],
+        Vec::new(),
+    )?;
+    let impact = preview_intent_revision(&session, &workspace, &revision)?;
+    let revision_authority = IntentRevisionAuthorityV1::explicit_user_confirmation(
+        &revision,
+        &impact,
+        "decision-revision-after-layer",
+    )?;
+    accept_intent_revision(
+        &mut session,
+        &workspace,
+        &revision,
+        &impact,
+        &revision_authority,
+        None,
+    )?;
+
+    assert!(matches!(
+        session.public_intent_stack_state()?,
+        PublicIntentStackStateV1::Available { stack, .. }
+            if stack.stack_version.get() == 2
+                && stack.intents[0].application_state == IntentApplicationState::NeedsRebuild
+    ));
+    assert_eq!(
+        session
+            .intent_operation_projection()?
+            .operations
+            .get(&drop_preview.operation_id)
+            .map(|operation| operation.state),
+        Some(IntentOperationStateV1::Rejected),
+        "historical operation stays auditable under its original plan version"
+    );
+
+    let recorder = session.mutation_event_recorder().context("recorder")?;
+    let report = recorder.enforce_artifact_retention_at(
+        &MutationArtifactRetentionPolicy {
+            max_artifacts: Some(0),
+            max_bytes: Some(0),
+            expire_older_than_ms: Some(u64::MAX),
+        },
+        u64::MAX,
+    )?;
+    assert!(
+        report.deleted_artifacts + report.expired_artifacts >= 4,
+        "superseded layer artifacts must leave the active retention-protected set"
+    );
+    Ok(())
+}

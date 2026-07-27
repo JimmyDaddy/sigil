@@ -782,11 +782,23 @@ fn active_intent_layer_artifact_ids(
     let layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
     let operations =
         crate::IntentOperationProjectionV1::from_records(&records, &admission, &layers)?;
+    let active_refs = admission
+        .latest_accepted_plan()
+        .map(|accepted| {
+            accepted
+                .plan
+                .intents
+                .iter()
+                .map(|intent| intent.intent_ref.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
     Ok(layers
         .layers
         .into_values()
         .filter(|layer| {
-            !operations.is_dropped(&layer.layer_manifest.core.intent_ref)
+            active_refs.contains(&layer.layer_manifest.core.intent_ref)
+                && !operations.is_dropped(&layer.layer_manifest.core.intent_ref)
                 && layer.artifacts.iter().all(|artifact| {
                     artifact.ownership == IntentArtifactOwnership::Exclusive
                         && artifact.availability == IntentArtifactAvailability::Available

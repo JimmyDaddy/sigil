@@ -109,7 +109,6 @@ impl IntentLayerProjectionV1 {
         admission: &IntentStackProjectionV1,
         lineage: &crate::IntentLineageProjectionV1,
     ) -> Result<Self> {
-        let accepted = admission.latest_accepted_plan();
         let facts = LayerMaterializationFacts::from_records(records)?;
         let mut pending =
             BTreeMap::<IntentExecutionId, (IntentArtifactManifestV1, String, u64)>::new();
@@ -158,7 +157,9 @@ impl IntentLayerProjectionV1 {
                         &manifest,
                         &artifact_manifest,
                         execution,
-                        accepted.context("Intent layer requires an accepted IntentPlan")?,
+                        admission
+                            .accepted_plan(execution.stack_version)
+                            .context("Intent layer requires its accepted IntentPlan version")?,
                         &facts,
                         artifact_sequence,
                         event.stream_sequence,
@@ -196,7 +197,7 @@ impl IntentLayerProjectionV1 {
         }
         projection.apply_artifact_lifecycle(records)?;
         projection.apply_workspace_drift(records)?;
-        projection.apply_shared_file_ownership(accepted);
+        projection.apply_shared_file_ownership(admission.latest_accepted_plan());
         Ok(projection)
     }
 
@@ -1141,6 +1142,15 @@ pub fn materialize_intent_layer(
     let execution = lineage
         .execution(execution_id)
         .context("Intent layer references an unknown execution")?;
+    if execution.stack_version != accepted.plan.stack_version
+        || !accepted
+            .plan
+            .intents
+            .iter()
+            .any(|intent| intent.intent_ref == execution.binding.intent_ref)
+    {
+        bail!("Intent layer materialization cannot use superseded execution authority");
+    }
     if execution.read_only_reason.is_some()
         || execution.changeset_ids.is_empty()
         || execution.parent_mutation_event_id.is_none()
