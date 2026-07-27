@@ -304,6 +304,7 @@ pub struct CheckpointRestored {
 pub enum CheckpointRestoreConflictReason {
     WorkspaceMismatch,
     CurrentHashMismatch,
+    IntentStateConflict,
     ArtifactUnavailable,
     SensitiveSnapshot,
     UnsupportedSnapshot,

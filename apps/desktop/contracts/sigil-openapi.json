@@ -858,6 +858,7 @@
         "enum": [
           "workspace_mismatch",
           "current_hash_mismatch",
+          "intent_state_conflict",
           "artifact_unavailable",
           "sensitive_snapshot",
           "unsupported_snapshot",
@@ -1552,6 +1553,7 @@
                 "enum": [
                   "workspace_mismatch",
                   "current_hash_mismatch",
+                  "intent_state_conflict",
                   "artifact_unavailable",
                   "sensitive_snapshot",
                   "unsupported_snapshot",

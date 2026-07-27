@@ -706,6 +706,7 @@ pub enum DesktopConversationDisplayCheckpointOutcome {
 pub enum DesktopConversationDisplayCheckpointConflictReason {
     WorkspaceMismatch,
     CurrentHashMismatch,
+    IntentStateConflict,
     ArtifactUnavailable,
     SensitiveSnapshot,
     UnsupportedSnapshot,
@@ -1619,6 +1620,7 @@ pub struct DesktopCheckpointRestoreRequest {
 pub enum DesktopCheckpointRestoreConflictReason {
     WorkspaceMismatch,
     CurrentHashMismatch,
+    IntentStateConflict,
     ArtifactUnavailable,
     SensitiveSnapshot,
     UnsupportedSnapshot,

@@ -211,6 +211,10 @@ fn resolve_restore(
     if checkpoint.checkpoint_digest != request.checkpoint_digest {
         bail!("controlled checkpoint changed since the action was rendered");
     }
+    let intent_conflict_paths = crate::intent_operation::checkpoint_intent_conflict_paths(
+        records,
+        checkpoint.turn_boundary_stream_sequence,
+    )?;
     let workspace_id = stable_workspace_id(&workspace_root)?;
     let mut preview_files = Vec::with_capacity(checkpoint.files.len());
     let mut resolved_files = Vec::with_capacity(checkpoint.files.len());
@@ -227,6 +231,9 @@ fn resolve_restore(
                 binding.path.clone()
             }
         };
+        let intent_state_conflict = relative_path
+            .to_str()
+            .is_some_and(|path| intent_conflict_paths.contains(path));
         let absolute_path = workspace_root.join(&relative_path);
         if ensure_absolute_path_matches_subject(&workspace_root, &relative_path, &absolute_path)
             .is_err()
@@ -293,6 +300,9 @@ fn resolve_restore(
                 None
             }
         };
+        if intent_state_conflict {
+            conflict_reason = Some(CheckpointRestoreConflictReason::IntentStateConflict);
+        }
         preview_files.push(ControlledCheckpointRestorePreviewFile {
             path: binding.path.clone(),
             restore_kind: binding.restore_kind,

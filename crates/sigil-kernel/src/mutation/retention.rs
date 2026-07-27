@@ -780,14 +780,17 @@ fn active_intent_layer_artifact_ids(
     }
     let lineage = IntentLineageProjectionV1::from_records(&records, &admission)?;
     let layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
+    let operations =
+        crate::IntentOperationProjectionV1::from_records(&records, &admission, &layers)?;
     Ok(layers
         .layers
         .into_values()
         .filter(|layer| {
-            layer.artifacts.iter().all(|artifact| {
-                artifact.ownership == IntentArtifactOwnership::Exclusive
-                    && artifact.availability == IntentArtifactAvailability::Available
-            })
+            !operations.is_dropped(&layer.layer_manifest.core.intent_ref)
+                && layer.artifacts.iter().all(|artifact| {
+                    artifact.ownership == IntentArtifactOwnership::Exclusive
+                        && artifact.availability == IntentArtifactAvailability::Available
+                })
         })
         .flat_map(|layer| {
             let mut ids = vec![

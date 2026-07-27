@@ -2079,7 +2079,7 @@ export interface components {
             restore_kind: components["schemas"]["CheckpointRestoreKind"];
         };
         /** @enum {string} */
-        CheckpointRestoreConflictReason: "workspace_mismatch" | "current_hash_mismatch" | "artifact_unavailable" | "sensitive_snapshot" | "unsupported_snapshot" | "invalid_binding";
+        CheckpointRestoreConflictReason: "workspace_mismatch" | "current_hash_mismatch" | "intent_state_conflict" | "artifact_unavailable" | "sensitive_snapshot" | "unsupported_snapshot" | "invalid_binding";
         /** @enum {string} */
         CheckpointRestoreKind: "restore_content" | "remove_created_file";
         CheckpointRestorePreviewFile: {
@@ -2250,7 +2250,7 @@ export interface components {
         } | {
             checkpoint_id?: string | null;
             /** @enum {string|null} */
-            conflict_reason?: "workspace_mismatch" | "current_hash_mismatch" | "artifact_unavailable" | "sensitive_snapshot" | "unsupported_snapshot" | "invalid_binding" | null;
+            conflict_reason?: "workspace_mismatch" | "current_hash_mismatch" | "intent_state_conflict" | "artifact_unavailable" | "sensitive_snapshot" | "unsupported_snapshot" | "invalid_binding" | null;
             /** @enum {string} */
             outcome: "restored" | "conflict";
             /** @constant */

@@ -7,13 +7,14 @@ use crate::{
     ControlEntry, DurableEventType, EventClass, INTENT_CONTRACT_SCHEMA_VERSION,
     INTENT_PUBLIC_DTO_SCHEMA_VERSION, IntentAcceptanceCriterionV1, IntentAcceptanceKind,
     IntentApplicationState, IntentAuthorityState, IntentDefinitionState, IntentDefinitionV1,
-    IntentDigest, IntentEventV1, IntentId, IntentPlanKind, IntentPlanProposalV1, IntentPlanV1,
-    IntentProposalCriterionV1, IntentSourceV1, IntentStackId, IntentStackVersion,
-    IntentTaskPlanBindingV1, IntentVersionRef, JsonlSessionStore, MAX_INTENT_CRITERIA,
-    MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES, ProjectionApplyDecision, ProjectionCursor,
-    PublicIntentSourceV1, PublicIntentStackStateV1, PublicIntentStackV1, PublicIntentV1, Session,
-    SessionLogEntry, SessionStreamRecord, TaskPlanEntry, TaskPlanStatus, TaskStepId, TaskStepMode,
-    TypedDomainEvent, TypedStoredEventDecode, decode_typed_stored_event, projection_apply_decision,
+    IntentDigest, IntentEventV1, IntentId, IntentOperationKind, IntentPlanKind,
+    IntentPlanProposalV1, IntentPlanV1, IntentProposalCriterionV1, IntentSourceV1, IntentStackId,
+    IntentStackVersion, IntentTaskPlanBindingV1, IntentVersionRef, JsonlSessionStore,
+    MAX_INTENT_CRITERIA, MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES,
+    ProjectionApplyDecision, ProjectionCursor, PublicIntentSourceV1, PublicIntentStackStateV1,
+    PublicIntentStackV1, PublicIntentV1, Session, SessionLogEntry, SessionStreamRecord,
+    TaskPlanEntry, TaskPlanStatus, TaskStepId, TaskStepMode, TypedDomainEvent,
+    TypedStoredEventDecode, decode_typed_stored_event, projection_apply_decision,
     validate_task_plan_graph_steps,
 };
 
@@ -544,7 +545,7 @@ impl IntentStackProjectionV1 {
     ///
     /// Returns an error when a stack exists but its latest admission is incomplete.
     pub fn public_state(&self) -> Result<PublicIntentStackStateV1> {
-        self.public_state_with_optional_projections(None, None)
+        self.public_state_with_optional_projections(None, None, None)
     }
 
     /// Produces the bounded adapter contract with R51.2 lineage and evidence summaries.
@@ -552,7 +553,7 @@ impl IntentStackProjectionV1 {
         &self,
         lineage: &crate::IntentLineageProjectionV1,
     ) -> Result<PublicIntentStackStateV1> {
-        self.public_state_with_optional_projections(Some(lineage), None)
+        self.public_state_with_optional_projections(Some(lineage), None, None)
     }
 
     /// Produces the bounded adapter contract with R51.2 lineage and R51.3 artifact summaries.
@@ -561,13 +562,24 @@ impl IntentStackProjectionV1 {
         lineage: &crate::IntentLineageProjectionV1,
         layers: &crate::IntentLayerProjectionV1,
     ) -> Result<PublicIntentStackStateV1> {
-        self.public_state_with_optional_projections(Some(lineage), Some(layers))
+        self.public_state_with_optional_projections(Some(lineage), Some(layers), None)
+    }
+
+    /// Produces the bounded adapter contract with R51.4 operation/application state.
+    pub fn public_state_with_operation_projection(
+        &self,
+        lineage: &crate::IntentLineageProjectionV1,
+        layers: &crate::IntentLayerProjectionV1,
+        operations: &crate::IntentOperationProjectionV1,
+    ) -> Result<PublicIntentStackStateV1> {
+        self.public_state_with_optional_projections(Some(lineage), Some(layers), Some(operations))
     }
 
     fn public_state_with_optional_projections(
         &self,
         lineage: Option<&crate::IntentLineageProjectionV1>,
         layers: Option<&crate::IntentLayerProjectionV1>,
+        operations: Option<&crate::IntentOperationProjectionV1>,
     ) -> Result<PublicIntentStackStateV1> {
         let Some(header) = &self.header else {
             return Ok(PublicIntentStackStateV1::HistoryUnavailable {
@@ -590,7 +602,7 @@ impl IntentStackProjectionV1 {
         let accepted = self
             .latest_accepted_plan()
             .context("Intent Stack has no accepted plan")?;
-        let intents = accepted
+        let mut intents = accepted
             .plan
             .intents
             .iter()
@@ -599,9 +611,31 @@ impl IntentStackProjectionV1 {
                     definition,
                     lineage.map(|lineage| lineage.summary_for(&definition.intent_ref)),
                     layers.map(|layers| layers.summary_for(&definition.intent_ref)),
+                    operations,
                 )
             })
             .collect::<Vec<_>>();
+        for intent in &mut intents {
+            let is_leaf = !accepted.plan.intents.iter().any(|candidate| {
+                candidate.intent_ref != intent.intent_ref
+                    && operations
+                        .is_none_or(|operations| !operations.is_dropped(&candidate.intent_ref))
+                    && candidate.depends_on.contains(&intent.intent_ref.intent_id)
+            });
+            if is_leaf
+                && intent.application_state == IntentApplicationState::Applied
+                && intent.exclusive_artifact_count > 0
+                && intent.shared_artifact_count == 0
+                && intent.unowned_artifact_count == 0
+                && intent.drifted_artifact_count == 0
+                && intent.unavailable_artifact_count == 0
+                && operations.is_none_or(|operations| {
+                    !operations.has_active_operation_for(&intent.intent_ref)
+                })
+            {
+                intent.available_actions.push(IntentOperationKind::Drop);
+            }
+        }
         let authority_state = if intents
             .iter()
             .any(|intent| intent.application_state == IntentApplicationState::ReadOnly)
@@ -619,7 +653,9 @@ impl IntentStackProjectionV1 {
                 authority_state,
                 plan_digest: accepted.plan.plan_digest.clone(),
                 intents,
-                conflicts: Vec::new(),
+                conflicts: operations
+                    .map(|operations| operations.conflicts.clone())
+                    .unwrap_or_default(),
             },
         })
     }
@@ -777,8 +813,13 @@ impl IntentStackProjectionV1 {
             | IntentEventV1::ChangeSetBound { .. }
             | IntentEventV1::ArtifactBindingsRecorded { .. }
             | IntentEventV1::LayerManifestRecorded { .. }
-            | IntentEventV1::VerificationLinked { .. } => {
-                // R51.2 lineage and R51.3 layers are reduced by their dedicated projections;
+            | IntentEventV1::VerificationLinked { .. }
+            | IntentEventV1::OperationRequested { .. }
+            | IntentEventV1::OperationPrepared { .. }
+            | IntentEventV1::OperationResolved { .. }
+            | IntentEventV1::ConflictRecorded { .. } => {
+                // R51.2 lineage, R51.3 layers, and R51.4 operations are reduced by their dedicated
+                // projections;
                 // admission remains an immutable view of accepted plan versions.
             }
             _ => bail!(
@@ -978,7 +1019,9 @@ impl Session {
         if let Some(recorder) = self.mutation_event_recorder() {
             layers.refresh_artifact_availability(&recorder)?;
         }
-        admission.public_state_with_projections(&lineage, &layers)
+        let operations =
+            crate::IntentOperationProjectionV1::from_records(&records, &admission, &layers)?;
+        admission.public_state_with_operation_projection(&lineage, &layers, &operations)
     }
 }
 
@@ -1115,6 +1158,7 @@ fn public_intent_from_definition(
     definition: &IntentDefinitionV1,
     lineage: Option<crate::IntentLineageSummaryV1>,
     layer: Option<crate::IntentLayerSummaryV1>,
+    operations: Option<&crate::IntentOperationProjectionV1>,
 ) -> PublicIntentV1 {
     let source = match &definition.source {
         IntentSourceV1::UserTurn { source_turn_id } => PublicIntentSourceV1::UserTurn {
@@ -1134,6 +1178,8 @@ fn public_intent_from_definition(
         ..crate::IntentLineageSummaryV1::default()
     });
     let layer = layer.unwrap_or_default();
+    let dropped =
+        operations.is_some_and(|operations| operations.is_dropped(&definition.intent_ref));
     PublicIntentV1 {
         intent_ref: definition.intent_ref.clone(),
         title: definition.title.clone(),
@@ -1142,17 +1188,25 @@ fn public_intent_from_definition(
         depends_on: definition.depends_on.clone(),
         source,
         definition_state: IntentDefinitionState::Accepted,
-        application_state: layer
-            .application_state
-            .or(lineage.application_state)
-            .unwrap_or(IntentApplicationState::Unapplied),
+        application_state: if dropped {
+            IntentApplicationState::Dropped
+        } else {
+            layer
+                .application_state
+                .or(lineage.application_state)
+                .unwrap_or(IntentApplicationState::Unapplied)
+        },
         exclusive_artifact_count: layer.exclusive_artifact_count,
         shared_artifact_count: layer.shared_artifact_count,
         unowned_artifact_count: layer.unowned_artifact_count,
         drifted_artifact_count: layer.drifted_artifact_count,
         unavailable_artifact_count: layer.unavailable_artifact_count,
         advisory_criterion_count: lineage.advisory_criterion_count,
-        system_verified_criterion_count: lineage.system_verified_criterion_count,
+        system_verified_criterion_count: if dropped {
+            0
+        } else {
+            lineage.system_verified_criterion_count
+        },
         artifacts: layer.artifacts,
         available_actions: Vec::new(),
     }

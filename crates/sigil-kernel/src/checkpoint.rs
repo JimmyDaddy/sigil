@@ -141,6 +141,8 @@ impl ControlledCheckpointProjection {
         crate::ConversationQueueDurableProjection::from_records(records)?;
         let unavailable_artifacts = unavailable_artifacts(records)?;
         let restored_operation_ids = restored_operation_ids(records)?;
+        let intent_operation_ids =
+            crate::intent_operation::intent_operation_mutation_operation_ids(records)?;
         let mut checkpoints = Vec::new();
         let mut current = None::<CheckpointBuilder>;
         let mut turn_index = 0usize;
@@ -168,7 +170,9 @@ impl ControlledCheckpointProjection {
                 DomainEvent::MutationPrepared(payload) => {
                     let prepared = serde_json::from_value::<MutationPrepared>(payload.payload)
                         .context("failed to decode checkpoint mutation prepared payload")?;
-                    if restored_operation_ids.contains(&prepared.operation_id) {
+                    if restored_operation_ids.contains(&prepared.operation_id)
+                        || intent_operation_ids.contains(&prepared.operation_id)
+                    {
                         continue;
                     }
                     builder.prepared.insert(
@@ -183,7 +187,9 @@ impl ControlledCheckpointProjection {
                 DomainEvent::MutationCommitted(payload) => {
                     let committed = serde_json::from_value::<MutationCommitted>(payload.payload)
                         .context("failed to decode checkpoint mutation committed payload")?;
-                    if restored_operation_ids.contains(&committed.operation_id) {
+                    if restored_operation_ids.contains(&committed.operation_id)
+                        || intent_operation_ids.contains(&committed.operation_id)
+                    {
                         continue;
                     }
                     builder.apply_committed(committed, record.event_id());

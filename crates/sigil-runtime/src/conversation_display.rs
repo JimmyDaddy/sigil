@@ -170,6 +170,7 @@ pub enum ConversationDisplayCheckpointOutcomeV1 {
 pub enum ConversationDisplayCheckpointConflictReasonV1 {
     WorkspaceMismatch,
     CurrentHashMismatch,
+    IntentStateConflict,
     ArtifactUnavailable,
     SensitiveSnapshot,
     UnsupportedSnapshot,
@@ -1687,6 +1688,9 @@ fn map_checkpoint_conflict_reason(
         }
         CheckpointRestoreConflictReason::CurrentHashMismatch => {
             ConversationDisplayCheckpointConflictReasonV1::CurrentHashMismatch
+        }
+        CheckpointRestoreConflictReason::IntentStateConflict => {
+            ConversationDisplayCheckpointConflictReasonV1::IntentStateConflict
         }
         CheckpointRestoreConflictReason::ArtifactUnavailable => {
             ConversationDisplayCheckpointConflictReasonV1::ArtifactUnavailable

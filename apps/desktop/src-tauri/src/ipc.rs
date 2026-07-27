@@ -2282,6 +2282,9 @@ fn checkpoint_conflict_reason_label(
         sigil_desktop::DesktopCheckpointRestoreConflictReason::CurrentHashMismatch => {
             "current_hash_mismatch"
         }
+        sigil_desktop::DesktopCheckpointRestoreConflictReason::IntentStateConflict => {
+            "intent_state_conflict"
+        }
         sigil_desktop::DesktopCheckpointRestoreConflictReason::ArtifactUnavailable => {
             "artifact_unavailable"
         }
@@ -2550,6 +2553,9 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                     }
                     NativeConversationDisplayCheckpointConflictReason::CurrentHashMismatch => {
                         "current_hash_mismatch"
+                    }
+                    NativeConversationDisplayCheckpointConflictReason::IntentStateConflict => {
+                        "intent_state_conflict"
                     }
                     NativeConversationDisplayCheckpointConflictReason::ArtifactUnavailable => {
                         "artifact_unavailable"

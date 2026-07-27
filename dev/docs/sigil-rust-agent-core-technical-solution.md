@@ -938,8 +938,9 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 
 当前实现选择如下：
 
-- RFC-0051 Intent Stack 的 R51.0-R51.3 已落地在 provider-neutral
-  `sigil-kernel::intent` / `intent_admission` / `intent_lineage` / `intent_layer`：model/provider proposal 使用无 runtime
+- RFC-0051 Intent Stack 的 R51.0-R51.4 已落地在 provider-neutral
+  `sigil-kernel::intent` / `intent_admission` / `intent_lineage` / `intent_layer` /
+  `intent_operation`：model/provider proposal 使用无 runtime
   authority 的 alias schema，accepted plan、独立 acceptance event、Task/Chat provenance、
   artifact/layer/operation 与 bounded public DTO 使用严格 V1 schema；canonical JSON digest
   与 exact byte digest 分型，layer core -> artifact manifest -> final layer manifest 使用无循环
@@ -957,8 +958,14 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
   applied ChangeSet 与 RFC-0002 prepare/commit materialize content-addressed forward/reverse
   patch、file hunk 和 canonical manifest；同文件跨 active intent 一律 shared，后续 formatter、
   codegen/unknown-dirty 或 artifact lifecycle 缺口降级 read-only，exclusive/available layer
-  artifacts 进入 retention protected set。exact drop/operation recovery 及 TUI/HTTP/Desktop
-  入口仍按 RFC-0051 R51.4-R51.7 逐片实施。
+  artifacts 进入 retention protected set。R51.4 以只含 stable id/version/digest 的 request 和
+  host-only approval authority 生成 exact drop preview，在 workspace lease 内重投影并通过
+  全文件 prepare-before-commit 的 RFC-0002 CAS batch 应用 reverse artifact；operation id
+  绑定 preview 所在 durable stream frontier，使拒绝后的合法重试获得新 identity、并发旧
+  preview 在 append 前失效。partial/crash 只按 durable evidence 收口，不重放文件写。
+  Committed drop 使旧 verification stale、public intent 进入 Dropped、checkpoint restore
+  返回 intent-state conflict，并让该 layer 退出 retention protected set。R51.5-R51.7 继续实现
+  impact/adoption、TUI 与 HTTP/Desktop/automation 入口。
 - `sigil-kernel::TaskStateProjection` 从 append-only control log 重建 task run、plan、step、child session 和 route 摘要状态。
 - `sigil-runtime::ConversationCoordinator` 将 TUI direct/queued source turn 绑定到 typed run purpose；TUI 在 typed handoff 后于同一 cancellation/approval root 内继续 task。Application source 使用相同 conversation purpose、foreground Task executor、typed control 与 restart recovery contract。
 - Planner 通过 internal model-visible `task_plan_update` tool 写入 durable plan；该 tool 由 agent loop 拦截并写 `ToolExecution` audit，不作为普通 workspace tool 执行。

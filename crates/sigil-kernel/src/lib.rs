@@ -22,6 +22,7 @@ pub mod intent;
 pub mod intent_admission;
 pub mod intent_layer;
 pub mod intent_lineage;
+pub mod intent_operation;
 pub mod memory;
 pub mod model_route;
 pub mod mutation;
@@ -316,6 +317,11 @@ pub use intent_lineage::{
     append_chat_direct_mutation_changeset_binding, append_chat_intent_execution_binding,
     append_intent_changeset_binding, append_intent_verification_evidence,
     append_task_intent_execution_binding,
+};
+pub use intent_operation::{
+    IntentDropRequestV1, IntentOperationAuthorityV1, IntentOperationExecutionV1,
+    IntentOperationProjectionV1, IntentOperationStateV1, IntentOperationSummaryV1,
+    cancel_intent_operation, execute_intent_drop, preview_intent_drop, reconcile_intent_operations,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use model_route::{ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute};

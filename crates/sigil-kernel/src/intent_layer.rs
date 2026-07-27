@@ -34,6 +34,7 @@ pub const INTENT_LAYER_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
 const INTENT_PATCH_MAGIC: &[u8] = b"sigil-intent-patch-v1\0";
 const INTENT_HUNK_MAGIC: &[u8] = b"sigil-intent-hunk-v1\0";
+const MAX_INTENT_PATCH_FILES: usize = 1_024;
 
 /// Why an accepted execution cannot become an executable layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1034,6 +1035,66 @@ enum PatchDirection {
     Reverse,
 }
 
+/// Strictly decoded full-file target from one content-addressed Intent patch.
+///
+/// This stays crate-private because renderer and provider adapters must never receive raw target
+/// bytes or turn them into mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExactIntentPatchFileV1 {
+    pub path: String,
+    pub expected_present: bool,
+    pub expected_digest: IntentContentDigest,
+    pub target: Option<Vec<u8>>,
+}
+
+/// Decodes the canonical patch format written by R51.3.
+///
+/// The decoder rejects duplicate/unsafe paths, invalid flags or digests, oversized targets and
+/// trailing bytes. Callers must still bind every entry to the durable layer manifest before use.
+pub(crate) fn decode_exact_intent_patch(bytes: &[u8]) -> Result<Vec<ExactIntentPatchFileV1>> {
+    let mut input = bytes;
+    if take_exact(&mut input, INTENT_PATCH_MAGIC.len())? != INTENT_PATCH_MAGIC {
+        bail!("Intent patch has an invalid format marker");
+    }
+    let file_count = usize::try_from(read_u32(&mut input)?)
+        .context("Intent patch file count cannot fit this platform")?;
+    if file_count == 0 || file_count > MAX_INTENT_PATCH_FILES {
+        bail!("Intent patch file count is outside the supported range");
+    }
+    let mut paths = BTreeSet::new();
+    let mut files = Vec::with_capacity(file_count);
+    for _ in 0..file_count {
+        let path = String::from_utf8(read_bytes(&mut input, 4_096)?)
+            .context("Intent patch path is not UTF-8")?;
+        if !normalized_intent_path(&path) || !paths.insert(path.clone()) {
+            bail!("Intent patch contains an invalid or duplicate path");
+        }
+        let expected_present = read_flag(&mut input)?;
+        let expected_digest = IntentContentDigest::new(
+            String::from_utf8(read_bytes(&mut input, 128)?)
+                .context("Intent patch expected digest is not UTF-8")?,
+        )?;
+        let target = if read_flag(&mut input)? {
+            Some(read_bytes(
+                &mut input,
+                usize::try_from(MAX_WORKSPACE_SNAPSHOT_FILE_BYTES).unwrap_or(usize::MAX),
+            )?)
+        } else {
+            None
+        };
+        files.push(ExactIntentPatchFileV1 {
+            path,
+            expected_present,
+            expected_digest,
+            target,
+        });
+    }
+    if !input.is_empty() {
+        bail!("Intent patch contains trailing bytes");
+    }
+    Ok(files)
+}
+
 /// Materializes one exact execution into content-addressed patch/hunk artifacts and appends the
 /// artifact manifest immediately before the final layer manifest.
 ///
@@ -1579,6 +1640,44 @@ fn push_u32(output: &mut Vec<u8>, value: usize) -> Result<()> {
 
 fn push_u64(output: &mut Vec<u8>, value: u64) {
     output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn read_flag(input: &mut &[u8]) -> Result<bool> {
+    match take_exact(input, 1)?[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => bail!("Intent patch contains an invalid presence flag"),
+    }
+}
+
+fn read_u32(input: &mut &[u8]) -> Result<u32> {
+    let mut bytes = [0_u8; 4];
+    bytes.copy_from_slice(take_exact(input, 4)?);
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn read_u64(input: &mut &[u8]) -> Result<u64> {
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(take_exact(input, 8)?);
+    Ok(u64::from_be_bytes(bytes))
+}
+
+fn read_bytes(input: &mut &[u8], maximum: usize) -> Result<Vec<u8>> {
+    let length = usize::try_from(read_u64(input)?)
+        .context("Intent patch length cannot fit this platform")?;
+    if length > maximum {
+        bail!("Intent patch field exceeds its bounded size");
+    }
+    Ok(take_exact(input, length)?.to_vec())
+}
+
+fn take_exact<'a>(input: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
+    if input.len() < length {
+        bail!("Intent patch is truncated");
+    }
+    let (value, remaining) = input.split_at(length);
+    *input = remaining;
+    Ok(value)
 }
 
 fn zero_intent_digest() -> Result<crate::IntentDigest> {

@@ -207,6 +207,10 @@ durable_event_types! {
     IntentArtifactBindingsRecorded => ("intent_artifact_bindings_recorded", RecoveryCritical, Critical, DirectJson, "intent_artifact_bindings_recorded"),
     IntentLayerManifestRecorded => ("intent_layer_manifest_recorded", RecoveryCritical, Critical, DirectJson, "intent_layer_manifest_recorded"),
     IntentVerificationLinked => ("intent_verification_linked", RecoveryCritical, Critical, DirectJson, "intent_verification_linked"),
+    IntentOperationRequested => ("intent_operation_requested", RecoveryCritical, Critical, DirectJson, "intent_operation_requested"),
+    IntentOperationPrepared => ("intent_operation_prepared", RecoveryCritical, Critical, DirectJson, "intent_operation_prepared"),
+    IntentOperationResolved => ("intent_operation_resolved", RecoveryCritical, Critical, DirectJson, "intent_operation_resolved"),
+    IntentConflictRecorded => ("intent_conflict_recorded", RecoveryCritical, Critical, DirectJson, "intent_conflict_recorded"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffResolved => ("task_handoff_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -721,7 +725,11 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         | DurableEventType::IntentChangeSetBound
         | DurableEventType::IntentArtifactBindingsRecorded
         | DurableEventType::IntentLayerManifestRecorded
-        | DurableEventType::IntentVerificationLinked => {
+        | DurableEventType::IntentVerificationLinked
+        | DurableEventType::IntentOperationRequested
+        | DurableEventType::IntentOperationPrepared
+        | DurableEventType::IntentOperationResolved
+        | DurableEventType::IntentConflictRecorded => {
             TypedDomainEvent::Intent(decode_intent_event(&event)?)
         }
         DurableEventType::WriteLeaseAcquired
@@ -909,6 +917,10 @@ fn decode_intent_event(event: &StoredEvent) -> Result<IntentEventV1> {
             DurableEventType::IntentLayerManifestRecorded
         }
         IntentEventV1::VerificationLinked { .. } => DurableEventType::IntentVerificationLinked,
+        IntentEventV1::OperationRequested { .. } => DurableEventType::IntentOperationRequested,
+        IntentEventV1::OperationPrepared { .. } => DurableEventType::IntentOperationPrepared,
+        IntentEventV1::OperationResolved { .. } => DurableEventType::IntentOperationResolved,
+        IntentEventV1::ConflictRecorded { .. } => DurableEventType::IntentConflictRecorded,
         _ => bail!(
             "{} carries an Intent event reserved for a later RFC-0051 slice",
             event.event_type

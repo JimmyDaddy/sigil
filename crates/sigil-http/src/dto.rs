@@ -976,6 +976,7 @@ pub enum HttpConversationDisplayCheckpointOutcome {
 pub enum HttpConversationDisplayCheckpointConflictReason {
     WorkspaceMismatch,
     CurrentHashMismatch,
+    IntentStateConflict,
     ArtifactUnavailable,
     SensitiveSnapshot,
     UnsupportedSnapshot,
@@ -1382,7 +1383,7 @@ map_enum!(ConversationDisplayCheckpointOutcomeV1 => HttpConversationDisplayCheck
     Restored, Conflict
 });
 map_enum!(ConversationDisplayCheckpointConflictReasonV1 => HttpConversationDisplayCheckpointConflictReason {
-    WorkspaceMismatch, CurrentHashMismatch, ArtifactUnavailable, SensitiveSnapshot,
+    WorkspaceMismatch, CurrentHashMismatch, IntentStateConflict, ArtifactUnavailable, SensitiveSnapshot,
     UnsupportedSnapshot, InvalidBinding
 });
 
@@ -2290,6 +2291,7 @@ impl From<&HttpCheckpointRestoreRequest> for sigil_kernel::ControlledCheckpointR
 pub enum HttpCheckpointRestoreConflictReason {
     WorkspaceMismatch,
     CurrentHashMismatch,
+    IntentStateConflict,
     ArtifactUnavailable,
     SensitiveSnapshot,
     UnsupportedSnapshot,
@@ -2359,6 +2361,9 @@ impl From<ApplicationCheckpointRestoreReview> for HttpCheckpointRestoreReview {
                         }
                         sigil_kernel::CheckpointRestoreConflictReason::CurrentHashMismatch => {
                             HttpCheckpointRestoreConflictReason::CurrentHashMismatch
+                        }
+                        sigil_kernel::CheckpointRestoreConflictReason::IntentStateConflict => {
+                            HttpCheckpointRestoreConflictReason::IntentStateConflict
                         }
                         sigil_kernel::CheckpointRestoreConflictReason::ArtifactUnavailable => {
                             HttpCheckpointRestoreConflictReason::ArtifactUnavailable

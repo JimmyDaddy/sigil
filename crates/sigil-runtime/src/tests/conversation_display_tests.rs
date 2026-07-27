@@ -4,21 +4,22 @@ use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
 use sigil_kernel::{
-    AgentRole, ApprovalMode, AssistantMessageKind, ControlEntry, ConversationForked,
-    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
-    ConversationInputQueuedEntry, ConversationInputTarget, ConversationRunFinalizedEntryV1,
-    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
-    JsonlSessionStore, MessageRole, ModelMessage, PermissionRisk, SecretRedactor, Session,
-    SessionLogEntry, SessionRef, SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent,
-    TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
+    AgentRole, ApprovalMode, AssistantMessageKind, CheckpointRestoreConflict,
+    CheckpointRestoreConflictReason, ControlEntry, ConversationForked, ConversationInputKind,
+    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputTarget, ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
+    ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
+    ModelMessage, PermissionRisk, SecretRedactor, Session, SessionLogEntry, SessionRef,
+    SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
 use crate::conversation_display::{
-    ConversationDisplayAssistantPhaseV1, ConversationDisplayContentV1,
-    ConversationDisplayItemKindV1, ConversationDisplayMessageRoleV1,
+    ConversationDisplayAssistantPhaseV1, ConversationDisplayCheckpointConflictReasonV1,
+    ConversationDisplayContentV1, ConversationDisplayItemKindV1, ConversationDisplayMessageRoleV1,
     ConversationDisplayProjectionError, ConversationDisplayStatusV1,
     ConversationLiveProvisionalSlotV1, MAX_CONVERSATION_DISPLAY_CONTENT_BYTES,
     MAX_CONVERSATION_DISPLAY_PAGE_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
@@ -672,6 +673,39 @@ fn reasoning_is_typed_and_empty_messages_do_not_create_placeholders() -> Result<
     assert!(matches!(
         &page.items[0].content,
         ConversationDisplayContentV1::Reasoning { text, .. } if text == "reasoning details"
+    ));
+    Ok(())
+}
+
+#[test]
+fn intent_state_checkpoint_conflict_projects_as_typed_display_reason() -> Result<()> {
+    let conflict = CheckpointRestoreConflict {
+        checkpoint_id: "checkpoint-1".to_owned(),
+        checkpoint_digest: "digest-1".to_owned(),
+        path: Some("src/lib.rs".into()),
+        reason: CheckpointRestoreConflictReason::IntentStateConflict,
+        expected_current_hash: None,
+        actual_current_hash: None,
+    };
+    let record = SessionStreamRecord::Stored(StoredEvent::new(
+        DurableEventType::CheckpointRestoreConflict,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "scope-1".to_owned(),
+        1,
+        serde_json::to_value(conflict)?,
+    )?);
+
+    let page = conversation_display_page_from_records(&[record], "scope-1", None, 10)?;
+    assert_eq!(page.items.len(), 1);
+    assert!(matches!(
+        page.items[0].content,
+        ConversationDisplayContentV1::Checkpoint {
+            conflict_reason: Some(
+                ConversationDisplayCheckpointConflictReasonV1::IntentStateConflict
+            ),
+            ..
+        }
     ));
     Ok(())
 }

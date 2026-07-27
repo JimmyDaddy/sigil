@@ -1567,7 +1567,7 @@ pub fn http_openapi_document() -> Value {
                                 "type": { "const": "checkpoint" },
                                 "outcome": { "type": "string", "enum": ["restored", "conflict"] },
                                 "checkpoint_id": { "type": ["string", "null"], "maxLength": 512 },
-                                "conflict_reason": { "type": ["string", "null"], "enum": ["workspace_mismatch", "current_hash_mismatch", "artifact_unavailable", "sensitive_snapshot", "unsupported_snapshot", "invalid_binding", null] }
+                                "conflict_reason": { "type": ["string", "null"], "enum": ["workspace_mismatch", "current_hash_mismatch", "intent_state_conflict", "artifact_unavailable", "sensitive_snapshot", "unsupported_snapshot", "invalid_binding", null] }
                             }
                         },
                         {
@@ -2011,7 +2011,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointRestoreConflictReason": {
                     "type": "string",
-                    "enum": ["workspace_mismatch", "current_hash_mismatch", "artifact_unavailable", "sensitive_snapshot", "unsupported_snapshot", "invalid_binding"]
+                    "enum": ["workspace_mismatch", "current_hash_mismatch", "intent_state_conflict", "artifact_unavailable", "sensitive_snapshot", "unsupported_snapshot", "invalid_binding"]
                 },
                 "CheckpointRestorePreviewFile": {
                     "type": "object",

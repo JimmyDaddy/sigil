@@ -222,6 +222,46 @@ impl IntentLineageProjectionV1 {
         })
     }
 
+    /// Returns current system-verification receipt identities for exact operation invalidation.
+    ///
+    /// Advisory or stale evidence is intentionally excluded.
+    #[must_use]
+    pub fn current_system_verification_receipt_ids(
+        &self,
+        intent_ref: &IntentVersionRef,
+    ) -> Vec<String> {
+        let Some(execution) = self.latest_execution_for(intent_ref) else {
+            return Vec::new();
+        };
+        let changeset_ids = execution
+            .changeset_ids
+            .iter()
+            .map(ChangeSetId::as_str)
+            .collect::<BTreeSet<_>>();
+        self.evidence
+            .iter()
+            .filter(|item| {
+                if &item.intent_ref != intent_ref
+                    || item.level != IntentCriterionEvidenceLevel::SystemVerified
+                    || execution.parent_snapshot_id.as_deref()
+                        != Some(item.parent_snapshot_id.as_str())
+                    || self.current_parent_snapshot_id.as_deref()
+                        != Some(item.parent_snapshot_id.as_str())
+                {
+                    return false;
+                }
+                item.changeset_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+                    == changeset_ids
+            })
+            .map(|item| item.receipt_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     #[must_use]
     pub fn summary_for(&self, intent_ref: &IntentVersionRef) -> IntentLineageSummaryV1 {
         let Some(execution) = self.latest_execution_for(intent_ref) else {

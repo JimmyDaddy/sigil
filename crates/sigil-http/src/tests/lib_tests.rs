@@ -32,8 +32,9 @@ use super::{
     HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCommandEnvelope, HttpCompactionAdmission, HttpCompactionEconomics,
-    HttpCompactionReceipt, HttpCompactionReview, HttpContextWindowSource,
+    HttpAuthValidator, HttpCheckpointRestoreConflictReason, HttpCommandEnvelope,
+    HttpCompactionAdmission, HttpCompactionEconomics, HttpCompactionReceipt, HttpCompactionReview,
+    HttpContextWindowSource, HttpConversationDisplayCheckpointConflictReason,
     HttpConversationDisplayContent, HttpConversationDisplayDriverError,
     HttpConversationDisplayItem, HttpConversationDisplayItemKind,
     HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
@@ -2942,6 +2943,22 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert!(document["components"]["schemas"]["SessionCatalogPage"].is_object());
     assert!(document["components"]["schemas"]["SessionCatalogBatchPlan"].is_object());
+    assert!(
+        document["components"]["schemas"]["CheckpointRestoreConflictReason"]["enum"]
+            .as_array()
+            .expect("checkpoint conflict enum")
+            .contains(&json!("intent_state_conflict"))
+    );
+    assert_eq!(
+        serde_json::to_value(HttpCheckpointRestoreConflictReason::IntentStateConflict)
+            .expect("restore conflict should serialize"),
+        json!("intent_state_conflict")
+    );
+    assert_eq!(
+        serde_json::to_value(HttpConversationDisplayCheckpointConflictReason::IntentStateConflict)
+            .expect("display conflict should serialize"),
+        json!("intent_state_conflict")
+    );
     assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
     assert!(document["paths"]["/support/doctor"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/support/bundle"]["post"]["responses"]["200"].is_object());

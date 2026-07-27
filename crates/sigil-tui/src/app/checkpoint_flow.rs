@@ -748,6 +748,9 @@ fn conflict_reason_label(reason: CheckpointRestoreConflictReason) -> &'static st
     match reason {
         CheckpointRestoreConflictReason::WorkspaceMismatch => "workspace mismatch",
         CheckpointRestoreConflictReason::CurrentHashMismatch => "current file changed",
+        CheckpointRestoreConflictReason::IntentStateConflict => {
+            "active intent state would be crossed"
+        }
         CheckpointRestoreConflictReason::ArtifactUnavailable => "snapshot unavailable",
         CheckpointRestoreConflictReason::SensitiveSnapshot => "sensitive snapshot excluded",
         CheckpointRestoreConflictReason::UnsupportedSnapshot => "snapshot unsupported",

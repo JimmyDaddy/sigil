@@ -305,6 +305,7 @@ export interface CheckpointRestorePreviewInput {
 export type CheckpointRestoreConflictReason =
   | "workspace_mismatch"
   | "current_hash_mismatch"
+  | "intent_state_conflict"
   | "artifact_unavailable"
   | "sensitive_snapshot"
   | "unsupported_snapshot"
@@ -581,6 +582,7 @@ export type ConversationDisplayContent =
       conflictReason?:
         | "workspace_mismatch"
         | "current_hash_mismatch"
+        | "intent_state_conflict"
         | "artifact_unavailable"
         | "sensitive_snapshot"
         | "unsupported_snapshot"

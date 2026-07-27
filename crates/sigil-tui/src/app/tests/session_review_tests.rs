@@ -478,6 +478,21 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
             .iter()
             .any(|line| line.contains("note.txt · current file changed"))
     );
+
+    let mut intent_blocked_preview = preview_for_completion.clone();
+    intent_blocked_preview.ready = false;
+    intent_blocked_preview.files[0].conflict_reason =
+        Some(sigil_kernel::CheckpointRestoreConflictReason::IntentStateConflict);
+    app.review.checkpoint_restore_preview = Some(intent_blocked_preview);
+    let intent_blocked = app
+        .checkpoint_restore_modal_view()
+        .expect("intent-blocked restore modal");
+    assert!(
+        intent_blocked
+            .body_notice_lines
+            .iter()
+            .any(|line| { line.contains("note.txt · active intent state would be crossed") })
+    );
     app.review.checkpoint_restore_preview = Some(preview_for_completion.clone());
 
     let second_enter = app

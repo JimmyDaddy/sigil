@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.3 complete，R51.4 next）
+状态：proposed / implementation active（R51.0-R51.4 complete，R51.5 next）
 
 创建日期：2026-07-22
 
@@ -28,7 +28,8 @@ Intent Stack 把用户认可的变更意图提升为一等、可持久化、可�
 > 撤销一个需求，而不是回到一个时间点。
 
 本 RFC 冻结语义、所有权和安全边界，并已完成 R51.0 契约、R51.1
-admission/projection、R51.2 execution lineage 与 R51.3 canonical layer/artifact 切片。后续切片
+admission/projection、R51.2 execution lineage、R51.3 canonical layer/artifact 与 R51.4 exact
+drop/recovery 切片。后续切片
 仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil 受控文件 mutation 产生的普通文件改动；任意
 人工 drift、同文件跨 intent、共享 hunk、未知副作用或依赖歧义必须 fail closed。
 
@@ -123,9 +124,10 @@ Intent operation 是针对一个或一组 intent 的高层动作：
 - 不把每个 agent step、tool call 或 validation command 都暴露为用户要管理的 stack item。
 - 不新增一组 command-only 的 `/intent-*` 主入口，也不要求用户维护复杂配置矩阵。
 - 不替代 Git；Intent Stack 是高于文件版本控制的产品语义层，最终仍可导出普通 diff/commit。
-- R51.0-R51.2 不实现 artifact materialization；R51.3 只建立 canonical layer、ownership 与
-  retention/inspect projection，不实现写 operation、runtime command 或 UI。R51.2 的
-  `NeedsReview` 只表示 parent lineage 完整，不表示已有可执行 layer。
+- R51.0-R51.2 不实现 artifact materialization；R51.3 建立 canonical layer、ownership 与
+  retention/inspect projection；R51.4 只开放 kernel exact drop primitive，不提供 TUI、HTTP、
+  Desktop 或 automation command。R51.2 的 `NeedsReview` 只表示 parent lineage 完整，不表示
+  已有可执行 layer。
 
 ## 6. Product contract
 
@@ -754,6 +756,49 @@ crash prefix、event registration/wire mismatch，以及 kernel 全量测试与 
 R51.4 exact drop 的可信输入；本切片本身没有执行文件回滚、operation recovery、verification
 invalidation、TUI 或 adapter command。
 
+### 12.5 R51.4 implementation checkpoint（2026-07-27）
+
+R51.4 已完成，落点为 `sigil-kernel::intent_operation`、strict intent patch decoder、checkpoint
+preflight/exclusion、retention pin 与 bounded public projection。本切片提供：
+
+- `intent_operation_requested`、`intent_operation_prepared`、`intent_operation_resolved` 与
+  `intent_conflict_recorded` 四个 recovery-critical typed event 的正式注册与 strict
+  wire/payload decoder；`intent_version_superseded` 仍留给 R51.5；
+- renderer-to-runtime `IntentDropRequestV1` 只携带 operation id、stack version 与 preview
+  digest。permission policy/approval 使用不可序列化的 host-only
+  `IntentOperationAuthorityV1`，provider、renderer 与恢复 JSON 不能制造写 authority；
+  operation id 额外绑定生成 preview 时的 durable stream frontier，终态拒绝/冲突后的重试会
+  获得新 identity，而并发追加导致的旧 preview 会在 request append 前 fail closed；
+- exact drop preview 从 accepted plan、latest layer、content-addressed reverse patch、当前
+  workspace revision/hash 与 active dependency DAG 重新计算。preview 绑定 leaf 结果、
+  create/update/delete presence、retained intents、artifact ids、verification stale/rerun
+  impact 与 typed conflict；shared/unowned/drifted/unavailable/missing layer 一律零写入；
+- reverse patch decoder 对 magic、数量、长度、UTF-8 normalized path、duplicate path、presence
+  flag、content digest、目标大小与 trailing bytes 严格 fail closed。apply 不使用 fuzzy
+  matching、不调用 provider/model，也不接受 UI 提交 path、hash 或 patch；
+- apply 在 workspace mutation lease 内完成重新投影、preview CAS、artifact/current-hash
+  全文件 preflight，之后才追加 `OperationPrepared` 并启动绑定 preview/policy/approval 的
+  RFC-0002 batch。逐文件 mutation 继续使用既有 prepare/commit 与 content CAS；
+- operation projection 从 durable batch evidence 推导 Requested/Prepared/Applying 与六种
+  terminal。partial apply 永不投影为 Dropped；restart 先使用 RFC-0002 磁盘 reconciliation，
+  已完整应用但缺 batch/operation terminal 时只追加证据驱动的唯一终态，prepared/unknown
+  状态只收口 Interrupted/Partial/Conflict，绝不重放文件写入；
+- 任一 drop mutation 会推进 parent workspace snapshot，使旧 SystemVerified receipt 按既有
+  lineage 自动 stale；Committed operation 将 public application state 投影为 Dropped、清零
+  current verified count 并移除 Drop action；
+- checkpoint projection 排除 intent-operation mutation，不把 drop 当作普通 rewind candidate；
+  restore preview 对 active intent path 或跨 intent transition 返回
+  `intent_state_conflict`。Dropped layer 退出 retention protected set，但历史、operation 与
+  lifecycle 仍可审计。
+
+完成证据覆盖 update/create/delete exact drop、renderer leaf forgery、shared/unavailable、
+stale preview/all-file preflight zero-write、host authority expiry/retry frontier、
+cancel-before-effect、multi-file partial
+apply、完整 file evidence 缺 terminal 的幂等修复、prepared restart no-replay、checkpoint
+conflict/exclusion、drop 后 retention 与 event registration/wire mismatch。R51.4 首次提供
+可执行的 intent-level version-control kernel primitive；TUI/typed adapter 与 revise/replace
+impact preview 仍分别由 R51.6/R51.7 和 R51.5 负责。
+
 依赖顺序：
 
 ```text
@@ -853,5 +898,7 @@ selective drop 闭环完成；它仍不等于通用语义 merge、外部副作�
 admission/projection 和 TaskPlan mixed writer batch；R51.2 已接入 Task/Chat exact execution、
 ChangeSet、parent mutation 与 criterion verification lineage；R51.3 已接入 canonical layer
 materializer、content-addressed patch/hunk artifact、保守 ownership、retention protection 与
-inspect projection。R51.4 起继续补 exact drop 与 operation recovery；任何 TUI 或 adapter
-operation 仍必须等待其依赖切片和独立门禁完成。
+inspect projection；R51.4 已接入 host-authorized exact drop、RFC-0002 batch apply、
+no-replay recovery、verification invalidation、checkpoint conflict 与 retention transition。
+R51.5 起继续补 impact/adoption 语义；任何 TUI 或 adapter operation 仍必须等待其依赖切片和
+独立门禁完成。

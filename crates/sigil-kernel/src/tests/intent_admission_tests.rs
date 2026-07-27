@@ -397,7 +397,7 @@ fn old_session_projects_explicit_history_unavailable_state() -> Result<()> {
 }
 
 #[test]
-fn durable_intent_event_decoder_registers_r51_3_and_rejects_future_slice() -> Result<()> {
+fn durable_intent_event_decoder_registers_r51_4_and_rejects_future_slice() -> Result<()> {
     assert_eq!(
         DurableEventType::from_event_type("intent_stack_created"),
         Some(DurableEventType::IntentStackCreated)
@@ -430,6 +430,26 @@ fn durable_intent_event_decoder_registers_r51_3_and_rejects_future_slice() -> Re
         DurableEventType::from_event_type("intent_artifact_bindings_recorded"),
         Some(DurableEventType::IntentArtifactBindingsRecorded)
     );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_operation_requested"),
+        Some(DurableEventType::IntentOperationRequested)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_operation_prepared"),
+        Some(DurableEventType::IntentOperationPrepared)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_operation_resolved"),
+        Some(DurableEventType::IntentOperationResolved)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_conflict_recorded"),
+        Some(DurableEventType::IntentConflictRecorded)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_version_superseded"),
+        None
+    );
 
     let root_plan: IntentPlanV1 = serde_json::from_str(include_str!(
         "../../../../dev/fixtures/intent-stack-v1/user-root-plan.json"
@@ -457,10 +477,10 @@ fn durable_intent_event_decoder_registers_r51_3_and_rejects_future_slice() -> Re
     ))?;
     let operation_preview: IntentOperationPreviewV1 =
         serde_json::from_value(digest_graph["operation_preview"].clone())?;
-    let future = crate::StoredEvent::new(
-        DurableEventType::IntentPlanRecorded,
+    let operation = crate::StoredEvent::new(
+        DurableEventType::IntentOperationRequested,
         EventClass::Critical,
-        "event-intent-future".to_owned(),
+        "event-intent-operation".to_owned(),
         "session-chat".to_owned(),
         1,
         serde_json::to_value(IntentEventV1::OperationRequested {
@@ -469,11 +489,12 @@ fn durable_intent_event_decoder_registers_r51_3_and_rejects_future_slice() -> Re
             safe_reason: "user requested exact drop".to_owned(),
         })?,
     )?;
-    assert!(
-        decode_typed_stored_event(future)
-            .expect_err("later-slice Intent events must remain unregistered")
-            .to_string()
-            .contains("later RFC-0051 slice")
-    );
+    assert!(matches!(
+        decode_typed_stored_event(operation)?,
+        TypedStoredEventDecode::Known(event)
+            if matches!(*event, TypedDomainEvent::Intent(
+                IntentEventV1::OperationRequested { .. }
+            ))
+    ));
     Ok(())
 }
