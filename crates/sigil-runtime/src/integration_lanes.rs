@@ -1079,13 +1079,17 @@ async fn require_path_hash(
     if bytes.len() > MAX_INTEGRATION_ARTIFACT_BYTES {
         bail!("integration path {relative_path} exceeds the lane file budget");
     }
-    let observed_hash = format!("{:x}", Sha256::digest(&bytes));
-    if observed_hash != expected_hash {
+    let observed_hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+    if !sha256_digests_equal(&observed_hash, expected_hash) {
         bail!(
             "integration path {relative_path} hash mismatch: expected {expected_hash}, observed {observed_hash}"
         );
     }
     Ok(())
+}
+
+fn sha256_digests_equal(left: &str, right: &str) -> bool {
+    left.strip_prefix("sha256:").unwrap_or(left) == right.strip_prefix("sha256:").unwrap_or(right)
 }
 
 async fn emit_event(

@@ -1430,8 +1430,8 @@ async fn extract_git_worktree_changeset(
             previous_path: None,
             action,
             risk: ChangeSetRisk::Medium,
-            before_hash: before.as_deref().map(bytes_sha256),
-            after_hash: after.as_deref().map(bytes_sha256),
+            before_hash: before.as_deref().map(prefixed_bytes_sha256),
+            after_hash: after.as_deref().map(prefixed_bytes_sha256),
             diff_hash: None,
             additions: 0,
             deletions: 0,
@@ -2033,6 +2033,10 @@ async fn git_blob_at_tree(
 
 fn bytes_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn prefixed_bytes_sha256(bytes: &[u8]) -> String {
+    format!("sha256:{}", bytes_sha256(bytes))
 }
 
 fn is_binary_content(bytes: &[u8]) -> bool {

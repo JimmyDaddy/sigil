@@ -128,6 +128,15 @@ async fn git_worktree_extracts_bounded_review_artifact_without_mutating_parent()
             .iter()
             .all(|fact| fact.content_class == IntegrationContentClass::Text)
     );
+    assert!(proposal.change_set.files.iter().all(|file| {
+        file.before_hash
+            .as_deref()
+            .is_none_or(|digest| digest.starts_with("sha256:"))
+            && file
+                .after_hash
+                .as_deref()
+                .is_none_or(|digest| digest.starts_with("sha256:"))
+    }));
     assert_eq!(proposal.change_set.files.len(), 2);
     assert!(
         proposal

@@ -9,22 +9,22 @@ use std::{
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    CandidateCheck, ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk,
-    CheckCommand, CheckDiscoverySource, CheckPromotion, CompletionCriteria, ControlEntry,
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ExecutionBackend,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt,
-    ExecutionRequest, IntegrationBaseRepresentation, IntegrationContentClass, IntegrationEffect,
-    IntegrationLaneCandidate, IntegrationLaneCleanupStatus, IntegrationLaneStatus, IntegrationPlan,
-    IntegrationPlanId, IntegrationPlanRecorded, IntegrationProjection,
-    IntegrationPromotionAttemptId, IntegrationPromotionEffect, IntegrationPromotionStatus,
-    IntegrationProposalFacts, IntegrationProposalSpec, JsonlSessionStore, MutationEventRecorder,
-    NoopEventHandler, SandboxProfileRequirement, Session, SessionLogEntry, TaskId,
-    TaskPromotionAuthority, TaskPromotionPreview, TaskPromotionPreviewInput,
-    TaskPromotionPreviewRecorded, TaskStepId, ToolEffect, TrustedCheckSpec,
-    VerificationAutoRunPolicy, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationScope, VerificationVerdict, WorkspaceTrust, WorkspaceTrustRequirement,
-    WriteIsolationMode, build_integration_plan, build_task_promotion_preview,
-    build_workspace_snapshot, stable_workspace_id,
+    CandidateCheck, ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId,
+    ChangeSetResultStatus, ChangeSetRisk, CheckCommand, CheckDiscoverySource, CheckPromotion,
+    CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture,
+    ExecutionNetworkReceipt, ExecutionRequest, IntegrationBaseRepresentation,
+    IntegrationContentClass, IntegrationEffect, IntegrationLaneCandidate,
+    IntegrationLaneCleanupStatus, IntegrationLaneStatus, IntegrationPlan, IntegrationPlanId,
+    IntegrationPlanRecorded, IntegrationProjection, IntegrationPromotionAttemptId,
+    IntegrationPromotionEffect, IntegrationPromotionStatus, IntegrationProposalFacts,
+    IntegrationProposalSpec, JsonlSessionStore, MutationEventRecorder, NoopEventHandler,
+    SandboxProfileRequirement, Session, SessionLogEntry, TaskId, TaskPromotionAuthority,
+    TaskPromotionPreview, TaskPromotionPreviewInput, TaskPromotionPreviewRecorded, TaskStepId,
+    ToolEffect, TrustedCheckSpec, VerificationAutoRunPolicy, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationScope, VerificationVerdict, WorkspaceTrust,
+    WorkspaceTrustRequirement, WriteIsolationMode, build_integration_plan,
+    build_task_promotion_preview, build_workspace_snapshot, stable_workspace_id,
 };
 use sigil_tools_builtin::LocalExecutionBackend;
 
@@ -77,7 +77,17 @@ async fn disjoint_git_integration_lanes_overlap_and_preserve_parent() -> Result<
     initialize_repository(&root, &[("a.txt", "old-a\n"), ("b.txt", "old-b\n")])?;
     let base_snapshot_id = workspace_snapshot_id(&root)?;
     let base_commit = git(&root, &["rev-parse", "HEAD"])?;
-    let change_a = change_set("change-a", "a.txt", "old-a\n", "new-a\n")?;
+    let mut change_a = change_set("change-a", "a.txt", "old-a\n", "new-a\n")?;
+    for file in &mut change_a.files {
+        file.before_hash = file
+            .before_hash
+            .take()
+            .map(|digest| format!("sha256:{digest}"));
+        file.after_hash = file
+            .after_hash
+            .take()
+            .map(|digest| format!("sha256:{digest}"));
+    }
     let change_b = change_set("change-b", "b.txt", "old-b\n", "new-b\n")?;
     let plan = build_integration_plan(
         IntegrationPlanId::new("plan-parallel")?,
@@ -833,6 +843,13 @@ async fn durable_integration_review_rebuilds_only_the_exact_reviewed_candidate()
         Some(VerificationVerdict::NotApplicable)
     );
     assert_eq!(fs::read_to_string(root.join("a.txt"))?, "new-a\n");
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ChangeSetApplied(result))
+                if result.id == change.id && result.status == ChangeSetResultStatus::Applied
+        )
+    }));
     let projection = IntegrationProjection::from_entries(session.entries());
     assert_eq!(
         projection

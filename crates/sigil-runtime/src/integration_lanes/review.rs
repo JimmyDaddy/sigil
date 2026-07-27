@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, path::Path, sync::Arc};
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
+    ChangeSetFileResult, ChangeSetFileResultStatus, ChangeSetResult, ChangeSetResultStatus,
     ControlEntry, EventHandler, EvidenceScope, ExecutionBackend, IntegrationBaseRepresentation,
     IntegrationProjection, IntegrationPromotionAttemptId, IntentExecutionOriginV1, RunEvent,
     SecretRedactor, Session, SessionLogEntry, TaskIntegrationReviewRequest, TaskPromotionAuthority,
@@ -250,6 +251,13 @@ where
         .verification_target
         .take()
         .ok_or_else(|| anyhow!("promoted integration target was not retained for verification"))?;
+    if let Err(error) =
+        record_promoted_changeset_results(session, &promotion.record.plan_id, handler)
+    {
+        let _ = handler.handle(RunEvent::Notice(format!(
+            "Intent Stack promotion receipts remained incomplete: {error:#}"
+        )));
+    }
     if let Err(error) = materialize_promoted_intent_layers(
         session,
         workspace_root,
@@ -292,6 +300,88 @@ where
         promotion,
         parent_verification: Some(parent_verification),
     })
+}
+
+fn record_promoted_changeset_results<H>(
+    session: &mut Session,
+    plan_id: &sigil_kernel::IntegrationPlanId,
+    handler: &mut H,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let integration = IntegrationProjection::from_entries(session.entries());
+    let plan = integration
+        .plans
+        .get(plan_id)
+        .ok_or_else(|| anyhow!("promoted integration plan is unavailable"))?
+        .recorded
+        .plan
+        .clone();
+    let mut results = Vec::with_capacity(plan.proposals.len());
+    for proposal in &plan.proposals {
+        let change_set = session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::ChangeSetProposed(change_set))
+                    if change_set.id == proposal.change_set_id =>
+                {
+                    Some(change_set)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "promoted proposal {} has no durable ChangeSet",
+                    proposal.change_set_id.as_str()
+                )
+            })?;
+        results.push(ChangeSetResult {
+            id: change_set.id.clone(),
+            status: ChangeSetResultStatus::Applied,
+            file_results: change_set
+                .files
+                .iter()
+                .map(|file| ChangeSetFileResult {
+                    path: file.path.clone(),
+                    action: file.action,
+                    status: ChangeSetFileResultStatus::Applied,
+                    message: None,
+                    validations: Vec::new(),
+                })
+                .collect(),
+            message: Some("applied through accepted task integration promotion".to_owned()),
+        });
+    }
+    for result in results {
+        if let Some(existing) = session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::ChangeSetApplied(existing))
+                    if existing.id == result.id =>
+                {
+                    Some(existing)
+                }
+                _ => None,
+            })
+        {
+            if existing != &result {
+                bail!(
+                    "promoted ChangeSet {} already has a conflicting result",
+                    result.id.as_str()
+                );
+            }
+            continue;
+        }
+        let control = ControlEntry::ChangeSetApplied(result);
+        session.append_control(control.clone())?;
+        handler.handle(RunEvent::Control(control))?;
+    }
+    Ok(())
 }
 
 fn materialize_promoted_intent_layers<H>(
