@@ -45,6 +45,10 @@ Check that the environment-variable name belongs to the selected connection and 
 | `catalog_unsupported` | This provider/endpoint does not expose discovery | Use the provider-owned bundled list or manual entry |
 | `catalog_malformed` | The response was not a valid catalog | Fix the endpoint or gateway; remote metadata is not trusted to add capabilities |
 
+Provider generation and remote model discovery both honor the standard
+`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables. The
+`[web].proxy_mode` setting governs Web tools; it does not configure provider traffic.
+
 If Doctor reports `mode=legacy_v1`, use the Desktop migration card or `/config` →
 **Legacy migration** → Enter. Review the connection/key/environment counts and exact default
 route first; migration requires no provider network or model loading. An ordinary pre-publish

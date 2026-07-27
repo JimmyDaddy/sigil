@@ -45,6 +45,9 @@ sigil doctor
 | `catalog_unsupported` | 当前 provider/端点不提供 discovery | 使用 provider 自带列表或手动输入 |
 | `catalog_malformed` | 返回值不是合法模型目录 | 修复端点或网关；远端元数据不会扩展本地能力 |
 
+Provider 生成请求与远程模型目录均遵循标准 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`
+环境变量。`[web].proxy_mode` 只控制 Web 工具，不用于配置 Provider 流量。
+
 如果 Doctor 报告 `mode=legacy_v1`，请使用 Desktop 迁移卡片，或在 `/config` →
 **Legacy migration** 上按 Enter。先检查连接数、密钥数、环境变量引用数和精确默认 route；
 迁移不需要 Provider 网络或模型 loading。普通的发布前凭据存储失败会保留旧配置；Sigil 会先

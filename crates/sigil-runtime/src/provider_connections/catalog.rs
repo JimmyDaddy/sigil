@@ -217,7 +217,6 @@ impl ProviderModelCatalogService {
             .timeout(CATALOG_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
-            .no_proxy()
             .build()?;
         Ok(Self {
             cache_root,

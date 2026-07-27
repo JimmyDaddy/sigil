@@ -1979,6 +1979,61 @@ async fn catalog_is_connection_scoped_single_flight_and_uses_exact_offline_cache
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn catalog_honors_standard_proxy_environment() {
+    let (proxy_base_url, request_count, server) = spawn_catalog_server(
+        200,
+        r#"{"data":[{"id":"proxy-visible-model"}]}"#,
+        Duration::ZERO,
+    )
+    .await;
+    let proxy_url = proxy_base_url
+        .strip_suffix("/v1")
+        .expect("catalog fixture URL suffix");
+    let _environment_guard = crate::test_env::lock();
+    let _http_proxy = crate::test_env::EnvScope::set("HTTP_PROXY", proxy_url);
+    let _http_proxy_lower = crate::test_env::EnvScope::set("http_proxy", proxy_url);
+    let _https_proxy = crate::test_env::EnvScope::set("HTTPS_PROXY", proxy_url);
+    let _https_proxy_lower = crate::test_env::EnvScope::set("https_proxy", proxy_url);
+    let _no_proxy = crate::test_env::EnvScope::set("NO_PROXY", "");
+    let _no_proxy_lower = crate::test_env::EnvScope::set("no_proxy", "");
+
+    let root = local_catalog_root("http://127.0.0.1:9/v1".to_owned(), "configured-only");
+    let connection = load_provider_connections(&root)
+        .default_connection()
+        .expect("default connection")
+        .config
+        .clone();
+    let result = ProviderModelCatalogService::new(
+        tempfile::tempdir().expect("cache root").keep(),
+        Arc::new(FakeCredentialStore::default()),
+        Arc::new(MapEnvironment::default()),
+    )
+    .expect("catalog service")
+    .models(
+        &root,
+        ModelCatalogRequest {
+            request_id: 1,
+            connection_id: connection.id.clone(),
+            draft_revision: 1,
+            connection_fingerprint: connection_semantic_fingerprint(&connection),
+            explicit_refresh: true,
+        },
+    )
+    .await;
+
+    assert_eq!(result.state, ModelCatalogState::Remote);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert!(
+        result
+            .entries
+            .iter()
+            .any(|entry| entry.model_ref.model_id == "proxy-visible-model")
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn catalog_single_flight_waiters_inherit_auth_failure_instead_of_stale_ready_cache() {
     let (base_url, request_count, server) = spawn_catalog_sequence_server(vec![
         (
