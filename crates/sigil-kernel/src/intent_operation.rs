@@ -101,7 +101,8 @@ pub struct IntentOperationSummaryV1 {
 
 /// Exact execution result. Conflicts and explicit rejection are durable successful protocol
 /// outcomes rather than unstructured errors.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct IntentOperationExecutionV1 {
     pub preview: IntentOperationPreviewV1,
     pub resolution: IntentOperationResolution,

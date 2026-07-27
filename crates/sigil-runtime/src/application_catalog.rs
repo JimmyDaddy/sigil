@@ -30,6 +30,7 @@ pub struct ApplicationCommandSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationClientAction {
     PreviewCompaction,
+    OpenIntentStack,
     NewSession,
     FocusEffort,
     FocusModel,
@@ -84,7 +85,7 @@ pub const APPLICATION_COMMANDS: &[ApplicationCommandSpec] = &[
         description: "review durable intents and exact Drop previews",
         argument_hint: None,
         completes_with_space: false,
-        client_action: None,
+        client_action: Some(ApplicationClientAction::OpenIntentStack),
     },
     ApplicationCommandSpec {
         canonical: "/effort",

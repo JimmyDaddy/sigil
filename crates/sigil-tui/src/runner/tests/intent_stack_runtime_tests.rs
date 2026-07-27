@@ -78,7 +78,8 @@ fn intent_stack_history_and_permission_boundaries_survive_worker_restart() -> Re
         WorkerMessage::IntentStackOperationFailed {
             request_id: 3,
             error,
-        } if error.contains("read-only permission mode denies Intent drop")
+        } if error.starts_with("Intent Stack permission is required:")
+            && error.contains("read-only permission mode denies Intent drop")
     ));
     worker.shutdown()
 }

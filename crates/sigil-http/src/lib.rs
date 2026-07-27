@@ -30,9 +30,9 @@ pub use driver::{
     HttpConversationDisplayDriverError, HttpConversationQueueDriverCommand,
     HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
     HttpConversationRecoveryDriverError, HttpConversationRecoveryDriverOutput,
-    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
-    HttpSessionOpenBindingError,
+    HttpIntentStackDriverError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunDriverTaskPause, HttpSessionOpenBindingError,
 };
 pub use dto::{
     HTTP_APPROVAL_POLICY_VERSION, HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION,
@@ -64,6 +64,8 @@ pub use dto::{
     HttpConversationRecoveryView, HttpConversationTaskControl, HttpConversationTaskLane,
     HttpConversationTaskPlanStep, HttpConversationTerminalFrontier, HttpDurableSessionFrontier,
     HttpForegroundRunOwner, HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind,
+    HttpIntentDropCommandReceipt, HttpIntentDropExecution, HttpIntentDropPreview,
+    HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpIntentStackView,
     HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpProviderConfigMode,
     HttpProviderConnectionEntry, HttpProviderConnectionInventory, HttpProviderConnectionIssue,
     HttpProviderConnectionReadiness, HttpProviderCredentialSource,

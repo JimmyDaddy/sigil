@@ -29,13 +29,14 @@ use crate::{
     dto::{
         HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest,
         HttpConversationQueueCommandRequest, HttpConversationRecoveryCommandAction,
-        HttpProviderLegacyMigrationRequest, HttpProviderSetupCatalogRequest,
-        HttpProviderSetupSaveRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
-        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
-        HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
-        HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
-        HttpTaskIntegrationReviewRequest, HttpTaskPauseRequest, HttpVerificationRerunRequest,
+        HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpProviderLegacyMigrationRequest,
+        HttpProviderSetupCatalogRequest, HttpProviderSetupSaveRequest, HttpRunCancelRequest,
+        HttpRunStartRequest, HttpServerInfo, HttpSessionCatalogBatchExecuteRequest,
+        HttpSessionCatalogBatchPlanRequest, HttpSessionCreateRequest, HttpSessionDeleteRequest,
+        HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
+        HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
+        HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpTaskIntegrationReviewRequest,
+        HttpTaskPauseRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -839,6 +840,61 @@ fn route_http_request(
         };
         return match registry.open_session(body) {
             Ok(session) => json_response(200, json!(session)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/intents"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.intent_stack_view(session_id) {
+            Ok(view) => json_response(200, json!(view)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/intents/drop-preview"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(body) = parse_json_body::<HttpIntentDropPreviewRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_intent_stack_request",
+                "invalid Intent Drop preview body",
+            );
+        };
+        return match registry.preview_intent_drop(session_id, body) {
+            Ok(preview) => json_response(200, json!(preview)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/intents/drop"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpIntentDropRequest>>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "invalid_intent_stack_request",
+                "invalid Intent Drop command body",
+            );
+        };
+        return match registry.execute_intent_drop_command(session_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
             Err(error) => registry_error_response(error),
         };
     }
@@ -1856,12 +1912,16 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ConversationQueueConflict
         | HttpRegistryError::ConversationQueueRequiresReentry
         | HttpRegistryError::ConversationRecoveryStaleBinding
-        | HttpRegistryError::ConversationRecoveryConflict => 409,
+        | HttpRegistryError::ConversationRecoveryConflict
+        | HttpRegistryError::IntentStackStale
+        | HttpRegistryError::IntentStackPermissionRequired
+        | HttpRegistryError::IntentStackConflict => 409,
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidTaskContinuation
         | HttpRegistryError::InvalidTaskPauseRequest
         | HttpRegistryError::InvalidTaskIntegrationReview
+        | HttpRegistryError::IntentStackInvalidRequest
         | HttpRegistryError::InvalidSessionOpenRequest
         | HttpRegistryError::ConversationDisplayCursorInvalid
         | HttpRegistryError::ConversationQueueInvalidCommand
@@ -1880,6 +1940,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ConversationDisplayUnavailable
         | HttpRegistryError::ConversationQueueUnavailable
         | HttpRegistryError::ConversationRecoveryUnavailable => 503,
+        HttpRegistryError::IntentStackUnavailable => 503,
     };
     let code = match &error {
         HttpRegistryError::InvalidSessionOpenRequest => "invalid_session_open_request",
@@ -1908,6 +1969,11 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationRecoveryUnavailable => "conversation_recovery_unavailable",
         HttpRegistryError::InvalidTaskPauseRequest => "invalid_task_pause_request",
         HttpRegistryError::InvalidTaskIntegrationReview => "invalid_task_integration_review",
+        HttpRegistryError::IntentStackInvalidRequest => "invalid_intent_stack_request",
+        HttpRegistryError::IntentStackStale => "intent_stack_stale",
+        HttpRegistryError::IntentStackPermissionRequired => "intent_stack_permission_required",
+        HttpRegistryError::IntentStackConflict => "intent_stack_conflict",
+        HttpRegistryError::IntentStackUnavailable => "intent_stack_unavailable",
         _ => "registry_error",
     };
     http_error_response(status, code, error.to_string())

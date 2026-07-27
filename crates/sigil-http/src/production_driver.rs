@@ -29,6 +29,11 @@ use sigil_kernel::{
 use sigil_runtime::application_compaction::{
     PendingApplicationCompaction, prepare_application_compaction,
 };
+use sigil_runtime::application_intent_stack::{
+    ApplicationIntentConfirmationSource, ApplicationIntentStackCommandOutputV1,
+    ApplicationIntentStackCommandV1, ApplicationIntentStackErrorClass,
+    execute_durable_application_intent_stack_command,
+};
 use sigil_runtime::application_queue::{
     ApplicationQueuedPromptMaterial, ApplicationQueuedRunRequest, prepare_application_queued_run,
 };
@@ -71,15 +76,16 @@ use crate::{
     HttpConversationQueueView, HttpConversationRecoveryCommandAction,
     HttpConversationRecoveryDriverCommand, HttpConversationRecoveryDriverError,
     HttpConversationRecoveryDriverOutput, HttpConversationRecoveryView, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
-    HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
-    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
-    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
-    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
-    HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter,
+    HttpIntentDropExecution, HttpIntentDropPreview, HttpIntentDropRequest,
+    HttpIntentStackDriverError, HttpIntentStackView, HttpLiveEventBus, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpPermissionMode, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunTerminalOutcome,
+    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -764,6 +770,34 @@ impl HttpProductionRunDriver {
         });
         Ok(())
     }
+
+    fn application_intent_stack_command(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        command: &ApplicationIntentStackCommandV1,
+    ) -> Result<ApplicationIntentStackCommandOutputV1, HttpIntentStackDriverError> {
+        execute_durable_application_intent_stack_command(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            command,
+            ApplicationIntentConfirmationSource::Http,
+        )
+        .map_err(|error| match error.class() {
+            ApplicationIntentStackErrorClass::InvalidRequest => {
+                HttpIntentStackDriverError::InvalidRequest
+            }
+            ApplicationIntentStackErrorClass::Stale => HttpIntentStackDriverError::Stale,
+            ApplicationIntentStackErrorClass::PermissionRequired => {
+                HttpIntentStackDriverError::PermissionRequired
+            }
+            ApplicationIntentStackErrorClass::Conflict => HttpIntentStackDriverError::Conflict,
+            ApplicationIntentStackErrorClass::Unavailable => {
+                HttpIntentStackDriverError::Unavailable
+            }
+        })
+    }
 }
 
 impl HttpRunDriver for HttpProductionRunDriver {
@@ -961,6 +995,53 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })
     }
 
+    fn intent_stack_view(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<HttpIntentStackView, HttpIntentStackDriverError> {
+        match self
+            .application_intent_stack_command(session, &ApplicationIntentStackCommandV1::Inspect)?
+        {
+            ApplicationIntentStackCommandOutputV1::Projection { state } => Ok(state),
+            _ => Err(HttpIntentStackDriverError::Unavailable),
+        }
+    }
+
+    fn preview_intent_drop(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        intent_ref: &sigil_kernel::IntentVersionRef,
+    ) -> Result<HttpIntentDropPreview, HttpIntentStackDriverError> {
+        intent_ref
+            .validate()
+            .map_err(|_| HttpIntentStackDriverError::InvalidRequest)?;
+        match self.application_intent_stack_command(
+            session,
+            &ApplicationIntentStackCommandV1::PreviewDrop {
+                intent_ref: intent_ref.clone(),
+            },
+        )? {
+            ApplicationIntentStackCommandOutputV1::DropPreview { preview } => Ok(preview),
+            _ => Err(HttpIntentStackDriverError::Unavailable),
+        }
+    }
+
+    fn execute_intent_drop(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &HttpIntentDropRequest,
+    ) -> Result<HttpIntentDropExecution, HttpIntentStackDriverError> {
+        match self.application_intent_stack_command(
+            session,
+            &ApplicationIntentStackCommandV1::ExecuteDrop {
+                request: request.clone(),
+            },
+        )? {
+            ApplicationIntentStackCommandOutputV1::DropExecution { execution } => Ok(execution),
+            _ => Err(HttpIntentStackDriverError::Unavailable),
+        }
+    }
+
     fn transcript_page(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -1130,6 +1211,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         client_action: entry.client_action.map(|action| match action {
                             sigil_runtime::ApplicationClientAction::PreviewCompaction => {
                                 HttpApplicationClientAction::PreviewCompaction
+                            }
+                            sigil_runtime::ApplicationClientAction::OpenIntentStack => {
+                                HttpApplicationClientAction::OpenIntentStack
                             }
                             sigil_runtime::ApplicationClientAction::NewSession => {
                                 HttpApplicationClientAction::NewSession

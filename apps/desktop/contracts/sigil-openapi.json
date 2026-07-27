@@ -325,6 +325,7 @@
       "ApplicationClientAction": {
         "enum": [
           "preview_compaction",
+          "open_intent_stack",
           "new_session",
           "focus_effort",
           "focus_model",
@@ -3001,6 +3002,783 @@
         ],
         "type": "string"
       },
+      "Intent": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "$ref": "#/components/schemas/IntentAcceptanceCriterion"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "advisory_criterion_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "application_state": {
+            "$ref": "#/components/schemas/IntentApplicationState"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/IntentArtifactSummary"
+            },
+            "type": "array"
+          },
+          "available_actions": {
+            "items": {
+              "$ref": "#/components/schemas/IntentOperationKind"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "definition_state": {
+            "$ref": "#/components/schemas/IntentDefinitionState"
+          },
+          "depends_on": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "drifted_artifact_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exclusive_artifact_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "intent_ref": {
+            "$ref": "#/components/schemas/IntentVersionRef"
+          },
+          "shared_artifact_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/IntentSource"
+          },
+          "statement": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "system_verified_criterion_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "unavailable_artifact_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unowned_artifact_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "intent_ref",
+          "title",
+          "statement",
+          "acceptance_criteria",
+          "depends_on",
+          "source",
+          "definition_state",
+          "application_state",
+          "exclusive_artifact_count",
+          "shared_artifact_count",
+          "unowned_artifact_count",
+          "drifted_artifact_count",
+          "unavailable_artifact_count",
+          "advisory_criterion_count",
+          "system_verified_criterion_count",
+          "artifacts",
+          "available_actions"
+        ],
+        "type": "object"
+      },
+      "IntentAcceptanceCriterion": {
+        "additionalProperties": false,
+        "properties": {
+          "criterion_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "statement": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "criterion_id",
+          "statement",
+          "required"
+        ],
+        "type": "object"
+      },
+      "IntentApplicationState": {
+        "enum": [
+          "unapplied",
+          "applied",
+          "dropped",
+          "needs_review",
+          "needs_rebuild",
+          "read_only",
+          "out_of_scope"
+        ],
+        "type": "string"
+      },
+      "IntentArtifactAvailability": {
+        "enum": [
+          "available",
+          "deleted",
+          "expired",
+          "corrupted"
+        ],
+        "type": "string"
+      },
+      "IntentArtifactKind": {
+        "enum": [
+          "file_hunk",
+          "test_evidence",
+          "documentation",
+          "change_set",
+          "verification_receipt",
+          "unsupported_side_effect"
+        ],
+        "type": "string"
+      },
+      "IntentArtifactOwnership": {
+        "enum": [
+          "exclusive",
+          "shared",
+          "unowned",
+          "drifted"
+        ],
+        "type": "string"
+      },
+      "IntentArtifactSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "artifact_kind": {
+            "$ref": "#/components/schemas/IntentArtifactKind"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/IntentArtifactAvailability"
+          },
+          "normalized_relative_path": {
+            "maxLength": 4096,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ownership": {
+            "$ref": "#/components/schemas/IntentArtifactOwnership"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "artifact_kind",
+          "ownership",
+          "availability"
+        ],
+        "type": "object"
+      },
+      "IntentAuthorityState": {
+        "enum": [
+          "active",
+          "read_only_provenance",
+          "out_of_scope"
+        ],
+        "type": "string"
+      },
+      "IntentConflict": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "$ref": "#/components/schemas/IntentOperationErrorCode"
+          },
+          "intent_ref": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IntentVersionRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "safe_reason": {
+            "maxLength": 2048,
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "safe_reason"
+        ],
+        "type": "object"
+      },
+      "IntentDefinitionState": {
+        "enum": [
+          "proposed",
+          "accepted",
+          "superseded",
+          "invalid"
+        ],
+        "type": "string"
+      },
+      "IntentDropCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/IntentDropRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "IntentDropCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "execution": {
+            "$ref": "#/components/schemas/IntentOperationExecution"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "execution",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "IntentDropPreviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "intent_ref": {
+            "$ref": "#/components/schemas/IntentVersionRef"
+          }
+        },
+        "required": [
+          "intent_ref"
+        ],
+        "type": "object"
+      },
+      "IntentDropRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "preview_digest": {
+            "pattern": "^sha256:jcs-v1:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "stack_version": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_id",
+          "stack_version",
+          "preview_digest"
+        ],
+        "type": "object"
+      },
+      "IntentOperationErrorCode": {
+        "enum": [
+          "unsupported_schema",
+          "intent_history_unavailable",
+          "unknown_intent",
+          "unknown_operation",
+          "stale_intent_version",
+          "stale_stack_version",
+          "invalid_dependency_graph",
+          "target_not_leaf",
+          "shared_artifact",
+          "unowned_artifact",
+          "drifted_artifact",
+          "artifact_unavailable",
+          "artifact_digest_mismatch",
+          "unsupported_artifact",
+          "unsupported_side_effect",
+          "missing_execution_lineage",
+          "missing_parent_mutation_evidence",
+          "missing_current_verification_evidence",
+          "preview_digest_mismatch",
+          "workspace_revision_mismatch",
+          "permission_denied",
+          "approval_authority_unavailable",
+          "workspace_lease_unavailable",
+          "workspace_out_of_scope",
+          "operation_state_conflict",
+          "intent_state_conflict",
+          "partial_application",
+          "reconciliation_required"
+        ],
+        "type": "string"
+      },
+      "IntentOperationExecution": {
+        "additionalProperties": false,
+        "properties": {
+          "committed_operation_ids": {
+            "items": {
+              "maxLength": 512,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "error_code": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IntentOperationErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mutation_batch_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "preview": {
+            "$ref": "#/components/schemas/IntentOperationPreview"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/IntentOperationResolution"
+          },
+          "result_snapshot_id": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "preview",
+          "resolution",
+          "mutation_batch_id",
+          "committed_operation_ids",
+          "result_snapshot_id",
+          "error_code"
+        ],
+        "type": "object"
+      },
+      "IntentOperationFileAction": {
+        "enum": [
+          "create",
+          "update",
+          "delete"
+        ],
+        "type": "string"
+      },
+      "IntentOperationFileSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/IntentOperationFileAction"
+          },
+          "artifact_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "normalized_relative_path": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "normalized_relative_path",
+          "action",
+          "artifact_ids"
+        ],
+        "type": "object"
+      },
+      "IntentOperationKind": {
+        "enum": [
+          "drop",
+          "revise_impact_preview",
+          "replace_impact_preview",
+          "adopt"
+        ],
+        "type": "string"
+      },
+      "IntentOperationPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/IntentConflict"
+            },
+            "type": "array"
+          },
+          "expires_at_ms": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file_effects": {
+            "items": {
+              "$ref": "#/components/schemas/IntentOperationFileSummary"
+            },
+            "type": "array"
+          },
+          "operation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "operation_kind": {
+            "$ref": "#/components/schemas/IntentOperationKind"
+          },
+          "preview_digest": {
+            "pattern": "^sha256:jcs-v1:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "retained_intents": {
+            "items": {
+              "$ref": "#/components/schemas/IntentVersionRef"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "stack_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "stack_version": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "target_intents": {
+            "items": {
+              "$ref": "#/components/schemas/IntentVersionRef"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "target_is_leaf": {
+            "type": "boolean"
+          },
+          "verification_impacts": {
+            "items": {
+              "$ref": "#/components/schemas/IntentVerificationImpactSummary"
+            },
+            "type": "array"
+          },
+          "workspace_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation_id",
+          "operation_kind",
+          "stack_id",
+          "stack_version",
+          "target_intents",
+          "target_is_leaf",
+          "workspace_revision",
+          "file_effects",
+          "retained_intents",
+          "verification_impacts",
+          "conflicts",
+          "preview_digest"
+        ],
+        "type": "object"
+      },
+      "IntentOperationResolution": {
+        "enum": [
+          "committed",
+          "rejected",
+          "cancelled",
+          "conflicted",
+          "partially_applied",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "IntentSource": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "user_turn",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "maxLength": 512,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "accepted_suggestion",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "maxLength": 512,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "trusted_spec",
+                "type": "string"
+              },
+              "safe_source_label": {
+                "maxLength": 4096,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "safe_source_label"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "IntentStack": {
+        "additionalProperties": false,
+        "properties": {
+          "authority_state": {
+            "$ref": "#/components/schemas/IntentAuthorityState"
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/IntentConflict"
+            },
+            "type": "array"
+          },
+          "intents": {
+            "items": {
+              "$ref": "#/components/schemas/Intent"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "plan_digest": {
+            "pattern": "^sha256:jcs-v1:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "stack_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "stack_version": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "stack_id",
+          "stack_version",
+          "authority_state",
+          "plan_digest",
+          "intents",
+          "conflicts"
+        ],
+        "type": "object"
+      },
+      "IntentStackState": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "schema_version": {
+                "const": 1,
+                "type": "integer"
+              },
+              "stack": {
+                "$ref": "#/components/schemas/IntentStack"
+              },
+              "status": {
+                "const": "available",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "schema_version",
+              "stack"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "safe_message": {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              "schema_version": {
+                "const": 1,
+                "type": "integer"
+              },
+              "status": {
+                "const": "history_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "schema_version",
+              "safe_message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "IntentVerificationImpact": {
+        "enum": [
+          "becomes_stale",
+          "rerun_required"
+        ],
+        "type": "string"
+      },
+      "IntentVerificationImpactSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "impact": {
+            "$ref": "#/components/schemas/IntentVerificationImpact"
+          },
+          "receipt_id": {
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "impact"
+        ],
+        "type": "object"
+      },
+      "IntentVersionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "intent_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "intent_id",
+          "version"
+        ],
+        "type": "object"
+      },
       "NoticeEvent": {
         "additionalProperties": false,
         "properties": {
@@ -4417,6 +5195,9 @@
           "durable_session_reopen": {
             "type": "boolean"
           },
+          "intent_stack": {
+            "type": "boolean"
+          },
           "live_events": {
             "type": "boolean"
           },
@@ -4461,6 +5242,7 @@
           "task_pause",
           "verification",
           "task_integration",
+          "intent_stack",
           "run_context",
           "agent_activity",
           "support_diagnostics",
@@ -4490,7 +5272,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 11,
+            "const": 12,
             "type": "integer"
           },
           "server_version": {
@@ -7417,6 +8199,137 @@
           }
         },
         "summary": "Read one canonical durable conversation display page"
+      }
+    },
+    "/sessions/{session_id}/intents": {
+      "get": {
+        "description": "Returns the same bounded projection consumed by TUI and automation. Raw patches, absolute paths, file content, policy and mutation authority are excluded.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntentStackState"
+                }
+              }
+            },
+            "description": "Current durable Intent Stack or explicit history-unavailable state"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read the adapter-neutral durable Intent Stack"
+      }
+    },
+    "/sessions/{session_id}/intents/drop": {
+      "post": {
+        "description": "Routes an idempotent digest-bound Drop command. The host reconstructs current permission, trust and confirmation authority; clients cannot submit paths, patches, file hashes or authority.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntentDropCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntentDropCommandReceipt"
+                }
+              }
+            },
+            "description": "Durable terminal Intent Drop receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Execute one exact confirmed Intent Drop"
+      }
+    },
+    "/sessions/{session_id}/intents/drop-preview": {
+      "post": {
+        "description": "Rebuilds a digest-bound preview under durable mutation exclusion without applying file changes.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntentDropPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntentOperationPreview"
+                }
+              }
+            },
+            "description": "Fresh exact Intent Drop preview"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Preview one exact leaf Intent Drop"
       }
     },
     "/sessions/{session_id}/queue": {

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Policy identity bound to every V1 HTTP approval request.
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::{
-    PublicTaskPhase, TaskIntegrationReviewRequest, TaskPauseRequest, TaskVerificationRerunRequest,
-    ToolApprovalUserDecision, VerificationProductView,
+    IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
+    PublicIntentStackStateV1, PublicTaskPhase, TaskIntegrationReviewRequest, TaskPauseRequest,
+    TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
 };
 use sigil_runtime::application_compaction::{
     ApplicationCompactionAdmission, ApplicationCompactionReview,
@@ -32,7 +33,7 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 11;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 12;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +69,8 @@ pub struct HttpServerCapabilities {
     pub verification: bool,
     /// Durable Task integration can be reviewed and one exact preview accepted.
     pub task_integration: bool,
+    /// Durable Intent Stack state can be reviewed and one exact Drop preview confirmed.
+    pub intent_stack: bool,
     /// Bound sessions expose typed model, permission-mode, and context-usage facts.
     pub run_context: bool,
     /// Bound sessions expose a safe, bounded child-agent lifecycle and handoff projection.
@@ -100,6 +103,7 @@ impl HttpServerCapabilities {
             task_pause: true,
             verification: true,
             task_integration: true,
+            intent_stack: true,
             run_context: true,
             agent_activity: true,
             conversation_recovery: true,
@@ -1568,6 +1572,7 @@ pub enum HttpContextWindowSource {
 #[serde(rename_all = "snake_case")]
 pub enum HttpApplicationClientAction {
     PreviewCompaction,
+    OpenIntentStack,
     NewSession,
     FocusEffort,
     FocusModel,
@@ -1575,6 +1580,45 @@ pub enum HttpApplicationClientAction {
     OpenAgentWorkbench,
     OpenSettings,
     OpenSupport,
+}
+
+/// Exact read-only target used to generate one current Intent Drop preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpIntentDropPreviewRequest {
+    pub intent_ref: IntentVersionRef,
+}
+
+/// Renderer-safe durable Intent Stack projection.
+pub type HttpIntentStackView = PublicIntentStackStateV1;
+
+/// Exact digest-bound Drop preview shared with every application adapter.
+pub type HttpIntentDropPreview = IntentOperationPreviewV1;
+
+/// Renderer-to-runtime Drop request. It carries no file or approval authority.
+pub type HttpIntentDropRequest = IntentDropRequestV1;
+
+/// Terminal operation result derived by the application owner.
+pub type HttpIntentDropExecution = IntentOperationExecutionV1;
+
+/// Receipt for one idempotent exact Intent Drop command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpIntentDropCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub execution: HttpIntentDropExecution,
+    pub replayed: bool,
+}
+
+impl HttpIntentDropCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
 }
 
 /// One bounded slash-command catalog entry.

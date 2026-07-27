@@ -25,9 +25,9 @@ use crate::{
     driver::{
         HttpConversationDisplayDriverError, HttpConversationQueueDriverCommand,
         HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
-        HttpConversationRecoveryDriverError, HttpQueuedRunDriverStart, HttpRunDriver,
-        HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart, HttpRunDriverTaskPause,
-        HttpSessionOpenBindingError,
+        HttpConversationRecoveryDriverError, HttpIntentStackDriverError, HttpQueuedRunDriverStart,
+        HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
+        HttpRunDriverTaskPause, HttpSessionOpenBindingError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
@@ -37,15 +37,16 @@ use crate::{
         HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
         HttpConversationQueuePromptMaterial, HttpConversationQueueView,
         HttpConversationRecoveryCommandAction, HttpConversationRecoveryCommandReceipt,
-        HttpConversationRecoveryView, HttpForegroundRunOwner, HttpPendingApproval,
-        HttpPermissionMode, HttpReasoningEffort, HttpRunCancelCommandReceipt, HttpRunCancelRequest,
-        HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus,
-        HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
-        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
-        HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceCommandReceipt,
-        HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
-        HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpVerificationRerunCommandReceipt,
-        HttpVerificationRerunRequest, HttpVerificationView,
+        HttpConversationRecoveryView, HttpForegroundRunOwner, HttpIntentDropCommandReceipt,
+        HttpIntentDropPreview, HttpIntentDropPreviewRequest, HttpIntentDropRequest,
+        HttpIntentStackView, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
+        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
+        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+        HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
+        HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
+        HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationReviewRequest,
+        HttpTaskIntegrationReviewView, HttpTaskPauseCommandReceipt, HttpTaskPauseRequest,
+        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -121,6 +122,21 @@ pub enum HttpRegistryError {
     /// The exact Task pause request identity is malformed.
     #[error("http Task pause request is invalid")]
     InvalidTaskPauseRequest,
+    /// The Intent Stack request body is malformed.
+    #[error("http Intent Stack request is invalid")]
+    IntentStackInvalidRequest,
+    /// The exact Intent Stack request no longer matches current durable truth.
+    #[error("http Intent Stack request is stale")]
+    IntentStackStale,
+    /// Current host permission or workspace trust does not authorize Intent Drop.
+    #[error("http Intent Stack operation requires permission")]
+    IntentStackPermissionRequired,
+    /// Current durable state conflicts with the requested Intent operation.
+    #[error("http Intent Stack operation conflicts with durable state")]
+    IntentStackConflict,
+    /// Durable Intent Stack projection or its application owner is unavailable.
+    #[error("http Intent Stack is unavailable")]
+    IntentStackUnavailable,
     /// The addressed run no longer owns the session's foreground event stream.
     #[error("http run {run_id} no longer owns foreground session {session_id}")]
     RunNoLongerForeground { session_id: String, run_id: String },
@@ -1659,6 +1675,94 @@ impl HttpSessionRunRegistry {
             })
     }
 
+    /// Projects the current adapter-neutral Intent Stack for one session.
+    pub fn intent_stack_view(
+        &self,
+        session_id: &str,
+    ) -> Result<HttpIntentStackView, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| self.driver.intent_stack_view(&session)))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "Intent Stack view",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(intent_stack_driver_registry_error)
+    }
+
+    /// Produces one fresh exact Intent Drop preview under durable mutation exclusion.
+    pub fn preview_intent_drop(
+        &self,
+        session_id: &str,
+        request: HttpIntentDropPreviewRequest,
+    ) -> Result<HttpIntentDropPreview, HttpRegistryError> {
+        request
+            .intent_ref
+            .validate()
+            .map_err(|_| HttpRegistryError::IntentStackInvalidRequest)?;
+        let session = self.get_session(session_id)?;
+        let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.driver
+                .preview_intent_drop(&session, &request.intent_ref)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "Intent Drop preview",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(intent_stack_driver_registry_error);
+        guard.finish(false);
+        result
+    }
+
+    /// Executes one exact Intent Drop from an idempotent command envelope.
+    pub fn execute_intent_drop_command(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpIntentDropRequest>,
+    ) -> Result<HttpIntentDropCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        let request = HttpReservedCommand::intent_drop(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_intent_drop(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| {
+            let session = self.get_session(session_id)?;
+            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+            let execution = catch_unwind(AssertUnwindSafe(|| {
+                self.driver.execute_intent_drop(&session, &command.payload)
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "Intent Drop",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(intent_stack_driver_registry_error);
+            guard.finish(false);
+            Ok(HttpIntentDropCommandReceipt {
+                command_id: command.command_id.clone(),
+                client_id: command.client_id.clone(),
+                session_id: command.session_id.clone(),
+                correlation_id: command.correlation_id.clone(),
+                execution: execution?,
+                replayed: false,
+            })
+        })();
+        completion.complete(HttpCommandCompletion::IntentDrop(Box::new(result.clone())))?;
+        result
+    }
+
     /// Executes one exact verification rerun from an idempotent command envelope.
     ///
     /// The session cannot admit an agent run or another verification rerun until the driver
@@ -2610,6 +2714,7 @@ enum HttpCommandKind {
     Approval,
     Verification,
     Integration,
+    IntentDrop,
     Queue,
     Recovery,
 }
@@ -2623,6 +2728,7 @@ impl HttpCommandKind {
             Self::Approval => b"approval",
             Self::Verification => b"verification",
             Self::Integration => b"integration",
+            Self::IntentDrop => b"intent_drop",
             Self::Queue => b"queue",
             Self::Recovery => b"recovery",
         }
@@ -2636,6 +2742,7 @@ impl HttpCommandKind {
             Self::Approval => "approval",
             Self::Verification => "verification",
             Self::Integration => "integration",
+            Self::IntentDrop => "intent_drop",
             Self::Queue => "queue",
             Self::Recovery => "recovery",
         }
@@ -2690,6 +2797,13 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpTaskIntegrationReviewRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::Integration, &[path_session_id], command)
+    }
+
+    fn intent_drop(
+        path_session_id: &str,
+        command: &HttpCommandEnvelope<HttpIntentDropRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::IntentDrop, &[path_session_id], command)
     }
 
     fn queue(
@@ -2758,6 +2872,7 @@ enum HttpCommandCompletion {
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Integration(Box<Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError>>),
+    IntentDrop(Box<Result<HttpIntentDropCommandReceipt, HttpRegistryError>>),
     Queue(Box<Result<HttpConversationQueueCommandReceipt, HttpRegistryError>>),
     Recovery(Box<Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError>>),
     Aborted,
@@ -2831,6 +2946,17 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Integration(Box::new(receipt))
             }
+            Self::IntentDrop(result) if result.is_ok() => {
+                let mut receipt = result
+                    .as_ref()
+                    .as_ref()
+                    .expect("successful Intent Drop completion should contain a receipt")
+                    .clone();
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::IntentDrop(Box::new(receipt))
+            }
             Self::Queue(result) if result.is_ok() => {
                 let mut receipt = result
                     .as_ref()
@@ -2860,6 +2986,7 @@ impl HttpCommandCompletion {
             | Self::Approval(Err(_))
             | Self::Verification(_)
             | Self::Integration(_)
+            | Self::IntentDrop(_)
             | Self::Queue(_)
             | Self::Recovery(_)
             | Self::Aborted => HttpStoredCommandCompletion::Aborted,
@@ -2877,6 +3004,9 @@ impl HttpCommandCompletion {
             }
             HttpStoredCommandCompletion::Integration(receipt) => {
                 Self::Integration(Box::new(Ok(*receipt)))
+            }
+            HttpStoredCommandCompletion::IntentDrop(receipt) => {
+                Self::IntentDrop(Box::new(Ok(*receipt)))
             }
             HttpStoredCommandCompletion::Queue(receipt) => Self::Queue(Box::new(Ok(*receipt))),
             HttpStoredCommandCompletion::Recovery(receipt) => {
@@ -3080,6 +3210,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -3096,6 +3227,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -3112,6 +3244,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -3128,6 +3261,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -3146,6 +3280,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -3164,6 +3299,24 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::IntentDrop(_)
+            | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_intent_drop(&self) -> Result<HttpIntentDropCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::IntentDrop(result) => {
+                (*result).map(HttpIntentDropCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
@@ -3181,6 +3334,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Recovery(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
@@ -3199,6 +3353,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
@@ -3685,6 +3840,18 @@ fn recovery_driver_registry_error(error: HttpConversationRecoveryDriverError) ->
         HttpConversationRecoveryDriverError::Unavailable => {
             HttpRegistryError::ConversationRecoveryUnavailable
         }
+    }
+}
+
+fn intent_stack_driver_registry_error(error: HttpIntentStackDriverError) -> HttpRegistryError {
+    match error {
+        HttpIntentStackDriverError::InvalidRequest => HttpRegistryError::IntentStackInvalidRequest,
+        HttpIntentStackDriverError::Stale => HttpRegistryError::IntentStackStale,
+        HttpIntentStackDriverError::PermissionRequired => {
+            HttpRegistryError::IntentStackPermissionRequired
+        }
+        HttpIntentStackDriverError::Conflict => HttpRegistryError::IntentStackConflict,
+        HttpIntentStackDriverError::Unavailable => HttpRegistryError::IntentStackUnavailable,
     }
 }
 

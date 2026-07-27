@@ -29,13 +29,16 @@ fn agent_command_opens_the_shared_agent_workbench() {
 }
 
 #[test]
-fn intent_stack_command_is_shared_but_keeps_graphical_routing_deferred() {
+fn intent_stack_command_has_one_shared_graphical_route() {
     let command = APPLICATION_COMMANDS
         .iter()
         .find(|command| command.canonical == "/intents")
         .expect("Intent Stack command");
 
-    assert_eq!(command.client_action, None);
+    assert_eq!(
+        command.client_action,
+        Some(crate::ApplicationClientAction::OpenIntentStack)
+    );
     assert!(!command.completes_with_space);
 }
 

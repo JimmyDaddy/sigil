@@ -50,22 +50,23 @@ use super::{
     HttpConversationRecoveryDriverOutput, HttpConversationRecoveryView, HttpDurableCommandStore,
     HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
     HttpForegroundRunOwner, HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind,
-    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
-    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpProviderModelRef, HttpProviderSetupCatalogRequest,
-    HttpProviderSetupCredentialSource, HttpProviderSetupProtocol, HttpProviderSetupSaveRequest,
-    HttpProviderSetupTemplate, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
-    HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest, HttpRunContextView,
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
-    HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationLaneView,
-    HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    HttpIntentDropExecution, HttpIntentDropPreview, HttpIntentDropRequest,
+    HttpIntentStackDriverError, HttpIntentStackView, HttpLiveEventBus, HttpLiveEventRecvError,
+    HttpLocalServer, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
+    HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
+    HttpProtocolReplayError, HttpProtocolVersionError, HttpProviderModelRef,
+    HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource, HttpProviderSetupProtocol,
+    HttpProviderSetupSaveRequest, HttpProviderSetupTemplate, HttpQueuedRunAdmission,
+    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunEventSequencer,
+    HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig,
+    HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
+    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
+    HttpSupportContext, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
     public_run_event_to_sse,
 };
 
@@ -1111,6 +1112,7 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert!(server_info.capabilities.durable_session_reopen);
     assert!(server_info.capabilities.bounded_transcript_replay);
     assert!(server_info.capabilities.verification);
+    assert!(server_info.capabilities.intent_stack);
     assert!(server_info.capabilities.run_context);
     assert!(server_info.capabilities.agent_activity);
     assert!(server_info.capabilities.support_diagnostics);
@@ -1676,6 +1678,122 @@ async fn local_server_projects_and_idempotently_accepts_exact_task_integration()
 }
 
 #[tokio::test]
+async fn local_server_projects_previews_and_idempotently_executes_exact_intent_drop() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "intent-stack"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let (view, preview, execution) = intent_stack_test_fixture();
+    driver.set_intent_stack_view(view.clone());
+    driver.set_intent_drop_preview(preview.clone());
+    driver.set_intent_drop_execution(execution.clone());
+
+    let view_path = format!("/sessions/{session_id}/intents");
+    let (status, body) = http_raw_request(address, http_get(&view_path, None, None)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, projected) =
+        http_raw_request(address, http_get(&view_path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_value::<HttpIntentStackView>(projected)
+            .expect("Intent Stack projection should decode"),
+        view
+    );
+
+    let preview_path = format!("/sessions/{session_id}/intents/drop-preview");
+    let invalid_preview_body = json!({
+        "intent_ref": {
+            "intent_id": "telemetry",
+            "version": 1
+        },
+        "absolute_path": "/private/forbidden"
+    })
+    .to_string();
+    let (status, body) = http_raw_request(
+        address,
+        http_post(&preview_path, Some("secret-token"), &invalid_preview_body),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_intent_stack_request");
+
+    let preview_request = json!({
+        "intent_ref": {
+            "intent_id": "telemetry",
+            "version": 1
+        }
+    })
+    .to_string();
+    let (status, projected_preview) = http_raw_request(
+        address,
+        http_post(&preview_path, Some("secret-token"), &preview_request),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_value::<HttpIntentDropPreview>(projected_preview)
+            .expect("Intent Drop preview should decode"),
+        preview
+    );
+    assert_eq!(
+        driver.intent_drop_previews(),
+        vec![preview.target_intents[0].clone()]
+    );
+
+    let request = HttpIntentDropRequest {
+        operation_id: preview.operation_id.clone(),
+        stack_version: preview.stack_version,
+        preview_digest: preview.preview_digest.clone(),
+    };
+    let command = HttpCommandEnvelope::new(
+        "intent-drop-command-1",
+        "desktop-client",
+        session_id,
+        request.clone(),
+    );
+    let command_json =
+        serde_json::to_value(&command).expect("Intent Drop command should serialize");
+    let drop_path = format!("/sessions/{session_id}/intents/drop");
+    let drop_request = http_post(&drop_path, Some("secret-token"), &command_json.to_string());
+    let (status, receipt) = http_raw_request(address, drop_request.clone()).await;
+    assert_eq!(status, 200);
+    assert_eq!(receipt["execution"]["resolution"], "committed");
+    assert_eq!(receipt["replayed"], false);
+
+    let (status, replay) = http_raw_request(address, drop_request).await;
+    assert_eq!(status, 200);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(driver.intent_drop_requests(), vec![request]);
+
+    let mut conflicting_command = command_json;
+    conflicting_command["payload"]["preview_digest"] =
+        json!(format!("sha256:jcs-v1:{}", "f".repeat(64)));
+    let (status, conflict) = http_raw_request(
+        address,
+        http_post(
+            &drop_path,
+            Some("secret-token"),
+            &conflicting_command.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(conflict["error"]["code"], "registry_error");
+    assert_eq!(driver.intent_drop_requests().len(), 1);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn local_server_authenticates_validates_and_pages_bounded_transcript() {
     let (address, shutdown, driver) = spawn_test_http_server().await;
     let (status, session) = http_raw_request(
@@ -2086,6 +2204,52 @@ fn task_integration_review_and_accept_never_overlap_a_foreground_agent_run() {
         })
     );
     assert!(driver.task_integration_accepts().is_empty());
+}
+
+#[test]
+fn intent_drop_preview_and_execution_never_overlap_a_foreground_agent_run() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let (view, preview, execution) = intent_stack_test_fixture();
+    driver.set_intent_stack_view(view);
+    driver.set_intent_drop_preview(preview.clone());
+    driver.set_intent_drop_execution(execution);
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("foreground", HttpPermissionMode::Manual),
+        )
+        .expect("foreground run should start");
+
+    let preview_request = super::HttpIntentDropPreviewRequest {
+        intent_ref: preview.target_intents[0].clone(),
+    };
+    assert_eq!(
+        registry.preview_intent_drop(&session.id, preview_request),
+        Err(HttpRegistryError::SessionForegroundRunActive {
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+        })
+    );
+    let command = HttpCommandEnvelope::new(
+        "intent-drop-busy-1",
+        "desktop-client",
+        &session.id,
+        HttpIntentDropRequest {
+            operation_id: preview.operation_id,
+            stack_version: preview.stack_version,
+            preview_digest: preview.preview_digest,
+        },
+    );
+    assert_eq!(
+        registry.execute_intent_drop_command(&session.id, command),
+        Err(HttpRegistryError::SessionForegroundRunActive {
+            session_id: session.id,
+            run_id: run.id,
+        })
+    );
+    assert!(driver.intent_drop_previews().is_empty());
+    assert!(driver.intent_drop_requests().is_empty());
 }
 
 #[test]
@@ -3204,6 +3368,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         "boolean"
     );
     assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["intent_stack"]["type"],
+        "boolean"
+    );
+    assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["task_pause"]["type"],
         "boolean"
     );
@@ -3217,6 +3385,39 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             ["409"]
             .is_object()
     );
+    assert!(
+        document["paths"]["/sessions/{session_id}/intents"]["get"]["responses"]["200"].is_object()
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/intents/drop-preview"]["post"]["responses"]["409"]
+            .is_object()
+    );
+    assert!(
+        document["paths"]["/sessions/{session_id}/intents/drop"]["post"]["responses"]["200"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["IntentDropCommand"]["allOf"][1]["properties"]["payload"]
+            ["$ref"],
+        "#/components/schemas/IntentDropRequest"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["IntentStackState"]["oneOf"][0]["properties"]["stack"]["$ref"],
+        "#/components/schemas/IntentStack"
+    );
+    for forbidden_field in [
+        "absolute_path",
+        "raw_patch",
+        "file_content",
+        "permission_policy_digest",
+        "approval_authority_id",
+    ] {
+        assert!(
+            document["components"]["schemas"]["IntentDropRequest"]["properties"]
+                .get(forbidden_field)
+                .is_none()
+        );
+    }
     assert_eq!(
         document["components"]["schemas"]["TaskIntegrationReviewView"]["properties"]["lanes"]["items"]
             ["$ref"],
@@ -7066,6 +7267,11 @@ struct RecordingRunDriver {
     task_integration_review: Mutex<Option<HttpTaskIntegrationReviewView>>,
     task_integration_acceptance: Mutex<Option<HttpTaskIntegrationAcceptanceView>>,
     task_integration_accepts: Mutex<Vec<TaskIntegrationReviewRequest>>,
+    intent_stack_view: Mutex<Option<HttpIntentStackView>>,
+    intent_drop_preview: Mutex<Option<HttpIntentDropPreview>>,
+    intent_drop_previews: Mutex<Vec<sigil_kernel::IntentVersionRef>>,
+    intent_drop_execution: Mutex<Option<HttpIntentDropExecution>>,
+    intent_drop_requests: Mutex<Vec<HttpIntentDropRequest>>,
     transcript_page: Mutex<Option<HttpSessionTranscriptPage>>,
     transcript_queries: Mutex<Vec<(Option<u64>, usize)>>,
     conversation_display_page: Mutex<Option<HttpConversationDisplayPage>>,
@@ -7157,6 +7363,26 @@ impl RecordingRunDriver {
 
     fn task_integration_accepts(&self) -> Vec<TaskIntegrationReviewRequest> {
         lock(&self.task_integration_accepts).clone()
+    }
+
+    fn set_intent_stack_view(&self, view: HttpIntentStackView) {
+        *lock(&self.intent_stack_view) = Some(view);
+    }
+
+    fn set_intent_drop_preview(&self, preview: HttpIntentDropPreview) {
+        *lock(&self.intent_drop_preview) = Some(preview);
+    }
+
+    fn intent_drop_previews(&self) -> Vec<sigil_kernel::IntentVersionRef> {
+        lock(&self.intent_drop_previews).clone()
+    }
+
+    fn set_intent_drop_execution(&self, execution: HttpIntentDropExecution) {
+        *lock(&self.intent_drop_execution) = Some(execution);
+    }
+
+    fn intent_drop_requests(&self) -> Vec<HttpIntentDropRequest> {
+        lock(&self.intent_drop_requests).clone()
     }
 
     fn set_transcript_page(&self, page: HttpSessionTranscriptPage) {
@@ -7388,6 +7614,37 @@ impl HttpRunDriver for RecordingRunDriver {
             .clone()
             .ok_or_else(|| HttpRunDriverError::new("test integration acceptance is missing"))
     }
+
+    fn intent_stack_view(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+    ) -> Result<HttpIntentStackView, HttpIntentStackDriverError> {
+        lock(&self.intent_stack_view)
+            .clone()
+            .ok_or(HttpIntentStackDriverError::Unavailable)
+    }
+
+    fn preview_intent_drop(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        intent_ref: &sigil_kernel::IntentVersionRef,
+    ) -> Result<HttpIntentDropPreview, HttpIntentStackDriverError> {
+        lock(&self.intent_drop_previews).push(intent_ref.clone());
+        lock(&self.intent_drop_preview)
+            .clone()
+            .ok_or(HttpIntentStackDriverError::Unavailable)
+    }
+
+    fn execute_intent_drop(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        request: &HttpIntentDropRequest,
+    ) -> Result<HttpIntentDropExecution, HttpIntentStackDriverError> {
+        lock(&self.intent_drop_requests).push(request.clone());
+        lock(&self.intent_drop_execution)
+            .clone()
+            .ok_or(HttpIntentStackDriverError::Unavailable)
+    }
 }
 
 fn verification_rerun_request() -> TaskVerificationRerunRequest {
@@ -7476,6 +7733,111 @@ fn task_integration_acceptance_test_view(
         promotion_cleanup_error: None,
         parent_cleanup_error: None,
     }
+}
+
+fn intent_stack_test_fixture() -> (
+    HttpIntentStackView,
+    HttpIntentDropPreview,
+    HttpIntentDropExecution,
+) {
+    let digest = format!("sha256:jcs-v1:{}", "a".repeat(64));
+    let preview_digest = format!("sha256:jcs-v1:{}", "b".repeat(64));
+    let intent = |intent_id: &str, title: &str, depends_on: Vec<&str>, available_actions: Value| {
+        json!({
+            "intent_ref": {
+                "intent_id": intent_id,
+                "version": 1
+            },
+            "title": title,
+            "statement": format!("Implement {title}"),
+            "acceptance_criteria": [{
+                "criterion_id": format!("{intent_id}-criterion"),
+                "statement": format!("{title} is verified"),
+                "required": true
+            }],
+            "depends_on": depends_on,
+            "source": {
+                "kind": "accepted_suggestion",
+                "source_turn_id": "turn-1"
+            },
+            "definition_state": "accepted",
+            "application_state": "applied",
+            "exclusive_artifact_count": 1,
+            "shared_artifact_count": 0,
+            "unowned_artifact_count": 0,
+            "drifted_artifact_count": 0,
+            "unavailable_artifact_count": 0,
+            "advisory_criterion_count": 0,
+            "system_verified_criterion_count": 1,
+            "artifacts": [{
+                "artifact_id": format!("{intent_id}-artifact"),
+                "artifact_kind": "file_hunk",
+                "ownership": "exclusive",
+                "availability": "available",
+                "normalized_relative_path": format!("src/{intent_id}.rs")
+            }],
+            "available_actions": available_actions
+        })
+    };
+    let view = serde_json::from_value(json!({
+        "status": "available",
+        "schema_version": 1,
+        "stack": {
+            "schema_version": 1,
+            "stack_id": "intent-stack-test",
+            "stack_version": 1,
+            "authority_state": "active",
+            "plan_digest": digest,
+            "intents": [
+                intent("retry", "Retry", vec![], json!([])),
+                intent("telemetry", "Telemetry", vec!["retry"], json!(["drop"])),
+                intent("operations-docs", "Operations docs", vec!["retry"], json!([]))
+            ],
+            "conflicts": []
+        }
+    }))
+    .expect("Intent Stack fixture should decode");
+    let preview: HttpIntentDropPreview = serde_json::from_value(json!({
+        "schema_version": 1,
+        "operation_id": "intent-drop-telemetry",
+        "operation_kind": "drop",
+        "stack_id": "intent-stack-test",
+        "stack_version": 1,
+        "target_intents": [{
+            "intent_id": "telemetry",
+            "version": 1
+        }],
+        "target_is_leaf": true,
+        "workspace_revision": 7,
+        "file_effects": [{
+            "normalized_relative_path": "src/telemetry.rs",
+            "action": "update",
+            "artifact_ids": ["telemetry-artifact"]
+        }],
+        "retained_intents": [{
+            "intent_id": "retry",
+            "version": 1
+        }, {
+            "intent_id": "operations-docs",
+            "version": 1
+        }],
+        "verification_impacts": [{
+            "receipt_id": "telemetry-verification",
+            "impact": "rerun_required"
+        }],
+        "conflicts": [],
+        "preview_digest": preview_digest
+    }))
+    .expect("Intent Drop preview fixture should decode");
+    let execution = HttpIntentDropExecution {
+        preview: preview.clone(),
+        resolution: sigil_kernel::IntentOperationResolution::Committed,
+        mutation_batch_id: Some("intent-drop-batch".to_owned()),
+        committed_operation_ids: vec!["intent-drop-file-1".to_owned()],
+        result_snapshot_id: Some("snapshot-after-telemetry-drop".to_owned()),
+        error_code: None,
+    };
+    (view, preview, execution)
 }
 
 fn recording_session_log_path(session_id: &str) -> String {

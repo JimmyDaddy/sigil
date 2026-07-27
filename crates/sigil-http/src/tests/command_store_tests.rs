@@ -4,8 +4,9 @@ use crate::{
     HttpConversationQueueItem, HttpConversationQueueItemKind, HttpConversationQueueItemStatus,
     HttpConversationQueuePromptMaterial, HttpConversationQueueView,
     HttpConversationRecoveryCommandActionKind, HttpConversationRecoveryCommandReceipt,
-    HttpConversationRecoveryView, HttpPermissionMode, HttpRunSnapshot, HttpRunStartCommandReceipt,
-    HttpRunStatus, HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
+    HttpConversationRecoveryView, HttpIntentDropCommandReceipt, HttpPermissionMode,
+    HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStatus,
+    HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
     command_store::{
         HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpDurableCommandStore, HttpStoredCommandClaim,
         HttpStoredCommandCompletion, HttpStoredCommandIdentity, HttpStoredCommandKey,
@@ -43,6 +44,12 @@ fn recovery_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandId
 fn integration_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
     let mut identity = identity(command_id, fingerprint);
     identity.kind = "integration".to_owned();
+    identity
+}
+
+fn intent_drop_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
+    let mut identity = identity(command_id, fingerprint);
+    identity.kind = "intent_drop".to_owned();
     identity
 }
 
@@ -149,6 +156,46 @@ fn integration_receipt(command_id: &str) -> HttpTaskIntegrationAcceptanceCommand
         },
         replayed: false,
     }
+}
+
+fn intent_drop_receipt(command_id: &str) -> HttpIntentDropCommandReceipt {
+    serde_json::from_value(serde_json::json!({
+        "command_id": command_id,
+        "client_id": "client-1",
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "execution": {
+            "preview": {
+                "schema_version": 1,
+                "operation_id": "intent-drop-telemetry",
+                "operation_kind": "drop",
+                "stack_id": "intent-stack-test",
+                "stack_version": 1,
+                "target_intents": [{
+                    "intent_id": "telemetry",
+                    "version": 1
+                }],
+                "target_is_leaf": true,
+                "workspace_revision": 7,
+                "file_effects": [{
+                    "normalized_relative_path": "src/telemetry.rs",
+                    "action": "update",
+                    "artifact_ids": ["telemetry-artifact"]
+                }],
+                "retained_intents": [],
+                "verification_impacts": [],
+                "conflicts": [],
+                "preview_digest": format!("sha256:jcs-v1:{}", "b".repeat(64))
+            },
+            "resolution": "committed",
+            "mutation_batch_id": "intent-drop-batch",
+            "committed_operation_ids": ["intent-drop-file-1"],
+            "result_snapshot_id": "snapshot-after-drop",
+            "error_code": null
+        },
+        "replayed": false
+    }))
+    .expect("Intent Drop receipt fixture should decode")
 }
 
 #[test]
@@ -312,6 +359,38 @@ fn durable_command_store_round_trips_task_integration_completion() {
     ));
     assert!(matches!(
         store.reserve(integration_identity("integration-command-1", '8')),
+        Ok(HttpStoredCommandClaim::Conflict)
+    ));
+}
+
+#[test]
+fn durable_command_store_round_trips_intent_drop_completion() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let stored = intent_drop_identity("intent-drop-command-1", '7');
+    let expected = intent_drop_receipt("intent-drop-command-1");
+    {
+        let store = HttpDurableCommandStore::open(&path, 8).expect("store should open");
+        assert!(matches!(
+            store.reserve(stored.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(
+                &stored,
+                HttpStoredCommandCompletion::IntentDrop(Box::new(expected.clone())),
+            )
+            .expect("Intent Drop completion should persist");
+    }
+
+    let store = HttpDurableCommandStore::open(&path, 8).expect("store should reopen");
+    assert!(matches!(
+        store.reserve(stored),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if *completion == HttpStoredCommandCompletion::IntentDrop(Box::new(expected))
+    ));
+    assert!(matches!(
+        store.reserve(intent_drop_identity("intent-drop-command-1", '6')),
         Ok(HttpStoredCommandClaim::Conflict)
     ));
 }

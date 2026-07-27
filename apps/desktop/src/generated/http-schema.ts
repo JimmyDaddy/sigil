@@ -1010,6 +1010,151 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/intents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the adapter-neutral durable Intent Stack
+         * @description Returns the same bounded projection consumed by TUI and automation. Raw patches, absolute paths, file content, policy and mutation authority are excluded.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current durable Intent Stack or explicit history-unavailable state */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IntentStackState"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/intents/drop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Execute one exact confirmed Intent Drop
+         * @description Routes an idempotent digest-bound Drop command. The host reconstructs current permission, trust and confirmation authority; clients cannot submit paths, patches, file hashes or authority.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["IntentDropCommand"];
+                };
+            };
+            responses: {
+                /** @description Durable terminal Intent Drop receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IntentDropCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/intents/drop-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview one exact leaf Intent Drop
+         * @description Rebuilds a digest-bound preview under durable mutation exclusion without applying file changes.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["IntentDropPreviewRequest"];
+                };
+            };
+            responses: {
+                /** @description Fresh exact Intent Drop preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IntentOperationPreview"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/queue": {
         parameters: {
             query?: never;
@@ -1956,7 +2101,7 @@ export interface components {
             user_invocable: boolean;
         };
         /** @enum {string} */
-        ApplicationClientAction: "preview_compaction" | "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench" | "open_settings" | "open_support";
+        ApplicationClientAction: "preview_compaction" | "open_intent_stack" | "new_session" | "focus_effort" | "focus_model" | "open_session_picker" | "open_agent_workbench" | "open_settings" | "open_support";
         ApplicationCommandCatalogEntry: {
             aliases: string[];
             argument_hint?: string | null;
@@ -2566,6 +2711,171 @@ export interface components {
         IntegrationPromotionStatus: "prepared" | "promoted" | "conflict" | "stale" | "failed" | "cancelled";
         /** @enum {string} */
         IntegrationPromotionTargetKind: "workspace_apply" | "git_ref_advance";
+        Intent: {
+            acceptance_criteria: components["schemas"]["IntentAcceptanceCriterion"][];
+            /** Format: uint32 */
+            advisory_criterion_count: number;
+            application_state: components["schemas"]["IntentApplicationState"];
+            artifacts: components["schemas"]["IntentArtifactSummary"][];
+            available_actions: components["schemas"]["IntentOperationKind"][];
+            definition_state: components["schemas"]["IntentDefinitionState"];
+            depends_on: string[];
+            /** Format: uint32 */
+            drifted_artifact_count: number;
+            /** Format: uint32 */
+            exclusive_artifact_count: number;
+            intent_ref: components["schemas"]["IntentVersionRef"];
+            /** Format: uint32 */
+            shared_artifact_count: number;
+            source: components["schemas"]["IntentSource"];
+            statement: string;
+            /** Format: uint32 */
+            system_verified_criterion_count: number;
+            title: string;
+            /** Format: uint32 */
+            unavailable_artifact_count: number;
+            /** Format: uint32 */
+            unowned_artifact_count: number;
+        };
+        IntentAcceptanceCriterion: {
+            criterion_id: string;
+            required: boolean;
+            statement: string;
+        };
+        /** @enum {string} */
+        IntentApplicationState: "unapplied" | "applied" | "dropped" | "needs_review" | "needs_rebuild" | "read_only" | "out_of_scope";
+        /** @enum {string} */
+        IntentArtifactAvailability: "available" | "deleted" | "expired" | "corrupted";
+        /** @enum {string} */
+        IntentArtifactKind: "file_hunk" | "test_evidence" | "documentation" | "change_set" | "verification_receipt" | "unsupported_side_effect";
+        /** @enum {string} */
+        IntentArtifactOwnership: "exclusive" | "shared" | "unowned" | "drifted";
+        IntentArtifactSummary: {
+            artifact_id: string;
+            artifact_kind: components["schemas"]["IntentArtifactKind"];
+            availability: components["schemas"]["IntentArtifactAvailability"];
+            normalized_relative_path?: string | null;
+            ownership: components["schemas"]["IntentArtifactOwnership"];
+        };
+        /** @enum {string} */
+        IntentAuthorityState: "active" | "read_only_provenance" | "out_of_scope";
+        IntentConflict: {
+            artifact_id?: string | null;
+            code: components["schemas"]["IntentOperationErrorCode"];
+            intent_ref?: components["schemas"]["IntentVersionRef"] | null;
+            safe_reason: string;
+        };
+        /** @enum {string} */
+        IntentDefinitionState: "proposed" | "accepted" | "superseded" | "invalid";
+        IntentDropCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["IntentDropRequest"];
+        };
+        IntentDropCommandReceipt: {
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            execution: components["schemas"]["IntentOperationExecution"];
+            replayed: boolean;
+            session_id: string;
+        };
+        IntentDropPreviewRequest: {
+            intent_ref: components["schemas"]["IntentVersionRef"];
+        };
+        IntentDropRequest: {
+            operation_id: string;
+            preview_digest: string;
+            /** Format: uint64 */
+            stack_version: number;
+        };
+        /** @enum {string} */
+        IntentOperationErrorCode: "unsupported_schema" | "intent_history_unavailable" | "unknown_intent" | "unknown_operation" | "stale_intent_version" | "stale_stack_version" | "invalid_dependency_graph" | "target_not_leaf" | "shared_artifact" | "unowned_artifact" | "drifted_artifact" | "artifact_unavailable" | "artifact_digest_mismatch" | "unsupported_artifact" | "unsupported_side_effect" | "missing_execution_lineage" | "missing_parent_mutation_evidence" | "missing_current_verification_evidence" | "preview_digest_mismatch" | "workspace_revision_mismatch" | "permission_denied" | "approval_authority_unavailable" | "workspace_lease_unavailable" | "workspace_out_of_scope" | "operation_state_conflict" | "intent_state_conflict" | "partial_application" | "reconciliation_required";
+        IntentOperationExecution: {
+            committed_operation_ids: string[];
+            error_code: components["schemas"]["IntentOperationErrorCode"] | null;
+            mutation_batch_id: string | null;
+            preview: components["schemas"]["IntentOperationPreview"];
+            resolution: components["schemas"]["IntentOperationResolution"];
+            result_snapshot_id: string | null;
+        };
+        /** @enum {string} */
+        IntentOperationFileAction: "create" | "update" | "delete";
+        IntentOperationFileSummary: {
+            action: components["schemas"]["IntentOperationFileAction"];
+            artifact_ids: string[];
+            normalized_relative_path: string;
+        };
+        /** @enum {string} */
+        IntentOperationKind: "drop" | "revise_impact_preview" | "replace_impact_preview" | "adopt";
+        IntentOperationPreview: {
+            conflicts: components["schemas"]["IntentConflict"][];
+            /** Format: uint64 */
+            expires_at_ms?: number | null;
+            file_effects: components["schemas"]["IntentOperationFileSummary"][];
+            operation_id: string;
+            operation_kind: components["schemas"]["IntentOperationKind"];
+            preview_digest: string;
+            retained_intents: components["schemas"]["IntentVersionRef"][];
+            /** @constant */
+            schema_version: 1;
+            stack_id: string;
+            /** Format: uint64 */
+            stack_version: number;
+            target_intents: components["schemas"]["IntentVersionRef"][];
+            target_is_leaf: boolean;
+            verification_impacts: components["schemas"]["IntentVerificationImpactSummary"][];
+            /** Format: uint64 */
+            workspace_revision: number;
+        };
+        /** @enum {string} */
+        IntentOperationResolution: "committed" | "rejected" | "cancelled" | "conflicted" | "partially_applied" | "interrupted";
+        IntentSource: {
+            /** @constant */
+            kind: "user_turn";
+            source_turn_id: string;
+        } | {
+            /** @constant */
+            kind: "accepted_suggestion";
+            source_turn_id: string;
+        } | {
+            /** @constant */
+            kind: "trusted_spec";
+            safe_source_label: string;
+        };
+        IntentStack: {
+            authority_state: components["schemas"]["IntentAuthorityState"];
+            conflicts: components["schemas"]["IntentConflict"][];
+            intents: components["schemas"]["Intent"][];
+            plan_digest: string;
+            /** @constant */
+            schema_version: 1;
+            stack_id: string;
+            /** Format: uint64 */
+            stack_version: number;
+        };
+        IntentStackState: {
+            /** @constant */
+            schema_version: 1;
+            stack: components["schemas"]["IntentStack"];
+            /** @constant */
+            status: "available";
+        } | {
+            safe_message: string;
+            /** @constant */
+            schema_version: 1;
+            /** @constant */
+            status: "history_unavailable";
+        };
+        /** @enum {string} */
+        IntentVerificationImpact: "becomes_stale" | "rerun_required";
+        IntentVerificationImpactSummary: {
+            impact: components["schemas"]["IntentVerificationImpact"];
+            receipt_id: string;
+        };
+        IntentVersionRef: {
+            intent_id: string;
+            /** Format: uint64 */
+            version: number;
+        };
         NoticeEvent: {
             message: string;
             /** @constant */
@@ -2873,6 +3183,7 @@ export interface components {
             conversation_recovery: boolean;
             durable_event_replay: boolean;
             durable_session_reopen: boolean;
+            intent_stack: boolean;
             live_events: boolean;
             provider_connections: boolean;
             provider_migration: boolean;
@@ -2892,7 +3203,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 11;
+            schema_version: 12;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;

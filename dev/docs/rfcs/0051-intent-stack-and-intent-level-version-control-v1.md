@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.6 complete，R51.7 next）
+状态：proposed / implementation active（R51.0-R51.6 complete，R51.7 in progress）
 
 创建日期：2026-07-22
 
@@ -868,6 +868,31 @@ bridge、responsive layout 与 mouse hit-area projection。本切片提供：
 detail、session switch、worker restart、read-only permission denial，以及 stale load/preview
 response。`sigil-tui` 全量测试、all-target check、Clippy 和 format gate 共同覆盖本切片；
 HTTP/Desktop/automation adapter 与 real cross-surface conformance 仍属于 R51.7。
+
+### 12.8 R51.7 implementation checkpoint（in progress，2026-07-27）
+
+R51.7 第一批已将 TUI、HTTP 与后续 Desktop/automation 所需的 application boundary 收敛为
+`ApplicationIntentStackCommandV1`。该 command 只有 inspect、exact preview 和
+digest-bound execute 三种动作；host confirmation source 不可序列化，permission policy、
+workspace trust、session path、patch/file content 与 approval authority 均不能由 client
+提交。
+
+当前 typed HTTP adapter 已提供：
+
+- `GET /sessions/{session_id}/intents`；
+- `POST /sessions/{session_id}/intents/drop-preview`；
+- idempotent `POST /sessions/{session_id}/intents/drop`。
+
+三个入口复用同一 runtime command/projection，并受 durable session scope、active-run
+mutation exclusion、workspace trust 与 exact command identity 约束。adapter error 使用稳定
+typed class 映射，不解析模型文本或错误字符串；同 command id 的完全相同重试返回 durable
+receipt replay，payload fingerprint 不同则 fail closed。HTTP server-info schema 已升级为
+V12，OpenAPI 与 Desktop 生成契约同步冻结 Intent Stack 的 bounded DTO，同时用负向断言排除
+absolute path、raw patch、file content、permission policy 与 approval authority。
+
+TUI worker 已改为调用同一 application command，不再私有重建 permission/authority 逻辑。
+本 checkpoint 尚未宣告 R51.7 完成；Desktop 操作面、CLI automation、canonical dogfood、
+real worker-loop E2E 与 §13 全门槛将在后续批次继续收口。
 
 依赖顺序：
 

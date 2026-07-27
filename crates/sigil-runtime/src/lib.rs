@@ -79,6 +79,7 @@ pub mod agent_supervisor;
 pub mod agent_tools;
 pub mod application_catalog;
 pub mod application_compaction;
+pub mod application_intent_stack;
 pub mod application_queue;
 pub mod application_recovery;
 pub mod application_run;
@@ -147,6 +148,12 @@ pub use application_catalog::{
     ApplicationClientAction, ApplicationCommandCatalogEntry, ApplicationCommandSpec,
     ApplicationExtensionCatalogView, ApplicationSkillBinding, ApplicationSkillCatalogEntry,
     application_extension_catalog_view,
+};
+pub use application_intent_stack::{
+    APPLICATION_INTENT_DROP_CONFIRMATION_TTL_MS, ApplicationIntentConfirmationSource,
+    ApplicationIntentStackCommandOutputV1, ApplicationIntentStackCommandV1,
+    ApplicationIntentStackError, ApplicationIntentStackErrorClass,
+    execute_application_intent_stack_command, execute_durable_application_intent_stack_command,
 };
 pub use context::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,

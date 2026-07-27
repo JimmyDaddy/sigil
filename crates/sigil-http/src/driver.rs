@@ -10,11 +10,13 @@ use crate::dto::{
     HttpConversationDisplayPage, HttpConversationForkReceipt, HttpConversationQueueCommandRequest,
     HttpConversationQueueGeneration, HttpConversationQueueView,
     HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
-    HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpPermissionMode, HttpReasoningEffort,
-    HttpRunContextView, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
-    HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTaskPauseRequest,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpIntentDropExecution,
+    HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackView, HttpPermissionMode,
+    HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
+    HttpSessionSnapshot, HttpSessionTranscriptPage, HttpTaskContinuationRequest,
+    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
+    HttpTaskIntegrationReviewView, HttpTaskPauseRequest, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -220,6 +222,32 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpRunDriverError::new(
             "verification projection is unavailable",
         ))
+    }
+
+    /// Projects the adapter-neutral durable Intent Stack for one bound session.
+    fn intent_stack_view(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpIntentStackView, HttpIntentStackDriverError> {
+        Err(HttpIntentStackDriverError::Unavailable)
+    }
+
+    /// Builds one fresh exact Intent Drop preview without mutation authority.
+    fn preview_intent_drop(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _intent_ref: &sigil_kernel::IntentVersionRef,
+    ) -> Result<HttpIntentDropPreview, HttpIntentStackDriverError> {
+        Err(HttpIntentStackDriverError::Unavailable)
+    }
+
+    /// Executes one digest-bound Drop request under host-owned permission and trust authority.
+    fn execute_intent_drop(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpIntentDropRequest,
+    ) -> Result<HttpIntentDropExecution, HttpIntentStackDriverError> {
+        Err(HttpIntentStackDriverError::Unavailable)
     }
 
     /// Projects one bounded chronological transcript page for a bound durable session.
@@ -457,6 +485,21 @@ pub trait HttpRunDriver: Send + Sync {
     fn wait_for_idle(&self, _timeout: Duration) -> Result<(), HttpRunDriverError> {
         Ok(())
     }
+}
+
+/// Bounded failure classes for the typed Intent Stack application adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum HttpIntentStackDriverError {
+    #[error("Intent Stack request is invalid")]
+    InvalidRequest,
+    #[error("Intent Stack request is stale")]
+    Stale,
+    #[error("Intent Stack operation requires permission")]
+    PermissionRequired,
+    #[error("Intent Stack operation conflicts with current durable state")]
+    Conflict,
+    #[error("Intent Stack is unavailable")]
+    Unavailable,
 }
 
 /// Bounded, path-free failure direction returned while reopening an existing durable session.
