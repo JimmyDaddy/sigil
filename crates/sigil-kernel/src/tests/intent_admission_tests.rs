@@ -7,7 +7,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::{
-    AgentRole, EventClass, IntentLayerManifestV1, IntentPlanProposalV1, IntentProposalUnitV1,
+    AgentRole, EventClass, IntentOperationPreviewV1, IntentPlanProposalV1, IntentProposalUnitV1,
     TaskId, TaskIsolationMode, TaskStepId, TaskStepMode, TaskStepSpec,
 };
 
@@ -397,7 +397,7 @@ fn old_session_projects_explicit_history_unavailable_state() -> Result<()> {
 }
 
 #[test]
-fn durable_intent_event_decoder_registers_r51_2_and_rejects_future_slice() -> Result<()> {
+fn durable_intent_event_decoder_registers_r51_3_and_rejects_future_slice() -> Result<()> {
     assert_eq!(
         DurableEventType::from_event_type("intent_stack_created"),
         Some(DurableEventType::IntentStackCreated)
@@ -424,8 +424,11 @@ fn durable_intent_event_decoder_registers_r51_2_and_rejects_future_slice() -> Re
     );
     assert_eq!(
         DurableEventType::from_event_type("intent_layer_manifest_recorded"),
-        None,
-        "R51.3 event types must remain unregistered"
+        Some(DurableEventType::IntentLayerManifestRecorded)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_artifact_bindings_recorded"),
+        Some(DurableEventType::IntentArtifactBindingsRecorded)
     );
 
     let root_plan: IntentPlanV1 = serde_json::from_str(include_str!(
@@ -452,17 +455,18 @@ fn durable_intent_event_decoder_registers_r51_2_and_rejects_future_slice() -> Re
     let digest_graph: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../dev/fixtures/intent-stack-v1/digest-graph.json"
     ))?;
-    let layer: IntentLayerManifestV1 =
-        serde_json::from_value(digest_graph["layer_manifest"].clone())?;
+    let operation_preview: IntentOperationPreviewV1 =
+        serde_json::from_value(digest_graph["operation_preview"].clone())?;
     let future = crate::StoredEvent::new(
         DurableEventType::IntentPlanRecorded,
         EventClass::Critical,
         "event-intent-future".to_owned(),
         "session-chat".to_owned(),
         1,
-        serde_json::to_value(IntentEventV1::LayerManifestRecorded {
+        serde_json::to_value(IntentEventV1::OperationRequested {
             schema_version: INTENT_CONTRACT_SCHEMA_VERSION,
-            manifest: layer,
+            preview: operation_preview,
+            safe_reason: "user requested exact drop".to_owned(),
         })?,
     )?;
     assert!(

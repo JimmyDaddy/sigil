@@ -707,6 +707,18 @@ fn contract_validation_rejects_ambiguous_plan_and_layer_shapes() -> Result<()> {
             .contains("different execution")
     );
 
+    let mut inconsistent_hunk: DigestGraph = serde_json::from_str(DIGEST_GRAPH)?;
+    inconsistent_hunk.artifact_manifest.artifacts[0].after_digest =
+        IntentContentDigest::new(format!("sha256:{}", "f".repeat(64)))?;
+    assert!(
+        inconsistent_hunk
+            .artifact_manifest
+            .validate_contract()
+            .expect_err("binding and hunk content digests must match")
+            .to_string()
+            .contains("content digests are inconsistent")
+    );
+
     let mut invalid_preview: DigestGraph = serde_json::from_str(DIGEST_GRAPH)?;
     invalid_preview.operation_preview.target_intents[0].version = 0;
     assert!(

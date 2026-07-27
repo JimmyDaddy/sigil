@@ -204,6 +204,8 @@ durable_event_types! {
     IntentPlanAccepted => ("intent_plan_accepted", RecoveryCritical, Critical, DirectJson, "intent_plan_accepted"),
     IntentExecutionBound => ("intent_execution_bound", RecoveryCritical, Critical, DirectJson, "intent_execution_bound"),
     IntentChangeSetBound => ("intent_change_set_bound", RecoveryCritical, Critical, DirectJson, "intent_change_set_bound"),
+    IntentArtifactBindingsRecorded => ("intent_artifact_bindings_recorded", RecoveryCritical, Critical, DirectJson, "intent_artifact_bindings_recorded"),
+    IntentLayerManifestRecorded => ("intent_layer_manifest_recorded", RecoveryCritical, Critical, DirectJson, "intent_layer_manifest_recorded"),
     IntentVerificationLinked => ("intent_verification_linked", RecoveryCritical, Critical, DirectJson, "intent_verification_linked"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -717,6 +719,8 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         | DurableEventType::IntentPlanAccepted
         | DurableEventType::IntentExecutionBound
         | DurableEventType::IntentChangeSetBound
+        | DurableEventType::IntentArtifactBindingsRecorded
+        | DurableEventType::IntentLayerManifestRecorded
         | DurableEventType::IntentVerificationLinked => {
             TypedDomainEvent::Intent(decode_intent_event(&event)?)
         }
@@ -898,6 +902,12 @@ fn decode_intent_event(event: &StoredEvent) -> Result<IntentEventV1> {
         IntentEventV1::PlanAccepted { .. } => DurableEventType::IntentPlanAccepted,
         IntentEventV1::ExecutionBound { .. } => DurableEventType::IntentExecutionBound,
         IntentEventV1::ChangeSetBound { .. } => DurableEventType::IntentChangeSetBound,
+        IntentEventV1::ArtifactBindingsRecorded { .. } => {
+            DurableEventType::IntentArtifactBindingsRecorded
+        }
+        IntentEventV1::LayerManifestRecorded { .. } => {
+            DurableEventType::IntentLayerManifestRecorded
+        }
         IntentEventV1::VerificationLinked { .. } => DurableEventType::IntentVerificationLinked,
         _ => bail!(
             "{} carries an Intent event reserved for a later RFC-0051 slice",

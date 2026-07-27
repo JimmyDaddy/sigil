@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.2 complete，R51.3 next）
+状态：proposed / implementation active（R51.0-R51.3 complete，R51.4 next）
 
 创建日期：2026-07-22
 
@@ -28,9 +28,9 @@ Intent Stack 把用户认可的变更意图提升为一等、可持久化、可�
 > 撤销一个需求，而不是回到一个时间点。
 
 本 RFC 冻结语义、所有权和安全边界，并已完成 R51.0 契约、R51.1
-admission/projection 与 R51.2 execution lineage 切片。后续切片仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil
-受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、
-未知副作用或依赖歧义必须 fail closed。
+admission/projection、R51.2 execution lineage 与 R51.3 canonical layer/artifact 切片。后续切片
+仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil 受控文件 mutation 产生的普通文件改动；任意
+人工 drift、同文件跨 intent、共享 hunk、未知副作用或依赖歧义必须 fail closed。
 
 ## 2. Problem statement
 
@@ -123,8 +123,9 @@ Intent operation 是针对一个或一组 intent 的高层动作：
 - 不把每个 agent step、tool call 或 validation command 都暴露为用户要管理的 stack item。
 - 不新增一组 command-only 的 `/intent-*` 主入口，也不要求用户维护复杂配置矩阵。
 - 不替代 Git；Intent Stack 是高于文件版本控制的产品语义层，最终仍可导出普通 diff/commit。
-- R51.0-R51.2 不实现 artifact materialization、写 operation、runtime command 或 UI；它们必须
-  等待对应后续切片。R51.2 的 `NeedsReview` 只表示 parent lineage 完整，不表示已有可执行 layer。
+- R51.0-R51.2 不实现 artifact materialization；R51.3 只建立 canonical layer、ownership 与
+  retention/inspect projection，不实现写 operation、runtime command 或 UI。R51.2 的
+  `NeedsReview` 只表示 parent lineage 完整，不表示已有可执行 layer。
 
 ## 6. Product contract
 
@@ -717,6 +718,42 @@ Task replan + WorkspaceApply、GitRef-only negative、Advisory/SystemVerified、
 receipt、event registration/wire mismatch 与 legacy history-unavailable。R51.2 仍不生成
 canonical patch artifact、ownership manifest 或任何可执行 Intent operation。
 
+### 12.4 R51.3 implementation checkpoint（2026-07-27）
+
+R51.3 已完成，落点为 `sigil-kernel::intent_layer`、RFC-0002 mutation artifact store/retention
+和 bounded public projection。本切片提供：
+
+- `intent_artifact_bindings_recorded`、`intent_layer_manifest_recorded` 两个
+  recovery-critical typed event 的正式注册与严格 wire/payload decoder；artifact manifest
+  必须紧邻 final layer manifest，崩溃只留下前缀时 projection fail closed，不能产生半个 layer；
+- 只从 accepted Task/Chat execution 的 exact successful terminal、applied ChangeSet、RFC-0002
+  prepare/commit、parent snapshot 与 workspace identity materialize layer。所有 evidence 必须在
+  layer 之前出现；之后补写终态或 mutation evidence 不能反向授权旧 layer；
+- forward/reverse patch 使用独立 content-addressed blob，event 只保存 id、digest 与 bounded
+  hunk metadata。patch 是带 expected-presence 和 exact content digest 前置条件的完整文件目标
+  bytes，不是 fuzzy/unified patch，也不调用模型重建冲突；
+- cycle-free 写入顺序固定为 layer core digest → file-hunk/artifact manifest → final layer
+  manifest。artifact manifest blob 必须与 event 的 canonical bytes 一致；缺失、损坏、显式删除
+  或过期只会把历史 layer 降级为永久 read-only；
+- 初始 layer 只接受普通 UTF-8 文件、exclusive/available ownership 与受控 create/update/delete。
+  protected/secret-like path、secret-like content、binary、rename、symlink/外部 parent、超限文件和
+  无法证明的 mutation 一律不生成执行 authority；
+- 同一 accepted plan 中两个 active intent 只要触及同一 normalized file，即使 byte range
+  不重叠也统一投影为 shared/read-only；后续 exact file mutation、formatter commit 或
+  unknown-dirty codegen 会投影为 drifted/read-only；
+- applied 且仍保持 exclusive/available 的 layer artifacts 自动加入 recommended retention
+  protected set；显式 cleanup 仍可删除，并通过 append-only lifecycle 在 restart 后稳定显示
+  unavailable，不会从 Git diff、模型或旧 preview 恢复 authority；
+- public Intent Stack inspect 现在显示真实 artifact path、ownership、availability 与计数；
+  R51.3 仍不暴露 drop action，`available_actions` 保持为空。
+
+完成证据覆盖 Chat materialization/idempotent replay、Task WorkspaceApply parent layer、
+exclusive/shared/unowned、
+formatter/codegen drift、secret 拒绝、artifact retention/显式删除/restart、orphan-manifest
+crash prefix、event registration/wire mismatch，以及 kernel 全量测试与 Clippy。R51.3 产物只是
+R51.4 exact drop 的可信输入；本切片本身没有执行文件回滚、operation recovery、verification
+invalidation、TUI 或 adapter command。
+
 依赖顺序：
 
 ```text
@@ -814,6 +851,7 @@ selective drop 闭环完成；它仍不等于通用语义 merge、外部副作�
 本 RFC 当前为 `proposed / implementation active`。R51.0 已冻结具体 Rust/DTO 命名、digest
 算法、错误 taxonomy 与 golden fixtures；R51.1 已接入 host-authorized append-only
 admission/projection 和 TaskPlan mixed writer batch；R51.2 已接入 Task/Chat exact execution、
-ChangeSet、parent mutation 与 criterion verification lineage。R51.3 起继续补 canonical layer
-materializer 与 artifact ownership；任何 TUI 或 destructive operation 仍必须等待其依赖切片和
-独立门禁完成。
+ChangeSet、parent mutation 与 criterion verification lineage；R51.3 已接入 canonical layer
+materializer、content-addressed patch/hunk artifact、保守 ownership、retention protection 与
+inspect projection。R51.4 起继续补 exact drop 与 operation recovery；任何 TUI 或 adapter
+operation 仍必须等待其依赖切片和独立门禁完成。

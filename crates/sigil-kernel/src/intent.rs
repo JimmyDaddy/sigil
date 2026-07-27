@@ -763,6 +763,8 @@ impl IntentArtifactBindingV1 {
                 normalized_relative_path,
                 old_range,
                 new_range,
+                old_content_digest,
+                new_content_digest,
                 ..
             } => {
                 if self.artifact_kind != IntentArtifactKind::FileHunk {
@@ -776,6 +778,11 @@ impl IntentArtifactBindingV1 {
                 validate_normalized_relative_path(normalized_relative_path)?;
                 if old_range.start > old_range.end || new_range.start > new_range.end {
                     bail!("intent byte range start must not exceed end");
+                }
+                if self.before_digest.as_ref() != Some(old_content_digest)
+                    || &self.after_digest != new_content_digest
+                {
+                    bail!("intent file hunk content digests are inconsistent");
                 }
             }
             BoundedIntentArtifactSubjectV1::Evidence { reference_id } => {

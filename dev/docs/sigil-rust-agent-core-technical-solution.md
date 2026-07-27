@@ -938,8 +938,8 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 
 当前实现选择如下：
 
-- RFC-0051 Intent Stack 的 R51.0-R51.2 已落地在 provider-neutral
-  `sigil-kernel::intent` / `intent_admission` / `intent_lineage`：model/provider proposal 使用无 runtime
+- RFC-0051 Intent Stack 的 R51.0-R51.3 已落地在 provider-neutral
+  `sigil-kernel::intent` / `intent_admission` / `intent_lineage` / `intent_layer`：model/provider proposal 使用无 runtime
   authority 的 alias schema，accepted plan、独立 acceptance event、Task/Chat provenance、
   artifact/layer/operation 与 bounded public DTO 使用严格 V1 schema；canonical JSON digest
   与 exact byte digest 分型，layer core -> artifact manifest -> final layer manifest 使用无循环
@@ -953,8 +953,12 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
   Task/Chat execution 绑定 exact attempt，Chat direct file mutation 可从 RFC-0002 evidence
   生成 bounded ChangeSet，Task 只接受 `WorkspaceApply` parent mutation lineage，GitRef-only
   与缺失/stale evidence 降级 read-only。`SystemVerified` 还必须匹配显式 criterion-scoped
-  CheckSpec、policy、receipt、ChangeSet 和当前 parent snapshot。materializer、operation apply
-  及 TUI/HTTP/Desktop 入口仍按 RFC-0051 R51.3-R51.7 逐片实施。
+  CheckSpec、policy、receipt、ChangeSet 和当前 parent snapshot。R51.3 只从 exact terminal、
+  applied ChangeSet 与 RFC-0002 prepare/commit materialize content-addressed forward/reverse
+  patch、file hunk 和 canonical manifest；同文件跨 active intent 一律 shared，后续 formatter、
+  codegen/unknown-dirty 或 artifact lifecycle 缺口降级 read-only，exclusive/available layer
+  artifacts 进入 retention protected set。exact drop/operation recovery 及 TUI/HTTP/Desktop
+  入口仍按 RFC-0051 R51.4-R51.7 逐片实施。
 - `sigil-kernel::TaskStateProjection` 从 append-only control log 重建 task run、plan、step、child session 和 route 摘要状态。
 - `sigil-runtime::ConversationCoordinator` 将 TUI direct/queued source turn 绑定到 typed run purpose；TUI 在 typed handoff 后于同一 cancellation/approval root 内继续 task。Application source 使用相同 conversation purpose、foreground Task executor、typed control 与 restart recovery contract。
 - Planner 通过 internal model-visible `task_plan_update` tool 写入 durable plan；该 tool 由 agent loop 拦截并写 `ToolExecution` audit，不作为普通 workspace tool 执行。

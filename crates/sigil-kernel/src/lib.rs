@@ -20,6 +20,7 @@ pub mod image_attachment;
 pub mod integration;
 pub mod intent;
 pub mod intent_admission;
+pub mod intent_layer;
 pub mod intent_lineage;
 pub mod memory;
 pub mod model_route;
@@ -303,6 +304,11 @@ pub use intent_admission::{
     TaskStepIntentAliasBindingV1, USER_DECLARED_ROOT_INTENT_ALIAS, UserDeclaredIntentV1,
     admit_suggested_decomposition, admit_user_declared_root, append_chat_root_intent_admission,
     append_task_intent_plan_admission, bind_task_plan_intents,
+};
+pub use intent_layer::{
+    EffectiveIntentArtifactV1, INTENT_LAYER_PROJECTION_SCHEMA_VERSION,
+    IntentLayerMaterializationOutcomeV1, IntentLayerProjectionV1, IntentLayerReadOnlyReasonV1,
+    IntentLayerStateV1, IntentLayerSummaryV1, materialize_intent_layer,
 };
 pub use intent_lineage::{
     INTENT_LINEAGE_PROJECTION_SCHEMA_VERSION, IntentExecutionLineageV1, IntentLineageProjectionV1,

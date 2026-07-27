@@ -7,8 +7,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ControlEntry, DurableEventType, JsonlSessionStore, SessionLogEntry, StoredEvent,
-    verification::WorkspaceId,
+    ControlEntry, DurableEventType, IntentArtifactAvailability, IntentArtifactOwnership,
+    IntentLayerProjectionV1, IntentLineageProjectionV1, IntentStackProjectionV1, JsonlSessionStore,
+    SessionLogEntry, StoredEvent, verification::WorkspaceId,
 };
 
 use super::{
@@ -416,7 +417,8 @@ fn select_artifacts_for_cleanup(
             .cmp(&right.created_at_ms)
             .then_with(|| left.artifact_id.cmp(&right.artifact_id))
     });
-    let pinned_artifacts = active_isolated_workspace_artifact_ids(session_log_path)?;
+    let mut pinned_artifacts = active_isolated_workspace_artifact_ids(session_log_path)?;
+    pinned_artifacts.extend(active_intent_layer_artifact_ids(session_log_path)?);
 
     match target {
         MutationArtifactCleanupTarget::Recommended => Ok(without_pinned_artifacts(
@@ -735,7 +737,74 @@ fn referenced_mutation_artifact_ids(
             }
         }
     }
+    artifact_ids.extend(all_intent_layer_artifact_ids(session_log_path)?);
     Ok(artifact_ids)
+}
+
+fn all_intent_layer_artifact_ids(session_log_path: &Path) -> Result<BTreeSet<MutationArtifactId>> {
+    let records = JsonlSessionStore::read_event_records(session_log_path)?;
+    let admission = IntentStackProjectionV1::from_records(&records)?;
+    if admission.latest_accepted_plan().is_none() {
+        return Ok(BTreeSet::new());
+    }
+    let lineage = IntentLineageProjectionV1::from_records(&records, &admission)?;
+    let layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
+    Ok(layers
+        .layers
+        .into_values()
+        .flat_map(|layer| {
+            let mut ids = vec![
+                layer.layer_manifest.core.forward_patch_artifact_id,
+                layer.layer_manifest.core.reverse_patch_artifact_id,
+                layer.layer_manifest.artifact_manifest_id,
+            ];
+            ids.extend(
+                layer
+                    .artifact_manifest
+                    .artifacts
+                    .into_iter()
+                    .map(|artifact| artifact.artifact_id.as_str().to_owned()),
+            );
+            ids
+        })
+        .collect())
+}
+
+fn active_intent_layer_artifact_ids(
+    session_log_path: &Path,
+) -> Result<BTreeSet<MutationArtifactId>> {
+    let records = JsonlSessionStore::read_event_records(session_log_path)?;
+    let admission = IntentStackProjectionV1::from_records(&records)?;
+    if admission.latest_accepted_plan().is_none() {
+        return Ok(BTreeSet::new());
+    }
+    let lineage = IntentLineageProjectionV1::from_records(&records, &admission)?;
+    let layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
+    Ok(layers
+        .layers
+        .into_values()
+        .filter(|layer| {
+            layer.artifacts.iter().all(|artifact| {
+                artifact.ownership == IntentArtifactOwnership::Exclusive
+                    && artifact.availability == IntentArtifactAvailability::Available
+            })
+        })
+        .flat_map(|layer| {
+            let mut ids = vec![
+                layer.layer_manifest.core.forward_patch_artifact_id,
+                layer.layer_manifest.core.reverse_patch_artifact_id,
+                layer.layer_manifest.artifact_manifest_id,
+            ];
+            ids.extend(
+                layer
+                    .artifact_manifest
+                    .artifacts
+                    .into_iter()
+                    .map(|artifact| artifact.artifact_id.as_str().to_owned()),
+            );
+            ids
+        })
+        .collect())
 }
 
 fn active_isolated_workspace_artifact_ids(
