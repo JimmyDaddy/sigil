@@ -420,17 +420,58 @@ fn append_task_promotion(
     let effect = match &target {
         IntegrationPromotionTarget::WorkspaceApply { .. } => {
             let recorder = MutationEventRecorder::new(store.clone());
-            recorder.append_committed(&MutationCommitted {
-                operation_id: "operation-task-promotion".to_owned(),
-                batch_id: Some("batch-task-promotion".to_owned()),
-                workspace_id: Some("workspace-demo".to_owned()),
-                observed_after_hash: None,
-                workspace_revision: 2,
-                workspace_snapshot_id: "snapshot-task-promoted".to_owned(),
-                committed_subject: MutationSubject::Workspace {
-                    scope_hash: "scope-task".to_owned(),
-                },
+            let file = &change_set.files[0];
+            let operation_id = "operation-task-promotion".to_owned();
+            let batch_id = "batch-task-promotion".to_owned();
+            let subject = MutationSubject::File {
+                path: file.path.clone().into(),
+                file_type: FileType::File,
+            };
+            recorder.append_batch_started(
+                &batch_id,
+                "operation-task-promotion-batch",
+                std::slice::from_ref(&subject),
+            )?;
+            recorder.append_prepared(&MutationPrepared {
+                operation_id: operation_id.clone(),
+                batch_id: Some(batch_id.clone()),
+                tool_call_id: Some("tool-task-promotion".to_owned()),
+                causation_event_id: "event-task-promotion".to_owned(),
+                subject: subject.clone(),
+                before_hash: file.before_hash.clone(),
+                intended_after_hash: file.after_hash.clone(),
+                snapshot_coverage: SnapshotCoverage::Unsupported,
+                workspace_id: "workspace-demo".to_owned(),
+                base_workspace_revision: 1,
+                sync_class: MutationSyncClass::RecoveryCritical,
             })?;
+            recorder.append_committed(&MutationCommitted {
+                operation_id: operation_id.clone(),
+                batch_id: Some(batch_id.clone()),
+                workspace_id: Some("workspace-demo".to_owned()),
+                observed_after_hash: file.after_hash.clone(),
+                workspace_revision: 2,
+                workspace_snapshot_id: "snapshot-single-file".to_owned(),
+                committed_subject: subject,
+            })?;
+            recorder.append_batch_finished(
+                &batch_id,
+                MutationBatchStatus::Applied,
+                std::slice::from_ref(&operation_id),
+                &[],
+            )?;
+            session.append_control(ControlEntry::ChangeSetApplied(ChangeSetResult {
+                id: change_set.id.clone(),
+                status: ChangeSetResultStatus::Applied,
+                file_results: vec![ChangeSetFileResult {
+                    path: file.path.clone(),
+                    action: file.action,
+                    status: ChangeSetFileResultStatus::Applied,
+                    message: None,
+                    validations: Vec::new(),
+                }],
+                message: None,
+            }))?;
             IntegrationPromotionEffect::WorkspaceApplied {
                 promoted_snapshot_id: "snapshot-task-promoted".to_owned(),
                 promoted_revision: 2,

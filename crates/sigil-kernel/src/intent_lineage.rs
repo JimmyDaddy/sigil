@@ -13,7 +13,8 @@ use crate::{
     IntentApplicationState, IntentCriterionEvidenceLevel, IntentCriterionEvidenceV1, IntentEventV1,
     IntentExecutionBindingKind, IntentExecutionBindingV1, IntentExecutionId,
     IntentExecutionOriginV1, IntentStackProjectionV1, IntentVersionRef, JsonlSessionStore,
-    MutationCommitted, MutationPrepared, MutationSubject, ReceiptStatus, Session, SessionLogEntry,
+    MutationBatchFinished, MutationBatchStarted, MutationBatchStatus, MutationCommitted,
+    MutationPrepared, MutationSubject, ReceiptStatus, Session, SessionLogEntry,
     SessionStreamRecord, TaskParentVerificationRecorded, TaskParticipantAttemptEntry,
     TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry,
     TaskPlanStatus, TaskStepId, TaskStepMode, TypedDomainEvent, TypedStoredEventDecode,
@@ -366,6 +367,8 @@ struct DurableLineageFacts {
     changeset_results: BTreeMap<ChangeSetId, EventFact<ChangeSetResult>>,
     mutation_prepared: Vec<EventFact<MutationPrepared>>,
     mutation_committed: Vec<EventFact<MutationCommitted>>,
+    mutation_batches_started: Vec<EventFact<MutationBatchStarted>>,
+    mutation_batches_finished: Vec<EventFact<MutationBatchFinished>>,
     workspace_mutations: Vec<EventFact<WorkspaceMutationDetected>>,
     integration_plans: Vec<EventFact<IntegrationPlanRecorded>>,
     promotions: Vec<EventFact<IntegrationPromotionRecorded>>,
@@ -407,6 +410,24 @@ impl DurableLineageFacts {
                         stream_sequence,
                         value: serde_json::from_value(event.payload.clone())
                             .context("failed to decode workspace mutation lineage")?,
+                    });
+                    continue;
+                }
+                Some(DurableEventType::MutationBatchStarted) => {
+                    facts.mutation_batches_started.push(EventFact {
+                        event_id,
+                        stream_sequence,
+                        value: serde_json::from_value(event.payload.clone())
+                            .context("failed to decode mutation batch start lineage")?,
+                    });
+                    continue;
+                }
+                Some(DurableEventType::MutationBatchFinished) => {
+                    facts.mutation_batches_finished.push(EventFact {
+                        event_id,
+                        stream_sequence,
+                        value: serde_json::from_value(event.payload.clone())
+                            .context("failed to decode mutation batch terminal lineage")?,
                     });
                     continue;
                 }
@@ -764,20 +785,82 @@ impl DurableLineageFacts {
                 );
             }
         };
-        self.mutation_committed
+        let Some(batch) = self.mutation_batches_finished.iter().rev().find(|fact| {
+            fact.stream_sequence < promotion.stream_sequence
+                && fact.value.status == MutationBatchStatus::Applied
+                && fact.value.failed_operations.is_empty()
+                && self.batch_applies_changesets(fact, changeset_ids, workspace_id)
+        }) else {
+            return ParentLineage::ReadOnly(IntentLineageReadOnlyReasonV1::MissingParentMutation);
+        };
+        ParentLineage::Applied {
+            mutation_event_id: batch.event_id.clone(),
+            snapshot_id: snapshot_id.clone(),
+        }
+    }
+
+    fn batch_applies_changesets(
+        &self,
+        terminal: &EventFact<MutationBatchFinished>,
+        changeset_ids: &[ChangeSetId],
+        workspace_id: &str,
+    ) -> bool {
+        let Some(started) = self
+            .mutation_batches_started
             .iter()
             .rev()
-            .find(|fact| {
-                fact.value.workspace_snapshot_id == *snapshot_id
-                    && fact.value.workspace_id.as_deref() == Some(workspace_id)
-            })
-            .map_or_else(
-                || ParentLineage::ReadOnly(IntentLineageReadOnlyReasonV1::MissingParentMutation),
-                |mutation| ParentLineage::Applied {
-                    mutation_event_id: mutation.event_id.clone(),
-                    snapshot_id: snapshot_id.clone(),
-                },
-            )
+            .find(|fact| fact.value.batch_id == terminal.value.batch_id)
+        else {
+            return false;
+        };
+        if started.stream_sequence >= terminal.stream_sequence {
+            return false;
+        }
+        let committed_operations = terminal
+            .value
+            .committed_operations
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        changeset_ids.iter().all(|id| {
+            let Some(change_set) = self.changesets.get(id) else {
+                return false;
+            };
+            self.changeset_results
+                .get(id)
+                .is_some_and(|result| result.value.status == ChangeSetResultStatus::Applied)
+                && change_set.value.files.iter().all(|file| {
+                    if file.action == ChangeSetFileAction::Rename {
+                        return false;
+                    }
+                    self.mutation_prepared.iter().any(|prepared| {
+                        prepared.value.batch_id.as_deref() == Some(terminal.value.batch_id.as_str())
+                            && prepared.stream_sequence > started.stream_sequence
+                            && prepared.stream_sequence < terminal.stream_sequence
+                            && prepared.value.workspace_id == workspace_id
+                            && prepared.value.before_hash == file.before_hash
+                            && prepared.value.intended_after_hash == file.after_hash
+                            && mutation_subject_matches_path(&prepared.value.subject, &file.path)
+                            && started
+                                .value
+                                .expected_subjects
+                                .contains(&prepared.value.subject)
+                            && committed_operations.contains(prepared.value.operation_id.as_str())
+                            && self.mutation_committed.iter().any(|committed| {
+                                committed.value.operation_id == prepared.value.operation_id
+                                    && committed.value.batch_id == prepared.value.batch_id
+                                    && committed.stream_sequence > prepared.stream_sequence
+                                    && committed.stream_sequence < terminal.stream_sequence
+                                    && committed.value.workspace_id.as_deref() == Some(workspace_id)
+                                    && committed.value.observed_after_hash == file.after_hash
+                                    && mutation_subject_matches_path(
+                                        &committed.value.committed_subject,
+                                        &file.path,
+                                    )
+                            })
+                    })
+                })
+        })
     }
 
     fn chat_parent_lineage(
