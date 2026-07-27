@@ -929,7 +929,6 @@
       "file": "mcp.md",
       "role": "mcp-setup-and-use-authority",
       "heading_keys": [
-        "cli-setup",
         "minimal-config",
         "streamable-http",
         "process-environment-and-credentials",
@@ -942,7 +941,6 @@
       "cta_key": "open-troubleshooting",
       "heading_labels": {
         "en": [
-          "CLI Setup",
           "Minimal Config",
           "Streamable HTTP",
           "Process Environment And Credentials",
@@ -953,7 +951,6 @@
           "Troubleshooting"
         ],
         "zh-CN": [
-          "CLI 配置",
           "最小配置",
           "Streamable HTTP",
           "进程环境与凭据",
