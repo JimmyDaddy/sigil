@@ -15,15 +15,16 @@ use sigil_kernel::{
     ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, ExecutionCleanupStatus,
     JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
     MutationEventRecorder, PlanApprovalPermission, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanSourceRef, PlanTaskStartMode, Provider, ReasoningEffort,
-    RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
-    ToolResultMeta, UserUrlCapabilityRegistrar, VerificationScope, WorkspaceMutationDetected,
-    WorkspaceRootSnapshot, plan_draft_created_entry, plan_task_input_from_draft,
-    project_user_message_for_persistence, task_id_from_plan_draft, task_plan_from_plan_draft,
+    PlanDecisionRecordedEntry, PlanSourceRef, PlanTaskStartMode, Provider,
+    PublicIntentStackStateV1, ReasoningEffort, RootConfig, Session, SessionLogEntry, SessionRef,
+    SessionStreamRecord, TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry,
+    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolEffect, ToolExecutionEntry,
+    ToolExecutionStatus, ToolRegistry, ToolResultMeta, UserUrlCapabilityRegistrar,
+    VerificationScope, WorkspaceMutationDetected, WorkspaceRootSnapshot, plan_draft_created_entry,
+    plan_task_input_from_draft, project_user_message_for_persistence, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -160,6 +161,129 @@ fn task_from_plan_reconciles_decision_only_crash_prefix_with_the_same_task_id() 
     );
     assert_eq!(created.entry.task_plan_version, 1);
     assert_eq!(created.entry.task_id, stable_task_id);
+    Ok(())
+}
+
+#[test]
+fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/plan-intents.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+        .map_err(anyhow::Error::msg)?;
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v2
+{
+  "summary": "Implement retry and telemetry",
+  "intents": [
+    {
+      "intent_alias": "retry",
+      "title": "Retry behavior",
+      "statement": "Retry failed operations safely.",
+      "acceptance_criteria": [{
+        "criterion_alias": "retry-test",
+        "statement": "Retry behavior is covered by a passing regression test.",
+        "required": true
+      }],
+      "depends_on_aliases": []
+    },
+    {
+      "intent_alias": "telemetry",
+      "title": "Retry telemetry",
+      "statement": "Expose retry outcomes to operators.",
+      "acceptance_criteria": [{
+        "criterion_alias": "telemetry-test",
+        "statement": "Telemetry output is covered by a passing regression test.",
+        "required": true
+      }],
+      "depends_on_aliases": ["retry"]
+    }
+  ],
+  "steps": [
+    {
+      "id": "implement-retry",
+      "title": "Implement retry behavior",
+      "role": "executor",
+      "depends_on": [],
+      "intent_aliases": ["retry"],
+      "mode": "write",
+      "isolation": "sequential_workspace_write",
+      "target_paths": ["src/retry.rs"]
+    },
+    {
+      "id": "add-telemetry",
+      "title": "Add retry telemetry",
+      "role": "executor",
+      "depends_on": ["implement-retry"],
+      "intent_aliases": ["telemetry"],
+      "mode": "write",
+      "isolation": "sequential_workspace_write",
+      "target_paths": ["src/telemetry.rs"]
+    }
+  ],
+  "target_paths": ["src/retry.rs", "src/telemetry.rs"]
+}
+```"#,
+        PlanSourceRef::default(),
+        1,
+        base_snapshot,
+    )?
+    .expect("structured intent plan draft");
+    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let mut current_session = Some(session);
+
+    let created = create_task_from_plan(
+        &root_config,
+        &workspace_root,
+        &session_log_path,
+        &mut current_session,
+        CreateTaskFromPlanRequest {
+            plan_id: draft.plan_id.as_str().to_owned(),
+            expected_plan_hash: draft.plan_hash,
+            start_mode: PlanTaskStartMode::CreatePaused,
+            permission_grant: None,
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let session = current_session.expect("task creation should retain the durable session");
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&created.task_id)
+        .cloned()
+        .expect("accepted task should exist");
+    let accepted_plan = task
+        .plans
+        .get(&1)
+        .expect("directly promoted task plan should exist");
+    assert_eq!(accepted_plan.steps[0].intent_refs.len(), 1);
+    assert_eq!(accepted_plan.steps[1].intent_refs.len(), 1);
+    assert_ne!(
+        accepted_plan.steps[0].intent_refs,
+        accepted_plan.steps[1].intent_refs
+    );
+    let PublicIntentStackStateV1::Available { stack, .. } =
+        session.public_intent_stack_state_for_workspace(&workspace_root)?
+    else {
+        panic!("accepted model proposal should create an available Intent Stack");
+    };
+    assert_eq!(stack.intents.len(), 2);
+    assert!(
+        stack
+            .intents
+            .iter()
+            .any(|intent| intent.title == "Retry behavior")
+    );
+    assert!(
+        stack
+            .intents
+            .iter()
+            .any(|intent| intent.title == "Retry telemetry")
+    );
     Ok(())
 }
 

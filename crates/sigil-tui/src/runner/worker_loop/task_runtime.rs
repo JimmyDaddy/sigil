@@ -1251,17 +1251,66 @@ pub(in crate::runner) fn create_task_from_plan(
     } else {
         None
     };
-    let (task_plan, step_mapping) = match promoted {
-        Some(promotion) if promotion.intent_alias_bindings.is_empty() => {
-            (Some(promotion.task_plan), promotion.step_mapping)
+    let (task_plan, step_mapping, intent_admission) = match promoted {
+        Some(promotion) => {
+            let mut task_plan = promotion.task_plan;
+            let intent_admission = match draft.intent_proposal.as_ref() {
+                Some(proposal) => {
+                    let workspace_id = stable_workspace_id(workspace_root)
+                        .map_err(|error| format!("failed to scope IntentPlan: {error:#}"))?;
+                    let stack_id = IntentStackId::new(stable_event_uuid(
+                        "sigil-plan-intent-stack-v1",
+                        &format!("{}:{}", draft.plan_id.as_str(), draft.plan_hash),
+                    ))
+                    .map_err(|error| format!("failed to derive Intent Stack id: {error:#}"))?;
+                    let context = IntentAdmissionContextV1::initial(
+                        stack_id,
+                        workspace_id,
+                        session.session_scope_id().to_owned(),
+                    )
+                    .map_err(|error| format!("failed to scope IntentPlan admission: {error:#}"))?;
+                    let authority_event_id = stable_event_uuid(
+                        "sigil-plan-intent-acceptance-v1",
+                        &format!(
+                            "{}:{}:{}",
+                            draft.plan_id.as_str(),
+                            draft.plan_hash,
+                            task_id.as_str()
+                        ),
+                    );
+                    let authority = IntentAcceptanceAuthorityV1::explicit_user_confirmation(
+                        proposal.source_turn_id.clone(),
+                        authority_event_id,
+                        proposal.proposal_digest.clone(),
+                    )
+                    .map_err(|error| format!("failed to bind plan acceptance: {error:#}"))?;
+                    let admission = admit_suggested_decomposition(&context, proposal, &authority)
+                        .map_err(|error| {
+                        format!("failed to admit accepted Intent proposal: {error:#}")
+                    })?;
+                    task_plan = bind_task_plan_intents(
+                        &admission,
+                        task_plan,
+                        &promotion.intent_alias_bindings,
+                    )
+                    .map_err(|error| {
+                        format!("failed to bind task steps to accepted intents: {error:#}")
+                    })?;
+                    Some(admission)
+                }
+                None => {
+                    if !promotion.intent_alias_bindings.is_empty() {
+                        return Err(format!(
+                            "plan {} carries intent aliases without a digest-bound proposal",
+                            plan_id.as_str()
+                        ));
+                    }
+                    None
+                }
+            };
+            (Some(task_plan), promotion.step_mapping, intent_admission)
         }
-        Some(_) => {
-            return Err(format!(
-                "plan {} carries an Intent proposal that requires explicit Intent admission",
-                plan_id.as_str()
-            ));
-        }
-        None => (None, Vec::new()),
+        None => (None, Vec::new(), None),
     };
     let existing_accepted_plan = session
         .task_state_projection()
@@ -1414,9 +1463,15 @@ pub(in crate::runner) fn create_task_from_plan(
                     plan_id.as_str()
                 ));
             }
-            None => session
-                .append_control(ControlEntry::TaskPlan(task_plan))
+            None if intent_admission.is_none() => session
+                .append_control(ControlEntry::TaskPlan(task_plan.clone()))
                 .map_err(|error| format!("failed to append promoted task plan: {error:#}"))?,
+            None => {}
+        }
+        if let Some(admission) = intent_admission.as_ref() {
+            append_task_intent_plan_admission(&mut session, admission, task_plan).map_err(
+                |error| format!("failed to atomically append IntentPlan and TaskPlan: {error:#}"),
+            )?;
         }
     }
 
@@ -1622,7 +1677,7 @@ pub(in crate::runner) fn session_ref_for_log_path(
 pub(in crate::runner) fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
     vec![
         ModelMessage::system(
-            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v2 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. Each step must include id, title, role, depends_on, mode, isolation, target_paths, suggested_checks, notes, and acceptance; detail, display_name, and risk are optional. Use the same role/mode/isolation values as task_plan_update. Use [] for empty arrays. Dependencies must reference step ids in the same block. If you are only summarizing, reviewing, or cannot produce executable steps, do not include a structured block.",
+            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v2 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. Each step must include id, title, role, depends_on, mode, isolation, target_paths, suggested_checks, notes, and acceptance; detail, display_name, risk, and intent_aliases are optional. Use the same role/mode/isolation values as task_plan_update. Use [] for empty arrays. Dependencies must reference step ids in the same block. When the requested outcome contains multiple independently meaningful product or user outcomes that should remain separately reviewable or removable, use your semantic judgment to add a top-level intents array. Each intent must contain intent_alias, title, statement, acceptance_criteria, and depends_on_aliases; each criterion must contain criterion_alias, statement, and required. Bind affected steps with intent_aliases. Every write step in an intent-enabled plan must bind exactly one alias; read and review steps may bind zero or more. Do not create intents by mechanically copying every implementation step. Omit intents and intent_aliases when semantic decomposition would not help. Provider aliases are descriptive only: never emit runtime intent ids, stack versions, acceptance authority, or permission claims. If you are only summarizing, reviewing, or cannot produce executable steps, do not include a structured block.",
         ),
         ModelMessage::user(prompt),
     ]

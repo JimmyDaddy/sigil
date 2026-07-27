@@ -181,7 +181,7 @@ Implementation may keep these as `ControlEntry` variants first, while RFC-0001 d
 
 ## 7. Plan Draft Text and Metadata
 
-Plan output is user-readable text plus an explicit fenced `sigil-plan-v2` structured draft when, and only when, the planner has at least one executable step. V2 steps include `id`, `title`, `role`, `depends_on`, `mode` and `isolation`; optional display/detail/path/check fields remain metadata. The parser still accepts `sigil-plan-v1` for compatibility, but it is not directly executable. Plain review or summary text must not create a task handoff.
+Plan output is user-readable text plus an explicit fenced `sigil-plan-v2` structured draft when, and only when, the planner has at least one executable step. V2 steps include `id`, `title`, `role`, `depends_on`, `mode` and `isolation`; optional display/detail/path/check fields remain metadata. A V2 plan may also carry model-proposed `intents` and per-step `intent_aliases`. The model decides whether semantic decomposition is useful, but its aliases and descriptions grant no authority. Accepting the Plan card binds the exact proposal digest; the host resolves runtime Intent identities and atomically appends the accepted IntentPlan with the bound TaskPlan. The parser still accepts `sigil-plan-v1` for compatibility, but it is not directly executable. Plain review or summary text must not create a task handoff.
 
 The durable plan record should preserve:
 
