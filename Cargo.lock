@@ -4852,6 +4852,7 @@ dependencies = [
  "futures",
  "libc",
  "portable-pty",
+ "serde",
  "serde_json",
  "sigil-desktop",
  "sigil-http",

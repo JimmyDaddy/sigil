@@ -1,15 +1,19 @@
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use anyhow::Result;
 use sigil_kernel::{
-    IntentDigest, IntentDropRequestV1, IntentOperationId, IntentStackVersion, PermissionMode,
-    RootConfig, Session,
+    ConversationRunStartedEntryV1, IntentDigest, IntentDropRequestV1, IntentId, IntentOperationId,
+    IntentStackVersion, IntentVersionRef, JsonlSessionStore, PermissionMode, RootConfig, Session,
 };
 
+use super::ensure_durable_intent_stack_session_idle;
 use crate::{
     ApplicationIntentConfirmationSource, ApplicationIntentStackCommandOutputV1,
     ApplicationIntentStackCommandV1, ApplicationIntentStackErrorClass,
-    execute_application_intent_stack_command,
+    execute_application_intent_stack_command, execute_durable_application_intent_stack_command,
 };
 
 fn drop_request() -> Result<IntentDropRequestV1> {
@@ -104,5 +108,91 @@ fn canonical_command_wire_contains_no_host_authority_or_file_payload() -> Result
     ] {
         assert!(!encoded.contains(forbidden), "{forbidden}");
     }
+    Ok(())
+}
+
+#[test]
+fn durable_mutation_gate_rejects_an_active_run_and_reopens_after_terminal_recovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let session = Session::new("provider", "model").with_store(store);
+    let recorder = session.conversation_run_lifecycle_recorder()?;
+
+    ensure_durable_intent_stack_session_idle(&session_path)?;
+    recorder.append_started(&ConversationRunStartedEntryV1::new("run-active", 1)?)?;
+    assert!(
+        ensure_durable_intent_stack_session_idle(&session_path)
+            .expect_err("active run must exclude an out-of-process mutation")
+            .to_string()
+            .contains("foreground run is active")
+    );
+    recorder.reconcile_unfinished(2)?;
+    ensure_durable_intent_stack_session_idle(&session_path)?;
+    Ok(())
+}
+
+#[test]
+fn durable_inspect_remains_available_to_recovery_ui_while_mutation_fails_closed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let session = Session::new("provider", "model").with_store(store);
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&ConversationRunStartedEntryV1::new("run-active", 1)?)?;
+    let missing_config = temp.path().join("missing.toml");
+
+    let inspect_error = execute_durable_application_intent_stack_command(
+        &missing_config,
+        temp.path(),
+        &session_path,
+        session.session_scope_id(),
+        &ApplicationIntentStackCommandV1::Inspect,
+        ApplicationIntentConfirmationSource::Automation,
+    )
+    .expect_err("missing config should be reached after inspect bypasses the mutation gate");
+    assert_eq!(
+        inspect_error.class(),
+        ApplicationIntentStackErrorClass::Unavailable
+    );
+
+    let mutation_error = execute_durable_application_intent_stack_command(
+        &missing_config,
+        temp.path(),
+        &session_path,
+        session.session_scope_id(),
+        &ApplicationIntentStackCommandV1::PreviewDrop {
+            intent_ref: IntentVersionRef::new(IntentId::new("intent-active")?, 1)?,
+        },
+        ApplicationIntentConfirmationSource::Automation,
+    )
+    .expect_err("active run must fail before loading adapter configuration");
+    assert_eq!(
+        mutation_error.class(),
+        ApplicationIntentStackErrorClass::Conflict
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_command_rejects_a_symlink_before_lifecycle_or_session_loading() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let target = temp.path().join("target.jsonl");
+    let _store = JsonlSessionStore::new(&target)?;
+    let link = temp.path().join("session.jsonl");
+    symlink(&target, &link)?;
+
+    let error = execute_durable_application_intent_stack_command(
+        &temp.path().join("missing.toml"),
+        temp.path(),
+        &link,
+        "session-scope",
+        &ApplicationIntentStackCommandV1::Inspect,
+        ApplicationIntentConfirmationSource::Automation,
+    )
+    .expect_err("symlink session sources must fail closed");
+    assert_eq!(error.class(), ApplicationIntentStackErrorClass::Unavailable);
     Ok(())
 }

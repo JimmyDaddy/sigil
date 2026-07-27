@@ -8,6 +8,8 @@ use std::{
 };
 
 pub mod egress_disclosure;
+#[cfg_attr(test, allow(dead_code))]
+mod intent_cli;
 mod mcp_cli;
 
 #[cfg(not(test))]
@@ -110,6 +112,13 @@ enum Commands {
     Doctor {
         #[arg(long, value_enum, default_value = "text")]
         output: DoctorOutput,
+    },
+    /// Emit typed JSON Intent Stack automation records for one exact durable session.
+    Intent {
+        #[arg(long, help = "Exact durable session ID in the current workspace")]
+        session: String,
+        #[command(subcommand)]
+        command: intent_cli::IntentCommand,
     },
     /// Manage MCP servers in the selected Sigil user configuration.
     Mcp {
@@ -259,35 +268,65 @@ async fn run_main() -> Result<u8> {
         Commands::Run { output, .. } if *output != RunOutput::Text => Some(*output),
         _ => None,
     };
+    let intent_session_id = match &command {
+        Commands::Intent { session, .. } => Some(session.as_str()),
+        _ => None,
+    };
     let cwd = match env::current_dir() {
         Ok(cwd) => cwd,
-        Err(_error) if machine_output.is_some() => {
-            eprintln!("sigil run: process working directory is unavailable");
-            return Ok(write_bootstrap_machine_error(
-                MachineError::new(
-                    MachineErrorCode::Internal,
-                    "process working directory is unavailable",
-                    false,
-                ),
-                MachineExitCode::ExecutionFailed,
-            ));
+        Err(error) => {
+            if let Some(session_id) = intent_session_id {
+                return Ok(u8::try_from(
+                    intent_cli::IntentCommandExecution::bootstrap_error(
+                        session_id,
+                        intent_cli::IntentAutomationErrorCode::ConfigurationInvalid,
+                    )
+                    .write_json()
+                    .as_i32(),
+                )
+                .expect("machine exit codes must fit in u8"));
+            }
+            if machine_output.is_some() {
+                eprintln!("sigil run: process working directory is unavailable");
+                return Ok(write_bootstrap_machine_error(
+                    MachineError::new(
+                        MachineErrorCode::Internal,
+                        "process working directory is unavailable",
+                        false,
+                    ),
+                    MachineExitCode::ExecutionFailed,
+                ));
+            }
+            return Err(error.into());
         }
-        Err(error) => return Err(error.into()),
     };
     let config_path = match preferred_config_path(cli.config.as_deref(), &cwd) {
         Ok(path) => path,
-        Err(_error) if machine_output.is_some() => {
-            eprintln!("sigil run: application configuration path is unavailable");
-            return Ok(write_bootstrap_machine_error(
-                MachineError::new(
-                    MachineErrorCode::ConfigurationInvalid,
-                    "application configuration path is unavailable",
-                    false,
-                ),
-                MachineExitCode::InvalidInput,
-            ));
+        Err(error) => {
+            if let Some(session_id) = intent_session_id {
+                return Ok(u8::try_from(
+                    intent_cli::IntentCommandExecution::bootstrap_error(
+                        session_id,
+                        intent_cli::IntentAutomationErrorCode::ConfigurationInvalid,
+                    )
+                    .write_json()
+                    .as_i32(),
+                )
+                .expect("machine exit codes must fit in u8"));
+            }
+            if machine_output.is_some() {
+                eprintln!("sigil run: application configuration path is unavailable");
+                return Ok(write_bootstrap_machine_error(
+                    MachineError::new(
+                        MachineErrorCode::ConfigurationInvalid,
+                        "application configuration path is unavailable",
+                        false,
+                    ),
+                    MachineExitCode::InvalidInput,
+                ));
+            }
+            return Err(error);
         }
-        Err(error) => return Err(error),
     };
     match command {
         Commands::Run {
@@ -331,6 +370,11 @@ async fn run_main() -> Result<u8> {
             )?;
         }
         Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
+        Commands::Intent { session, command } => {
+            let exit = intent_cli::execute_intent_command(&config_path, &cwd, &session, command)
+                .write_json();
+            return Ok(u8::try_from(exit.as_i32()).expect("machine exit codes must fit in u8"));
+        }
         Commands::Mcp { command } => {
             print!("{}", mcp_cli::execute_mcp_command(&config_path, command)?);
         }

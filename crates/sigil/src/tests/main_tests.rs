@@ -25,6 +25,7 @@ use tokio::{
     net::TcpListener,
 };
 
+use super::intent_cli::IntentCommand;
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
     RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
@@ -153,6 +154,68 @@ fn cli_parses_hidden_model_eval_command_options() -> Result<()> {
             && output_dir == Path::new("/tmp/model-eval")
             && orchestration_route_contract
                 == Some(PathBuf::from("/tmp/orchestration-route.toml"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_exact_intent_stack_automation_commands() -> Result<()> {
+    let inspect = Cli::try_parse_from(["sigil", "intent", "--session", "session-1", "inspect"])?;
+    assert!(matches!(
+        inspect.command,
+        Some(Commands::Intent {
+            session,
+            command: IntentCommand::Inspect,
+        }) if session == "session-1"
+    ));
+
+    let preview = Cli::try_parse_from([
+        "sigil",
+        "intent",
+        "--session",
+        "session-1",
+        "drop-preview",
+        "--intent-id",
+        "intent-core",
+        "--intent-version",
+        "2",
+    ])?;
+    assert!(matches!(
+        preview.command,
+        Some(Commands::Intent {
+            session,
+            command: IntentCommand::DropPreview {
+                intent_id,
+                intent_version: 2,
+            },
+        }) if session == "session-1" && intent_id == "intent-core"
+    ));
+
+    let drop = Cli::try_parse_from([
+        "sigil",
+        "intent",
+        "--session",
+        "session-1",
+        "drop",
+        "--operation-id",
+        "operation-drop-core",
+        "--stack-version",
+        "4",
+        "--preview-digest",
+        "sha256:jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ])?;
+    assert!(matches!(
+        drop.command,
+        Some(Commands::Intent {
+            session,
+            command: IntentCommand::Drop {
+                operation_id,
+                stack_version: 4,
+                preview_digest,
+            },
+        }) if session == "session-1"
+            && operation_id == "operation-drop-core"
+            && preview_digest.starts_with("sha256:jcs-v1:")
     ));
     Ok(())
 }
@@ -748,6 +811,7 @@ fn cli_help_hides_provider_debug_commands() {
     assert!(help.contains("run"));
     assert!(help.contains("resume"));
     assert!(help.contains("doctor"));
+    assert!(help.contains("intent"));
     assert!(help.contains("mcp"));
     assert!(help.contains("serve"));
     assert!(!help.contains("prefix"));

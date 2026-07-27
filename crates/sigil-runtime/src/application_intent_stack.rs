@@ -7,10 +7,12 @@ use anyhow::{Context, Result as AnyhowResult, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
+    CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION, ConversationRunLifecycleRecordV1,
     INTENT_CANONICAL_DIGEST_PREFIX, IntentDigest, IntentDropRequestV1, IntentOperationAuthorityV1,
     IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef, JsonlSessionStore,
     PermissionMode, PublicIntentStackStateV1, RootConfig, Session, WorkspaceTrust,
-    execute_intent_drop, preview_intent_drop, resolve_workspace_root, workspace_trust_from_entries,
+    conversation_run_lifecycle_record_from_stream, execute_intent_drop, preview_intent_drop,
+    resolve_workspace_root, workspace_trust_from_entries,
 };
 use thiserror::Error;
 
@@ -167,8 +169,9 @@ impl ApplicationIntentStackError {
 
 /// Executes the canonical Intent Stack command against an already loaded durable session.
 ///
-/// Callers remain responsible for excluding an active foreground run. Write authority is always
-/// reconstructed here from current host configuration and durable workspace trust.
+/// Callers that own a live in-memory session remain responsible for excluding an active
+/// foreground run. Write authority is always reconstructed here from current host configuration
+/// and durable workspace trust.
 pub fn execute_application_intent_stack_command(
     session: &Session,
     root_config: &RootConfig,
@@ -247,7 +250,9 @@ pub fn execute_application_intent_stack_command(
 ///
 /// This is the shared entry point for process adapters that do not own a live in-memory session.
 /// It rejects symlink/non-file session paths and validates the expected durable scope before any
-/// projection or mutation.
+/// projection or mutation. State-sensitive preview/execute commands also fail closed when the
+/// durable lifecycle still has an active foreground run; read-only inspection remains available
+/// for recovery UI.
 pub fn execute_durable_application_intent_stack_command(
     config_path: &Path,
     launch_cwd: &Path,
@@ -256,6 +261,12 @@ pub fn execute_durable_application_intent_stack_command(
     command: &ApplicationIntentStackCommandV1,
     confirmation_source: ApplicationIntentConfirmationSource,
 ) -> Result<ApplicationIntentStackCommandOutputV1, ApplicationIntentStackError> {
+    validate_durable_intent_stack_session_path(session_log_path)
+        .map_err(ApplicationIntentStackError::unavailable)?;
+    if !matches!(command, ApplicationIntentStackCommandV1::Inspect) {
+        ensure_durable_intent_stack_session_idle(session_log_path)
+            .map_err(ApplicationIntentStackError::conflict)?;
+    }
     let (root_config, workspace_root, session) = load_intent_stack_session(
         config_path,
         launch_cwd,
@@ -272,15 +283,39 @@ pub fn execute_durable_application_intent_stack_command(
     )
 }
 
-fn load_intent_stack_session(
-    config_path: &Path,
-    launch_cwd: &Path,
-    session_log_path: &Path,
-    expected_session_scope_id: &str,
-) -> AnyhowResult<(RootConfig, PathBuf, Session)> {
-    if expected_session_scope_id.trim().is_empty() {
-        bail!("Intent Stack session scope is empty");
+fn ensure_durable_intent_stack_session_idle(session_log_path: &Path) -> AnyhowResult<()> {
+    let records = JsonlSessionStore::read_event_records(session_log_path)
+        .context("failed to read Intent Stack session lifecycle")?;
+    let mut active_run_id: Option<String> = None;
+    for record in &records {
+        let Some(lifecycle) = conversation_run_lifecycle_record_from_stream(record)? else {
+            continue;
+        };
+        match lifecycle {
+            ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started) => {
+                if started.schema_version() != CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION
+                    || active_run_id.replace(started.run_id().to_owned()).is_some()
+                {
+                    bail!("Intent Stack session has ambiguous active run ownership");
+                }
+            }
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized) => {
+                if finalized.schema_version() != CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION
+                    || active_run_id.as_deref() != Some(finalized.run_id())
+                {
+                    bail!("Intent Stack session terminal does not match active ownership");
+                }
+                active_run_id = None;
+            }
+        }
     }
+    if active_run_id.is_some() {
+        bail!("Intent Stack mutation is unavailable while a foreground run is active");
+    }
+    Ok(())
+}
+
+fn validate_durable_intent_stack_session_path(session_log_path: &Path) -> AnyhowResult<PathBuf> {
     let metadata = fs::symlink_metadata(session_log_path).with_context(|| {
         format!(
             "failed to inspect Intent Stack session {}",
@@ -290,12 +325,24 @@ fn load_intent_stack_session(
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         bail!("Intent Stack session must be an existing regular non-symlink file");
     }
-    let canonical_session_path = session_log_path.canonicalize().with_context(|| {
+    session_log_path.canonicalize().with_context(|| {
         format!(
             "failed to canonicalize Intent Stack session {}",
             session_log_path.display()
         )
-    })?;
+    })
+}
+
+fn load_intent_stack_session(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_log_path: &Path,
+    expected_session_scope_id: &str,
+) -> AnyhowResult<(RootConfig, PathBuf, Session)> {
+    if expected_session_scope_id.trim().is_empty() {
+        bail!("Intent Stack session scope is empty");
+    }
+    let canonical_session_path = validate_durable_intent_stack_session_path(session_log_path)?;
     let root_config = RootConfig::load(config_path)
         .with_context(|| "failed to load Intent Stack application configuration")?;
     let workspace_root =

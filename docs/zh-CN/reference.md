@@ -74,6 +74,9 @@
 | `sigil mcp list` / `get <名称>` / `remove <名称>` | 检查或移除已配置的 MCP 服务 |
 | `sigil run "<task>" [--connection <id> --model <id>] [--output text|json|jsonl]` | 运行非交互任务；connection 与 model 必须同时提供 |
 | `sigil resume [session-id]` | 打开 TUI 并恢复会话 |
+| `sigil intent --session <session-id> inspect` | 输出某个精确会话的 bounded durable Intent Stack |
+| `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | 生成精确、只读的 Drop preview |
+| `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | 确认并执行该精确 preview |
 | `sigil serve` | 启动带认证且只监听回环地址的本机服务 |
 | `sigil --version` | 打印已安装版本 |
 | `sigil --config <path> doctor` | 诊断显式配置 |
@@ -81,6 +84,11 @@
 ## 脚本输出与本地服务
 
 `sigil run --output json` 会向 stdout 写入一条结果；`jsonl` 会写入有序事件，最后再写一条结果或错误。供人阅读的进度与安全网络提示保留在 stderr。退出码：`0` 表示成功，`1` 表示执行失败，`2` 表示调用方式或配置无效，`130` 表示已取消。
+
+`sigil intent` 始终只向 stdout 写一条带版本的 JSON result 或安全 typed error。它只从当前
+workspace catalog 解析精确 durable session id，不接受 session path，也不接受 client 提交的
+permission/approval authority。执行 Drop 前必须生成新的 preview；durable session 仍有前台
+run 时，preview 和 execute 都会 fail closed。
 
 使用足够随机的环境令牌启动本机服务：
 

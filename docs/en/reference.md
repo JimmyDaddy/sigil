@@ -74,6 +74,9 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 | `sigil mcp list` / `get <name>` / `remove <name>` | Inspect or remove configured MCP servers |
 | `sigil run "<task>" [--connection <id> --model <id>] [--output text|json|jsonl]` | Run a non-interactive task; connection and model must appear together |
 | `sigil resume [session-id]` | Open the TUI and restore a session |
+| `sigil intent --session <session-id> inspect` | Emit the bounded durable Intent Stack for one exact session |
+| `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | Build an exact read-only Drop preview |
+| `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | Confirm and execute the exact preview |
 | `sigil serve` | Start the authenticated loopback-only local service |
 | `sigil --version` | Print the installed version |
 | `sigil --config <path> doctor` | Diagnose an explicit config |
@@ -81,6 +84,11 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 ## Machine Output And Local Server
 
 `sigil run --output json` writes one result to stdout. `jsonl` writes ordered events followed by one result or error. Human progress and safe network notices stay on stderr. Exit codes are `0` success, `1` execution failure, `2` invalid invocation/configuration, and `130` cancellation.
+
+`sigil intent` writes exactly one versioned JSON result or safe typed error to stdout. It resolves
+only an exact durable session id from the current workspace catalog; it does not accept a session
+path or client-supplied permission/approval authority. Build a fresh preview before Drop. Preview
+and execute fail closed while the durable session still has an active foreground run.
 
 Start the local service with a high-entropy environment token:
 
