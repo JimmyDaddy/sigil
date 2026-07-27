@@ -1311,6 +1311,7 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                     depends_on: Vec::new(),
+                    intent_refs: Vec::new(),
                     mode: None,
                     isolation: None,
                 }],

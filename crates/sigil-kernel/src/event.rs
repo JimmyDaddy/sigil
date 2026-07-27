@@ -202,6 +202,9 @@ durable_event_types! {
     IntentStackCreated => ("intent_stack_created", RecoveryCritical, Critical, DirectJson, "intent_stack_created"),
     IntentPlanRecorded => ("intent_plan_recorded", RecoveryCritical, Critical, DirectJson, "intent_plan_recorded"),
     IntentPlanAccepted => ("intent_plan_accepted", RecoveryCritical, Critical, DirectJson, "intent_plan_accepted"),
+    IntentExecutionBound => ("intent_execution_bound", RecoveryCritical, Critical, DirectJson, "intent_execution_bound"),
+    IntentChangeSetBound => ("intent_change_set_bound", RecoveryCritical, Critical, DirectJson, "intent_change_set_bound"),
+    IntentVerificationLinked => ("intent_verification_linked", RecoveryCritical, Critical, DirectJson, "intent_verification_linked"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffResolved => ("task_handoff_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -711,7 +714,10 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         }
         DurableEventType::IntentStackCreated
         | DurableEventType::IntentPlanRecorded
-        | DurableEventType::IntentPlanAccepted => {
+        | DurableEventType::IntentPlanAccepted
+        | DurableEventType::IntentExecutionBound
+        | DurableEventType::IntentChangeSetBound
+        | DurableEventType::IntentVerificationLinked => {
             TypedDomainEvent::Intent(decode_intent_event(&event)?)
         }
         DurableEventType::WriteLeaseAcquired
@@ -890,6 +896,9 @@ fn decode_intent_event(event: &StoredEvent) -> Result<IntentEventV1> {
         IntentEventV1::StackCreated { .. } => DurableEventType::IntentStackCreated,
         IntentEventV1::PlanRecorded { .. } => DurableEventType::IntentPlanRecorded,
         IntentEventV1::PlanAccepted { .. } => DurableEventType::IntentPlanAccepted,
+        IntentEventV1::ExecutionBound { .. } => DurableEventType::IntentExecutionBound,
+        IntentEventV1::ChangeSetBound { .. } => DurableEventType::IntentChangeSetBound,
+        IntentEventV1::VerificationLinked { .. } => DurableEventType::IntentVerificationLinked,
         _ => bail!(
             "{} carries an Intent event reserved for a later RFC-0051 slice",
             event.event_type

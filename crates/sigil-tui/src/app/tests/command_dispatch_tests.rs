@@ -98,6 +98,7 @@ fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
                 detail: None,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(sigil_kernel::TaskStepMode::Read),
                 isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
             }],

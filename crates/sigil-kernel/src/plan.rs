@@ -524,6 +524,7 @@ pub fn task_plan_from_plan_draft(
                     .cloned()
                     .map(TaskStepId::new)
                     .collect::<Result<Vec<_>>>()?,
+                intent_refs: Vec::new(),
                 mode: step.mode,
                 isolation: step.isolation,
             })

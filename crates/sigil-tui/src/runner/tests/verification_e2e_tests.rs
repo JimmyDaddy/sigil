@@ -38,6 +38,7 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
         detail: None,
         role: AgentRole::Executor,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Verify),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };

@@ -4782,6 +4782,7 @@ fn task_guidance_assessment_context() -> Result<TaskGuidanceAssessmentContext> {
                 detail: None,
                 role: AgentRole::Executor,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],

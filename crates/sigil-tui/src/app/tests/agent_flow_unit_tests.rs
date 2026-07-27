@@ -230,6 +230,7 @@ fn active_agent_view_terminal_uses_child_session_status() -> anyhow::Result<()> 
                 detail: None,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],

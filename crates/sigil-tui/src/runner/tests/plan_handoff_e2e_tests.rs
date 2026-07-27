@@ -403,6 +403,7 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
             detail: None,
             role: AgentRole::Executor,
             depends_on: Vec::new(),
+            intent_refs: Vec::new(),
             mode: Some(TaskStepMode::Read),
             isolation: Some(TaskIsolationMode::SharedReadOnly),
         }],

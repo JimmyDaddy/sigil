@@ -68,6 +68,7 @@ fn sync_child_agent(app: &mut AppState) -> Result<()> {
                 detail: None,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],

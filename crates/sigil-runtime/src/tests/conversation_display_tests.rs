@@ -833,6 +833,7 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
             detail: Some("private planner detail".to_owned()),
             role: AgentRole::SubagentRead,
             depends_on: Vec::new(),
+            intent_refs: Vec::new(),
             mode: Some(TaskStepMode::Read),
             isolation: Some(TaskIsolationMode::SharedReadOnly),
         }],
@@ -935,6 +936,7 @@ fn durable_task_control_truncates_oversized_plan_summary_explicitly() -> Result<
                 } else {
                     Vec::new()
                 },
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Write),
                 isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
             })
@@ -990,6 +992,7 @@ fn durable_task_control_does_not_carry_step_status_across_plan_versions() -> Res
                 detail: None,
                 role: AgentRole::Executor,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Write),
                 isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
             }],

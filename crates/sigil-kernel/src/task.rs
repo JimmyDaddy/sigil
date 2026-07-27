@@ -515,6 +515,13 @@ pub struct TaskStepSpec {
     pub role: AgentRole,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<TaskStepId>,
+    /// Runtime-resolved accepted Intent versions served by this step.
+    ///
+    /// Provider-authored aliases must be resolved by the host before the TaskPlan is accepted.
+    /// Write steps participating in Intent Stack V1 must bind exactly one ref; read/review steps
+    /// may bind an accepted dependency closure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intent_refs: Vec<crate::IntentVersionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<TaskStepMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -940,6 +947,7 @@ pub fn task_plan_update_entry(
                     .into_iter()
                     .map(TaskStepId::new)
                     .collect::<Result<Vec<_>>>()?,
+                intent_refs: Vec::new(),
                 mode: Some(mode),
                 isolation: Some(isolation),
             })
@@ -1014,6 +1022,9 @@ pub fn validate_task_plan_graph_steps(steps: &[TaskStepSpec]) -> Result<()> {
         let isolation = step.effective_isolation();
         validate_step_mode_isolation(&step.step_id, mode, isolation)?;
         validate_step_role_isolation(&step.step_id, step.role, isolation)?;
+        if step.intent_refs.iter().collect::<BTreeSet<_>>().len() != step.intent_refs.len() {
+            bail!("task step {} repeats an intent ref", step.step_id.as_str());
+        }
     }
 
     for step in steps {

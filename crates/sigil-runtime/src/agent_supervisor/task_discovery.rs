@@ -208,6 +208,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                 detail: Some(probe.objective.clone()),
                 role: AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Read),
                 isolation: Some(TaskIsolationMode::SharedReadOnly),
             };

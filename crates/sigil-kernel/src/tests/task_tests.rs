@@ -68,6 +68,7 @@ fn read_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
         detail: None,
         role: AgentRole::SubagentRead,
         depends_on,
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Read),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     })
@@ -81,6 +82,7 @@ fn write_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
         detail: None,
         role: AgentRole::Executor,
         depends_on,
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
     })
@@ -94,6 +96,7 @@ fn changeset_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec>
         detail: None,
         role: AgentRole::SubagentWrite,
         depends_on,
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::ChangesetOnly),
     })
@@ -107,6 +110,7 @@ fn worktree_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> 
         detail: None,
         role: AgentRole::SubagentWrite,
         depends_on,
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::Worktree),
     })
@@ -264,6 +268,7 @@ fn task_control_entries_roundtrip() -> Result<()> {
                 detail: Some("read code".to_owned()),
                 role: AgentRole::Planner,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],
@@ -804,6 +809,7 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
         detail: None,
         role: AgentRole::SubagentRead,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Read),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };
@@ -814,6 +820,7 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
         detail: None,
         role: AgentRole::Executor,
         depends_on: vec![step_id("read")?],
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
     };
@@ -824,6 +831,7 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
         detail: None,
         role: AgentRole::SubagentWrite,
         depends_on: vec![step_id("read")?],
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::Worktree),
     };
@@ -840,6 +848,7 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
         detail: None,
         role: AgentRole::SubagentRead,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Read),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };
@@ -1134,6 +1143,7 @@ fn task_dag_read_only_write_denial_rejects_shared_read_only_write_step() -> Resu
         detail: None,
         role: AgentRole::Executor,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };
@@ -1154,6 +1164,7 @@ fn task_verify_mode_separates_review_advisory_from_system_verifier() -> Result<(
         detail: None,
         role: AgentRole::SubagentRead,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Review),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };
@@ -1164,6 +1175,7 @@ fn task_verify_mode_separates_review_advisory_from_system_verifier() -> Result<(
         detail: None,
         role: AgentRole::Executor,
         depends_on: vec![step_id("review")?],
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Verify),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
     };
@@ -1201,6 +1213,7 @@ fn task_projection_replays_run_plan_and_step_state() -> Result<()> {
                 detail: None,
                 role: AgentRole::Executor,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],
@@ -1563,6 +1576,7 @@ fn task_projection_supersedes_previous_accepted_plan() -> Result<()> {
                     detail: None,
                     role: AgentRole::Executor,
                     depends_on: Vec::new(),
+                    intent_refs: Vec::new(),
                     mode: Some(TaskStepMode::Write),
                     isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
                 },
@@ -1573,6 +1587,7 @@ fn task_projection_supersedes_previous_accepted_plan() -> Result<()> {
                     detail: None,
                     role: AgentRole::Planner,
                     depends_on: Vec::new(),
+                    intent_refs: Vec::new(),
                     mode: Some(TaskStepMode::Read),
                     isolation: Some(TaskIsolationMode::SharedReadOnly),
                 },
@@ -1600,6 +1615,7 @@ fn task_projection_supersedes_previous_accepted_plan() -> Result<()> {
                 detail: None,
                 role: AgentRole::Planner,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Read),
                 isolation: Some(TaskIsolationMode::SharedReadOnly),
             }],
@@ -1649,6 +1665,7 @@ fn task_replan_projection_clears_current_step_from_superseded_plan() -> Result<(
                 detail: None,
                 role: AgentRole::Executor,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Write),
                 isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
             }],
@@ -1675,6 +1692,7 @@ fn task_replan_projection_clears_current_step_from_superseded_plan() -> Result<(
                 detail: None,
                 role: AgentRole::Planner,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Read),
                 isolation: Some(TaskIsolationMode::SharedReadOnly),
             }],

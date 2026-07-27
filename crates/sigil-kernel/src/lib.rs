@@ -20,6 +20,7 @@ pub mod image_attachment;
 pub mod integration;
 pub mod intent;
 pub mod intent_admission;
+pub mod intent_lineage;
 pub mod memory;
 pub mod model_route;
 pub mod mutation;
@@ -299,8 +300,16 @@ pub use intent_admission::{
     AcceptedIntentPlanProjectionV1, INTENT_ADMISSION_PROJECTION_SCHEMA_VERSION,
     INTENT_HISTORY_UNAVAILABLE_MESSAGE, IntentAcceptanceAuthorityV1, IntentAdmissionContextV1,
     IntentAdmissionWriteOutcomeV1, IntentPlanAdmissionV1, IntentStackProjectionV1,
-    UserDeclaredIntentV1, admit_suggested_decomposition, admit_user_declared_root,
-    append_chat_root_intent_admission, append_task_intent_plan_admission,
+    TaskStepIntentAliasBindingV1, USER_DECLARED_ROOT_INTENT_ALIAS, UserDeclaredIntentV1,
+    admit_suggested_decomposition, admit_user_declared_root, append_chat_root_intent_admission,
+    append_task_intent_plan_admission, bind_task_plan_intents,
+};
+pub use intent_lineage::{
+    INTENT_LINEAGE_PROJECTION_SCHEMA_VERSION, IntentExecutionLineageV1, IntentLineageProjectionV1,
+    IntentLineageReadOnlyReasonV1, IntentLineageSummaryV1, IntentLineageWriteOutcomeV1,
+    append_chat_direct_mutation_changeset_binding, append_chat_intent_execution_binding,
+    append_intent_changeset_binding, append_intent_verification_evidence,
+    append_task_intent_execution_binding,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use model_route::{ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute};
@@ -598,7 +607,7 @@ pub use verification::{
     CheckSpec, CheckSpecId, CheckSpecRecordedEntry, ChildVerificationReceiptLinked,
     CompletionCriteria, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
     EnvironmentFingerprint, EvidenceReceipt, EvidenceScope, FileMetadataEvidence,
-    FileMetadataPlatform, FileType, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
+    FileMetadataPlatform, FileType, IntentCheckScopeV1, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
     PluginVerificationHookReceiptRequest, ReadinessEvaluatedEntry, ReadinessEvaluation,
     ReadinessInput, ReadinessReason, ReceiptId, ReceiptStatus, RedactionState, RequiredAction,
     RunStatus, SandboxDecisionId, SandboxProfileHash, SandboxProfileRequirement,

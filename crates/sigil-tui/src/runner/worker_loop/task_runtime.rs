@@ -542,6 +542,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
                 detail: Some("direct user-invoked agent".to_owned()),
                 role: child_role,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             },

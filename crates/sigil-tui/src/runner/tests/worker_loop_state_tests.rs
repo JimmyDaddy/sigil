@@ -114,6 +114,7 @@ fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<
                 detail: None,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(sigil_kernel::TaskStepMode::Read),
                 isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
             }],

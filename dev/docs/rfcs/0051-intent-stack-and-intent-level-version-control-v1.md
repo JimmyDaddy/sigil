@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0-R51.1 complete，R51.2 next）
+状态：proposed / implementation active（R51.0-R51.2 complete，R51.3 next）
 
 创建日期：2026-07-22
 
@@ -27,8 +27,8 @@ Intent Stack 把用户认可的变更意图提升为一等、可持久化、可�
 
 > 撤销一个需求，而不是回到一个时间点。
 
-本 RFC 冻结语义、所有权和安全边界，并已完成 R51.0 契约与 R51.1
-admission/projection 切片。后续切片仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil
+本 RFC 冻结语义、所有权和安全边界，并已完成 R51.0 契约、R51.1
+admission/projection 与 R51.2 execution lineage 切片。后续切片仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil
 受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、
 未知副作用或依赖歧义必须 fail closed。
 
@@ -123,8 +123,8 @@ Intent operation 是针对一个或一组 intent 的高层动作：
 - 不把每个 agent step、tool call 或 validation command 都暴露为用户要管理的 stack item。
 - 不新增一组 command-only 的 `/intent-*` 主入口，也不要求用户维护复杂配置矩阵。
 - 不替代 Git；Intent Stack 是高于文件版本控制的产品语义层，最终仍可导出普通 diff/commit。
-- R51.0-R51.1 不实现 execution binding、artifact materialization、写 operation、runtime
-  command 或 UI；它们必须等待对应后续切片。
+- R51.0-R51.2 不实现 artifact materialization、写 operation、runtime command 或 UI；它们必须
+  等待对应后续切片。R51.2 的 `NeedsReview` 只表示 parent lineage 完整，不表示已有可执行 layer。
 
 ## 6. Product contract
 
@@ -684,6 +684,39 @@ wire/payload mismatch。R51.1 只建立可供 runtime 调用的 admission 原语
 自动视为用户确认，也不开放 execution authority、artifact ownership、drop/replace、TUI 或
 adapter command。
 
+### 12.3 R51.2 implementation checkpoint（2026-07-27）
+
+R51.2 已完成，落点为 `sigil-kernel::intent_lineage`、TaskPlan stable intent ref、verification
+check criterion scope 与 bounded public projection。本切片提供：
+
+- `TaskStepSpec.intent_refs` 只持久化 runtime 从 accepted plan alias 解析出的
+  `IntentVersionRef`；Intent-enabled write step 必须精确绑定一个 accepted ref，unknown、
+  duplicate、out-of-plan ref 在执行前 fail closed。Task replan 可在 statement/criteria/dependency
+  未改变时复用同一 intent version；
+- `intent_execution_bound`、`intent_change_set_bound`、`intent_verification_linked` 三个
+  recovery-critical typed event 的正式注册与严格 wire/payload decoder；R51.3 及之后的 layer、
+  artifact 和 operation events 仍未注册；
+- Task execution 绑定 exact accepted TaskPlan step 与 started participant attempt；Chat
+  execution 绑定单一 `UserDeclaredRoot` 的 source turn、foreground root logical run 与 exact
+  agent-run attempt。continue/retry 的下一 attempt 或 interruption 会终止旧 Chat attempt 的
+  mutation window；
+- 无显式 ChangeSet 的 Chat controlled file mutation 由 runtime 从 exact prepare/commit pair
+  生成单文件 bounded ChangeSet 和 applied result；不接受模型提供路径、hash 或 lineage；
+- Task child ChangeSet 只有经一致的 integration projection、`WorkspaceApply` promotion 和同一
+  promoted parent snapshot 的 RFC-0002 mutation 后才获得 parent lineage。`GitRefAdvance`、
+  missing ChangeSet/mutation、未知或不完整路径均只投影为 `ReadOnlyProvenance`；
+- criterion evidence 分为 `Advisory` 与 `SystemVerified`。后者必须由 CheckSpec 显式声明
+  accepted intent/criterion scope，并同时匹配 successful receipt、policy digest、execution
+  ChangeSet 和当前 parent snapshot；后续 workspace mutation 会把旧 receipt 降级为 stale
+  read-only，不保留 system-verified 计数；
+- public projection 在 lineage 完整但 R51.3 layer 尚未 materialize 时只显示 `NeedsReview`，
+  不提前宣称 `Applied`，也不开放 drop/replace authority。
+
+完成证据覆盖 host alias resolution、Chat direct-file projection、missing-lineage read-only、
+Task replan + WorkspaceApply、GitRef-only negative、Advisory/SystemVerified、stale parent
+receipt、event registration/wire mismatch 与 legacy history-unavailable。R51.2 仍不生成
+canonical patch artifact、ownership manifest 或任何可执行 Intent operation。
+
 依赖顺序：
 
 ```text
@@ -780,5 +813,7 @@ selective drop 闭环完成；它仍不等于通用语义 merge、外部副作�
 
 本 RFC 当前为 `proposed / implementation active`。R51.0 已冻结具体 Rust/DTO 命名、digest
 算法、错误 taxonomy 与 golden fixtures；R51.1 已接入 host-authorized append-only
-admission/projection 和 TaskPlan mixed writer batch。R51.2 起继续补 execution/ChangeSet/
-verification lineage；任何 TUI 或 destructive operation 仍必须等待其依赖切片和独立门禁完成。
+admission/projection 和 TaskPlan mixed writer batch；R51.2 已接入 Task/Chat exact execution、
+ChangeSet、parent mutation 与 criterion verification lineage。R51.3 起继续补 canonical layer
+materializer 与 artifact ownership；任何 TUI 或 destructive operation 仍必须等待其依赖切片和
+独立门禁完成。

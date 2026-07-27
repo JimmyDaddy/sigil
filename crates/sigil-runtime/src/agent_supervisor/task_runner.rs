@@ -1738,6 +1738,7 @@ fn participant_control_step(step_id: &str, title: &str, role: AgentRole) -> Resu
         detail: None,
         role,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Read),
         isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
     })

@@ -28,6 +28,7 @@ fn projector_emits_typed_plan_batch_and_step_events_without_raw_detail() -> Resu
             ),
             role: AgentRole::SubagentRead,
             depends_on: Vec::new(),
+            intent_refs: Vec::new(),
             mode: Some(TaskStepMode::Read),
             isolation: Some(TaskIsolationMode::SharedReadOnly),
         }],

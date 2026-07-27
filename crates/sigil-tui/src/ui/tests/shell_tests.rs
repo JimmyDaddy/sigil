@@ -2047,6 +2047,7 @@ fn docs_verification_entries() -> anyhow::Result<Vec<SessionLogEntry>> {
                 detail: None,
                 role: AgentRole::Executor,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],

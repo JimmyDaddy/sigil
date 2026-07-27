@@ -44,6 +44,7 @@ fn task_entries() -> Result<Vec<SessionLogEntry>> {
                 detail: None,
                 role: AgentRole::Executor,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(TaskStepMode::Verify),
                 isolation: Some(TaskIsolationMode::SharedReadOnly),
             }],

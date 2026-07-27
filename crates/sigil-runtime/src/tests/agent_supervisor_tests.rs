@@ -1188,6 +1188,7 @@ fn step(id: &str) -> Result<TaskStepSpec> {
         detail: Some("test child step".to_owned()),
         role: AgentRole::SubagentRead,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: None,
         isolation: None,
     })
@@ -1201,6 +1202,7 @@ fn write_step(id: &str) -> Result<TaskStepSpec> {
         detail: Some("test write child step".to_owned()),
         role: AgentRole::SubagentWrite,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: None,
         isolation: None,
     })
@@ -1214,6 +1216,7 @@ fn changeset_step(id: &str) -> Result<TaskStepSpec> {
         detail: Some("test changeset-only child step".to_owned()),
         role: AgentRole::SubagentWrite,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(sigil_kernel::TaskStepMode::Write),
         isolation: Some(sigil_kernel::TaskIsolationMode::ChangesetOnly),
     })
@@ -1227,6 +1230,7 @@ fn worktree_step(id: &str) -> Result<TaskStepSpec> {
         detail: Some("test physical worktree child step".to_owned()),
         role: AgentRole::SubagentWrite,
         depends_on: Vec::new(),
+        intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Write),
         isolation: Some(TaskIsolationMode::Worktree),
     })
@@ -3014,6 +3018,7 @@ async fn planner_output_returns_model_owned_task_guidance_decision() -> Result<(
             detail: None,
             role: AgentRole::Executor,
             depends_on: Vec::new(),
+            intent_refs: Vec::new(),
             mode: None,
             isolation: None,
         }],

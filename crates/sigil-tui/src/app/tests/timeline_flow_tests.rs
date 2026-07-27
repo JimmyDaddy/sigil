@@ -90,6 +90,7 @@ fn long_task_frames_reuse_versioned_view_cache_without_store_scan_or_reducer_rep
                 detail: None,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: Some(sigil_kernel::TaskStepMode::Read),
                 isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
             })
@@ -179,6 +180,7 @@ fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
                 detail: None,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 depends_on: Vec::new(),
+                intent_refs: Vec::new(),
                 mode: None,
                 isolation: None,
             }],

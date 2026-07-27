@@ -12,8 +12,8 @@ use crate::{
     IntentTaskPlanBindingV1, IntentVersionRef, JsonlSessionStore, MAX_INTENT_CRITERIA,
     MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES, ProjectionApplyDecision, ProjectionCursor,
     PublicIntentSourceV1, PublicIntentStackStateV1, PublicIntentStackV1, PublicIntentV1, Session,
-    SessionLogEntry, SessionStreamRecord, TaskPlanEntry, TaskPlanStatus, TypedDomainEvent,
-    TypedStoredEventDecode, decode_typed_stored_event, projection_apply_decision,
+    SessionLogEntry, SessionStreamRecord, TaskPlanEntry, TaskPlanStatus, TaskStepId, TaskStepMode,
+    TypedDomainEvent, TypedStoredEventDecode, decode_typed_stored_event, projection_apply_decision,
     validate_task_plan_graph_steps,
 };
 
@@ -23,6 +23,8 @@ pub const INTENT_ADMISSION_PROJECTION_SCHEMA_VERSION: u16 = 1;
 /// Stable adapter text for sessions that predate Intent Stack durable facts.
 pub const INTENT_HISTORY_UNAVAILABLE_MESSAGE: &str =
     "Intent history is unavailable for this session.";
+/// Host alias for the single automatically admitted user-declared root.
+pub const USER_DECLARED_ROOT_INTENT_ALIAS: &str = "root";
 
 /// Host-owned identity and workspace scope for one initial IntentPlan admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +140,7 @@ pub struct IntentPlanAdmissionV1 {
     acceptance_kind: IntentAcceptanceKind,
     source_turn_id: String,
     acceptance_authority_id: String,
+    resolved_aliases: BTreeMap<String, IntentVersionRef>,
 }
 
 impl IntentPlanAdmissionV1 {
@@ -149,6 +152,12 @@ impl IntentPlanAdmissionV1 {
     #[must_use]
     pub fn acceptance_kind(&self) -> IntentAcceptanceKind {
         self.acceptance_kind
+    }
+
+    /// Returns the runtime-owned accepted intent ref resolved from one provider-local alias.
+    #[must_use]
+    pub fn intent_ref_for_alias(&self, alias: &str) -> Option<&IntentVersionRef> {
+        self.resolved_aliases.get(alias)
     }
 
     fn stack_created_event(&self) -> IntentEventV1 {
@@ -216,6 +225,81 @@ impl IntentPlanAdmissionV1 {
     }
 }
 
+/// Host-owned mapping from one Task step to provider-local intent aliases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStepIntentAliasBindingV1 {
+    pub step_id: TaskStepId,
+    pub intent_aliases: Vec<String>,
+}
+
+/// Resolves provider-local aliases into accepted stable refs before TaskPlan persistence.
+///
+/// The returned plan contains no provider aliases. Every write step must resolve exactly one
+/// accepted ref; read and review steps may bind a dependency closure or remain unbound.
+///
+/// # Errors
+///
+/// Returns an error for an unknown/duplicate alias, an unknown/duplicate step mapping, or a write
+/// step that does not bind exactly one accepted intent.
+pub fn bind_task_plan_intents(
+    admission: &IntentPlanAdmissionV1,
+    mut task_plan: TaskPlanEntry,
+    bindings: &[TaskStepIntentAliasBindingV1],
+) -> Result<TaskPlanEntry> {
+    validate_task_plan_graph_steps(&task_plan.steps)?;
+    let mut by_step = BTreeMap::<TaskStepId, Vec<IntentVersionRef>>::new();
+    for binding in bindings {
+        if by_step.contains_key(&binding.step_id) {
+            bail!(
+                "task step {} has more than one intent alias mapping",
+                binding.step_id.as_str()
+            );
+        }
+        let mut aliases = BTreeSet::new();
+        let mut refs = Vec::with_capacity(binding.intent_aliases.len());
+        for alias in &binding.intent_aliases {
+            if !aliases.insert(alias.as_str()) {
+                bail!(
+                    "task step {} repeats intent alias {alias}",
+                    binding.step_id.as_str()
+                );
+            }
+            refs.push(
+                admission
+                    .intent_ref_for_alias(alias)
+                    .cloned()
+                    .with_context(|| {
+                        format!("task step references unknown intent alias {alias}")
+                    })?,
+            );
+        }
+        if refs.iter().collect::<BTreeSet<_>>().len() != refs.len() {
+            bail!(
+                "task step {} aliases resolve to duplicate intent refs",
+                binding.step_id.as_str()
+            );
+        }
+        by_step.insert(binding.step_id.clone(), refs);
+    }
+    for step in &mut task_plan.steps {
+        step.intent_refs = by_step.remove(&step.step_id).unwrap_or_default();
+        if step.effective_mode() == TaskStepMode::Write && step.intent_refs.len() != 1 {
+            bail!(
+                "Intent-enabled write task step {} must bind exactly one accepted intent",
+                step.step_id.as_str()
+            );
+        }
+    }
+    if let Some((step_id, _)) = by_step.first_key_value() {
+        bail!(
+            "intent alias mapping references unknown task step {}",
+            step_id.as_str()
+        );
+    }
+    validate_task_plan_intent_refs(admission.plan(), &task_plan)?;
+    Ok(task_plan)
+}
+
 /// Resolves one user-declared root into runtime-owned ids and a digest-bound plan.
 ///
 /// # Errors
@@ -261,10 +345,15 @@ pub fn admit_user_declared_root(
         },
         supersedes: None,
     };
+    let resolved_aliases = BTreeMap::from([(
+        USER_DECLARED_ROOT_INTENT_ALIAS.to_owned(),
+        definition.intent_ref.clone(),
+    )]);
     build_admission(
         context,
         IntentPlanKind::UserDeclaredRoot,
         vec![definition],
+        resolved_aliases,
         authority,
     )
 }
@@ -346,10 +435,15 @@ pub fn admit_suggested_decomposition(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let resolved_aliases = ids
+        .into_iter()
+        .map(|(alias, intent_id)| Ok((alias.to_owned(), IntentVersionRef::new(intent_id, 1)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
     build_admission(
         context,
         IntentPlanKind::SuggestedDecomposition,
         intents,
+        resolved_aliases,
         authority,
     )
 }
@@ -358,6 +452,7 @@ fn build_admission(
     context: &IntentAdmissionContextV1,
     kind: IntentPlanKind,
     intents: Vec<IntentDefinitionV1>,
+    resolved_aliases: BTreeMap<String, IntentVersionRef>,
     authority: &IntentAcceptanceAuthorityV1,
 ) -> Result<IntentPlanAdmissionV1> {
     let mut plan = IntentPlanV1 {
@@ -377,6 +472,7 @@ fn build_admission(
         acceptance_kind: authority.kind,
         source_turn_id: authority.source_turn_id.clone(),
         acceptance_authority_id: authority.authority_event_id.clone(),
+        resolved_aliases,
     })
 }
 
@@ -448,6 +544,21 @@ impl IntentStackProjectionV1 {
     ///
     /// Returns an error when a stack exists but its latest admission is incomplete.
     pub fn public_state(&self) -> Result<PublicIntentStackStateV1> {
+        self.public_state_with_optional_lineage(None)
+    }
+
+    /// Produces the bounded adapter contract with R51.2 lineage and evidence summaries.
+    pub fn public_state_with_lineage(
+        &self,
+        lineage: &crate::IntentLineageProjectionV1,
+    ) -> Result<PublicIntentStackStateV1> {
+        self.public_state_with_optional_lineage(Some(lineage))
+    }
+
+    fn public_state_with_optional_lineage(
+        &self,
+        lineage: Option<&crate::IntentLineageProjectionV1>,
+    ) -> Result<PublicIntentStackStateV1> {
         let Some(header) = &self.header else {
             return Ok(PublicIntentStackStateV1::HistoryUnavailable {
                 schema_version: INTENT_PUBLIC_DTO_SCHEMA_VERSION,
@@ -473,15 +584,28 @@ impl IntentStackProjectionV1 {
             .plan
             .intents
             .iter()
-            .map(public_intent_from_definition)
+            .map(|definition| {
+                public_intent_from_definition(
+                    definition,
+                    lineage.map(|lineage| lineage.summary_for(&definition.intent_ref)),
+                )
+            })
             .collect::<Vec<_>>();
+        let authority_state = if intents
+            .iter()
+            .any(|intent| intent.application_state == IntentApplicationState::ReadOnly)
+        {
+            IntentAuthorityState::ReadOnlyProvenance
+        } else {
+            IntentAuthorityState::Active
+        };
         Ok(PublicIntentStackStateV1::Available {
             schema_version: INTENT_PUBLIC_DTO_SCHEMA_VERSION,
             stack: PublicIntentStackV1 {
                 schema_version: INTENT_PUBLIC_DTO_SCHEMA_VERSION,
                 stack_id: header.stack_id.clone(),
                 stack_version: accepted.plan.stack_version,
-                authority_state: IntentAuthorityState::Active,
+                authority_state,
                 plan_digest: accepted.plan.plan_digest.clone(),
                 intents,
                 conflicts: Vec::new(),
@@ -638,6 +762,12 @@ impl IntentStackProjectionV1 {
                     self.accepted_plans.insert(version, accepted);
                 }
             }
+            IntentEventV1::ExecutionBound { .. }
+            | IntentEventV1::ChangeSetBound { .. }
+            | IntentEventV1::VerificationLinked { .. } => {
+                // R51.2 lineage is reduced by `IntentLineageProjectionV1`; admission remains an
+                // immutable view of accepted plan versions.
+            }
             _ => bail!(
                 "{} is registered by a later RFC-0051 slice",
                 intent_event.event_type()
@@ -721,6 +851,7 @@ pub fn append_task_intent_plan_admission(
         bail!("IntentPlan task admission requires an accepted TaskPlan");
     }
     validate_task_plan_graph_steps(&task_plan.steps)?;
+    validate_task_plan_intent_refs(admission.plan(), &task_plan)?;
     let binding = IntentTaskPlanBindingV1 {
         task_id: task_plan.task_id.as_str().to_owned(),
         task_plan_version: task_plan.plan_version,
@@ -820,7 +951,16 @@ impl Session {
 
     /// Returns the bounded Intent Stack adapter DTO.
     pub fn public_intent_stack_state(&self) -> Result<PublicIntentStackStateV1> {
-        self.intent_stack_projection()?.public_state()
+        let Some(store) = self.durable_store() else {
+            return IntentStackProjectionV1::default().public_state();
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let admission = IntentStackProjectionV1::from_records(&records)?;
+        if admission.latest_accepted_plan().is_none() {
+            return admission.public_state();
+        }
+        let lineage = crate::IntentLineageProjectionV1::from_records(&records, &admission)?;
+        admission.public_state_with_lineage(&lineage)
     }
 }
 
@@ -858,6 +998,33 @@ fn validate_plan_header(
         || plan.source_session_id != session_id
     {
         bail!("IntentPlan scope does not match its stack header and durable session");
+    }
+    Ok(())
+}
+
+fn validate_task_plan_intent_refs(plan: &IntentPlanV1, task_plan: &TaskPlanEntry) -> Result<()> {
+    let accepted_refs = plan
+        .intents
+        .iter()
+        .map(|intent| &intent.intent_ref)
+        .collect::<BTreeSet<_>>();
+    for step in &task_plan.steps {
+        if step
+            .intent_refs
+            .iter()
+            .any(|intent_ref| !accepted_refs.contains(intent_ref))
+        {
+            bail!(
+                "task step {} references an intent outside the accepted IntentPlan",
+                step.step_id.as_str()
+            );
+        }
+        if step.effective_mode() == TaskStepMode::Write && step.intent_refs.len() != 1 {
+            bail!(
+                "Intent-enabled write task step {} must bind exactly one accepted intent",
+                step.step_id.as_str()
+            );
+        }
     }
     Ok(())
 }
@@ -926,7 +1093,10 @@ fn validate_acceptance_for_plan(
     Ok(())
 }
 
-fn public_intent_from_definition(definition: &IntentDefinitionV1) -> PublicIntentV1 {
+fn public_intent_from_definition(
+    definition: &IntentDefinitionV1,
+    lineage: Option<crate::IntentLineageSummaryV1>,
+) -> PublicIntentV1 {
     let source = match &definition.source {
         IntentSourceV1::UserTurn { source_turn_id } => PublicIntentSourceV1::UserTurn {
             source_turn_id: source_turn_id.clone(),
@@ -940,6 +1110,10 @@ fn public_intent_from_definition(definition: &IntentDefinitionV1) -> PublicInten
             safe_source_label: "Trusted specification".to_owned(),
         },
     };
+    let lineage = lineage.unwrap_or(crate::IntentLineageSummaryV1 {
+        application_state: Some(IntentApplicationState::Unapplied),
+        ..crate::IntentLineageSummaryV1::default()
+    });
     PublicIntentV1 {
         intent_ref: definition.intent_ref.clone(),
         title: definition.title.clone(),
@@ -948,14 +1122,16 @@ fn public_intent_from_definition(definition: &IntentDefinitionV1) -> PublicInten
         depends_on: definition.depends_on.clone(),
         source,
         definition_state: IntentDefinitionState::Accepted,
-        application_state: IntentApplicationState::Unapplied,
+        application_state: lineage
+            .application_state
+            .unwrap_or(IntentApplicationState::Unapplied),
         exclusive_artifact_count: 0,
         shared_artifact_count: 0,
         unowned_artifact_count: 0,
         drifted_artifact_count: 0,
         unavailable_artifact_count: 0,
-        advisory_criterion_count: 0,
-        system_verified_criterion_count: 0,
+        advisory_criterion_count: lineage.advisory_criterion_count,
+        system_verified_criterion_count: lineage.system_verified_criterion_count,
         artifacts: Vec::new(),
         available_actions: Vec::new(),
     }

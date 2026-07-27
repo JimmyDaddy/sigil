@@ -1427,6 +1427,10 @@ impl IntentEventV1 {
                 }
                 for item in evidence {
                     item.intent_ref.validate()?;
+                    validate_bounded_identity(
+                        "intent verification source event id",
+                        &item.source_event_id,
+                    )?;
                     validate_bounded_identity("intent verification receipt id", &item.receipt_id)?;
                     validate_bounded_identity(
                         "intent verification parent snapshot id",
@@ -1436,6 +1440,16 @@ impl IntentEventV1 {
                         && item.changeset_ids.is_empty()
                     {
                         bail!("system-verified intent criterion requires change set lineage");
+                    }
+                    let mut changesets = BTreeSet::new();
+                    for changeset_id in &item.changeset_ids {
+                        validate_bounded_identity(
+                            "intent verification change set id",
+                            changeset_id,
+                        )?;
+                        if !changesets.insert(changeset_id) {
+                            bail!("intent verification evidence repeats a change set");
+                        }
                     }
                 }
                 Ok(())

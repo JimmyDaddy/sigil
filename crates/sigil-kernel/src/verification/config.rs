@@ -626,12 +626,23 @@ fn default_tool_effect_read_only() -> ToolEffect {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct IntentCheckScopeV1 {
+    pub intent_ref: IntentVersionRef,
+    pub criterion_ids: Vec<IntentCriterionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct CheckSpec {
     pub check_spec_id: CheckSpecId,
     pub command: CheckCommand,
     pub effect: ToolEffect,
     pub check_spec_hash: String,
     pub verification_scope_hash: VerificationScopeHash,
+    /// Explicit bounded Intent/criterion coverage. Empty means this check cannot produce
+    /// `SystemVerified` Intent evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intent_scopes: Vec<IntentCheckScopeV1>,
 }
 
 impl CheckSpec {
@@ -662,6 +673,109 @@ impl CheckSpec {
             effect,
             check_spec_hash,
             verification_scope_hash,
+            intent_scopes: Vec::new(),
         }
+    }
+
+    /// Adds one explicit accepted Intent/criterion scope and rebinds the check-spec hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty/duplicate criterion set or a duplicate intent scope.
+    pub fn with_intent_scope(
+        mut self,
+        intent_ref: IntentVersionRef,
+        mut criterion_ids: Vec<IntentCriterionId>,
+    ) -> Result<Self> {
+        if criterion_ids.is_empty() {
+            bail!("intent check scope requires at least one criterion");
+        }
+        let original_len = criterion_ids.len();
+        criterion_ids.sort();
+        criterion_ids.dedup();
+        if criterion_ids.len() != original_len {
+            bail!("intent check scope repeats a criterion");
+        }
+        if self
+            .intent_scopes
+            .iter()
+            .any(|scope| scope.intent_ref == intent_ref)
+        {
+            bail!("check spec repeats an intent scope");
+        }
+        self.intent_scopes.push(IntentCheckScopeV1 {
+            intent_ref,
+            criterion_ids,
+        });
+        self.intent_scopes
+            .sort_by(|left, right| left.intent_ref.cmp(&right.intent_ref));
+        self.check_spec_hash = self.computed_hash()?;
+        Ok(self)
+    }
+
+    /// Validates the persisted hash and bounded Intent scope declaration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identities are empty, scopes repeat, or the content hash drifts.
+    pub fn validate_shape(&self) -> Result<()> {
+        if self.check_spec_id.trim().is_empty()
+            || self.verification_scope_hash.trim().is_empty()
+            || self.command.command.trim().is_empty()
+        {
+            bail!("check spec identity, command and verification scope must not be empty");
+        }
+        let mut intent_refs = BTreeSet::new();
+        for scope in &self.intent_scopes {
+            if scope.criterion_ids.is_empty()
+                || scope.criterion_ids.iter().collect::<BTreeSet<_>>().len()
+                    != scope.criterion_ids.len()
+                || !intent_refs.insert(&scope.intent_ref)
+            {
+                bail!("check spec has an empty or duplicate Intent criterion scope");
+            }
+        }
+        if self.check_spec_hash != self.computed_hash()? {
+            bail!("check spec hash does not match its persisted content");
+        }
+        Ok(())
+    }
+
+    fn computed_hash(&self) -> Result<String> {
+        let command_cwd = self
+            .command
+            .cwd
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let base_hash = stable_hash_parts(
+            self.check_spec_id.as_str(),
+            &self.command.command,
+            self.command.args.iter().map(String::as_str),
+            command_cwd.as_str(),
+            &self.verification_scope_hash,
+            self.effect.as_str(),
+        );
+        if self.intent_scopes.is_empty() {
+            return Ok(base_hash);
+        }
+        let value = serde_json::to_value(&self.intent_scopes)
+            .map_err(|error| anyhow!("failed to serialize intent check scopes: {error}"))?;
+        let mut digest = Sha256::new();
+        digest.update(base_hash.as_bytes());
+        digest.update([0]);
+        digest.update(canonical_json_bytes(&value)?);
+        Ok(format!("sha256:{:x}", digest.finalize()))
+    }
+
+    #[must_use]
+    pub fn covers_intent_criterion(
+        &self,
+        intent_ref: &IntentVersionRef,
+        criterion_id: &IntentCriterionId,
+    ) -> bool {
+        self.intent_scopes.iter().any(|scope| {
+            &scope.intent_ref == intent_ref && scope.criterion_ids.contains(criterion_id)
+        })
     }
 }

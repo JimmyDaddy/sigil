@@ -387,6 +387,7 @@ fn compaction_extraction_keeps_active_task_objective_and_accepted_plan() -> Resu
                     detail: None,
                     role: crate::AgentRole::Executor,
                     depends_on: Vec::new(),
+                    intent_refs: Vec::new(),
                     mode: None,
                     isolation: None,
                 }],

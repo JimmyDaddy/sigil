@@ -7,8 +7,8 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::{
-    AgentRole, EventClass, IntentPlanProposalV1, IntentProposalUnitV1, TaskId, TaskIsolationMode,
-    TaskStepId, TaskStepMode, TaskStepSpec,
+    AgentRole, EventClass, IntentLayerManifestV1, IntentPlanProposalV1, IntentProposalUnitV1,
+    TaskId, TaskIsolationMode, TaskStepId, TaskStepMode, TaskStepSpec,
 };
 
 const PROPOSAL: &str = include_str!("../../../../dev/fixtures/intent-stack-v1/proposal.json");
@@ -57,23 +57,31 @@ fn root_admission(session: &Session) -> Result<IntentPlanAdmissionV1> {
     )
 }
 
-fn accepted_task_plan() -> Result<TaskPlanEntry> {
-    Ok(TaskPlanEntry {
-        task_id: TaskId::new("task-intent-admission-1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
+fn accepted_task_plan(admission: &IntentPlanAdmissionV1) -> Result<TaskPlanEntry> {
+    bind_task_plan_intents(
+        admission,
+        TaskPlanEntry {
+            task_id: TaskId::new("task-intent-admission-1")?,
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: TaskStepId::new("implement")?,
+                title: "Implement accepted intents".to_owned(),
+                display_name: None,
+                detail: Some("Apply the accepted plan in the bound workspace.".to_owned()),
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            }],
+            reason: Some("accepted with the IntentPlan".to_owned()),
+        },
+        &[TaskStepIntentAliasBindingV1 {
             step_id: TaskStepId::new("implement")?,
-            title: "Implement accepted intents".to_owned(),
-            display_name: None,
-            detail: Some("Apply the accepted plan in the bound workspace.".to_owned()),
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            mode: Some(TaskStepMode::Write),
-            isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            intent_aliases: vec!["retry".to_owned()],
         }],
-        reason: Some("accepted with the IntentPlan".to_owned()),
-    })
+    )
 }
 
 #[test]
@@ -222,7 +230,7 @@ fn task_and_intent_acceptance_share_one_ordered_durable_batch_and_replay() -> Re
     let path = temp.path().join("session.jsonl");
     let (store, mut session) = session_at(&path)?;
     let admission = suggested_admission(&session)?;
-    let task_plan = accepted_task_plan()?;
+    let task_plan = accepted_task_plan(&admission)?;
 
     let first = append_task_intent_plan_admission(&mut session, &admission, task_plan.clone())?;
     assert!(first.appended);
@@ -299,7 +307,11 @@ fn crash_prefix_without_task_plan_never_activates_task_bound_intent() -> Result<
     {
         let (_store, mut session) = session_at(&path)?;
         let admission = suggested_admission(&session)?;
-        append_task_intent_plan_admission(&mut session, &admission, accepted_task_plan()?)?;
+        append_task_intent_plan_admission(
+            &mut session,
+            &admission,
+            accepted_task_plan(&admission)?,
+        )?;
     }
 
     let content = fs::read_to_string(&path)?;
@@ -330,7 +342,7 @@ fn crash_prefix_without_task_plan_never_activates_task_bound_intent() -> Result<
         !reopened
             .task_state_projection()
             .tasks
-            .contains_key(&accepted_task_plan()?.task_id),
+            .contains_key(&TaskId::new("task-intent-admission-1")?),
         "without the final TaskPlan record no task participant can be admitted"
     );
     assert!(
@@ -385,7 +397,7 @@ fn old_session_projects_explicit_history_unavailable_state() -> Result<()> {
 }
 
 #[test]
-fn durable_intent_event_decoder_rejects_wire_payload_mismatch_and_future_slice() -> Result<()> {
+fn durable_intent_event_decoder_registers_r51_2_and_rejects_future_slice() -> Result<()> {
     assert_eq!(
         DurableEventType::from_event_type("intent_stack_created"),
         Some(DurableEventType::IntentStackCreated)
@@ -400,8 +412,20 @@ fn durable_intent_event_decoder_rejects_wire_payload_mismatch_and_future_slice()
     );
     assert_eq!(
         DurableEventType::from_event_type("intent_execution_bound"),
+        Some(DurableEventType::IntentExecutionBound)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_change_set_bound"),
+        Some(DurableEventType::IntentChangeSetBound)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_verification_linked"),
+        Some(DurableEventType::IntentVerificationLinked)
+    );
+    assert_eq!(
+        DurableEventType::from_event_type("intent_layer_manifest_recorded"),
         None,
-        "R51.2 event types must remain unregistered"
+        "R51.3 event types must remain unregistered"
     );
 
     let root_plan: IntentPlanV1 = serde_json::from_str(include_str!(
@@ -425,17 +449,20 @@ fn durable_intent_event_decoder_rejects_wire_payload_mismatch_and_future_slice()
             .contains("mismatched")
     );
 
+    let digest_graph: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../dev/fixtures/intent-stack-v1/digest-graph.json"
+    ))?;
+    let layer: IntentLayerManifestV1 =
+        serde_json::from_value(digest_graph["layer_manifest"].clone())?;
     let future = crate::StoredEvent::new(
         DurableEventType::IntentPlanRecorded,
         EventClass::Critical,
         "event-intent-future".to_owned(),
         "session-chat".to_owned(),
         1,
-        serde_json::to_value(IntentEventV1::ChangeSetBound {
+        serde_json::to_value(IntentEventV1::LayerManifestRecorded {
             schema_version: INTENT_CONTRACT_SCHEMA_VERSION,
-            intent_ref: IntentVersionRef::new(IntentId::new("root")?, 1)?,
-            execution_id: crate::IntentExecutionId::new("execution-1")?,
-            changeset_ids: vec!["changeset-1".to_owned()],
+            manifest: layer,
         })?,
     )?;
     assert!(
