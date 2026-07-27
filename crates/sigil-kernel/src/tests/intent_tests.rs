@@ -327,6 +327,11 @@ fn event_type_names_and_payload_variants_are_frozen() -> Result<()> {
             plan_digest: plan.plan_digest.clone(),
             acceptance_kind: IntentAcceptanceKind::ExplicitUserConfirmation,
             source_turn_id: "turn-1".to_owned(),
+            acceptance_authority_id: "decision-accept-intents-1".to_owned(),
+            task_plan_binding: Some(IntentTaskPlanBindingV1 {
+                task_id: "task-demo-1".to_owned(),
+                task_plan_version: 1,
+            }),
         },
         IntentEventV1::ExecutionBound {
             schema_version: 1,

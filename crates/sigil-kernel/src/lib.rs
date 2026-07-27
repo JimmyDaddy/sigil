@@ -19,6 +19,7 @@ pub mod hosted;
 pub mod image_attachment;
 pub mod integration;
 pub mod intent;
+pub mod intent_admission;
 pub mod memory;
 pub mod model_route;
 pub mod mutation;
@@ -288,11 +289,18 @@ pub use intent::{
     IntentOperationId, IntentOperationKind, IntentOperationPreviewV1, IntentOperationResolution,
     IntentPlanKind, IntentPlanProposalV1, IntentPlanV1, IntentProposalCriterionV1,
     IntentProposalUnitV1, IntentSourceV1, IntentStackId, IntentStackVersion,
-    IntentVerificationImpact, IntentVerificationImpactV1, IntentVersionRef, MAX_INTENT_CRITERIA,
-    MAX_INTENT_DEPENDENCIES, MAX_INTENT_REASON_BYTES, MAX_INTENT_STATEMENT_BYTES,
-    MAX_INTENT_TITLE_BYTES, MAX_INTENTS_PER_PLAN, PublicIntentArtifactSummaryV1,
-    PublicIntentOperationErrorV1, PublicIntentSourceV1, PublicIntentStackStateV1,
-    PublicIntentStackV1, PublicIntentV1, canonical_intent_digest,
+    IntentTaskPlanBindingV1, IntentVerificationImpact, IntentVerificationImpactV1,
+    IntentVersionRef, MAX_INTENT_CRITERIA, MAX_INTENT_DEPENDENCIES, MAX_INTENT_REASON_BYTES,
+    MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES, MAX_INTENTS_PER_PLAN,
+    PublicIntentArtifactSummaryV1, PublicIntentOperationErrorV1, PublicIntentSourceV1,
+    PublicIntentStackStateV1, PublicIntentStackV1, PublicIntentV1, canonical_intent_digest,
+};
+pub use intent_admission::{
+    AcceptedIntentPlanProjectionV1, INTENT_ADMISSION_PROJECTION_SCHEMA_VERSION,
+    INTENT_HISTORY_UNAVAILABLE_MESSAGE, IntentAcceptanceAuthorityV1, IntentAdmissionContextV1,
+    IntentAdmissionWriteOutcomeV1, IntentPlanAdmissionV1, IntentStackProjectionV1,
+    UserDeclaredIntentV1, admit_suggested_decomposition, admit_user_declared_root,
+    append_chat_root_intent_admission, append_task_intent_plan_admission,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use model_route::{ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute};

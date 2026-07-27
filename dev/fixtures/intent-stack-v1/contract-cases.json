@@ -6,7 +6,12 @@
     "stack_version": 1,
     "plan_digest": "sha256:jcs-v1:2222222222222222222222222222222222222222222222222222222222222222",
     "acceptance_kind": "explicit_user_confirmation",
-    "source_turn_id": "turn-1"
+    "source_turn_id": "turn-1",
+    "acceptance_authority_id": "decision-accept-intents-1",
+    "task_plan_binding": {
+      "task_id": "task-demo-1",
+      "task_plan_version": 1
+    }
   },
   "task_execution_bound": {
     "record": "execution_bound",

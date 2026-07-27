@@ -10,20 +10,21 @@ use uuid::Uuid;
 use crate::{
     ApprovalMode, ChangeSet, ChangeSetResult, CommandPermissionMatch, CompactionAppliedV2,
     CompactionFailureEntry, CompactionStartedEntry, ControlEntry, ConversationInputPromotedEntry,
-    EgressDisclosurePresented, HostedToolAuthorization, HostedToolOutcome, JobIntentEntry,
-    McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared, NetworkEffect,
-    OrchestrationRouteDisabledEntry, PathTrustZone, PermissionConfirmation, PermissionRisk,
-    ProviderContinuationCandidateInvalidatedEntry, ProviderContinuationCandidateRecordedEntry,
-    ProviderContinuationObservedEntry, ProviderContinuationPayloadLifecycleEntry,
-    ProviderContinuationState, ProviderContinuationToolClosureRecordedEntry,
-    ProviderObservedResolutionPlanRecordedEntry, ProviderPhysicalAttemptStartedEntry,
-    ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome, QueryEgressStarted, SessionLogEntry,
-    StepLeaseEntry, StepLeaseHeartbeatEntry, TaskGuidancePromotedEntry, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry,
-    ToolCall, ToolOperation, ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent,
-    ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
-    VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
-    WebFetchTransportAuthorization, WorkspaceMutationDetected,
+    EgressDisclosurePresented, HostedToolAuthorization, HostedToolOutcome, IntentEventV1,
+    JobIntentEntry, McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared,
+    NetworkEffect, OrchestrationRouteDisabledEntry, PathTrustZone, PermissionConfirmation,
+    PermissionRisk, ProviderContinuationCandidateInvalidatedEntry,
+    ProviderContinuationCandidateRecordedEntry, ProviderContinuationObservedEntry,
+    ProviderContinuationPayloadLifecycleEntry, ProviderContinuationState,
+    ProviderContinuationToolClosureRecordedEntry, ProviderObservedResolutionPlanRecordedEntry,
+    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome,
+    QueryEgressStarted, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
+    TaskGuidancePromotedEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry, ToolCall, ToolOperation,
+    ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent, ToolResult, ToolSpec,
+    ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
+    VerificationReceiptLinkRecorded, VerificationRecordedEntry, WebFetchTransportAuthorization,
+    WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -198,6 +199,9 @@ durable_event_types! {
     VerificationFailureLocatorRecorded => ("verification_failure_locator_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     EnvironmentFingerprintRecorded => ("environment_fingerprint_recorded", RecoveryCritical, Critical, DirectJson, "environment_fingerprint_recorded"),
     ReadinessEvaluated => ("readiness_evaluated", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IntentStackCreated => ("intent_stack_created", RecoveryCritical, Critical, DirectJson, "intent_stack_created"),
+    IntentPlanRecorded => ("intent_plan_recorded", RecoveryCritical, Critical, DirectJson, "intent_plan_recorded"),
+    IntentPlanAccepted => ("intent_plan_accepted", RecoveryCritical, Critical, DirectJson, "intent_plan_accepted"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffResolved => ("task_handoff_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -492,6 +496,7 @@ pub enum TypedDomainEvent {
     JobIntentRecorded(JobIntentEntry),
     StepLeaseRecorded(StepLeaseEntry),
     StepLeaseHeartbeatRecorded(StepLeaseHeartbeatEntry),
+    Intent(IntentEventV1),
     TaskStatusChanged(ControlEntry),
     TaskHandoffRequested(TaskHandoffRequestedEntry),
     TaskHandoffResolved(TaskHandoffResolvedEntry),
@@ -704,6 +709,11 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 &event,
             )?)
         }
+        DurableEventType::IntentStackCreated
+        | DurableEventType::IntentPlanRecorded
+        | DurableEventType::IntentPlanAccepted => {
+            TypedDomainEvent::Intent(decode_intent_event(&event)?)
+        }
         DurableEventType::WriteLeaseAcquired
         | DurableEventType::WriteLeaseReleased
         | DurableEventType::IsolatedWorkspacePrepared
@@ -871,6 +881,28 @@ fn decode_step_lease_heartbeat_recorded(event: &StoredEvent) -> Result<StepLease
         ControlEntry::StepLeaseHeartbeatRecorded(entry) => Ok(entry),
         _ => bail!("step lease heartbeat event carried non-step-lease-heartbeat payload"),
     }
+}
+
+fn decode_intent_event(event: &StoredEvent) -> Result<IntentEventV1> {
+    let intent_event: IntentEventV1 = decode_event_payload(event)?;
+    intent_event.validate_contract()?;
+    let expected_type = match &intent_event {
+        IntentEventV1::StackCreated { .. } => DurableEventType::IntentStackCreated,
+        IntentEventV1::PlanRecorded { .. } => DurableEventType::IntentPlanRecorded,
+        IntentEventV1::PlanAccepted { .. } => DurableEventType::IntentPlanAccepted,
+        _ => bail!(
+            "{} carries an Intent event reserved for a later RFC-0051 slice",
+            event.event_type
+        ),
+    };
+    if event.event_kind() != Some(expected_type) {
+        bail!(
+            "{} event carried mismatched Intent payload {}",
+            event.event_type,
+            intent_event.event_type()
+        );
+    }
+    Ok(intent_event)
 }
 
 fn decode_write_isolation_record(event: &StoredEvent) -> Result<ControlEntry> {

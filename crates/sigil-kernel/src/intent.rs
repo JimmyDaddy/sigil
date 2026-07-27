@@ -1219,9 +1219,18 @@ pub enum IntentAcceptanceKind {
     ContentBoundSpecDecision,
 }
 
+/// Exact TaskPlan version admitted in the same durable writer batch as an IntentPlan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct IntentTaskPlanBindingV1 {
+    pub task_id: String,
+    pub task_plan_version: u32,
+}
+
 /// Recovery-critical Intent Stack event payload contract.
 ///
-/// R51.0 freezes this schema only; it does not register these variants in the durable writer.
+/// R51.0 froze this schema. R51.1 registers the stack/plan/acceptance subset; later slices register
+/// the execution, artifact, verification, and operation variants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "record", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IntentEventV1 {
@@ -1242,6 +1251,9 @@ pub enum IntentEventV1 {
         plan_digest: IntentDigest,
         acceptance_kind: IntentAcceptanceKind,
         source_turn_id: String,
+        acceptance_authority_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_plan_binding: Option<IntentTaskPlanBindingV1>,
     },
     ExecutionBound {
         schema_version: u16,
@@ -1373,8 +1385,24 @@ impl IntentEventV1 {
                 validate_bounded_identity("intent source session id", source_session_id)
             }
             Self::PlanRecorded { plan, .. } => plan.validate_contract(),
-            Self::PlanAccepted { source_turn_id, .. } => {
-                validate_bounded_identity("intent acceptance source turn id", source_turn_id)
+            Self::PlanAccepted {
+                source_turn_id,
+                acceptance_authority_id,
+                task_plan_binding,
+                ..
+            } => {
+                validate_bounded_identity("intent acceptance source turn id", source_turn_id)?;
+                validate_bounded_identity(
+                    "intent acceptance authority id",
+                    acceptance_authority_id,
+                )?;
+                if let Some(binding) = task_plan_binding {
+                    validate_bounded_identity("intent acceptance task id", &binding.task_id)?;
+                    if binding.task_plan_version == 0 {
+                        bail!("intent acceptance task plan version must be non-zero");
+                    }
+                }
+                Ok(())
             }
             Self::ExecutionBound { binding, .. } => validate_execution_binding(binding),
             Self::ChangeSetBound {

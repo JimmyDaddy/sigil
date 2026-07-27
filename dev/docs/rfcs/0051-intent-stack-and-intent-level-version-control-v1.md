@@ -1,6 +1,6 @@
 # RFC-0051 Intent Stack / 意图级版本控制 V1
 
-状态：proposed / implementation active（R51.0 complete，R51.1 next）
+状态：proposed / implementation active（R51.0-R51.1 complete，R51.2 next）
 
 创建日期：2026-07-22
 
@@ -27,7 +27,10 @@ Intent Stack 把用户认可的变更意图提升为一等、可持久化、可�
 
 > 撤销一个需求，而不是回到一个时间点。
 
-本 RFC 冻结语义、所有权和安全边界，并已由明确实施任务完成 R51.0 契约切片。后续切片仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil 受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、未知副作用或依赖歧义必须 fail closed。
+本 RFC 冻结语义、所有权和安全边界，并已完成 R51.0 契约与 R51.1
+admission/projection 切片。后续切片仍只覆盖归属明确、跨 intent 文件互斥、由 Sigil
+受控文件 mutation 产生的普通文件改动；任意人工 drift、同文件跨 intent、共享 hunk、
+未知副作用或依赖歧义必须 fail closed。
 
 ## 2. Problem statement
 
@@ -120,7 +123,8 @@ Intent operation 是针对一个或一组 intent 的高层动作：
 - 不把每个 agent step、tool call 或 validation command 都暴露为用户要管理的 stack item。
 - 不新增一组 command-only 的 `/intent-*` 主入口，也不要求用户维护复杂配置矩阵。
 - 不替代 Git；Intent Stack 是高于文件版本控制的产品语义层，最终仍可导出普通 diff/commit。
-- 不在本 RFC 变更中实现 domain type、event、projection、runtime command 或 UI。
+- R51.0-R51.1 不实现 execution binding、artifact materialization、写 operation、runtime
+  command 或 UI；它们必须等待对应后续切片。
 
 ## 6. Product contract
 
@@ -650,6 +654,36 @@ R51.0 只增加纯 contract validation、canonical digest 与 fixture tests。�
 artifact materializer、operation apply、TUI、HTTP、Desktop 或 automation；这些仍由
 R51.1-R51.7 分别负责。
 
+### 12.2 R51.1 implementation checkpoint（2026-07-27）
+
+R51.1 已完成，落点为 `sigil-kernel::intent_admission`、durable event decoder 与 session
+mixed writer batch。本切片提供：
+
+- 非序列化的 host acceptance authority：`UserDeclaredRoot` 只能绑定原始 user-turn
+  authority；`SuggestedDecomposition` 必须绑定 exact proposal digest 的显式用户确认。provider
+  proposal 仍使用 `deny_unknown_fields`，不能提交 acceptance kind、authority id、runtime
+  intent id 或 stack version；
+- runtime-owned、确定性且 retry-stable 的 intent/criterion id resolution；provider alias
+  只作为 admission 输入，不直接成为 durable identity；
+- `intent_stack_created`、`intent_plan_recorded`、`intent_plan_accepted` 三个
+  recovery-critical typed event 的正式注册与 strict decoder。其余十个 R51 event 仍保持
+  未注册，直到对应 execution/artifact/operation slice；
+- Task 路径的 mixed writer batch：三个 Intent event 在前，accepted `TaskPlan` control
+  在最后。projection 只有看到与 acceptance 紧邻、identity/version 完全匹配的 TaskPlan
+  才激活 task-bound IntentPlan；崩溃留下的 Intent prefix 保持 incomplete，不能启动 write
+  participant；
+- Chat 路径的单一 `UserDeclaredRoot` acceptance；R51.2 再绑定 root logical run、source turn
+  和 concrete attempt；
+- append-only `IntentStackProjectionV1`、bounded available DTO 与旧 session 的显式
+  `history_unavailable` 状态。incomplete/mismatched/duplicate/non-monotonic admission
+  一律 fail closed。
+
+完成证据覆盖 exact-authority negative cases、1-16 节点 DAG schema/property、同批顺序与
+idempotent replay、TaskPlan 尾记录 crash 截断、Chat root resume、legacy unavailable 以及
+wire/payload mismatch。R51.1 只建立可供 runtime 调用的 admission 原语；它不把模型 proposal
+自动视为用户确认，也不开放 execution authority、artifact ownership、drop/replace、TUI 或
+adapter command。
+
 依赖顺序：
 
 ```text
@@ -745,6 +779,6 @@ replace/rebase mutation 不再混入 V1 active slices；它们必须在 R51.4 do
 selective drop 闭环完成；它仍不等于通用语义 merge、外部副作用补偿或项目级长期记忆。
 
 本 RFC 当前为 `proposed / implementation active`。R51.0 已冻结具体 Rust/DTO 命名、digest
-算法、错误 taxonomy 与 golden fixtures，但没有改变生产运行行为。R51.1 起才允许在对应切片
-内接入 append-only admission/projection；任何 TUI 或 destructive operation 仍必须等待其依赖
-切片和独立门禁完成。
+算法、错误 taxonomy 与 golden fixtures；R51.1 已接入 host-authorized append-only
+admission/projection 和 TaskPlan mixed writer batch。R51.2 起继续补 execution/ChangeSet/
+verification lineage；任何 TUI 或 destructive operation 仍必须等待其依赖切片和独立门禁完成。

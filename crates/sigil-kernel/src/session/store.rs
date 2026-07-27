@@ -171,7 +171,7 @@ impl JsonlSessionStore {
             .context("session writer returned no event for a single append")
     }
 
-    pub(super) fn append_events_and_session_entries(
+    pub(crate) fn append_events_and_session_entries(
         &self,
         durable_events: Vec<(DurableEventType, EventClass, serde_json::Value)>,
         entries: &[SessionLogEntry],
@@ -215,6 +215,65 @@ impl JsonlSessionStore {
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         let (events, _) = writer.append_events(pending, false)?;
         Ok(events)
+    }
+
+    /// Conditionally appends one mixed direct-event/session-entry writer batch.
+    ///
+    /// The predicate and append run under the same process writer and its persistent cross-process
+    /// single-writer ownership, so admission code can compare the current durable projection
+    /// without a competing writer. Direct events are always ordered before session entries.
+    pub(crate) fn append_events_and_session_entries_if<F>(
+        &self,
+        durable_events: Vec<(DurableEventType, EventClass, serde_json::Value)>,
+        entries: &[SessionLogEntry],
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        if durable_events.is_empty() && entries.is_empty() {
+            bail!("conditional mixed event append batch must not be empty");
+        }
+        if entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
+            )
+        }) {
+            bail!("conversation input promotion must use the critical direct promotion append API");
+        }
+        let mut pending = durable_events
+            .into_iter()
+            .map(|(event_type, event_class, payload)| PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                event_id: None,
+                correlation_id: None,
+                causation_id: None,
+            })
+            .collect::<Vec<_>>();
+        pending.extend(entries.iter().map(|entry| {
+            let event_type = session_entry_event_type(entry);
+            PendingStoredEvent {
+                event_type,
+                event_class: session_entry_event_class(event_type),
+                payload: serde_json::json!({ "session_log_entry": entry }),
+                event_id: None,
+                correlation_id: None,
+                causation_id: None,
+            }
+        }));
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let records = writer.read_records_writer()?;
+        if !should_append(&records)? {
+            return Ok(None);
+        }
+        let (events, _) = writer.append_events(pending, false)?;
+        Ok(Some(events))
     }
 
     pub(crate) fn append_event_if<F>(

@@ -938,16 +938,18 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 
 当前实现选择如下：
 
-- RFC-0051 Intent Stack 的 R51.0 契约切片已经落地在 provider-neutral
-  `sigil-kernel::intent`：model/provider proposal 使用无 runtime authority 的 alias schema，
-  accepted plan、独立 acceptance event、Task/Chat provenance、artifact/layer/operation 与
-  bounded public DTO 使用严格 V1 schema；canonical JSON digest 与 exact byte digest 分型，
-  layer core -> artifact manifest -> final layer manifest 使用无循环单向 digest 图。对应 golden
-  corpus 固定 event/error/enum token、UserDeclaredRoot/SuggestedDecomposition、shared-file、
-  verification、authority boundary、artifact deletion 和 exact preview。该切片只提供纯
-  validation/digest contract，尚未注册 durable writer/reducer，也没有接入 Task/Chat admission、
-  materializer、operation apply 或任何 TUI/HTTP/Desktop 入口；这些仍按 RFC-0051 R51.1-R51.7
-  逐片实施。
+- RFC-0051 Intent Stack 的 R51.0-R51.1 已落地在 provider-neutral
+  `sigil-kernel::intent` / `intent_admission`：model/provider proposal 使用无 runtime
+  authority 的 alias schema，accepted plan、独立 acceptance event、Task/Chat provenance、
+  artifact/layer/operation 与 bounded public DTO 使用严格 V1 schema；canonical JSON digest
+  与 exact byte digest 分型，layer core -> artifact manifest -> final layer manifest 使用无循环
+  单向 digest 图。host-only acceptance authority 将 `UserDeclaredRoot` 绑定原始 user turn，并将
+  `SuggestedDecomposition` 绑定 exact proposal digest 的显式确认；runtime 重新分配 retry-stable
+  intent/criterion id。首批三个 intent durable event 已注册，Task-bound admission 把 accepted
+  `TaskPlan` 作为 mixed writer batch 的最后一条记录，append-only projection 只有在紧邻且
+  identity/version 匹配时才激活；crash prefix 与旧 session 分别投影为 incomplete 和
+  `history_unavailable`。execution/ChangeSet/verification bridge、materializer、operation apply
+  及 TUI/HTTP/Desktop 入口仍按 RFC-0051 R51.2-R51.7 逐片实施。
 - `sigil-kernel::TaskStateProjection` 从 append-only control log 重建 task run、plan、step、child session 和 route 摘要状态。
 - `sigil-runtime::ConversationCoordinator` 将 TUI direct/queued source turn 绑定到 typed run purpose；TUI 在 typed handoff 后于同一 cancellation/approval root 内继续 task。Application source 使用相同 conversation purpose、foreground Task executor、typed control 与 restart recovery contract。
 - Planner 通过 internal model-visible `task_plan_update` tool 写入 durable plan；该 tool 由 agent loop 拦截并写 `ToolExecution` audit，不作为普通 workspace tool 执行。
