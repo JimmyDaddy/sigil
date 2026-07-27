@@ -186,6 +186,7 @@ def child_environment(
     case_root: Path,
     provider: str,
     credential_env: str | None = None,
+    toolchain_bin: Path | None = None,
 ) -> dict[str, str]:
     environment = SUPPORT.identity_environment(os.environ)
     allowed_names = PLAN.COMMON_PROVIDER_ENV_NAMES | PLAN.PROVIDER_ENV_BY_NAME.get(provider, set())
@@ -193,6 +194,24 @@ def child_environment(
         if not PLAN.ENVIRONMENT_NAME.fullmatch(credential_env):
             raise CampaignError("active provider credential environment is invalid")
         allowed_names.add(credential_env)
+    if toolchain_bin is not None:
+        resolved_toolchain_bin = toolchain_bin.resolve(strict=True)
+        if not resolved_toolchain_bin.is_dir():
+            raise CampaignError("direct Rust toolchain bin is not a directory")
+        for executable in ("cargo", "rustc"):
+            candidate = resolved_toolchain_bin / executable
+            if (
+                not candidate.is_file()
+                or not os.access(candidate, os.X_OK)
+                or candidate.resolve(strict=True).parent != resolved_toolchain_bin
+            ):
+                raise CampaignError("direct Rust toolchain is incomplete")
+        current_path = environment.get("PATH", "")
+        environment["PATH"] = (
+            f"{resolved_toolchain_bin}{os.pathsep}{current_path}"
+            if current_path
+            else str(resolved_toolchain_bin)
+        )
     case_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     for name in allowed_names:
         if name in os.environ:
@@ -210,6 +229,33 @@ def child_environment(
     for name in ("home", "xdg-config", "xdg-state", "xdg-cache", "tmp"):
         (case_root / name).mkdir(parents=True, mode=0o700, exist_ok=True)
     return environment
+
+
+def resolve_direct_rust_toolchain_bin(root: Path) -> Path:
+    try:
+        completed = subprocess.run(
+            ["rustc", "--print", "sysroot"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CampaignError("failed to resolve the admitted Rust toolchain") from error
+    raw_sysroot = completed.stdout.strip()
+    if not raw_sysroot or "\n" in raw_sysroot:
+        raise CampaignError("Rust toolchain sysroot output is invalid")
+    toolchain_bin = (Path(raw_sysroot).resolve(strict=True) / "bin").resolve(strict=True)
+    for executable in ("cargo", "rustc"):
+        candidate = toolchain_bin / executable
+        if (
+            not candidate.is_file()
+            or not os.access(candidate, os.X_OK)
+            or candidate.resolve(strict=True).parent != toolchain_bin
+        ):
+            raise CampaignError("admitted Rust toolchain is incomplete")
+    return toolchain_bin
 
 
 def run_child(
@@ -521,6 +567,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             PLAN.load_fixture(root / PLAN.DEFAULT_FIXTURE)
         binary_source, identity = SUPPORT.inspect_binary(args.binary)
         SUPPORT.assert_expected_identity(identity, args)
+        toolchain_bin = (
+            resolve_direct_rust_toolchain_bin(root)
+            if any(case in MODEL_CASES for case in selected)
+            else None
+        )
         timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         selected_output = args.output_dir or root / ".repo-local-dev" / "dogfood" / f"real-{timestamp}"
         output_dir = (selected_output if selected_output.is_absolute() else root / selected_output).resolve()
@@ -654,6 +705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         temporary_root / "model-child",
                         source_config.provider,
                         source_config.credential_env,
+                        toolchain_bin,
                     )
                     model_child = run_child(
                         command,

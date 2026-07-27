@@ -119,6 +119,45 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(environment["CUSTOM_DEEPSEEK_KEY"], "provider-key")
             self.assertNotIn("UNRELATED_SECRET", environment)
 
+    def test_environment_prefers_direct_toolchain_without_cargo_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            toolchain_bin = root / "toolchain" / "bin"
+            toolchain_bin.mkdir(parents=True)
+            for executable in ("cargo", "rustc"):
+                path = toolchain_bin / executable
+                path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                path.chmod(0o700)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": "/usr/bin",
+                    "RUSTUP_HOME": "/private/rustup",
+                    "CARGO_HOME": "/private/cargo",
+                },
+                clear=True,
+            ):
+                environment = MODULE.child_environment(
+                    root / "case",
+                    "deepseek",
+                    toolchain_bin=toolchain_bin,
+                )
+            self.assertEqual(
+                Path(environment["PATH"].split(os.pathsep)[0]),
+                toolchain_bin.resolve(),
+            )
+            self.assertNotIn("RUSTUP_HOME", environment)
+            self.assertNotIn("CARGO_HOME", environment)
+
+    def test_direct_toolchain_resolution_rejects_missing_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sysroot = Path(temporary)
+            (sysroot / "bin").mkdir()
+            completed = mock.Mock(stdout=f"{sysroot}\n")
+            with mock.patch.object(MODULE.subprocess, "run", return_value=completed):
+                with self.assertRaisesRegex(MODULE.CampaignError, "incomplete"):
+                    MODULE.resolve_direct_rust_toolchain_bin(Path(temporary))
+
 
 class EvidenceTests(unittest.TestCase):
     def test_model_result_projection_drops_provider_and_session_content(self) -> None:
