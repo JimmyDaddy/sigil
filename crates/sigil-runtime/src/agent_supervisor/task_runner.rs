@@ -1384,6 +1384,8 @@ async fn promotion_preview_from_prepared(
         .plans
         .get(&plan.plan_id)
         .ok_or_else(|| anyhow::anyhow!("integration plan disappeared before promotion review"))?;
+    let (intent_binding, has_executable_intent_refs) =
+        task_intent_promotion_binding(parent_session, plan)?;
     build_task_promotion_preview(
         state,
         TaskPromotionPreviewInput {
@@ -1391,10 +1393,10 @@ async fn promotion_preview_from_prepared(
             aggregate_diff_digest: prepared.aggregate_diff_digest(),
             target: prepared.target().clone(),
             verification_invalidation: vec![policy.verification_scope.scope_hash.clone()],
-            intent_binding: None,
+            intent_binding,
             policy_digest,
             has_pending_approval: false,
-            has_executable_intent_refs: false,
+            has_executable_intent_refs,
             created_at_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .context("system clock is before unix epoch")?
@@ -1403,6 +1405,89 @@ async fn promotion_preview_from_prepared(
                 .context("promotion preview timestamp exceeds u64")?,
         },
     )
+}
+
+pub(crate) fn task_intent_promotion_binding(
+    parent_session: &Session,
+    integration_plan: &sigil_kernel::IntegrationPlan,
+) -> Result<(Option<String>, bool)> {
+    let task_projection = parent_session.task_state_projection();
+    let task = task_projection
+        .tasks
+        .get(&integration_plan.task_id)
+        .ok_or_else(|| anyhow::anyhow!("integration plan has no durable Task projection"))?;
+    let task_plan = task
+        .plans
+        .get(&integration_plan.plan_version)
+        .filter(|plan| plan.status == sigil_kernel::TaskPlanStatus::Accepted)
+        .ok_or_else(|| anyhow::anyhow!("integration plan has no accepted TaskPlan version"))?;
+    let mut bindings = Vec::with_capacity(integration_plan.proposals.len());
+    let mut has_refs = false;
+    for proposal in &integration_plan.proposals {
+        let step = task_plan
+            .steps
+            .iter()
+            .find(|step| step.step_id == proposal.step_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "integration proposal {} references an unknown TaskPlan step",
+                    proposal.change_set_id.as_str()
+                )
+            })?;
+        match step.intent_refs.as_slice() {
+            [] => bindings.push(serde_json::json!({
+                "change_set_id": proposal.change_set_id,
+                "step_id": proposal.step_id,
+                "intent_ref": null,
+            })),
+            [intent_ref] => {
+                has_refs = true;
+                bindings.push(serde_json::json!({
+                    "change_set_id": proposal.change_set_id,
+                    "step_id": proposal.step_id,
+                    "intent_ref": intent_ref,
+                }));
+            }
+            _ => anyhow::bail!(
+                "integration write step {} carries ambiguous Intent refs",
+                proposal.step_id.as_str()
+            ),
+        }
+    }
+    if !has_refs {
+        return Ok((None, false));
+    }
+    if bindings
+        .iter()
+        .any(|binding| binding["intent_ref"].is_null())
+    {
+        anyhow::bail!("Intent-enabled integration plan contains an unbound write proposal");
+    }
+    let intent_projection = parent_session.intent_stack_projection()?;
+    let accepted = intent_projection
+        .latest_accepted_plan()
+        .ok_or_else(|| anyhow::anyhow!("Intent-bound integration has no accepted IntentPlan"))?;
+    let expected_binding = sigil_kernel::IntentTaskPlanBindingV1 {
+        task_id: integration_plan.task_id.as_str().to_owned(),
+        task_plan_version: integration_plan.plan_version,
+    };
+    if accepted.task_plan_binding.as_ref() != Some(&expected_binding) {
+        anyhow::bail!("Intent-bound integration does not match accepted TaskPlan authority");
+    }
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "intent_plan_digest": accepted.plan.plan_digest,
+        "task_id": integration_plan.task_id,
+        "task_plan_version": integration_plan.plan_version,
+        "bindings": bindings,
+    });
+    Ok((
+        Some(format!(
+            "sha256:{}",
+            sigil_kernel::sha256_hex(&serde_json::to_vec(&payload)?)
+        )),
+        true,
+    ))
 }
 
 async fn prepare_integration_promotion_preview(

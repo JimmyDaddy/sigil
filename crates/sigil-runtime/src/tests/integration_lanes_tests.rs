@@ -816,6 +816,7 @@ async fn durable_integration_review_rebuilds_only_the_exact_reviewed_candidate()
         &mut session,
         &mut handler,
         Arc::new(LocalExecutionBackend),
+        &sigil_kernel::SecretRedactor::empty(),
         &root,
         &request,
     )

@@ -796,6 +796,13 @@ where
                         Some(&step.step_id),
                         step.role,
                     )?;
+                    bind_task_step_intent_execution(
+                        session,
+                        &request,
+                        plan_version,
+                        &step,
+                        &attempt,
+                    )?;
                     let prompt = if step.role == AgentRole::Executor {
                         executor_step_prompt(
                             &request.objective,
@@ -928,6 +935,7 @@ where
                                     &request,
                                     plan_version,
                                     &step,
+                                    &attempt,
                                     base_snapshot_id,
                                     &step_output,
                                 )?;
@@ -1039,6 +1047,7 @@ where
                     Some(&step.step_id),
                     step.role,
                 )?;
+                bind_task_step_intent_execution(session, &request, plan_version, &step, &attempt)?;
                 let write_lease_id = acquire_task_write_lease(
                     session,
                     handler,
@@ -1838,6 +1847,7 @@ where
                 request,
                 plan_version,
                 step,
+                attempt,
                 &base_snapshot_id,
                 &step_output,
             )?;
@@ -2757,6 +2767,33 @@ where
         ControlEntry::TaskParticipantAttempt(entry.clone()),
     )?;
     Ok(entry)
+}
+
+fn bind_task_step_intent_execution(
+    session: &Session,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    attempt: &TaskParticipantAttemptEntry,
+) -> Result<Option<crate::IntentExecutionId>> {
+    if step.effective_mode() != TaskStepMode::Write || step.intent_refs.is_empty() {
+        return Ok(None);
+    }
+    let [intent_ref] = step.intent_refs.as_slice() else {
+        bail!(
+            "intent-bound write step {} must carry exactly one immutable intent ref",
+            step.step_id.as_str()
+        );
+    };
+    crate::append_task_intent_execution_binding(
+        session,
+        intent_ref.clone(),
+        &request.task_id,
+        plan_version,
+        &step.step_id,
+        &attempt.attempt_id,
+    )
+    .map(|outcome| outcome.execution_id)
 }
 
 fn unix_time_ms() -> u64 {

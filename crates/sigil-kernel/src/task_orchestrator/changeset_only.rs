@@ -177,6 +177,7 @@ pub(super) fn record_isolated_child_output<H>(
     request: &SequentialTaskRequest,
     plan_version: u32,
     step: &TaskStepSpec,
+    attempt: &crate::TaskParticipantAttemptEntry,
     base_snapshot_id: &str,
     output: &StepRunOutput,
 ) -> Result<()>
@@ -222,6 +223,29 @@ where
         handler,
         ControlEntry::ChangeSetProposed(proposal.change_set.clone()),
     )?;
+    if step.effective_mode() == TaskStepMode::Write && !step.intent_refs.is_empty() {
+        let [intent_ref] = step.intent_refs.as_slice() else {
+            bail!(
+                "intent-bound isolated step {} must carry exactly one immutable intent ref",
+                step.step_id.as_str()
+            );
+        };
+        let execution = crate::append_task_intent_execution_binding(
+            session,
+            intent_ref.clone(),
+            &request.task_id,
+            plan_version,
+            &step.step_id,
+            &attempt.attempt_id,
+        )?
+        .execution_id
+        .ok_or_else(|| anyhow!("intent-bound isolated step lost its execution identity"))?;
+        crate::append_intent_changeset_binding(
+            session,
+            &execution,
+            vec![proposal.change_set.id.clone()],
+        )?;
+    }
     append_task_control(
         session,
         handler,

@@ -4004,6 +4004,150 @@ async fn changeset_only_ready_steps_batch_proposals_without_parent_workspace_mut
 }
 
 #[tokio::test]
+async fn intent_bound_changeset_steps_persist_exact_attempt_and_proposal_lineage() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::load_from_store("planner", "model", store)?;
+    let task_id = TaskId::new("task_intent_changesets")?;
+    let request = SequentialTaskRequest {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "propose independently attributable changes".to_owned(),
+    };
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: request.parent_session_ref.clone(),
+        objective: request.objective.clone(),
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+    let proposal = crate::IntentPlanProposalV1::new(
+        "proposal-task-lineage",
+        "turn-task-lineage",
+        vec![
+            crate::IntentProposalUnitV1 {
+                intent_alias: "first".to_owned(),
+                title: "First outcome".to_owned(),
+                statement: "Produce the first independent change.".to_owned(),
+                acceptance_criteria: vec![crate::IntentProposalCriterionV1 {
+                    criterion_alias: "first-ready".to_owned(),
+                    statement: "The first proposal is reviewable.".to_owned(),
+                    required: true,
+                }],
+                depends_on_aliases: Vec::new(),
+            },
+            crate::IntentProposalUnitV1 {
+                intent_alias: "second".to_owned(),
+                title: "Second outcome".to_owned(),
+                statement: "Produce the second independent change.".to_owned(),
+                acceptance_criteria: vec![crate::IntentProposalCriterionV1 {
+                    criterion_alias: "second-ready".to_owned(),
+                    statement: "The second proposal is reviewable.".to_owned(),
+                    required: true,
+                }],
+                depends_on_aliases: Vec::new(),
+            },
+        ],
+    )?;
+    let authority = crate::IntentAcceptanceAuthorityV1::explicit_user_confirmation(
+        proposal.source_turn_id.clone(),
+        "event-accept-task-lineage",
+        proposal.proposal_digest.clone(),
+    )?;
+    let admission = crate::admit_suggested_decomposition(
+        &crate::IntentAdmissionContextV1::initial(
+            crate::IntentStackId::new("stack-task-lineage")?,
+            stable_workspace_id(temp.path())?,
+            session.session_scope_id(),
+        )?,
+        &proposal,
+        &authority,
+    )?;
+    let steps = [("proposal_a", "first"), ("proposal_b", "second")]
+        .into_iter()
+        .map(|(step_id, _)| {
+            Ok(TaskStepSpec {
+                step_id: TaskStepId::new(step_id)?,
+                title: format!("proposal {step_id}"),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::ChangesetOnly),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let bindings = [("proposal_a", "first"), ("proposal_b", "second")]
+        .into_iter()
+        .map(|(step_id, alias)| {
+            Ok(crate::TaskStepIntentAliasBindingV1 {
+                step_id: TaskStepId::new(step_id)?,
+                intent_aliases: vec![alias.to_owned()],
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let task_plan = crate::bind_task_plan_intents(
+        &admission,
+        TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        },
+        &bindings,
+    )?;
+    crate::append_task_intent_plan_admission(&mut session, &admission, task_plan)?;
+
+    let orchestrator =
+        SequentialTaskOrchestrator::new_with_child_runner(ChangesetBatchChildRunner {
+            batch_calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .with_max_parallel_changeset_steps(2);
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+    let options = options_for_workspace(temp.path());
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            request,
+            options.clone(),
+            options.clone(),
+            options,
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    let lineage = session.intent_lineage_projection()?;
+    assert_eq!(lineage.executions.len(), 2);
+    assert!(lineage.executions.values().all(|execution| {
+        matches!(
+            execution.binding.origin,
+            crate::IntentExecutionOriginV1::Task {
+                attempt_id: Some(_),
+                ..
+            }
+        ) && execution.changeset_ids.len() == 1
+    }));
+    assert_eq!(
+        lineage
+            .executions
+            .values()
+            .flat_map(|execution| execution.changeset_ids.iter())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn task_write_isolation_active_lease_pauses_ready_queue_without_running_steps() -> Result<()>
 {
     let read_requests = Arc::new(Mutex::new(Vec::new()));
@@ -4379,6 +4523,18 @@ fn unchanged_worktree_child_does_not_request_empty_merge_review() -> Result<()> 
     };
     let mut session = Session::new("planner", "model");
     let mut handler = RecordingEventHandler::default();
+    let attempt = TaskParticipantAttemptEntry {
+        child_session_ref: SessionRef::new_relative("child.jsonl")?,
+        attempt_id: TaskParticipantAttemptId::new("attempt-worktree-noop")?,
+        task_id: request.task_id.clone(),
+        purpose: TaskParticipantPurpose::Step,
+        ordinal: 1,
+        plan_version: Some(1),
+        step_id: Some(step.step_id.clone()),
+        role: step.role,
+        status: TaskParticipantAttemptStatus::Started,
+        reason: None,
+    };
 
     record_isolated_child_output(
         &mut session,
@@ -4386,6 +4542,7 @@ fn unchanged_worktree_child_does_not_request_empty_merge_review() -> Result<()> 
         &request,
         1,
         &step,
+        &attempt,
         "snapshot-parent",
         &output,
     )?;

@@ -254,6 +254,30 @@ fn exact_integration_review_reads_and_digest_checks_the_bound_artifact() -> Resu
             _ => {}
         }
     }
+
+    worker.send(WorkerCommand::AcceptTaskIntegration {
+        request: request.clone(),
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!("timed out waiting for integration acceptance"));
+        }
+        match worker.recv_with_timeout(remaining)? {
+            WorkerMessage::TaskIntegrationAcceptanceFailed {
+                request: failed_request,
+                ..
+            } => {
+                assert_eq!(failed_request, request);
+                break;
+            }
+            WorkerMessage::RunFailed(error) => {
+                return Err(anyhow!("integration acceptance worker failed: {error}"));
+            }
+            _ => {}
+        }
+    }
     worker.shutdown()?;
     Ok(())
 }

@@ -446,11 +446,13 @@ where
                     continue;
                 };
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
                 match runtime.block_on(
                     sigil_runtime::integration_lanes::accept_task_integration_review(
                         session,
                         &mut handler,
                         execution_backend,
+                        &secret_redactor,
                         &options.workspace_root,
                         &request,
                     ),

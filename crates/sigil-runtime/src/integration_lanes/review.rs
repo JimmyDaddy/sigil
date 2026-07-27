@@ -4,9 +4,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ControlEntry, EventHandler, EvidenceScope, ExecutionBackend, IntegrationBaseRepresentation,
-    IntegrationProjection, IntegrationPromotionAttemptId, RunEvent, Session, SessionLogEntry,
-    TaskIntegrationReviewRequest, TaskPromotionAuthority, TaskPromotionPreview, TrustedCheckSpec,
-    VerificationPolicy, WorkspaceTrust, stable_event_uuid, stable_workspace_id,
+    IntegrationProjection, IntegrationPromotionAttemptId, IntentExecutionOriginV1, RunEvent,
+    SecretRedactor, Session, SessionLogEntry, TaskIntegrationReviewRequest, TaskPromotionAuthority,
+    TaskPromotionPreview, TrustedCheckSpec, VerificationPolicy, WorkspaceTrust,
+    materialize_intent_layer, stable_event_uuid, stable_workspace_id,
 };
 
 use super::{
@@ -160,6 +161,7 @@ pub async fn accept_task_integration_review<H>(
     session: &mut Session,
     handler: &mut H,
     execution_backend: Arc<dyn ExecutionBackend>,
+    secret_redactor: &SecretRedactor,
     workspace_root: &Path,
     request: &TaskIntegrationReviewRequest,
 ) -> Result<TaskIntegrationAcceptanceOutput>
@@ -248,6 +250,17 @@ where
         .verification_target
         .take()
         .ok_or_else(|| anyhow!("promoted integration target was not retained for verification"))?;
+    if let Err(error) = materialize_promoted_intent_layers(
+        session,
+        workspace_root,
+        &promotion.record.plan_id,
+        secret_redactor,
+        handler,
+    ) {
+        let _ = handler.handle(RunEvent::Notice(format!(
+            "Intent Stack remained read-only after promotion: {error:#}"
+        )));
+    }
     let target_root = target.workspace_root().to_path_buf();
     let parent_verification = run_authoritative_parent_verification(
         session,
@@ -279,6 +292,88 @@ where
         promotion,
         parent_verification: Some(parent_verification),
     })
+}
+
+fn materialize_promoted_intent_layers<H>(
+    session: &Session,
+    workspace_root: &Path,
+    plan_id: &sigil_kernel::IntegrationPlanId,
+    secret_redactor: &SecretRedactor,
+    handler: &mut H,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let integration = IntegrationProjection::from_entries(session.entries());
+    let plan = &integration
+        .plans
+        .get(plan_id)
+        .ok_or_else(|| anyhow!("promoted integration plan is unavailable"))?
+        .recorded
+        .plan;
+    let task_projection = session.task_state_projection();
+    let task_plan = task_projection
+        .tasks
+        .get(&plan.task_id)
+        .and_then(|task| task.plans.get(&plan.plan_version))
+        .filter(|task_plan| task_plan.status == sigil_kernel::TaskPlanStatus::Accepted)
+        .ok_or_else(|| anyhow!("promoted integration has no accepted TaskPlan"))?;
+    let lineage = session.intent_lineage_projection()?;
+    for proposal in &plan.proposals {
+        let step = task_plan
+            .steps
+            .iter()
+            .find(|step| step.step_id == proposal.step_id)
+            .ok_or_else(|| anyhow!("promoted integration step is absent from its TaskPlan"))?;
+        let [intent_ref] = step.intent_refs.as_slice() else {
+            if step.intent_refs.is_empty() {
+                continue;
+            }
+            bail!(
+                "promoted integration step {} has ambiguous Intent refs",
+                step.step_id.as_str()
+            );
+        };
+        let execution = lineage
+            .execution_order
+            .iter()
+            .rev()
+            .filter_map(|execution_id| lineage.execution(execution_id))
+            .find(|execution| {
+                execution.binding.intent_ref == *intent_ref
+                    && matches!(
+                        &execution.binding.origin,
+                        IntentExecutionOriginV1::Task {
+                            task_id,
+                            task_plan_version,
+                            step_id,
+                            ..
+                        } if task_id == plan.task_id.as_str()
+                            && *task_plan_version == plan.plan_version
+                            && step_id == proposal.step_id.as_str()
+                    )
+                    && execution.changeset_ids.contains(&proposal.change_set_id)
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "promoted integration proposal {} has no exact Intent execution lineage",
+                    proposal.change_set_id.as_str()
+                )
+            })?;
+        let outcome = materialize_intent_layer(
+            session,
+            workspace_root,
+            &execution.binding.execution_id,
+            secret_redactor,
+        )?;
+        if let Some(reason) = outcome.read_only_reason {
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "Intent layer for step {} is read-only: {reason:?}",
+                step.step_id.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct ParentVerificationContext {
