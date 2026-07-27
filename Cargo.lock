@@ -5186,6 +5186,7 @@ dependencies = [
  "sigil-kernel",
  "sigil-mcp",
  "sigil-runtime",
+ "sigil-tools-builtin",
  "syntect",
  "tempfile",
  "tokio",
