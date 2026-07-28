@@ -333,7 +333,7 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
     assert_eq!(ModelPickerTarget::ProviderFim.title(), "FIM Model");
     assert_eq!(
         SecretInputTarget::SetupApiKey.summary("SIGIL_API_KEY"),
-        "Saved to the secure credential store. The value never enters sigil.toml; SIGIL_API_KEY is a separate selectable source."
+        "Saved to the protected credential store. The value never enters sigil.toml; SIGIL_API_KEY is a separate selectable source."
     );
     assert_eq!(
         TextInputTarget::ConfigField(ConfigField::ProviderBaseUrl).config_key(),
@@ -692,7 +692,7 @@ fn modal_helper_edge_cases_cover_refresh_defaults_and_empty_values() {
 
     assert_eq!(
         SecretInputTarget::ConfigProviderApiKey.summary("SIGIL_API_KEY"),
-        "Staged in memory for secure-store save. The value never enters sigil.toml; SIGIL_API_KEY is a separate source."
+        "Staged in memory for protected-store save. The value never enters sigil.toml; SIGIL_API_KEY is a separate source."
     );
 
     app.open_model_picker(ModelPickerTarget::ProviderFim, "current-model");

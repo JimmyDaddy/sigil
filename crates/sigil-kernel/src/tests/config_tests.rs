@@ -497,8 +497,8 @@ fn storage_mutation_artifact_retention_has_user_visible_defaults_and_overrides()
     let config = StorageConfig::default();
     assert_eq!(
         config.credential_store,
-        CredentialStorageMode::Auto,
-        "credential storage should prefer the portable auto policy"
+        CredentialStorageMode::File,
+        "credential storage should avoid native prompts unless explicitly configured"
     );
     assert_eq!(
         config.mutation_artifact_retention.max_artifacts,

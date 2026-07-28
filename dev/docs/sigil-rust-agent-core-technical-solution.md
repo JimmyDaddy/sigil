@@ -292,14 +292,16 @@ Provider connection 配置采用 V2 复合身份。kernel 只定义中立的 `Co
 `ProviderConnectionConfig`、V1 -> V2 投影、credential reference、connection inventory、
 provider-native catalog 及其 exact-fingerprint cache。`sigil.toml` 只保存连接、endpoint、
 协议选项、默认 `ModelRef` 和 credential reference，不保存新输入的密钥。凭据可来自命名环境
-变量、OS credential store，或 owner-only `~/.sigil/credentials.json`；默认 `auto` 优先
-OS store，仅在其不可用时回退到私有文件，用户也可显式选择严格 `keyring` 或 `file`。因此这里的
-安全承诺是“凭据与普通配置、session、catalog cache、日志和 support bundle 分离”，而不是
-“任何凭据绝不在本机持久化”。TUI 首启与 `/config` 采用 connection-first 流程，并通过异步
-readiness snapshot 避免在输入热路径同步访问 keyring；Desktop 只消费不含 secret 的 exact
-model option 和 freshness/availability 元数据。session 一旦开始即绑定 immutable exact
-route；endpoint/protocol semantic fingerprint 漂移时 fail closed，切换 connection 或 model
-必须创建新 session，fork/restore 也不得静默改写原 route。
+变量、OS credential store，或 owner-only `~/.sigil/credentials.json`；新配置默认使用 file
+backend，`auto` / `keyring` 作为显式 native-store 策略保留，已有显式策略不静默迁移。因此这里
+的安全承诺是“凭据与普通配置、session、catalog cache、日志和 support bundle 分离”，而不是
+“任何凭据绝不在本机持久化”。TUI 首启与 `/config` 采用 connection-first 流程；启动只投影
+secret-free offline readiness，用户主动进入配置流程后才异步验证 stored credential。native
+调用在 blocking worker 中 process-global 串行执行，不以无法取消底层系统 prompt 的短 timeout
+制造伪失败。Desktop 只消费不含 secret 的 exact model option 和 freshness/availability
+元数据。session 一旦开始即绑定 immutable exact route；endpoint/protocol semantic fingerprint
+漂移时 fail closed，切换 connection 或 model 必须创建新 session，fork/restore 也不得静默改写
+原 route。
 
 这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流则留在 `sigil-tui` 内，因为它们属于第一用户表面的交互模型。
 

@@ -97,7 +97,7 @@ impl SetupCredentialSource {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Environment => "detected environment",
-            Self::SecureStore => "secure credential store",
+            Self::SecureStore => "protected credential store",
             Self::NoAuthentication => "no authentication",
         }
     }
@@ -360,10 +360,10 @@ impl SetupState {
             SetupCredentialSource::SecureStore
                 if self.api_key.expose_secret().trim().is_empty() =>
             {
-                "secure store · key required".to_owned()
+                "protected store · key required".to_owned()
             }
             SetupCredentialSource::SecureStore => {
-                "secure store · credential staged in memory".to_owned()
+                "protected store · credential staged in memory".to_owned()
             }
             SetupCredentialSource::NoAuthentication => {
                 "no authentication · local endpoint only".to_owned()

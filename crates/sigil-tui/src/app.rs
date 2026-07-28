@@ -730,7 +730,7 @@ impl AppState {
             .session_log_dir
             .join(format!("session-{}.jsonl", app.session_id));
         app.load_input_history();
-        app.schedule_connection_inventory_refresh(root_config);
+        app.seed_connection_inventory_offline(root_config);
         app.refresh_memory_summary();
         app.recompute_compaction_status(false);
         app.refresh_session_history();

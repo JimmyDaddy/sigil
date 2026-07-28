@@ -15,6 +15,24 @@
 - [RFC-0050 Desktop Conversation Library and Settings V1](0050-desktop-conversation-library-and-settings-v1.md)
 - [RFC-0052 Desktop Conversation Continuity and Control V1](0052-desktop-conversation-continuity-and-control-v1.md)
 
+### 2026-07-28 credential startup amendment
+
+Provider API key 的安全承诺保持不变：secret 不进入普通配置、workspace、session、cache、日志或
+support artifact。默认后端与启动时序调整如下：
+
+- 新配置默认 `credential_store = "file"`，使用独立、owner-only 的
+  `~/.sigil/credentials.json`；`auto` 和 `keyring` 保留为显式选择。
+- 已持久化的显式 `auto` / `keyring` 配置继续按原语义读取，不把现有 native credential
+  静默复制到 file backend。
+- TUI 启动只生成 secret-free offline connection inventory；stored credential verification
+  只在用户主动打开或保存配置等明确配置流程中运行，不与 agent worker 的必要 credential
+  resolution 竞争。
+- native credential operation 通过一个 process-global blocking mutex 串行执行。读取不使用
+  无法取消底层系统 prompt 的短 async timeout；等待系统认证期间 TUI 保持可用，provider build
+  的真实成功、拒绝或取消结果决定 worker 状态。
+- worker 不再用固定 readiness deadline 丢弃等待系统认证的 prompt；provider build 在 ready 前
+  明确失败时，TUI 直接退休该 worker 与尚未发送的 pending command，不再追加第二条泛化错误。
+
 ## 1. Problem statement
 
 Sigil 当前已经支持 DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic
@@ -77,12 +95,12 @@ V1 采用以下方案：
    -> 同 connection 的 manual entry`。永远不跨 connection 或 provider fallback。
 6. remote catalog 只证明“该 ID 被当前 connection 暴露”；它不能授予 tool、image、reasoning、
    context window 或 hosted search 等安全/能力位。能力仍由 provider-owned exact matrix 保守解释。
-7. 新输入的 API key 默认进入独立的受保护凭据存储。`[storage].credential_store = "auto"`
-   优先使用 native system keyring；仅当 native store 明确不可用时，才回退到 owner-only
-   `~/.sigil/credentials.json`。用户可显式选择严格 `keyring` 或 `file` 模式。TOML connection
-   只保存 opaque credential reference；environment reference 和显式 unauthenticated local
-   connection 也是一等来源。这里不承诺“secret 在任何地方都不落盘”，而是承诺 secret 不进入
-   主配置、workspace、session、catalog cache、log、snapshot 或 support artifact。
+7. 新输入的 API key 默认进入独立、owner-only 的 `~/.sigil/credentials.json`。
+   `[storage].credential_store = "auto" | "keyring"` 作为显式 native system store 策略保留。
+   TOML connection 只保存 opaque credential reference；environment reference 和显式
+   unauthenticated local connection 也是一等来源。这里不承诺“secret 在任何地方都不落盘”，
+   而是承诺 secret 不进入主配置、workspace、session、catalog cache、log、snapshot 或
+   support artifact。
 8. legacy inline API key 继续可读，但进入只读兼容状态；迁移成功后不再 dual-write plaintext。
 9. config save 使用 copy-on-write credential rotation 与 atomic file publish。Unix parent 为
    `0700`，config/cache/credential file 为 `0600`；file mode 是受权限保护的独立 plaintext
@@ -239,7 +257,7 @@ flowchart TD
     P --> D["Create unsaved connection draft"]
     D --> A{"Credential source"}
     A -- "detected env" --> E["Confirm environment reference"]
-    A -- "paste key" --> K["Stage secure-store credential"]
+    A -- "paste key" --> K["Stage protected-store credential"]
     A -- "no auth allowed" --> N["Confirm unauthenticated endpoint"]
     E --> V["Probe exact connection"]
     K --> V
@@ -290,9 +308,10 @@ V1 支持三种用户可选来源：
    - 显示 variable name，不显示 value；
    - 保存 `environment` reference；
    - 只检测非空，不在 UI 中复制 value。
-2. **Save API key in secure credential store**
+2. **Save API key in protected credential store**
    - secret 只进入 modal buffer 和 runtime-owned credential store；
    - 验证/保存后立即清空 draft secret carrier；
+   - 新配置默认写入 owner-only credential file；
    - `auto` 只在 system store 明确不可用时回退到 owner-only credential file；
    - system store 的拒绝、损坏或 record mismatch 不得被 file fallback 隐藏；
    - `keyring` 模式不可用时明确报错，任何模式都不得回退写入 `sigil.toml`。
@@ -301,7 +320,7 @@ V1 支持三种用户可选来源：
    - 不能通过留空 API key 隐式获得该状态。
 
 标准 provider 的 environment 变量由 provider template 给出。选择 environment 后，运行时只解析
-该 reference；它不会因为另一个 ambient variable 存在而静默覆盖用户已选 secure store。
+该 reference；它不会因为另一个 ambient variable 存在而静默覆盖用户已选 credential store。
 
 认证探测必须是无 generation side effect 的 provider-owned operation。优先使用 model list 或专用
 account/readiness endpoint。探测结果使用 typed state：
@@ -393,7 +412,7 @@ Provider section 改为 connection-first：
 
 ```text
 [connections]
-> OpenAI (personal)        ready · secure store
+> OpenAI (personal)        ready · protected store
   DeepSeek (work)          ready · environment
   Local gateway            needs model · no auth
   + Add connection
@@ -406,7 +425,7 @@ Provider section 改为 connection-first：
   provider                 : OpenAI
   protocol                 : Responses
   endpoint                 : api.openai.com
-  credential               : secure store · available
+  credential               : protected store · available
 ```
 
 默认 view 不显示 secret、credential ID、完整 private endpoint 或 protocol-specific switches。
@@ -685,7 +704,7 @@ model = "gpt-5.4"
 tool_timeout_secs = 30
 
 [storage]
-credential_store = "auto"
+credential_store = "file"
 
 [connections.openai-personal]
 label = "OpenAI (personal)"
@@ -765,6 +784,9 @@ config 即使不再保存 secret，也保持 `0600`，因为它可能包含 priv
 | `keyring` | 只使用 system credential store | unavailable 时 fail closed |
 | `file` | 只使用 `~/.sigil/credentials.json` | path、permission、lock、schema 或 atomic publish 异常时 fail closed |
 
+新配置默认 `file`。`auto` / `keyring` 必须由用户显式配置；读取已有显式策略时不做隐式 backend
+迁移。
+
 credential file 与 `sigil.toml` 分离，使用 versioned bounded JSON、advisory lock、same-parent atomic
 publish、Unix parent `0700`/file `0600` 和 Windows current-user ACL。其内容是 plaintext-equivalent
 credential material，base64 只是一种 wire encoding，不是加密。它不得进入 workspace、session、
@@ -810,7 +832,7 @@ legacy inline `api_key`：
 - 可用于当前进程兼容启动；
 - inventory 显示 `legacy plaintext · migration required`；
 - 不进入新 `CredentialRefConfig`；
-- 显式 save/migrate 时要求选择 secure store 或 environment；
+- 显式 save/migrate 时要求选择 protected store 或 environment；
 - stored migration 完成、read-back 验证和 config atomic publish 成功后，plaintext 才从 config 消失；
 - 不生成含 plaintext 的 `.bak`；
 - configured credential store 不可用时保留旧文件，不做部分迁移。
@@ -1192,7 +1214,7 @@ UI-facing error 使用 stable code + bounded message：
 | `catalog_malformed` | schema/limit/control validation failed | retry/report provider mismatch |
 | `catalog_rate_limited` | 429 | 等待 retry-after |
 | `route_drift` | restore 时 semantic fingerprint 改变 | 恢复 config 或 fork |
-| `legacy_secret_migration_required` | inline secret 阻止 V2 save | secure-store/env migration |
+| `legacy_secret_migration_required` | inline secret 阻止 V2 save | protected-store/env migration |
 
 错误文案不根据 provider raw string 猜分类。未分类 transport error 保守落入
 `endpoint_unreachable` 或 `provider_error`，并保留 redacted local diagnostic。
@@ -1363,7 +1385,7 @@ configuration-wide、本地完成且不依赖 provider 网络的显式操作：
 
 至少覆盖：
 
-1. isolated HOME 首启，loopback OpenAI Responses，fake secure store，选择 model 并启动；
+1. isolated HOME 首启，loopback OpenAI Responses，fake protected store，选择 model 并启动；
 2. isolated config 从 legacy DeepSeek inline key 迁移到 stored ref；
 3. config publish failure 保留旧 config 与旧 credential；
 4. offline restart 使用 exact stale cache 并显示 provenance；
@@ -1380,7 +1402,7 @@ provider conformance 入口。
 - macOS native Keychain round trip；
 - Windows native credential store + ACL；
 - Linux Secret Service 可用路径；
-- secure store unavailable 的 fail-closed path 和 `auto` 的 unavailable-only fallback；
+- protected store unavailable 的 fail-closed path 和 `auto` 的 unavailable-only fallback；
 - terminal PTY on macOS/Linux/Windows；
 - no plaintext write to main config/workspace/session/cache/log/support on every platform。
 
@@ -1526,7 +1548,7 @@ credential/PTY/workspace/security conformance；同时补齐显式 connection �
 legacy migration、write-ahead recovery/recheck 与 Desktop/TUI fail-closed 恢复路径。
 
 这里的“密钥不进入配置”不是“任何持久介质都不保存密钥”：`sigil.toml`、workspace、
-session、cache、log 和 support artifact 永远不承载 secret；`auto` 优先系统 credential
-store，并只在系统后端不可用时回退到 owner-only `~/.sigil/credentials.json`，用户也可显式选择
-`keyring`、`file` 或非持久化 environment reference。该边界与 §7.3、§8.4、§12.1 和
+session、cache、log 和 support artifact 永远不承载 secret；新配置默认使用 owner-only
+`~/.sigil/credentials.json`，用户可显式选择 `auto`、`keyring` 或非持久化 environment
+reference。已有显式 native-store 策略不静默迁移。该边界与 §7.3、§8.4、§12.1 和
 §17.5 保持一致。

@@ -69,7 +69,7 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
             .unwrap_or("unsupported provider");
         lines.push(format!("environment option: {env_name}"));
         lines.push(
-            "storage: pasted API keys are saved only to the configured secure credential store"
+            "storage: pasted API keys are saved only to the configured protected credential store"
                 .to_owned(),
         );
         if config_state.draft.selected_requires_legacy_migration() {
@@ -91,7 +91,8 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
                 .to_owned(),
         );
         lines.push(
-            "credentials: all inline keys move directly into configured secure storage".to_owned(),
+            "credentials: all inline keys move directly into configured protected storage"
+                .to_owned(),
         );
     }
     if matches!(field, ConfigField::ProviderFimModel) {

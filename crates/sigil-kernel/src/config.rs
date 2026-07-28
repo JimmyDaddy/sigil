@@ -2706,8 +2706,8 @@ pub struct StorageConfig {
     pub cache_root: StorageRoot,
     #[serde(default)]
     pub mutation_artifact_retention: MutationArtifactRetentionConfig,
-    /// Provider-login credential persistence. `auto` prefers the OS store and falls back to the
-    /// owner-only Sigil credential file when the OS store is unavailable.
+    /// Provider-login credential persistence. New configurations default to the owner-only Sigil
+    /// credential file; native credential-store access remains an explicit policy choice.
     #[serde(default)]
     pub credential_store: CredentialStorageMode,
 }
@@ -2718,7 +2718,7 @@ impl Default for StorageConfig {
             state_root: StorageRoot::Auto,
             cache_root: StorageRoot::Auto,
             mutation_artifact_retention: MutationArtifactRetentionConfig::default(),
-            credential_store: CredentialStorageMode::Auto,
+            credential_store: CredentialStorageMode::File,
         }
     }
 }
@@ -2728,11 +2728,11 @@ impl Default for StorageConfig {
 #[serde(rename_all = "snake_case")]
 pub enum CredentialStorageMode {
     /// Prefer the OS credential store and fall back to an owner-only local credential file.
-    #[default]
     Auto,
     /// Require the OS credential store and fail when it is unavailable.
     Keyring,
     /// Use the owner-only local credential file.
+    #[default]
     File,
 }
 

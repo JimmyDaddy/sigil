@@ -365,7 +365,7 @@ impl AppState {
             SetupField::ApiKey if state.credential_source == SetupCredentialSource::SecureStore => {
                 state.api_key = SecretString::new(value);
                 state.bump_revision();
-                self.last_notice = Some("staged API key for secure credential store".to_owned());
+                self.last_notice = Some("staged API key for protected credential store".to_owned());
             }
             SetupField::Provider
             | SetupField::Protocol
@@ -496,7 +496,7 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
             state.api_key_env_name().unwrap_or("for this provider")
         )),
         SetupCredentialSource::SecureStore if state.api_key.expose_secret().trim().is_empty() => {
-            Some("enter an API key to save in the secure credential store".to_owned())
+            Some("enter an API key to save in the protected credential store".to_owned())
         }
         SetupCredentialSource::NoAuthentication if !state.no_authentication_allowed() => Some(
             "no authentication is only allowed for an explicit loopback custom endpoint".to_owned(),

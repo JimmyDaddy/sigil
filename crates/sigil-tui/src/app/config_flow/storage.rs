@@ -89,7 +89,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         "read-only; state/cache roots can be overridden, project assets are fixed under workspace .sigil",
     ));
     lines.push(render_config_hint_row(
-        "credential store: auto prefers the system store; file uses owner-only ~/.sigil/credentials.json",
+        "credential store: file is the default; auto/keyring explicitly enable native system storage",
     ));
     lines.push(render_config_hint_row(
         "footer clean records lifecycle events; artifact details are audit/debug",

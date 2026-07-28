@@ -4429,7 +4429,7 @@ fn setup_save_requires_credentials() -> Result<()> {
     assert_eq!(state.selected_field, SetupField::Save);
     assert_eq!(
         app.last_notice(),
-        Some("enter an API key to save in the secure credential store")
+        Some("enter an API key to save in the protected credential store")
     );
     Ok(())
 }

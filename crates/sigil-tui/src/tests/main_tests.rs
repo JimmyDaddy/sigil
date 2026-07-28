@@ -1552,6 +1552,36 @@ fn drain_worker_messages_marks_runtime_ready() -> Result<()> {
 }
 
 #[test]
+fn drain_worker_messages_retires_an_unready_worker_after_startup_failure() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.enqueue_worker_command(WorkerCommand::SubmitPrompt {
+        prompt: "queued while starting".to_owned(),
+        reasoning_effort: sigil_kernel::ReasoningEffort::Max,
+    });
+    let (worker_tx, _command_rx) = mpsc::channel();
+    let (message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: false,
+    });
+    message_tx.send(WorkerMessage::RunFailed(
+        "native credential store rejected the read".to_owned(),
+    ))?;
+
+    assert!(drain_worker_messages(&mut app, &mut worker)?);
+    assert!(worker.is_none());
+    assert!(!app.has_pending_worker_commands());
+    assert!(app.timeline.iter().any(|entry| {
+        entry
+            .text
+            .contains("native credential store rejected the read")
+            && !entry.text.contains("did not become ready")
+    }));
+    Ok(())
+}
+
+#[test]
 fn drain_worker_messages_returns_clean_without_runtime() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let mut worker = None;

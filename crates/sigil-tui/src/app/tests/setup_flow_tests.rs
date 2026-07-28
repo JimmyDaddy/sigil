@@ -377,7 +377,7 @@ fn setup_paste_updates_model_and_api_key_fields() {
     app.handle_setup_paste_text("sk-test\n");
     assert_eq!(
         app.last_notice(),
-        Some("staged API key for secure credential store")
+        Some("staged API key for protected credential store")
     );
     assert_eq!(
         app.setup_state
@@ -393,7 +393,7 @@ fn setup_paste_updates_model_and_api_key_fields() {
     app.handle_setup_paste_text("ignored");
     assert_eq!(
         app.last_notice(),
-        Some("staged API key for secure credential store")
+        Some("staged API key for protected credential store")
     );
 }
 
@@ -420,7 +420,7 @@ fn setup_validation_and_builder_reject_empty_model_and_auth() {
 
         assert_eq!(
             validate_setup_state(&state),
-            Some("enter an API key to save in the secure credential store".to_owned())
+            Some("enter an API key to save in the protected credential store".to_owned())
         );
         assert_eq!(
             build_setup_root_config(&state)

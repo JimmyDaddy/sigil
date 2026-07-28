@@ -694,7 +694,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert!(
         ConfigField::ProviderApiKey
             .help_text()
-            .contains("secure credential store")
+            .contains("protected credential store")
     );
     assert!(
         ConfigField::TerminalScrollSensitivity

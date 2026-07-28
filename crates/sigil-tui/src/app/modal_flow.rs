@@ -179,12 +179,12 @@ impl SecretInputTarget {
         match self {
             Self::SetupApiKey => {
                 format!(
-                    "Saved to the secure credential store. The value never enters sigil.toml; {env_name} is a separate selectable source."
+                    "Saved to the protected credential store. The value never enters sigil.toml; {env_name} is a separate selectable source."
                 )
             }
             Self::ConfigProviderApiKey => {
                 format!(
-                    "Staged in memory for secure-store save. The value never enters sigil.toml; {env_name} is a separate source."
+                    "Staged in memory for protected-store save. The value never enters sigil.toml; {env_name} is a separate source."
                 )
             }
         }

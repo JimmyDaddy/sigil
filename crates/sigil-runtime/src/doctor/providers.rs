@@ -50,7 +50,7 @@ fn check_legacy_connection_state(report: &mut DoctorReport, root_config: &RootCo
             "provider:migration",
             "legacy plaintext credential requires explicit migration",
             Some(
-                "open Provider settings and save the connection to the secure store or environment",
+                "open Provider settings and save the connection to the protected store or environment",
             ),
         );
     }

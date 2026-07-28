@@ -7,6 +7,22 @@ fn config_for_workspace(workspace_root: &std::path::Path) -> RootConfig {
     config
 }
 
+#[test]
+fn startup_keeps_connection_inventory_offline_until_config_is_opened() {
+    let config = test_config();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &config);
+
+    assert_eq!(app.runtime.connection_inventory_revision, 1);
+    assert!(
+        app.runtime.connection_inventory.is_some(),
+        "startup should seed a secret-free inventory"
+    );
+
+    app.open_config_panel();
+
+    assert_eq!(app.runtime.connection_inventory_revision, 2);
+}
+
 fn write_workspace_agent(workspace_root: &std::path::Path, id: &str, body: &str) -> Result<()> {
     let path = workspace_root
         .join(".sigil")
@@ -67,7 +83,7 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     let api_key_details = render_config_selection_details(&state).join("\n");
     assert!(api_key_details.contains("environment option: SIGIL_API_KEY"));
     assert!(api_key_details.contains(
-        "storage: pasted API keys are saved only to the configured secure credential store"
+        "storage: pasted API keys are saved only to the configured protected credential store"
     ));
     state.draft.provider_name = "openai_compat".to_owned();
     let api_key_details = render_config_selection_details(&state).join("\n");

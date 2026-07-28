@@ -11,22 +11,23 @@ use sigil_runtime::provider_connections::{
 use std::sync::mpsc::TryRecvError;
 
 impl AppState {
-    pub(in crate::app) fn schedule_connection_inventory_refresh(
-        &mut self,
-        root_config: &RootConfig,
-    ) {
+    pub(in crate::app) fn seed_connection_inventory_offline(&mut self, root_config: &RootConfig) {
         self.runtime.connection_inventory_revision =
             self.runtime.connection_inventory_revision.saturating_add(1);
-        #[cfg(not(test))]
-        let revision = self.runtime.connection_inventory_revision;
         self.runtime.connection_inventory = Some(connection_inventory_offline(
             root_config,
             &ProcessCredentialEnvironment,
         ));
-        #[cfg(test)]
-        {
-            self.runtime.connection_inventory_rx = None;
-        }
+        self.runtime.connection_inventory_rx = None;
+    }
+
+    pub(in crate::app) fn schedule_connection_inventory_refresh(
+        &mut self,
+        root_config: &RootConfig,
+    ) {
+        self.seed_connection_inventory_offline(root_config);
+        #[cfg(not(test))]
+        let revision = self.runtime.connection_inventory_revision;
 
         #[cfg(not(test))]
         {

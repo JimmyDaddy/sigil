@@ -1267,6 +1267,7 @@ impl AppState {
         let (plugins, plugin_warnings) = self.discover_config_plugins();
         config_state.set_plugin_discovery(plugins, plugin_warnings);
         self.config_state = Some(config_state);
+        self.schedule_connection_inventory_refresh(&persisted_root_config);
         self.refresh_mutation_artifact_retention_preview();
         self.schedule_session_retention_preview();
         self.last_notice = Some("opened config".to_owned());

@@ -250,7 +250,7 @@ impl ConfigDraft {
             return "unavailable".to_owned();
         };
         if !self.provider_api_key.is_empty() || draft.staged_credential.is_some() {
-            return "secure store · staged in memory".to_owned();
+            return "protected store · staged in memory".to_owned();
         }
         if draft.legacy_inline {
             return "legacy plaintext · migration required".to_owned();
@@ -261,7 +261,7 @@ impl ConfigDraft {
         match &draft.config.credential {
             CredentialRefConfig::Environment { name } => format!("environment · {name}"),
             CredentialRefConfig::SystemKeyring { .. } => "legacy keyring · referenced".to_owned(),
-            CredentialRefConfig::Stored { .. } => "secure store · referenced".to_owned(),
+            CredentialRefConfig::Stored { .. } => "protected store · referenced".to_owned(),
             CredentialRefConfig::None => "no authentication".to_owned(),
         }
     }
@@ -622,7 +622,7 @@ fn credential_label(draft: &ProviderConnectionDraft) -> &'static str {
         match draft.config.credential {
             CredentialRefConfig::Environment { .. } => "environment",
             CredentialRefConfig::SystemKeyring { .. } => "legacy keyring",
-            CredentialRefConfig::Stored { .. } => "secure store",
+            CredentialRefConfig::Stored { .. } => "protected store",
             CredentialRefConfig::None => "no auth",
         }
     }

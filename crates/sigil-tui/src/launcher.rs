@@ -61,8 +61,6 @@ const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
 #[cfg(not(test))]
-const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(not(test))]
 const EVENT_BATCH_LIMIT: usize = 64;
 // Keep restored scrollback seeding small enough that startup reaches the first
 // interactive frame quickly even when the previous session has a long timeline.
@@ -387,7 +385,6 @@ fn run_app(
         dirty |= restart_worker_after_session_transition(app, worker, spawn_worker)?;
         attention.emit_pending_nonfatal(terminal.backend_mut());
         dirty |= app.poll_background_tasks();
-        dirty |= expire_unready_worker(app, worker)?;
         dirty |= flush_pending_worker_commands(app, worker)?;
         if let Some(enable) =
             next_mouse_capture_action(*mouse_capture_active, app.terminal_mouse_capture_enabled())
@@ -954,16 +951,23 @@ fn drain_worker_messages_inner(
         return Ok(false);
     };
     let mut dirty = false;
+    let mut startup_failed = false;
     app.begin_timeline_render_batch();
     while let Ok(message) = runtime.worker_rx.try_recv() {
         if matches!(message, WorkerMessage::WorkerReady) {
             runtime.ready = true;
+        } else if !runtime.ready && matches!(message, WorkerMessage::RunFailed(_)) {
+            startup_failed = true;
         }
         if let Some(attention) = attention.as_deref_mut() {
             attention.observe(&message, Instant::now());
         }
         app.handle_worker_message(message)?;
         dirty = true;
+    }
+    if startup_failed {
+        let _ = app.drain_pending_worker_commands();
+        *worker = None;
     }
     Ok(dirty | app.flush_timeline_render_batch())
 }
@@ -994,22 +998,6 @@ where
             &format!("session changed but the agent worker could not rebind: {error:#}"),
         )?,
     }
-    Ok(true)
-}
-
-#[cfg(not(test))]
-fn expire_unready_worker(app: &mut AppState, worker: &mut Option<WorkerRuntime>) -> Result<bool> {
-    let Some(runtime) = worker.as_ref() else {
-        return Ok(false);
-    };
-    if runtime.ready || runtime.spawned_at.elapsed() < WORKER_READY_TIMEOUT {
-        return Ok(false);
-    }
-    *worker = None;
-    let _ = app.drain_pending_worker_commands();
-    app.handle_worker_message(WorkerMessage::RunFailed(
-        "agent worker did not become ready; prompt was not sent".to_owned(),
-    ))?;
     Ok(true)
 }
 
@@ -1510,8 +1498,6 @@ struct WorkerRuntime {
     worker_tx: std::sync::mpsc::Sender<runner::WorkerCommand>,
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     ready: bool,
-    #[cfg(not(test))]
-    spawned_at: Instant,
 }
 
 #[cfg(not(test))]
@@ -1526,8 +1512,6 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
         worker_tx,
         worker_rx,
         ready: false,
-        #[cfg(not(test))]
-        spawned_at: Instant::now(),
     })
 }
 

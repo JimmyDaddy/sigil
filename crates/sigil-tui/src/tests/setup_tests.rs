@@ -91,7 +91,7 @@ fn setup_auth_summary_reports_staged_secure_store_without_plaintext() {
     state.api_key = SecretString::new("  secret  ");
 
     let summary = state.auth_summary();
-    assert_eq!(summary, "secure store · credential staged in memory");
+    assert_eq!(summary, "protected store · credential staged in memory");
     assert!(!summary.contains("secret"));
 }
 

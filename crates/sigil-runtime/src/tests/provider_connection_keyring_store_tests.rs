@@ -87,6 +87,66 @@ fn keyring_platform_failures_fail_closed_instead_of_triggering_file_fallback() {
     );
 }
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_credential_operations_wait_for_the_active_operation() {
+    let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+    let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+    let first = tokio::spawn(run_keyring_task(move || {
+        first_started_tx
+            .send(())
+            .expect("first task start should be observed");
+        release_first_rx
+            .recv()
+            .expect("first task should be released");
+        Ok::<_, ProviderCredentialError>("first")
+    }));
+    first_started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("first task should acquire the operation lock");
+
+    let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
+    let second = tokio::spawn(run_keyring_task(move || {
+        second_started_tx
+            .send(())
+            .expect("second task start should be observed");
+        Ok::<_, ProviderCredentialError>("second")
+    }));
+
+    assert!(
+        second_started_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err(),
+        "a concurrent native operation must wait instead of being rejected"
+    );
+    release_first_tx
+        .send(())
+        .expect("first task release should be delivered");
+
+    assert_eq!(
+        first
+            .await
+            .expect("first join should complete")
+            .expect("first operation should succeed"),
+        "first"
+    );
+    second_started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("second operation should start after the first finishes");
+    assert_eq!(
+        second
+            .await
+            .expect("second join should complete")
+            .expect("second operation should succeed"),
+        "second"
+    );
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[tokio::test]
 #[ignore = "requires the native desktop credential store"]

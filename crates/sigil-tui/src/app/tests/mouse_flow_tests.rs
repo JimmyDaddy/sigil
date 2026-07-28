@@ -369,7 +369,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
         app.last_notice(),
-        Some("enter an API key to save in the secure credential store")
+        Some("enter an API key to save in the protected credential store")
     );
     assert_eq!(
         app.setup_state

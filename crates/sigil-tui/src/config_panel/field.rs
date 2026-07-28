@@ -246,7 +246,7 @@ impl ConfigField {
                 "Chat model used for new runs. Switching the saved default does not rewrite the current session."
             }
             Self::ProviderApiKey => {
-                "Credential reference for this connection. New keys are staged in memory and saved only to the configured secure credential store."
+                "Credential reference for this connection. New keys are staged in memory and saved only to the configured protected credential store."
             }
             Self::ModelRequestTimeoutSecs => {
                 "Seconds to wait for the model provider to accept a request and return response headers."
