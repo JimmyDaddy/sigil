@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use sigil_kernel::{
-    CompactionInitiation, CompactionLifecycleProjection, CompactionThresholdStatus,
-    ContinuationModelOutputV1, FrozenProviderRequestMaterial, PortableSemanticCompactionOutcome,
+    CompactionCircuitBreakerDecisionV1, CompactionCircuitBreakerInputV1, CompactionCircuitScopeV1,
+    CompactionEmergencyBlockingLayerV1, CompactionForecastConfidenceV1, CompactionForecastSourceV1,
+    CompactionInitiation, CompactionLifecycleProjection, CompactionRolloutModeV1,
+    CompactionStrategy, CompactionThresholdStatus, ControlEntry, DurableEventType,
+    ExpectedRemainingTurnsV1, FrozenProviderRequestMaterial, PortableSemanticCompactionOutcome,
     PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
     PortableTargetRequestMaterial, ProviderNonGeneratingAttempt,
     ProviderNonGeneratingAttemptReceipt, ProviderPhysicalAttemptOutcome,
@@ -15,7 +18,10 @@ use super::{
     QueuedConversationPressureAdmission, RootConfig, Session, build_workspace_snapshot,
     current_unix_time_ms, stable_event_uuid, stable_workspace_id,
 };
-use crate::runner::protocol::{V2CompactionAdmission, V2CompactionReview};
+use crate::runner::protocol::{
+    ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionReview, V2ConstraintPreview,
+    V2ContinuityPreview,
+};
 
 const IDLE_AUTO_COMPACTION_COOLDOWN_MS: u64 = 60_000;
 
@@ -74,8 +80,15 @@ pub(in crate::runner) enum IdleAutoCompactionPreparation {
     NotHardThreshold,
     NoFoldableHistory,
     FailureLatched,
-    CoolingDown { retry_after_unix_ms: u64 },
-    AdmissionUnavailable { reason: String },
+    CircuitOpen {
+        decision: CompactionCircuitBreakerDecisionV1,
+    },
+    CoolingDown {
+        retry_after_unix_ms: u64,
+    },
+    AdmissionUnavailable {
+        reason: String,
+    },
     Ready(Box<PendingV2Compaction>),
 }
 
@@ -87,9 +100,43 @@ pub(in crate::runner) struct PendingV2Compaction {
     request_id: u64,
     session_scope_id: String,
     idle_auto_scope_fingerprint: Option<String>,
+    deterministic_emergency_fallback: bool,
     preflight: PortableSemanticCompactionPreflight,
     target_material: PortableTargetRequestMaterial,
+    economics_v2_input: sigil_runtime::PortableCompactionEconomicsV2Input,
     folded_event_count: usize,
+    native_carrier: PendingNativeCarrier,
+}
+
+/// Exact zero-provider-I/O plan retained between `/compact` and the user's choice.
+///
+/// It binds the durable cursor and session scope but carries no generated summary. Confirming a
+/// full compaction consumes this plan and starts the semantic-summary stage; choosing standalone
+/// shrink applies only its deterministic large-tool projection.
+pub(in crate::runner) struct PendingLocalV2Compaction {
+    request_id: u64,
+    session_scope_id: String,
+    preview: V2CompactionPreview,
+}
+
+impl PendingLocalV2Compaction {
+    pub(in crate::runner) fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub(in crate::runner) fn session_scope_id(&self) -> &str {
+        &self.session_scope_id
+    }
+
+    pub(in crate::runner) fn preview(&self) -> &V2CompactionPreview {
+        &self.preview
+    }
+}
+
+struct PendingNativeCarrier {
+    frozen_request: FrozenProviderRequestMaterial,
+    covers_through: sigil_kernel::CompactionCursor,
+    portable_compaction_id: sigil_kernel::CompactionId,
 }
 
 /// Exact process-local material prepared for a portable V2 activation before its target proof is
@@ -99,28 +146,44 @@ struct PreparedPortableV2Compaction {
     request_id: u64,
     session_scope_id: String,
     idle_auto_scope_fingerprint: Option<String>,
+    deterministic_emergency_fallback: bool,
     cache_root: std::path::PathBuf,
     preflight: PortableSemanticCompactionPreflight,
     frozen_before_request: FrozenProviderRequestMaterial,
     frozen_target_request: FrozenProviderRequestMaterial,
+    native_covers_through: sigil_kernel::CompactionCursor,
+    native_portable_compaction_id: sigil_kernel::CompactionId,
+    economics_v2_input: sigil_runtime::PortableCompactionEconomicsV2Input,
     folded_event_count: usize,
 }
 
 impl PreparedPortableV2Compaction {
     fn into_pending(self) -> Result<PendingV2Compaction> {
         let target_material =
-            sigil_runtime::deepseek_v4_flash_portable_target_material_with_economics(
+            sigil_runtime::deepseek_v4_flash_portable_target_material_with_economics_v2_candidate(
                 &self.cache_root,
                 &self.frozen_before_request,
                 self.frozen_target_request,
             )?;
+        let target_material = sigil_runtime::attach_portable_compaction_economics_v2(
+            target_material,
+            self.economics_v2_input.clone(),
+        )?;
+        require_prepared_v2_admission(&target_material, self.economics_v2_input.rollout_mode)?;
         Ok(PendingV2Compaction {
             request_id: self.request_id,
             session_scope_id: self.session_scope_id,
             idle_auto_scope_fingerprint: self.idle_auto_scope_fingerprint,
+            deterministic_emergency_fallback: self.deterministic_emergency_fallback,
             preflight: self.preflight,
             target_material,
+            economics_v2_input: self.economics_v2_input,
             folded_event_count: self.folded_event_count,
+            native_carrier: PendingNativeCarrier {
+                frozen_request: self.frozen_before_request,
+                covers_through: self.native_covers_through,
+                portable_compaction_id: self.native_portable_compaction_id,
+            },
         })
     }
 
@@ -159,15 +222,27 @@ impl PreparedPortableV2Compaction {
             target_receipt,
             target_material.frozen_request().fingerprint(),
         )?;
-        let target_material =
-            target_material.with_portable_economics(&self.frozen_before_request, before_input)?;
+        let target_material = target_material
+            .with_portable_economics_v2_candidate(&self.frozen_before_request, before_input)?;
+        let target_material = sigil_runtime::attach_portable_compaction_economics_v2(
+            target_material,
+            self.economics_v2_input.clone(),
+        )?;
+        require_prepared_v2_admission(&target_material, self.economics_v2_input.rollout_mode)?;
         Ok(PendingV2Compaction {
             request_id: self.request_id,
             session_scope_id: self.session_scope_id,
             idle_auto_scope_fingerprint: self.idle_auto_scope_fingerprint,
+            deterministic_emergency_fallback: self.deterministic_emergency_fallback,
             preflight: self.preflight,
             target_material,
+            economics_v2_input: self.economics_v2_input,
             folded_event_count: self.folded_event_count,
+            native_carrier: PendingNativeCarrier {
+                frozen_request: self.frozen_before_request,
+                covers_through: self.native_covers_through,
+                portable_compaction_id: self.native_portable_compaction_id,
+            },
         })
     }
 }
@@ -252,16 +327,29 @@ impl PendingQueuedConversationPortablePreflight {
     /// A failure leaves the queue unpromoted. The caller must reload durable state before it can
     /// attempt the separate queue-revision CAS and before it ever hands the retained request to
     /// the provider path.
-    pub(in crate::runner) fn apply_compaction(
+    pub(in crate::runner) fn apply_compaction<P>(
         self,
         session: &Session,
         session_log_path: &std::path::Path,
+        provider: &P,
+        runtime: &tokio::runtime::Runtime,
+        native_carrier_enabled: bool,
     ) -> Result<(
         PreparedQueuedConversationCandidate,
         PortableSemanticCompactionOutcome,
-    )> {
-        let outcome = self.pending_compaction.apply(session, session_log_path)?;
-        Ok((self.candidate, outcome))
+        Option<String>,
+    )>
+    where
+        P: sigil_kernel::Provider,
+    {
+        let (outcome, native_notice) = self.pending_compaction.apply_with_optional_native(
+            session,
+            session_log_path,
+            provider,
+            runtime,
+            native_carrier_enabled,
+        )?;
+        Ok((self.candidate, outcome, native_notice))
     }
 
     pub(in crate::runner) fn folded_event_count(&self) -> usize {
@@ -326,16 +414,77 @@ impl PendingV2Compaction {
         self.target_material.frozen_request().clone()
     }
 
-    pub(in crate::runner) fn apply(
+    pub(in crate::runner) fn apply_with_optional_native<P>(
         self,
         session: &Session,
         session_log_path: &std::path::Path,
-    ) -> Result<PortableSemanticCompactionOutcome> {
+        provider: &P,
+        runtime: &tokio::runtime::Runtime,
+        native_carrier_enabled: bool,
+    ) -> Result<(PortableSemanticCompactionOutcome, Option<String>)>
+    where
+        P: sigil_kernel::Provider,
+    {
+        let emergency_fallback_notice = self.deterministic_emergency_fallback.then(|| {
+            "semantic summary unavailable; compaction continued with the audited deterministic emergency continuity floor".to_owned()
+        });
+        let (outcome, native_carrier) = self.apply_portable(session, session_log_path)?;
+        if !native_carrier_enabled
+            || !sigil_runtime::application_compaction::NATIVE_COMPACTION_RESUME_ENABLED
+        {
+            return Ok((outcome, emergency_fallback_notice));
+        }
+        let logical_run_id = format!("native-carrier:{}", outcome.compaction_id);
+        let native_result = runtime.block_on(sigil_runtime::materialize_native_compaction_carrier(
+            provider,
+            session,
+            logical_run_id,
+            native_carrier.frozen_request,
+            native_carrier.covers_through,
+            native_carrier.portable_compaction_id,
+        ));
+        let notice = match native_result {
+            Ok(Some(_materialized)) => {
+                Some("portable compaction applied; native carrier materialized".to_owned())
+            }
+            Ok(None) => Some(
+                "portable compaction applied; provider-native threshold did not produce a carrier"
+                    .to_owned(),
+            ),
+            Err(_error) => {
+                Some("portable compaction applied; optional native carrier unavailable".to_owned())
+            }
+        };
+        let notice = match (emergency_fallback_notice, notice) {
+            (Some(emergency), Some(native)) => Some(format!("{emergency}; {native}")),
+            (Some(emergency), None) => Some(emergency),
+            (None, native) => native,
+        };
+        Ok((outcome, notice))
+    }
+
+    fn apply_portable(
+        mut self,
+        session: &Session,
+        session_log_path: &std::path::Path,
+    ) -> Result<(PortableSemanticCompactionOutcome, PendingNativeCarrier)> {
         if session.session_scope_id() != self.session_scope_id {
             bail!("reviewed V2 compaction belongs to a different session scope");
         }
-        JsonlSessionStore::new(session_log_path)?
-            .execute_portable_semantic_compaction(self.preflight, self.target_material)
+        if self.economics_v2_input.rollout_mode == CompactionRolloutModeV1::Preview {
+            self.economics_v2_input.user_confirmed = true;
+            self.target_material = sigil_runtime::attach_portable_compaction_economics_v2(
+                self.target_material,
+                self.economics_v2_input.clone(),
+            )?;
+        }
+        require_activation_v2_admission(
+            &self.target_material,
+            self.economics_v2_input.rollout_mode,
+        )?;
+        let outcome = JsonlSessionStore::new(session_log_path)?
+            .execute_portable_semantic_compaction(self.preflight, self.target_material)?;
+        Ok((outcome, self.native_carrier))
     }
 }
 
@@ -382,7 +531,7 @@ pub(in crate::runner) async fn prepare_overflow_recovery_compaction<P>(
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
-    session: &Session,
+    session: &mut Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
     source_physical_attempt_id: String,
@@ -414,9 +563,9 @@ where
     if !effective_config.enabled {
         bail!("overflow recovery requires enabled compaction");
     }
-    let preview = session
-        .v2_compaction_preview(effective_config.tail_messages)?
-        .context("overflow recovery has no foldable V2 history")?;
+    let preview =
+        sigil_runtime::context_window::compaction_preview_for_strategy(session, &effective_config)?
+            .context("overflow recovery has no foldable history")?;
     let runtime_context = resolve_session_request_context(session, context_resolver).await;
     let target_input = PortableV2TargetRequestInput {
         tools,
@@ -432,25 +581,112 @@ where
         root_config,
         workspace_root,
         session_log_path,
+        provider,
         session,
         &options.memory_config,
         target_input,
         preview,
-    )?
+    )
+    .await?
     .into_server_count_pending(provider, session, &source_physical_attempt_id)
     .await
 }
 
-/// Prepares a read-only V2 review plus the exact process-local material needed for confirmation.
+/// Builds the zero-provider-I/O manual preview required before a billed semantic summary.
 ///
-/// The returned review is always safe to render. An unavailable local tokenizer or exact proof
-/// produces an unavailable admission instead of a durable lifecycle write.
+/// The deterministic checkpoint baseline is constructed with empty model-owned sections solely
+/// to render authority, continuity, whole-turn tail and shrink evidence. It is never activated;
+/// the full-compaction choice builds a fresh checkpoint from the validated model response.
 pub(in crate::runner) fn prepare_v2_compaction_review(
     request_id: u64,
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
     session: &Session,
+    preview: V2CompactionPreview,
+) -> Result<(V2CompactionReview, PendingLocalV2Compaction)> {
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    let scope = root_config
+        .verification
+        .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    let snapshot = build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)?;
+    let valid_for_snapshot = snapshot
+        .workspace_snapshot_id
+        .context("portable compaction requires a complete workspace snapshot")?;
+    let now = current_unix_time_ms();
+    let source_key = format!(
+        "{}:{}:local-preview:{request_id}",
+        session.session_scope_id(),
+        preview.plan.base_stream_cursor.last_applied_event_id,
+    );
+    let store = JsonlSessionStore::new(session_log_path)?;
+    let preflight =
+        store.prepare_portable_semantic_compaction(PortableSemanticCompactionRequest {
+            attempt_id: format!(
+                "local-preview-{}",
+                stable_event_uuid("sigil-local-compaction-preview-attempt", &source_key)
+            ),
+            compaction_id: format!(
+                "local-preview-{}",
+                stable_event_uuid("sigil-local-compaction-preview", &source_key)
+            ),
+            initiation: CompactionInitiation::Manual,
+            base_projection_revision: "portable-v3-local-preview-r1".to_owned(),
+            branch_id: None,
+            valid_for_snapshot,
+            objective: None,
+            language: "en".to_owned(),
+            plan: preview.plan.clone(),
+            model_output: sigil_kernel::ContinuationModelOutputV1 {
+                in_progress: Vec::new(),
+                pending_actions: Vec::new(),
+                provider_continuity: Vec::new(),
+                model_notes: Vec::new(),
+            },
+            tool_output_projection_policy: ToolOutputProjectionPolicy::default(),
+            started_at_unix_ms: now,
+            completed_at_unix_ms: now,
+        })?;
+    let records = JsonlSessionStore::read_event_records(session_log_path)?;
+    let active_standalone_sources =
+        sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(&records)?
+            .active_standalone_source_event_ids();
+    let tool_output_shrink_candidates = tool_output_shrink_previews(
+        &preflight,
+        &active_standalone_sources,
+        &sigil_runtime::secret_redactor_for_root_config(root_config),
+    );
+    let standalone_tool_output_shrink_available = !tool_output_shrink_candidates.is_empty();
+    let review = V2CompactionReview {
+        request_id,
+        strategy: root_config.compaction.strategy,
+        preview: preview.clone(),
+        admission: V2CompactionAdmission::Prepared {
+            standalone_tool_output_shrink_available,
+        },
+        tool_output_shrink_candidates,
+        continuity: Some(continuity_preview(&preflight)),
+        native_carrier_requested: root_config.compaction.native_carrier_enabled
+            && sigil_runtime::application_compaction::NATIVE_COMPACTION_RESUME_ENABLED,
+    };
+    Ok((
+        review,
+        PendingLocalV2Compaction {
+            request_id,
+            session_scope_id: session.session_scope_id().to_owned(),
+            preview,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::runner) fn prepare_v2_compaction_summary_review(
+    request_id: u64,
+    root_config: &RootConfig,
+    workspace_root: &std::path::Path,
+    session_log_path: &std::path::Path,
+    provider: &dyn sigil_kernel::Provider,
+    session: &mut Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
     context_resolver: &sigil_runtime::RequestContextResolver,
@@ -459,32 +695,35 @@ pub(in crate::runner) fn prepare_v2_compaction_review(
 ) -> Result<(V2CompactionReview, Option<PendingV2Compaction>)> {
     let runtime_context =
         runtime_handle.block_on(resolve_session_request_context(session, context_resolver));
-    prepare_v2_compaction(
+    runtime_handle.block_on(prepare_v2_compaction(
         request_id,
         CompactionInitiation::Manual,
         root_config,
         workspace_root,
         session_log_path,
+        provider,
         session,
         options,
         tools,
         runtime_context,
         preview,
-    )
+    ))
 }
 
-/// Prepares the automatic K25.11 path without creating a modal or a durable attempt.
+/// Prepares the automatic K25.11 path without creating a modal.
 ///
 /// This is invoked only by the scheduler after a successful chat run and after it has proven
-/// that no active run, queue item, or agent-result continuation remains. It never performs
-/// provider I/O; the same local target admission as manual `/compact` remains mandatory.
+/// that no active run, queue item, or agent-result continuation remains. Cache-aware V3 performs
+/// one audited semantic-summary request; the same exact target admission as manual `/compact`
+/// remains mandatory.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn prepare_idle_auto_compaction(
     state: &mut IdleAutoCompactionState,
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
-    session: &Session,
+    provider: &dyn sigil_kernel::Provider,
+    session: &mut Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
     context_resolver: &sigil_runtime::RequestContextResolver,
@@ -499,18 +738,58 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         session.model_name(),
         &options.compaction_config,
     );
-    if effective_config.threshold_status(session.stats().last_prompt_tokens)
-        != CompactionThresholdStatus::Hard
-    {
+    let threshold_status = effective_config.threshold_status(session.stats().last_prompt_tokens);
+    let threshold_allows_preparation = match effective_config.strategy {
+        CompactionStrategy::LegacyV2 => threshold_status == CompactionThresholdStatus::Hard,
+        CompactionStrategy::CacheAwareV3 => !matches!(
+            threshold_status,
+            CompactionThresholdStatus::Off | CompactionThresholdStatus::NotAvailable
+        ),
+    };
+    if !threshold_allows_preparation {
         state.consume_request();
         return Ok(IdleAutoCompactionPreparation::NotHardThreshold);
     }
 
-    let Some(preview) = session.v2_compaction_preview(effective_config.tail_messages)? else {
+    let Some(preview) =
+        sigil_runtime::context_window::compaction_preview_for_strategy(session, &effective_config)?
+    else {
         state.consume_request();
         return Ok(IdleAutoCompactionPreparation::NoFoldableHistory);
     };
-    let scope_fingerprint = idle_auto_scope_fingerprint(session, &preview, &effective_config)?;
+    if effective_config.strategy == CompactionStrategy::CacheAwareV3 {
+        let next_turn_p95_tokens = preview
+            .plan
+            .adaptive_tail
+            .as_ref()
+            .map_or(4_096, |tail| tail.recent_complete_turn_p95_tokens.max(1));
+        let output_reserve = sigil_runtime::portable_compaction_target_output_tokens(
+            session.provider_name(),
+            session.model_name(),
+        )
+        .map_or(4_096, u64::from);
+        let fit_required = effective_config
+            .context_window_tokens
+            .is_some_and(|context_window| {
+                session
+                    .stats()
+                    .last_prompt_tokens
+                    .saturating_add(next_turn_p95_tokens)
+                    .saturating_add(output_reserve)
+                    .saturating_add(8_192)
+                    >= u64::from(context_window)
+            });
+        if !fit_required {
+            // Cost-only automatic compaction must eventually pass a pre-call upper-bound
+            // economics gate. Until that exact gate is available, do not spend a summary request
+            // merely to discover that rotation is uneconomic.
+            state.consume_request();
+            return Ok(IdleAutoCompactionPreparation::NotHardThreshold);
+        }
+    }
+    let circuit_scope = idle_auto_circuit_scope(session, &preview)?;
+    let scope_fingerprint =
+        idle_auto_scope_fingerprint(session, &preview, &effective_config, &circuit_scope)?;
     let now = current_unix_time_ms();
     if let Some(retry_after_unix_ms) = state.retry_after(&scope_fingerprint)
         && now < retry_after_unix_ms
@@ -526,22 +805,59 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         return Ok(IdleAutoCompactionPreparation::FailureLatched);
     }
 
+    let records = JsonlSessionStore::read_event_records(session_log_path)?;
+    let lifecycle = CompactionLifecycleProjection::from_records(&records)?;
+    let latest_applied_sequence = lifecycle.latest_applied_stream_sequence();
+    let completed_turn_sequences = records
+        .iter()
+        .filter(|record| {
+            record.stored_event().event_kind() == Some(DurableEventType::AssistantMessageRecorded)
+        })
+        .map(|record| record.stream_sequence())
+        .filter(|sequence| latest_applied_sequence.is_none_or(|applied| *sequence > applied))
+        .collect::<Vec<_>>();
+    let emergency = effective_config
+        .context_window_tokens
+        .is_some_and(|context_window| {
+            session.stats().last_prompt_tokens.saturating_mul(10)
+                >= u64::from(context_window).saturating_mul(9)
+        });
+    let post_activation_emergency_layer =
+        (latest_applied_sequence.is_some() && completed_turn_sequences.len() == 1 && emergency)
+            .then(|| emergency_blocking_layer(&preview, session.stats().last_prompt_tokens));
+    let circuit_decision =
+        lifecycle.circuit_breaker_decision(&CompactionCircuitBreakerInputV1 {
+            scope: circuit_scope.clone(),
+            latest_completed_real_turn_sequence: completed_turn_sequences.into_iter().max(),
+            emergency,
+            post_activation_emergency_layer,
+            manual_retry: false,
+        })?;
+    if circuit_decision != CompactionCircuitBreakerDecisionV1::Allowed {
+        state.consume_request();
+        return Ok(IdleAutoCompactionPreparation::CircuitOpen {
+            decision: circuit_decision,
+        });
+    }
+
     let runtime_context =
         runtime_handle.block_on(resolve_session_request_context(session, context_resolver));
-    let (review, pending) = prepare_v2_compaction(
+    let (review, pending) = runtime_handle.block_on(prepare_v2_compaction(
         0,
         CompactionInitiation::IdleAutomatic {
             scope_fingerprint: scope_fingerprint.clone(),
+            circuit_scope: Some(circuit_scope),
         },
         root_config,
         workspace_root,
         session_log_path,
+        provider,
         session,
         options,
         tools,
         runtime_context,
         preview,
-    )?;
+    ))?;
     state.consume_request();
     match pending {
         Some(pending) => Ok(IdleAutoCompactionPreparation::Ready(Box::new(pending))),
@@ -556,22 +872,28 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_v2_compaction(
+async fn prepare_v2_compaction(
     request_id: u64,
     initiation: CompactionInitiation,
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
-    session: &Session,
+    provider: &dyn sigil_kernel::Provider,
+    session: &mut Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
     runtime_context: RuntimeContextCandidates,
     preview: V2CompactionPreview,
 ) -> Result<(V2CompactionReview, Option<PendingV2Compaction>)> {
-    let review = |admission| V2CompactionReview {
+    let review = |admission, tool_output_shrink_candidates, continuity| V2CompactionReview {
         request_id,
+        strategy: root_config.compaction.strategy,
         preview: preview.clone(),
         admission,
+        tool_output_shrink_candidates,
+        continuity,
+        native_carrier_requested: root_config.compaction.native_carrier_enabled
+            && sigil_runtime::application_compaction::NATIVE_COMPACTION_RESUME_ENABLED,
     };
     let target_input = PortableV2TargetRequestInput {
         tools,
@@ -587,14 +909,22 @@ fn prepare_v2_compaction(
         root_config,
         workspace_root,
         session_log_path,
+        provider,
         session,
         &options.memory_config,
         target_input,
         preview.clone(),
     )
+    .await
     .and_then(PreparedPortableV2Compaction::into_pending)
     {
         Ok(pending) => {
+            let continuity = Some(continuity_preview(&pending.preflight));
+            let tool_output_shrink_candidates = tool_output_shrink_previews(
+                &pending.preflight,
+                &std::collections::BTreeSet::new(),
+                &sigil_runtime::secret_redactor_for_root_config(root_config),
+            );
             let budget = &pending.target_material.proof().budget;
             let economics = pending
                 .target_material
@@ -602,33 +932,164 @@ fn prepare_v2_compaction(
                 .context("portable target material has no before/after economics proof")?;
             match &pending.target_material.proof().input {
                 sigil_kernel::InputTokenEvidence::Exact { tokens, .. } => Ok((
-                    review(V2CompactionAdmission::Ready {
-                        before_input_tokens: economics.before_input.admission_tokens(),
-                        input_tokens: *tokens,
-                        context_window_tokens: budget.context_window_tokens,
-                        output_tokens: budget.requested_output_tokens,
-                        safety_buffer_tokens: budget.safety_buffer_tokens,
-                        savings_tokens: economics.savings_tokens,
-                        savings_ratio_ppm: economics.savings_ratio_ppm,
-                        minimum_savings_tokens: economics.minimum_savings_tokens,
-                        minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
-                    }),
+                    review(
+                        V2CompactionAdmission::Ready {
+                            before_input_tokens: economics.before_input.admission_tokens(),
+                            input_tokens: *tokens,
+                            context_window_tokens: budget.context_window_tokens,
+                            output_tokens: budget.requested_output_tokens,
+                            safety_buffer_tokens: budget.safety_buffer_tokens,
+                            savings_tokens: economics.savings_tokens,
+                            savings_ratio_ppm: economics.savings_ratio_ppm,
+                            minimum_savings_tokens: economics.minimum_savings_tokens,
+                            minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
+                            summary_usage_observed: pending
+                                .economics_v2_input
+                                .compactor_usage_observed,
+                            deterministic_emergency_fallback: pending
+                                .deterministic_emergency_fallback,
+                            summary_cache_read_tokens: pending
+                                .economics_v2_input
+                                .compactor_cache_read_tokens,
+                            summary_uncached_input_tokens: pending
+                                .economics_v2_input
+                                .compactor_uncached_input_tokens,
+                            summary_output_tokens: pending
+                                .economics_v2_input
+                                .compactor_output_tokens,
+                            summary_cost_nano_usd: economics
+                                .v2_economics
+                                .as_ref()
+                                .and_then(|economics| economics.cost_projection.as_ref())
+                                .map(|cost| cost.rotate_compactor_cost_nano_usd),
+                            economics_v2: economics.v2_economics.clone().map(Box::new),
+                        },
+                        tool_output_shrink_candidates,
+                        continuity,
+                    ),
                     Some(pending),
                 )),
                 sigil_kernel::InputTokenEvidence::ConservativeUpperBound { .. } => Ok((
-                    review(V2CompactionAdmission::Unavailable {
-                        reason: "local exact target proof is unavailable".to_owned(),
-                    }),
+                    review(
+                        V2CompactionAdmission::Unavailable {
+                            reason: "local exact target proof is unavailable".to_owned(),
+                        },
+                        tool_output_shrink_candidates,
+                        continuity,
+                    ),
                     None,
                 )),
             }
         }
         Err(error) => Ok((
-            review(V2CompactionAdmission::Unavailable {
-                reason: format!("local exact target proof is unavailable: {error:#}"),
-            }),
+            review(
+                V2CompactionAdmission::Unavailable {
+                    reason: format!("local exact target proof is unavailable: {error:#}"),
+                },
+                Vec::new(),
+                None,
+            ),
             None,
         )),
+    }
+}
+
+fn tool_output_shrink_previews(
+    preflight: &PortableSemanticCompactionPreflight,
+    excluded_source_event_ids: &std::collections::BTreeSet<String>,
+    redactor: &sigil_kernel::SecretRedactor,
+) -> Vec<ToolOutputShrinkPreview> {
+    preflight
+        .tool_output_shrink_candidates()
+        .iter()
+        .filter(|candidate| match &candidate.raw_durable_result {
+            sigil_kernel::ToolOutputArtifactRefV1::DurableTranscriptEvent { event_id, .. } => {
+                !excluded_source_event_ids.contains(event_id)
+            }
+        })
+        .map(|candidate| ToolOutputShrinkPreview {
+            tool_name: candidate.tool_name.clone(),
+            tool_call_id: candidate.tool_call_id.clone(),
+            status: candidate.status.clone(),
+            original_content_bytes: candidate.original_content_bytes,
+            original_content_token_upper_bound: candidate.original_content_token_upper_bound,
+            head_excerpt: redactor.redact_text(&candidate.head_excerpt),
+            tail_excerpt: redactor.redact_text(&candidate.tail_excerpt),
+            content_sha256: candidate.content_sha256.clone(),
+            artifact_ref: match &candidate.raw_durable_result {
+                sigil_kernel::ToolOutputArtifactRefV1::DurableTranscriptEvent {
+                    event_id, ..
+                } => format!("durable transcript event {event_id}"),
+            },
+            reason: "large completed historical result".to_owned(),
+            recovery_instruction: redactor.redact_text(&candidate.recovery_instruction),
+        })
+        .collect()
+}
+
+fn continuity_preview(preflight: &PortableSemanticCompactionPreflight) -> V2ContinuityPreview {
+    let checkpoint = preflight.checkpoint();
+    let anchor = checkpoint
+        .session_anchor
+        .as_ref()
+        .expect("admitted V3 checkpoint has a session anchor");
+    let continuity = checkpoint
+        .continuity_v2
+        .as_ref()
+        .expect("admitted V3 checkpoint has source-bound continuity");
+    let anchored_source_refs = 1
+        + usize::from(anchor.active_subgoal.is_some())
+        + anchor.constraints.len()
+        + anchor.authorization_boundary.len()
+        + anchor.attachment_refs.len();
+    let grounded_source_refs = [
+        &continuity.decisions,
+        &continuity.progress,
+        &continuity.pending_work,
+        &continuity.files_and_artifacts,
+        &continuity.commands,
+        &continuity.verification,
+        &continuity.failures_and_dead_ends,
+        &continuity.risks,
+        &continuity.unresolved_questions,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|item| item.source_refs.len())
+    .sum::<usize>();
+    V2ContinuityPreview {
+        root_objective: bounded_preview_text(&anchor.root_objective.exact_text, 192),
+        active_constraints: anchor
+            .constraints
+            .iter()
+            .chain(&anchor.authorization_boundary)
+            .filter(|constraint| constraint.status == sigil_kernel::ConstraintStatusV1::Active)
+            .map(|constraint| V2ConstraintPreview {
+                text: bounded_preview_text(&constraint.exact_text, 192),
+                source_event_id: constraint.source.event_id.clone(),
+                source_field_path: constraint.source.field_path.clone(),
+            })
+            .collect(),
+        active_constraint_count: anchor
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.status == sigil_kernel::ConstraintStatusV1::Active)
+            .count(),
+        authorization_boundary_count: anchor.authorization_boundary.len(),
+        recoverable_attachment_count: anchor.attachment_refs.len(),
+        pending_work_count: continuity.pending_work.len(),
+        unresolved_question_count: continuity.unresolved_questions.len(),
+        source_ref_count: anchored_source_refs.saturating_add(grounded_source_refs),
+    }
+}
+
+fn bounded_preview_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
     }
 }
 
@@ -642,17 +1103,31 @@ struct PortableV2TargetRequestInput {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_portable_v2_compaction(
+async fn prepare_portable_v2_compaction(
     request_id: u64,
     initiation: CompactionInitiation,
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
-    session: &Session,
+    provider: &dyn sigil_kernel::Provider,
+    session: &mut Session,
     memory_config: &sigil_kernel::MemoryConfig,
     target_input: PortableV2TargetRequestInput,
     preview: V2CompactionPreview,
 ) -> Result<PreparedPortableV2Compaction> {
+    let local_target_profile = sigil_runtime::is_deepseek_v4_flash_portable_target_profile(
+        session.provider_name(),
+        session.model_name(),
+    );
+    let overflow_server_count_profile =
+        matches!(&initiation, CompactionInitiation::OverflowRecovery { .. })
+            && sigil_runtime::is_openai_responses_portable_target_profile(
+                session.provider_name(),
+                session.model_name(),
+            );
+    if !local_target_profile && !overflow_server_count_profile {
+        bail!("route has no admitted portable target profile for this compaction initiation");
+    }
     if sigil_runtime::is_deepseek_v4_flash_portable_target_profile(
         session.provider_name(),
         session.model_name(),
@@ -674,10 +1149,12 @@ fn prepare_portable_v2_compaction(
             session.session_scope_id(),
             preview.plan.base_stream_cursor.last_applied_event_id,
         ),
-        CompactionInitiation::IdleAutomatic { scope_fingerprint } => {
+        CompactionInitiation::IdleAutomatic {
+            scope_fingerprint, ..
+        } => {
             format!(
-                "{}:idle-auto:{scope_fingerprint}",
-                session.session_scope_id()
+                "{}:idle-auto:{scope_fingerprint}:request:{request_id}",
+                session.session_scope_id(),
             )
         }
         CompactionInitiation::PreTurnPressure { queue_id } => format!(
@@ -702,33 +1179,15 @@ fn prepare_portable_v2_compaction(
         "portable-{}",
         stable_event_uuid("sigil-portable-compaction-activation", &source_key)
     );
-    let request = PortableSemanticCompactionRequest {
-        attempt_id,
-        compaction_id,
-        initiation: initiation.clone(),
-        base_projection_revision: "portable-v2-admission-r1".to_owned(),
-        branch_id: None,
-        valid_for_snapshot,
-        objective: None,
-        language: "en".to_owned(),
-        plan: preview.plan.clone(),
-        // K25.10B intentionally activates only deterministic task-memory and user-constraint
-        // extraction. Semantic compressor I/O remains a later admitted stage.
-        model_output: ContinuationModelOutputV1 {
-            in_progress: Vec::new(),
-            pending_actions: Vec::new(),
-            provider_continuity: Vec::new(),
-            model_notes: Vec::new(),
-        },
-        tool_output_projection_policy: ToolOutputProjectionPolicy::default(),
-        started_at_unix_ms: now,
-        completed_at_unix_ms: now,
-    };
     let store = JsonlSessionStore::new(session_log_path)?;
-    let preflight = store.prepare_portable_semantic_compaction(request)?;
-    let target_max_tokens = sigil_runtime::portable_compaction_target_output_tokens(
-        session.provider_name(),
-        session.model_name(),
+    let target_max_tokens = Some(
+        sigil_runtime::portable_compaction_target_output_tokens(
+            session.provider_name(),
+            session.model_name(),
+        )
+        .context(
+            "local exact target proof is unavailable: route has no admitted portable target profile",
+        )?,
     );
     let before_request = session.build_pre_turn_candidate_request(
         workspace_root,
@@ -744,6 +1203,68 @@ fn prepare_portable_v2_compaction(
     )?;
     let frozen_before_request =
         FrozenProviderRequestMaterial::freeze(session.session_scope_id(), before_request)?;
+    let fallback_policy = if matches!(
+        &initiation,
+        CompactionInitiation::PreTurnPressure { .. }
+            | CompactionInitiation::OverflowRecovery { .. }
+    ) {
+        sigil_runtime::SemanticCompactionFallbackPolicy::DeterministicEmergency
+    } else {
+        sigil_runtime::SemanticCompactionFallbackPolicy::Forbid
+    };
+    let summary_result = sigil_runtime::generate_portable_compaction_summary(
+        provider,
+        session,
+        &store,
+        &attempt_id,
+        &frozen_before_request,
+        &preview.plan,
+        fallback_policy,
+    )
+    .await;
+    let summary = match summary_result {
+        Ok(summary) => summary,
+        Err(error) => {
+            if fallback_policy == sigil_runtime::SemanticCompactionFallbackPolicy::Forbid {
+                sigil_runtime::record_semantic_compaction_failure(
+                    &store,
+                    &attempt_id,
+                    initiation.clone(),
+                    now,
+                    &error,
+                )
+                .context("failed to record semantic compaction failure")?;
+            }
+            return Err(error).context("semantic compaction summary request failed");
+        }
+    };
+    let sigil_runtime::PortableCompactionSummary {
+        model_output,
+        usage: summary_usage,
+        rebased_plan,
+        deterministic_emergency_fallback,
+    } = summary;
+    let native_portable_compaction_id = compaction_id.clone();
+    let native_covers_through = rebased_plan
+        .folded_through
+        .clone()
+        .context("portable compaction plan has no folded-through cursor")?;
+    let request = PortableSemanticCompactionRequest {
+        attempt_id,
+        compaction_id,
+        initiation: initiation.clone(),
+        base_projection_revision: "portable-v3-hybrid-summary-r1".to_owned(),
+        branch_id: None,
+        valid_for_snapshot,
+        objective: None,
+        language: "en".to_owned(),
+        plan: rebased_plan,
+        model_output,
+        tool_output_projection_policy: ToolOutputProjectionPolicy::default(),
+        started_at_unix_ms: now,
+        completed_at_unix_ms: current_unix_time_ms(),
+    };
+    let preflight = store.prepare_portable_semantic_compaction(request)?;
     let target_request = session.build_portable_compaction_candidate_request(
         workspace_root,
         memory_config,
@@ -766,21 +1287,192 @@ fn prepare_portable_v2_compaction(
         &root_config.session,
         workspace_root,
     );
+    let economics_v2_input = portable_economics_v2_input(
+        session,
+        &preview,
+        &preflight,
+        &initiation,
+        root_config.compaction.strategy,
+        summary_usage.as_ref(),
+    );
     Ok(PreparedPortableV2Compaction {
         request_id,
         session_scope_id: session.session_scope_id().to_owned(),
         idle_auto_scope_fingerprint: match initiation {
-            CompactionInitiation::IdleAutomatic { scope_fingerprint } => Some(scope_fingerprint),
+            CompactionInitiation::IdleAutomatic {
+                scope_fingerprint, ..
+            } => Some(scope_fingerprint),
             CompactionInitiation::Manual
             | CompactionInitiation::PreTurnPressure { .. }
             | CompactionInitiation::OverflowRecovery { .. } => None,
         },
+        deterministic_emergency_fallback,
         cache_root: paths.cache_root,
         preflight,
         frozen_before_request,
         frozen_target_request,
+        native_covers_through,
+        native_portable_compaction_id,
+        economics_v2_input,
         folded_event_count: preview.plan.folded_event_ids.len(),
     })
+}
+
+fn portable_economics_v2_input(
+    session: &Session,
+    preview: &V2CompactionPreview,
+    preflight: &PortableSemanticCompactionPreflight,
+    initiation: &CompactionInitiation,
+    strategy: CompactionStrategy,
+    summary_usage: Option<&sigil_kernel::UsageStats>,
+) -> sigil_runtime::PortableCompactionEconomicsV2Input {
+    let latest_usage = session.entries().iter().rev().find_map(|entry| {
+        let sigil_kernel::SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) = entry
+        else {
+            return None;
+        };
+        Some(usage)
+    });
+    let cache_usage = latest_usage.and_then(|usage| usage.cache_usage.as_ref());
+    let summary_cache_usage = summary_usage.and_then(|usage| usage.cache_usage.as_ref());
+    let next_turn_p95_tokens = preview
+        .plan
+        .adaptive_tail
+        .as_ref()
+        .map_or(4_096, |tail| tail.recent_complete_turn_p95_tokens.max(1));
+    let bulky_shrink_candidate_tokens = preflight
+        .tool_output_shrink_candidates()
+        .iter()
+        .fold(0_u64, |total, candidate| {
+            total.saturating_add(candidate.original_content_token_upper_bound)
+        });
+    let (rollout_mode, user_confirmed, overflow_observed) = match initiation {
+        CompactionInitiation::Manual => (CompactionRolloutModeV1::Preview, false, false),
+        CompactionInitiation::IdleAutomatic { .. } => (
+            match strategy {
+                CompactionStrategy::LegacyV2 => CompactionRolloutModeV1::Shadow,
+                CompactionStrategy::CacheAwareV3 => CompactionRolloutModeV1::Automatic,
+            },
+            false,
+            false,
+        ),
+        CompactionInitiation::PreTurnPressure { .. } => {
+            (CompactionRolloutModeV1::Automatic, false, false)
+        }
+        CompactionInitiation::OverflowRecovery { .. } => {
+            (CompactionRolloutModeV1::Automatic, false, true)
+        }
+    };
+    sigil_runtime::PortableCompactionEconomicsV2Input {
+        next_turn_p95_tokens,
+        tool_growth_p95_tokens: 4_096,
+        provider_state_tokens: 0,
+        bulky_shrink_candidate_tokens,
+        overflow_observed,
+        expected_remaining_turns: ExpectedRemainingTurnsV1 {
+            turns: 3,
+            source: CompactionForecastSourceV1::ConservativeFallback,
+            confidence: CompactionForecastConfidenceV1::Low,
+            source_event_ids: Vec::new(),
+        },
+        observed_current_cache_read_tokens: cache_usage
+            .and_then(|usage| usage.read.as_ref())
+            .map(|count| count.tokens),
+        observed_current_uncached_tokens: cache_usage
+            .and_then(|usage| usage.uncached.as_ref())
+            .map(|count| count.tokens),
+        pricing_snapshot: summary_usage
+            .filter(|usage| usage.prompt_tokens > 0 && usage.completion_tokens > 0)
+            .and_then(|usage| usage.pricing_snapshot.clone())
+            .or_else(|| {
+                summary_usage
+                    .is_some_and(|usage| usage.prompt_tokens > 0 && usage.completion_tokens > 0)
+                    .then(|| latest_usage.and_then(|usage| usage.pricing_snapshot.clone()))
+                    .flatten()
+            }),
+        compactor_usage_observed: summary_usage
+            .is_some_and(|usage| usage.prompt_tokens > 0 && usage.completion_tokens > 0),
+        compactor_cache_read_tokens: summary_cache_usage
+            .and_then(|usage| usage.read.as_ref())
+            .map_or_else(
+                || summary_usage.map_or(0, |usage| usage.cache_hit_tokens),
+                |count| count.tokens,
+            ),
+        compactor_uncached_input_tokens: summary_cache_usage
+            .and_then(|usage| usage.uncached.as_ref())
+            .map_or_else(
+                || summary_usage.map_or(0, |usage| usage.cache_miss_tokens),
+                |count| count.tokens,
+            ),
+        compactor_output_tokens: summary_usage.map_or(0, |usage| usage.completion_tokens),
+        rollout_mode,
+        user_confirmed,
+        legacy_v2_would_compact: true,
+    }
+}
+
+fn economics_v2_admission(
+    target_material: &PortableTargetRequestMaterial,
+) -> Result<&sigil_kernel::CompactionAdmissionV2> {
+    target_material
+        .portable_economics()
+        .and_then(|economics| economics.v2_economics.as_ref())
+        .map(|economics| &economics.admission)
+        .context("portable target material has no RFC-0057 admission")
+}
+
+fn require_prepared_v2_admission(
+    target_material: &PortableTargetRequestMaterial,
+    rollout_mode: CompactionRolloutModeV1,
+) -> Result<()> {
+    let admission = economics_v2_admission(target_material)?;
+    match rollout_mode {
+        CompactionRolloutModeV1::Shadow => Ok(()),
+        CompactionRolloutModeV1::Preview
+            if admission.decision == sigil_kernel::CompactionAdmissionDecisionV2::Preview =>
+        {
+            Ok(())
+        }
+        CompactionRolloutModeV1::Automatic
+            if admission.decision == sigil_kernel::CompactionAdmissionDecisionV2::Admit
+                && admission.automatic_allowed =>
+        {
+            Ok(())
+        }
+        CompactionRolloutModeV1::Preview | CompactionRolloutModeV1::Automatic => bail!(
+            "RFC-0057 compaction preparation is not admitted: {:?} ({:?})",
+            admission.decision,
+            admission.reason
+        ),
+    }
+}
+
+fn require_activation_v2_admission(
+    target_material: &PortableTargetRequestMaterial,
+    rollout_mode: CompactionRolloutModeV1,
+) -> Result<()> {
+    let admission = economics_v2_admission(target_material)?;
+    match rollout_mode {
+        CompactionRolloutModeV1::Shadow => Ok(()),
+        CompactionRolloutModeV1::Preview
+            if admission.decision == sigil_kernel::CompactionAdmissionDecisionV2::Admit
+                && admission.user_confirmed
+                && !admission.automatic_allowed =>
+        {
+            Ok(())
+        }
+        CompactionRolloutModeV1::Automatic
+            if admission.decision == sigil_kernel::CompactionAdmissionDecisionV2::Admit
+                && admission.automatic_allowed =>
+        {
+            Ok(())
+        }
+        CompactionRolloutModeV1::Preview | CompactionRolloutModeV1::Automatic => bail!(
+            "RFC-0057 compaction activation is not admitted: {:?} ({:?})",
+            admission.decision,
+            admission.reason
+        ),
+    }
 }
 
 /// Completes the no-write pre-turn admission for the next queued conversation input.
@@ -788,14 +1480,16 @@ fn prepare_portable_v2_compaction(
 /// Exact fit returns the frozen direct candidate. When the direct target exceeds the only
 /// admitted local budget, this prepares and proves a second frozen request based on a portable
 /// compaction preflight whose fold source is the current durable stream before queue promotion.
-/// Neither branch appends a queue promotion, compaction lifecycle, capability registration, or
-/// provider request.
+/// Neither branch appends a queue promotion, compaction activation, or capability registration.
+/// The pressure branch may append one audited semantic-summary physical attempt before target
+/// admission; failure leaves the queued input unpromoted.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
-    session: &Session,
+    provider: &dyn sigil_kernel::Provider,
+    session: &mut Session,
     exact_prompts: &ExactConversationPromptStore,
     memory_config: &sigil_kernel::MemoryConfig,
     tools: Vec<sigil_kernel::ToolSpec>,
@@ -853,14 +1547,15 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
                 });
             }
             let fallback_candidate = candidate.clone();
-            match prepare_queued_portable_preflight(
+            match runtime_handle.block_on(prepare_queued_portable_preflight(
                 root_config,
                 workspace_root,
                 session_log_path,
+                provider,
                 session,
                 memory_config,
                 *candidate,
-            ) {
+            )) {
                 Ok(Some(pending)) => Ok(
                     QueuedConversationPreTurnAdmission::PortablePreflightReady(Box::new(pending)),
                 ),
@@ -883,11 +1578,12 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_queued_portable_preflight(
+async fn prepare_queued_portable_preflight(
     root_config: &RootConfig,
     workspace_root: &std::path::Path,
     session_log_path: &std::path::Path,
-    session: &Session,
+    provider: &dyn sigil_kernel::Provider,
+    session: &mut Session,
     memory_config: &sigil_kernel::MemoryConfig,
     mut candidate: PreparedQueuedConversationCandidate,
 ) -> Result<Option<PendingQueuedConversationPortablePreflight>> {
@@ -896,7 +1592,9 @@ fn prepare_queued_portable_preflight(
         session.model_name(),
         &root_config.compaction,
     );
-    let Some(preview) = session.v2_compaction_preview(effective_config.tail_messages)? else {
+    let Some(preview) =
+        sigil_runtime::context_window::compaction_preview_for_strategy(session, &effective_config)?
+    else {
         return Ok(None);
     };
 
@@ -947,11 +1645,13 @@ fn prepare_queued_portable_preflight(
         root_config,
         workspace_root,
         session_log_path,
+        provider,
         session,
         memory_config,
         target_input,
         preview,
-    )?;
+    )
+    .await?;
     let post_compaction_frozen_request = prepared.frozen_target_request.clone();
     let pending_compaction = prepared.into_pending()?;
     candidate.frozen_request = post_compaction_frozen_request;
@@ -990,6 +1690,7 @@ fn idle_auto_scope_fingerprint(
     session: &Session,
     preview: &V2CompactionPreview,
     effective_config: &sigil_kernel::CompactionConfig,
+    circuit_scope: &CompactionCircuitScopeV1,
 ) -> Result<String> {
     let material = serde_json::json!({
         "schema": "sigil-idle-auto-compaction-scope-v1",
@@ -1001,6 +1702,7 @@ fn idle_auto_scope_fingerprint(
         "tail_messages": effective_config.tail_messages,
         "target_output_tokens": sigil_runtime::deepseek_v4_flash_portable_target_output_tokens(),
         "target_policy_revision": 1,
+        "circuit_scope": circuit_scope,
         "active_compaction_id": &preview.active_compaction_id,
         "prior_folded_through": &preview.plan.prior_folded_through,
         "folded_event_ids": &preview.plan.folded_event_ids,
@@ -1012,6 +1714,50 @@ fn idle_auto_scope_fingerprint(
         "sigil-idle-auto-compaction-scope",
         &serialized,
     ))
+}
+
+fn idle_auto_circuit_scope(
+    session: &Session,
+    preview: &V2CompactionPreview,
+) -> Result<CompactionCircuitScopeV1> {
+    let layout_material = serde_json::json!({
+        "schema": "sigil-compaction-circuit-layout-v1",
+        "active_compaction_id": &preview.active_compaction_id,
+        "prior_folded_through": &preview.plan.prior_folded_through,
+        "folded_event_ids": &preview.plan.folded_event_ids,
+        "retained_event_ids": &preview.plan.retained_event_ids,
+        "adaptive_tail": &preview.plan.adaptive_tail,
+    });
+    let layout_serialized = serde_json::to_string(&layout_material)
+        .context("failed to canonicalize automatic compaction circuit layout")?;
+    Ok(CompactionCircuitScopeV1 {
+        source_cursor_event_id: preview
+            .plan
+            .base_stream_cursor
+            .last_applied_event_id
+            .clone(),
+        layout_hash: stable_event_uuid("sigil-compaction-circuit-layout", &layout_serialized),
+        route_fingerprint: stable_event_uuid(
+            "sigil-compaction-circuit-route",
+            &format!("{}:{}", session.provider_name(), session.model_name()),
+        ),
+    })
+}
+
+fn emergency_blocking_layer(
+    preview: &V2CompactionPreview,
+    current_input_tokens: u64,
+) -> CompactionEmergencyBlockingLayerV1 {
+    let Some(adaptive_tail) = &preview.plan.adaptive_tail else {
+        return CompactionEmergencyBlockingLayerV1::Unknown;
+    };
+    if adaptive_tail.active_turn_extended {
+        CompactionEmergencyBlockingLayerV1::ActiveTurn
+    } else if adaptive_tail.retained_token_upper_bound.saturating_mul(2) >= current_input_tokens {
+        CompactionEmergencyBlockingLayerV1::RetainedConversation
+    } else {
+        CompactionEmergencyBlockingLayerV1::StableSystemAndTools
+    }
 }
 
 #[cfg(test)]

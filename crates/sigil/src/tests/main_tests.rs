@@ -553,6 +553,8 @@ fn render_provider_chunk_formats_text_reasoning_usage_and_done() {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: Some("fp-1".to_owned()),
+        cache_usage: None,
+        pricing_snapshot: None,
     }));
     assert!(
         usage
@@ -671,6 +673,8 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: Some("fp-2".to_owned()),
+        cache_usage: None,
+        pricing_snapshot: None,
     }));
     assert!(
         usage
@@ -697,6 +701,8 @@ async fn drain_provider_stream_and_stdout_event_handler_accept_supported_events(
                 output_cost: 0.0,
                 cache_savings: 0.0,
                 system_fingerprint: Some("fp".to_owned()),
+                cache_usage: None,
+                pricing_snapshot: None,
             })),
             Ok(ProviderChunk::Done),
             Ok(ProviderChunk::TextDelta("ignored after done".to_owned())),

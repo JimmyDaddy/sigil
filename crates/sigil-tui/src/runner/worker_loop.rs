@@ -119,11 +119,11 @@ pub(in crate::runner) use command_dispatch::{
     WorkerCommandDomain, classify_worker_command, validate_task_pause_request,
 };
 pub(in crate::runner) use compaction_runtime::{
-    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
-    QueuedConversationPreTurnAdmission, exact_context_window_rejection_source,
+    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingLocalV2Compaction,
+    PendingV2Compaction, QueuedConversationPreTurnAdmission, exact_context_window_rejection_source,
     has_failed_idle_automatic_scope, prepare_idle_auto_compaction,
     prepare_next_queued_conversation_pre_turn_admission, prepare_overflow_recovery_compaction,
-    prepare_v2_compaction_review,
+    prepare_v2_compaction_review, prepare_v2_compaction_summary_review,
 };
 pub(in crate::runner) use compaction_tasks::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult, IdleV2CompactionPreparation,

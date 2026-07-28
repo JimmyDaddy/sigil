@@ -24,6 +24,8 @@ pub(crate) enum ConfigField {
     VerificationAutoRun,
     MemoryEnabled,
     CompactionEnabled,
+    CompactionNativeCarrierEnabled,
+    CompactionStrategy,
     CompactionSoftThresholdRatio,
     CompactionHardThresholdRatio,
     CompactionContextWindowTokens,
@@ -89,8 +91,10 @@ impl ConfigField {
         Self::WebBundledSearchEnabled,
     ];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
-    const COMPACTION_FIELDS: [Self; 5] = [
+    const COMPACTION_FIELDS: [Self; 7] = [
         Self::CompactionEnabled,
+        Self::CompactionNativeCarrierEnabled,
+        Self::CompactionStrategy,
         Self::CompactionContextWindowTokens,
         Self::CompactionSoftThresholdRatio,
         Self::CompactionHardThresholdRatio,
@@ -152,6 +156,8 @@ impl ConfigField {
             Self::VerificationAutoRun => "checks",
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
+            Self::CompactionNativeCarrierEnabled => "native_carrier",
+            Self::CompactionStrategy => "strategy",
             Self::CompactionSoftThresholdRatio => "soft_threshold",
             Self::CompactionHardThresholdRatio => "hard_threshold",
             Self::CompactionContextWindowTokens => "fallback_window",
@@ -199,6 +205,8 @@ impl ConfigField {
             Self::VerificationAutoRun => "Checks",
             Self::MemoryEnabled => "Memory",
             Self::CompactionEnabled => "Auto compact",
+            Self::CompactionNativeCarrierEnabled => "Native carrier",
+            Self::CompactionStrategy => "Strategy",
             Self::CompactionSoftThresholdRatio => "Soft threshold",
             Self::CompactionHardThresholdRatio => "Hard threshold",
             Self::CompactionContextWindowTokens => "Fallback window",
@@ -272,7 +280,13 @@ impl ConfigField {
                 "Loads workspace memory documents once at startup for stable session context."
             }
             Self::CompactionEnabled => {
-                "Allows manual compaction and idle hard-threshold auto compaction."
+                "Allows manual compaction and safe-boundary automatic epoch rotation."
+            }
+            Self::CompactionNativeCarrierEnabled => {
+                "After portable continuity is durable, explicitly allows one extra provider-native compaction request on an exact supported route. Portable truth remains authoritative."
+            }
+            Self::CompactionStrategy => {
+                "Cache-aware V3 uses whole turns, portable continuity, cache economics, and provider capability gates. Legacy V2 remains available for rollback."
             }
             Self::CompactionSoftThresholdRatio => {
                 "Prompt pressure where the UI starts warning that compaction may be useful."
@@ -382,6 +396,7 @@ impl ConfigField {
             | Self::WebNetworkMode
             | Self::WebSearchRoute
             | Self::VerificationAutoRun
+            | Self::CompactionStrategy
             | Self::CodeIntelServerStartup
             | Self::TerminalNotificationMethod
             | Self::AppearanceTheme
@@ -393,6 +408,7 @@ impl ConfigField {
             | Self::WebEnabled
             | Self::WebBundledSearchEnabled
             | Self::CompactionEnabled
+            | Self::CompactionNativeCarrierEnabled
             | Self::CodeIntelEnabled
             | Self::CodeIntelAutoDiscover
             | Self::CodeIntelReportMissing

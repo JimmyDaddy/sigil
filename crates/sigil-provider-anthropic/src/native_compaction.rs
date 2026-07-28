@@ -3,9 +3,10 @@ use reqwest::header::RETRY_AFTER;
 use serde_json::{Value, json, value::RawValue};
 use sigil_kernel::{
     CompactionCursor, CompletionRequest, ContextSensitivity, FrozenProviderRequestMaterial,
-    NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
-    NativeProviderCompactionMetadata, NativeProviderCompactionRequest, Provider,
-    ProviderPhysicalAttemptOutcome, ProviderStreamTimeoutState, Session, VersionedProfileIdentity,
+    NativeCarrierPolicyV1, NativeProviderCompactionAttempt,
+    NativeProviderCompactionMaterialization, NativeProviderCompactionMetadata,
+    NativeProviderCompactionRequest, Provider, ProviderPhysicalAttemptOutcome,
+    ProviderStreamTimeoutState, Session, VersionedProfileIdentity,
     provider_continuation_route_fingerprint, provider_status_error, timeout_provider_request,
     timeout_provider_stream_next,
 };
@@ -14,7 +15,7 @@ use crate::{
     AnthropicProvider,
     hosted_search::{AnthropicHostedContinuationStore, AnthropicHostedPlatform},
     provider::{provider_timeout_error, read_error_response_body},
-    request::build_messages_request_with_continuations,
+    request::{AnthropicCachePolicy, build_messages_request_with_continuations},
 };
 
 /// Anthropic's documented beta header for Messages context compaction.
@@ -148,6 +149,8 @@ impl AnthropicProvider {
         logical_run_id: impl Into<String>,
         frozen_request: FrozenProviderRequestMaterial,
         covers_through: CompactionCursor,
+        portable_compaction_id: sigil_kernel::CompactionId,
+        carrier_policy: NativeCarrierPolicyV1,
         options: AnthropicNativeCompactionOptions,
     ) -> Result<Option<NativeProviderCompactionMaterialization>> {
         let request = frozen_request.request();
@@ -160,6 +163,8 @@ impl AnthropicProvider {
                 logical_run_id: logical_run_id.into(),
                 frozen_request,
                 covers_through,
+                portable_compaction_id,
+                carrier_policy,
                 metadata,
             },
         )
@@ -227,6 +232,9 @@ impl AnthropicProvider {
         }
         if self.hosted_platform != AnthropicHostedPlatform::ClaudeApi {
             bail!("Anthropic native compaction only supports the official Anthropic API base URL");
+        }
+        if self.config.anthropic_version != "2023-06-01" {
+            bail!("Anthropic native compaction requires anthropic-version 2023-06-01");
         }
         if !is_native_compaction_model(&request.model_name) {
             bail!(
@@ -300,6 +308,7 @@ pub(crate) fn build_paused_compaction_request(
         &compactable,
         default_max_tokens,
         &AnthropicHostedContinuationStore::default(),
+        AnthropicCachePolicy::Disabled,
     )?
     .body;
     body.stream = false;
@@ -401,7 +410,7 @@ fn parse_paused_compaction_response(payload: &[u8]) -> Result<AnthropicPausedCom
     })
 }
 
-fn is_native_compaction_model(model_name: &str) -> bool {
+pub(crate) fn is_native_compaction_model(model_name: &str) -> bool {
     matches!(
         model_name,
         "claude-fable-5"

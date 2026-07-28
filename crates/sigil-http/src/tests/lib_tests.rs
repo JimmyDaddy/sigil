@@ -2260,6 +2260,15 @@ fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
         preview_id: Some("preview-1".to_owned()),
         folded_event_count: 8,
         retained_event_count: 4,
+        policy: sigil_runtime::application_compaction::ApplicationCompactionPolicyView {
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
+            phase: sigil_kernel::CompactionPressureStateV1::Prepare,
+            forecast_confidence: Some(sigil_kernel::CompactionForecastConfidenceV1::Medium),
+            admission_reason: Some(sigil_kernel::CompactionAdmissionReasonV2::QualifiedCostSavings),
+            native_carrier_available: true,
+            legacy_migration_fields: vec!["tail_messages".to_owned()],
+        },
+        details: None,
         admission: HttpCompactionAdmission::Ready {
             economics: HttpCompactionEconomics {
                 before_input_tokens: 1_000,
@@ -2271,6 +2280,10 @@ fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
                 savings_ratio_ppm: 400_000,
                 minimum_savings_tokens: 200,
                 minimum_savings_ratio_ppm: 100_000,
+                summary_cache_read_tokens: 800,
+                summary_uncached_input_tokens: 200,
+                summary_output_tokens: 64,
+                summary_cost_nano_usd: Some(42),
             },
         },
     };
@@ -2294,7 +2307,11 @@ fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
             task_memory_id: "memory-1".to_owned(),
             folded_event_count: 8,
             tool_output_projection_recorded: true,
+            native_carrier_materialized: false,
+            native_carrier_status: None,
         }),
+        compaction_review: None,
+        tool_output_shrink: None,
         restore: None,
         fork: None,
         recovery,

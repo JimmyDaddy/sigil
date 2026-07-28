@@ -997,7 +997,71 @@ pub(crate) struct DesktopCompactionReview {
     pub(crate) preview_id: Option<String>,
     pub(crate) folded_event_count: usize,
     pub(crate) retained_event_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) policy: Option<DesktopCompactionPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) details: Option<DesktopCompactionDetails>,
     pub(crate) admission: DesktopCompactionAdmission,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionPolicy {
+    pub(crate) strategy: String,
+    pub(crate) phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) forecast_confidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_reason: Option<String>,
+    pub(crate) native_carrier_available: bool,
+    pub(crate) legacy_migration_fields: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionConstraint {
+    pub(crate) text: String,
+    pub(crate) source_event_id: String,
+    pub(crate) source_field_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionToolArtifact {
+    pub(crate) source_event_id: String,
+    pub(crate) content_sha256: String,
+    pub(crate) tool_name: String,
+    pub(crate) tool_call_id: String,
+    pub(crate) status: String,
+    pub(crate) original_content_bytes: u64,
+    pub(crate) original_content_token_upper_bound: u64,
+    pub(crate) head_excerpt: String,
+    pub(crate) tail_excerpt: String,
+    pub(crate) reason: String,
+    pub(crate) recovery_instruction: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionDetails {
+    pub(crate) active_objective: String,
+    pub(crate) objective_source_event_id: String,
+    pub(crate) active_constraints: Vec<DesktopCompactionConstraint>,
+    pub(crate) folded_complete_turn_count: usize,
+    pub(crate) folded_token_upper_bound: u64,
+    pub(crate) retained_complete_turn_count: usize,
+    pub(crate) retained_token_upper_bound: u64,
+    pub(crate) tool_artifact_count: usize,
+    pub(crate) tool_artifacts: Vec<DesktopCompactionToolArtifact>,
+    pub(crate) pending_work_count: usize,
+    pub(crate) unresolved_question_count: usize,
+    pub(crate) recoverable_attachment_count: usize,
+    pub(crate) protected_control_event_count: usize,
+    pub(crate) protected_active_tool_or_approval_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_cache_read_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) break_even_turns: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1007,6 +1071,9 @@ pub(crate) struct DesktopCompactionReview {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum DesktopCompactionAdmission {
+    Prepared {
+        standalone_tool_output_shrink_available: bool,
+    },
     Ready {
         economics: DesktopCompactionEconomics,
     },
@@ -1031,6 +1098,11 @@ pub(crate) struct DesktopCompactionEconomics {
     pub(crate) savings_ratio_ppm: u32,
     pub(crate) minimum_savings_tokens: u64,
     pub(crate) minimum_savings_ratio_ppm: u32,
+    pub(crate) summary_cache_read_tokens: u64,
+    pub(crate) summary_uncached_input_tokens: u64,
+    pub(crate) summary_output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) summary_cost_nano_usd: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1186,6 +1258,9 @@ pub(crate) struct DesktopCompactionReceipt {
     pub(crate) task_memory_id: String,
     pub(crate) folded_event_count: usize,
     pub(crate) tool_output_projection_recorded: bool,
+    pub(crate) native_carrier_materialized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) native_carrier_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2157,7 +2232,64 @@ impl From<NativeCompactionReview> for DesktopCompactionReview {
             preview_id: value.preview_id,
             folded_event_count: value.folded_event_count,
             retained_event_count: value.retained_event_count,
+            policy: value.policy.map(|policy| DesktopCompactionPolicy {
+                strategy: policy.strategy,
+                phase: policy.phase,
+                forecast_confidence: policy.forecast_confidence,
+                admission_reason: policy.admission_reason,
+                native_carrier_available: policy.native_carrier_available,
+                legacy_migration_fields: policy.legacy_migration_fields,
+            }),
+            details: value.details.map(|details| DesktopCompactionDetails {
+                active_objective: details.active_objective,
+                objective_source_event_id: details.objective_source_event_id,
+                active_constraints: details
+                    .active_constraints
+                    .into_iter()
+                    .map(|constraint| DesktopCompactionConstraint {
+                        text: constraint.text,
+                        source_event_id: constraint.source_event_id,
+                        source_field_path: constraint.source_field_path,
+                    })
+                    .collect(),
+                folded_complete_turn_count: details.folded_complete_turn_count,
+                folded_token_upper_bound: details.folded_token_upper_bound,
+                retained_complete_turn_count: details.retained_complete_turn_count,
+                retained_token_upper_bound: details.retained_token_upper_bound,
+                tool_artifact_count: details.tool_artifact_count,
+                tool_artifacts: details
+                    .tool_artifacts
+                    .into_iter()
+                    .map(|artifact| DesktopCompactionToolArtifact {
+                        source_event_id: artifact.source_event_id,
+                        content_sha256: artifact.content_sha256,
+                        tool_name: artifact.tool_name,
+                        tool_call_id: artifact.tool_call_id,
+                        status: artifact.status,
+                        original_content_bytes: artifact.original_content_bytes,
+                        original_content_token_upper_bound: artifact
+                            .original_content_token_upper_bound,
+                        head_excerpt: artifact.head_excerpt,
+                        tail_excerpt: artifact.tail_excerpt,
+                        reason: artifact.reason,
+                        recovery_instruction: artifact.recovery_instruction,
+                    })
+                    .collect(),
+                pending_work_count: details.pending_work_count,
+                unresolved_question_count: details.unresolved_question_count,
+                recoverable_attachment_count: details.recoverable_attachment_count,
+                protected_control_event_count: details.protected_control_event_count,
+                protected_active_tool_or_approval_count: details
+                    .protected_active_tool_or_approval_count,
+                current_cache_read_tokens: details.current_cache_read_tokens,
+                break_even_turns: details.break_even_turns,
+            }),
             admission: match value.admission {
+                NativeCompactionAdmission::Prepared {
+                    standalone_tool_output_shrink_available,
+                } => DesktopCompactionAdmission::Prepared {
+                    standalone_tool_output_shrink_available,
+                },
                 NativeCompactionAdmission::Ready { economics } => {
                     DesktopCompactionAdmission::Ready {
                         economics: DesktopCompactionEconomics {
@@ -2170,6 +2302,10 @@ impl From<NativeCompactionReview> for DesktopCompactionReview {
                             savings_ratio_ppm: economics.savings_ratio_ppm,
                             minimum_savings_tokens: economics.minimum_savings_tokens,
                             minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
+                            summary_cache_read_tokens: economics.summary_cache_read_tokens,
+                            summary_uncached_input_tokens: economics.summary_uncached_input_tokens,
+                            summary_output_tokens: economics.summary_output_tokens,
+                            summary_cost_nano_usd: economics.summary_cost_nano_usd,
                         },
                     }
                 }
@@ -2233,6 +2369,8 @@ impl From<NativeConversationRecoveryCommandReceipt> for DesktopConversationRecov
                 task_memory_id: receipt.task_memory_id,
                 folded_event_count: receipt.folded_event_count,
                 tool_output_projection_recorded: receipt.tool_output_projection_recorded,
+                native_carrier_materialized: receipt.native_carrier_materialized,
+                native_carrier_status: receipt.native_carrier_status,
             }),
             restore: value
                 .restore
@@ -2305,7 +2443,11 @@ fn conversation_recovery_action_kind_label(
     value: NativeConversationRecoveryCommandActionKind,
 ) -> &'static str {
     match value {
+        NativeConversationRecoveryCommandActionKind::PrepareCompaction => "prepare_compaction",
         NativeConversationRecoveryCommandActionKind::ApplyCompaction => "apply_compaction",
+        NativeConversationRecoveryCommandActionKind::ApplyStandaloneToolOutputShrink => {
+            "apply_standalone_tool_output_shrink"
+        }
         NativeConversationRecoveryCommandActionKind::RestoreCheckpoint => "restore_checkpoint",
         NativeConversationRecoveryCommandActionKind::ForkConversation => "fork_conversation",
     }

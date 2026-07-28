@@ -43,7 +43,13 @@ fn map_envelope_emits_usage_reasoning_tool_chunks_and_continuation_state() -> Re
     let mut mapper = StreamMapper::new("deepseek-v4-flash");
     let chunks = mapper.map_envelope(envelope)?;
 
-    assert!(matches!(chunks[0], ProviderChunk::Usage(_)));
+    assert!(matches!(
+        chunks[0],
+        ProviderChunk::Usage(ref usage)
+            if usage.pricing_snapshot.is_none()
+                && usage.input_cost == 0.0
+                && usage.output_cost == 0.0
+    ));
     assert!(matches!(chunks[1], ProviderChunk::TextDelta(ref text) if text == "answer"));
     assert!(matches!(chunks[2], ProviderChunk::ReasoningDelta(ref text) if text == "think"));
     assert!(matches!(

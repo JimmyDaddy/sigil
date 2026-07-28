@@ -121,7 +121,7 @@ When the current session has accepted Intent Stack history, press `Alt-S` or run
 
 ## Long Context and Compaction
 
-The info rail shows reported context use and warns as the model window fills. `/compact` opens a read-only review of what would be shortened and kept; apply only when the review says it is ready. If context size is unknown, set `fallback_context_window_tokens`. See [Advanced configuration](advanced-configuration.md) for settings and recovery guidance.
+The info rail shows reported context use and warns as the model window fills. `/compact` first builds a local-only review without contacting the provider or changing the active context. You can keep the current context, clean only recoverable large historical tool outputs, or explicitly generate one billed semantic summary on the current route. A generated summary is still not activated until you confirm the final ready review. If context size is unknown, set `fallback_context_window_tokens`. See [Advanced configuration](advanced-configuration.md) for settings and recovery guidance.
 
 ## Code Intelligence
 

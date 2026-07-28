@@ -1544,7 +1544,7 @@ struct RenderedOutput {
 enum StreamRenderEvent {
     TextDelta(String),
     ReasoningDelta(String),
-    Usage(UsageStats),
+    Usage(Box<UsageStats>),
     Done,
 }
 
@@ -1581,7 +1581,9 @@ fn render_provider_chunk(chunk: ProviderChunk) -> RenderedOutput {
         ProviderChunk::ReasoningDelta(delta) | ProviderChunk::ReasoningSummaryDelta(delta) => {
             render_stream_event(StreamRenderEvent::ReasoningDelta(delta))
         }
-        ProviderChunk::Usage(usage) => render_stream_event(StreamRenderEvent::Usage(usage)),
+        ProviderChunk::Usage(usage) => {
+            render_stream_event(StreamRenderEvent::Usage(Box::new(usage)))
+        }
         ProviderChunk::Done => render_stream_event(StreamRenderEvent::Done),
         _ => RenderedOutput::default(),
     }
@@ -1699,7 +1701,9 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
                 ..RenderedOutput::default()
             }
         }
-        PublicRunEventKind::Usage { usage } => render_stream_event(StreamRenderEvent::Usage(usage)),
+        PublicRunEventKind::Usage { usage } => {
+            render_stream_event(StreamRenderEvent::Usage(Box::new(usage)))
+        }
         PublicRunEventKind::Notice { message } => RenderedOutput {
             stderr: format!("[notice] {message}\n"),
             ..RenderedOutput::default()

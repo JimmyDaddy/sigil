@@ -1392,7 +1392,7 @@ export interface paths {
         put?: never;
         /**
          * Preview one exact portable context compaction
-         * @description Builds and locally proves the exact post-compaction provider request without appending a compaction lifecycle attempt. A ready preview is process-local and must be explicitly applied before it becomes stale.
+         * @description Builds a local-only fold, continuity and recoverable tool-output plan without contacting the provider, activating a compaction lifecycle or changing the visible projection. The returned process-local prepared preview can be kept unchanged, used for standalone tool-output cleanup, or explicitly advanced through prepare_compaction to one billed semantic-summary attempt. A ready semantic preview must still be explicitly applied before it becomes stale.
          */
         post: {
             parameters: {
@@ -2290,6 +2290,11 @@ export interface components {
             /** @constant */
             kind: "no_foldable_history";
         };
+        CompactionAdmissionPrepared: {
+            /** @constant */
+            kind: "prepared";
+            standalone_tool_output_shrink_available: boolean;
+        };
         CompactionAdmissionReady: {
             economics: components["schemas"]["CompactionEconomics"];
             /** @constant */
@@ -2299,6 +2304,41 @@ export interface components {
             /** @constant */
             kind: "unavailable";
             reason: string;
+        };
+        CompactionConstraint: {
+            source_event_id: string;
+            source_field_path: string;
+            text: string;
+        };
+        CompactionDetails: {
+            active_constraints: components["schemas"]["CompactionConstraint"][];
+            active_objective: string;
+            /** Format: uint32 */
+            break_even_turns?: number | null;
+            /** Format: uint64 */
+            current_cache_read_tokens?: number | null;
+            /** Format: uint64 */
+            folded_complete_turn_count: number;
+            /** Format: uint64 */
+            folded_token_upper_bound: number;
+            objective_source_event_id: string;
+            /** Format: uint64 */
+            pending_work_count: number;
+            /** Format: uint64 */
+            protected_active_tool_or_approval_count: number;
+            /** Format: uint64 */
+            protected_control_event_count: number;
+            /** Format: uint64 */
+            recoverable_attachment_count: number;
+            /** Format: uint64 */
+            retained_complete_turn_count: number;
+            /** Format: uint64 */
+            retained_token_upper_bound: number;
+            /** Format: uint64 */
+            tool_artifact_count: number;
+            tool_artifacts: components["schemas"]["CompactionToolArtifact"][];
+            /** Format: uint64 */
+            unresolved_question_count: number;
         };
         CompactionEconomics: {
             /** Format: uint64 */
@@ -2318,23 +2358,61 @@ export interface components {
             /** Format: uint64 */
             savings_tokens: number;
             /** Format: uint64 */
+            summary_cache_read_tokens: number;
+            /** Format: uint64 */
+            summary_cost_nano_usd?: number;
+            /** Format: uint64 */
+            summary_output_tokens: number;
+            /** Format: uint64 */
+            summary_uncached_input_tokens: number;
+            /** Format: uint64 */
             target_input_tokens: number;
+        };
+        CompactionPolicy: {
+            admission_reason?: ("emergency_fit" | "projected_fit_required" | "qualified_cost_savings" | "pricing_unavailable" | "low_forecast_confidence" | "expected_turns_before_break_even" | "insufficient_savings") | null;
+            forecast_confidence?: ("low" | "medium" | "high") | null;
+            legacy_migration_fields?: string[];
+            native_carrier_available: boolean;
+            /** @enum {string} */
+            phase: "below_observe" | "observe" | "prepare" | "admit" | "emergency";
+            /** @enum {string} */
+            strategy: "cache_aware_v3" | "legacy_v2";
         };
         CompactionReceipt: {
             attempt_id: string;
             compaction_id: string;
             /** Format: uint64 */
             folded_event_count: number;
+            native_carrier_materialized: boolean;
+            native_carrier_status?: string;
             task_memory_id: string;
             tool_output_projection_recorded: boolean;
         };
         CompactionReview: {
-            admission: components["schemas"]["CompactionAdmissionReady"] | components["schemas"]["CompactionAdmissionNoHistory"] | components["schemas"]["CompactionAdmissionUnavailable"];
+            admission: components["schemas"]["CompactionAdmissionPrepared"] | components["schemas"]["CompactionAdmissionReady"] | components["schemas"]["CompactionAdmissionNoHistory"] | components["schemas"]["CompactionAdmissionUnavailable"];
+            details?: components["schemas"]["CompactionDetails"] | null;
             /** Format: uint64 */
             folded_event_count: number;
+            policy: components["schemas"]["CompactionPolicy"];
             preview_id?: string | null;
             /** Format: uint64 */
             retained_event_count: number;
+        };
+        CompactionToolArtifact: {
+            content_sha256: string;
+            head_excerpt: string;
+            /** Format: uint64 */
+            original_content_bytes: number;
+            /** Format: uint64 */
+            original_content_token_upper_bound: number;
+            /** @constant */
+            reason: "large_completed_historical_result";
+            recovery_instruction: string;
+            source_event_id: string;
+            status: string;
+            tail_excerpt: string;
+            tool_call_id: string;
+            tool_name: string;
         };
         ContinuationStateEvent: {
             state: Record<string, never>;
@@ -2588,19 +2666,21 @@ export interface components {
         ConversationRecoveryCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["ConversationRecoveryCommandAction"];
         };
-        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"];
+        ConversationRecoveryCommandAction: components["schemas"]["ConversationRecoveryPrepareCompactionAction"] | components["schemas"]["ConversationRecoveryCompactionAction"] | components["schemas"]["ConversationRecoveryToolOutputShrinkAction"] | components["schemas"]["ConversationRecoveryRestoreAction"] | components["schemas"]["ConversationRecoveryForkAction"];
         ConversationRecoveryCommandReceipt: {
             /** @enum {string} */
-            action: "apply_compaction" | "restore_checkpoint" | "fork_conversation";
+            action: "prepare_compaction" | "apply_compaction" | "apply_standalone_tool_output_shrink" | "restore_checkpoint" | "fork_conversation";
             client_id: string;
             command_id: string;
             compaction?: components["schemas"]["CompactionReceipt"] | null;
+            compaction_review?: components["schemas"]["CompactionReview"] | null;
             correlation_id?: string | null;
             fork?: components["schemas"]["ConversationForkReceipt"] | null;
             recovery: components["schemas"]["ConversationRecoveryView"];
             replayed: boolean;
             restore?: components["schemas"]["CheckpointRestoreReceipt"] | null;
             session_id: string;
+            tool_output_shrink?: components["schemas"]["ToolOutputShrinkReceipt"] | null;
         };
         ConversationRecoveryCompactionAction: {
             /** @constant */
@@ -2613,11 +2693,21 @@ export interface components {
             model_ref: components["schemas"]["ProviderModelRef"];
             source_turn_digest: string;
         };
+        ConversationRecoveryPrepareCompactionAction: {
+            /** @constant */
+            kind: "prepare_compaction";
+            preview_id: string;
+        };
         ConversationRecoveryRestoreAction: {
             checkpoint_digest: string;
             checkpoint_id: string;
             /** @constant */
             kind: "restore_checkpoint";
+        };
+        ConversationRecoveryToolOutputShrinkAction: {
+            /** @constant */
+            kind: "apply_standalone_tool_output_shrink";
+            preview_id: string;
         };
         ConversationRecoveryView: {
             checkpoints: components["schemas"]["CheckpointView"][];
@@ -3608,6 +3698,11 @@ export interface components {
             type: "tool_call_started";
         } & {
             [key: string]: unknown;
+        };
+        ToolOutputShrinkReceipt: {
+            context_epoch_id: string;
+            /** Format: uint64 */
+            projected_output_count: number;
         };
         ToolProgressEvent: {
             progress: components["schemas"]["PublicToolProgress"];

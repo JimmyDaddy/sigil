@@ -201,6 +201,9 @@ pub(in crate::runner) enum QueueCompactionCommand {
     ApplyV2Compaction {
         request_id: u64,
     },
+    ApplyStandaloneToolOutputShrink {
+        request_id: u64,
+    },
     CancelV2CompactionReview {
         request_id: u64,
     },
@@ -537,6 +540,11 @@ pub(in crate::runner) fn classify_worker_command(
             ClassifiedWorkerCommand::QueueCompaction(QueueCompactionCommand::ApplyV2Compaction {
                 request_id,
             })
+        }
+        WorkerCommand::ApplyStandaloneToolOutputShrink { request_id } => {
+            ClassifiedWorkerCommand::QueueCompaction(
+                QueueCompactionCommand::ApplyStandaloneToolOutputShrink { request_id },
+            )
         }
         WorkerCommand::CancelV2CompactionReview { request_id } => {
             ClassifiedWorkerCommand::QueueCompaction(

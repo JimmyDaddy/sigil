@@ -11,6 +11,7 @@ fn started() -> ProviderPhysicalAttemptStartedEntry {
         request_material_fingerprint: "hmac-sha256:started".to_owned(),
         provider_name: "test-provider".to_owned(),
         model_name: "test-model".to_owned(),
+        cache_layout_proof: None,
         started_at_unix_ms: 1,
     }
 }
@@ -443,5 +444,39 @@ async fn non_generating_attempt_records_an_input_measurement_lifecycle() -> Resu
             ..
         }) if durable_output_event_ids.is_empty() && durable_side_effect_event_ids.is_empty()
     ));
+    let first_layout = attempts[0]
+        .entry
+        .cache_layout_proof
+        .as_ref()
+        .expect("new physical attempt should persist cache layout proof");
+    assert_eq!(
+        first_layout.mutation_from_previous.kind,
+        crate::CacheLayoutMutationKind::FirstObservation
+    );
+    let second_attempts = projection.attempts_for_logical_run_id("input-token-measurement-2");
+    assert_eq!(
+        second_attempts[0]
+            .entry
+            .cache_layout_proof
+            .as_ref()
+            .expect("second physical attempt should persist cache layout proof")
+            .mutation_from_previous
+            .kind,
+        crate::CacheLayoutMutationKind::Identical
+    );
+    Ok(())
+}
+
+#[test]
+fn physical_attempt_schema_v2_remains_readable_without_cache_layout() -> Result<()> {
+    let mut legacy = started();
+    legacy.schema_version = 2;
+    legacy.cache_layout_proof = None;
+
+    legacy.validate_shape()?;
+    let round_trip: ProviderPhysicalAttemptStartedEntry =
+        serde_json::from_value(serde_json::to_value(legacy)?)?;
+    round_trip.validate_shape()?;
+    assert!(round_trip.cache_layout_proof.is_none());
     Ok(())
 }

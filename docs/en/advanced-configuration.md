@@ -70,12 +70,16 @@ Sigil-native reusable workspace skills, commands, agents, and plugins live under
 ```toml
 [compaction]
 enabled = true
+strategy = "cache_aware_v3"
+native_carrier_enabled = false
 soft_threshold_ratio = 0.5
 hard_threshold_ratio = 0.8
 tail_messages = 6
 ```
 
-Compaction shortens older conversation context when the review says the target is ready. `/compact` is the manual path. If a model window is unknown, set `fallback_context_window_tokens`; failure leaves the active conversation unchanged.
+`cache_aware_v3` is the default. It keeps stable provider/tool prefixes, preserves active intent through a source-bound portable checkpoint, retains complete recent turns, and rotates the cache epoch only when fit requires it or trusted cost evidence wins. Manual `/compact` starts with a local-only prepare stage: no provider request, semantic lifecycle, or visible projection change occurs. The review offers three distinct choices—keep the current context, apply only a recoverable large-tool-output projection epoch, or generate the full semantic candidate. Only the third choice makes one additional LLM request on the current provider/model route: the old epoch request remains the cacheable prefix and a strict JSON summary instruction is appended at the end. This is not a child agent and cannot execute tools. The model contributes only untrusted semantic narrative; objectives, constraints, authorization, completion, and verification remain grounded in durable session records. The final review and session bill include the summary request's cache-read, uncached-input, output, and cost observations, and activation still requires explicit confirmation. Automatic V3 is enabled only for an exact portable-proof profile on a trusted provider route; unknown or compatible routes fall back to `legacy_v2`. A failed manual summary is not silently downgraded; only fit-required/overflow emergency paths may use an explicitly audited deterministic fallback. The ratio and `tail_messages` fields remain readable for rollback/migration; V3 translates the tail value into a whole-turn minimum rather than cutting a raw message count. If a model window is unknown, set `fallback_context_window_tokens`; failure leaves the active conversation unchanged.
+
+`native_carrier_enabled` is a reserved, default-off migration flag. Sigil currently keeps provider-native materialization fail-closed, even when this value is `true`, because a carrier must be consumed by the next request on the exact same route before the extra billed request can provide any benefit. Portable continuity is the only active compaction path until that resume contract ships.
 
 <!-- public-doc-topic: code-intelligence -->
 

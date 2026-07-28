@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use sigil_kernel::{
-    ProviderChunk, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+    CacheUsageV1, ProviderChunk, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
 };
 
 use crate::models::{OpenAiStreamEnvelope, OpenAiToolCallDelta};
@@ -27,6 +27,12 @@ impl StreamMapper {
                 .as_ref()
                 .map(|details| details.cached_tokens)
                 .unwrap_or_default();
+            let cache_usage = usage.prompt_tokens_details.as_ref().map(|details| {
+                CacheUsageV1::reported_read_with_derived_uncached(
+                    usage.prompt_tokens,
+                    details.cached_tokens,
+                )
+            });
             chunks.push(ProviderChunk::Usage(UsageStats {
                 prompt_tokens: usage.prompt_tokens,
                 completion_tokens: usage.completion_tokens,
@@ -36,6 +42,8 @@ impl StreamMapper {
                 output_cost: 0.0,
                 cache_savings: 0.0,
                 system_fingerprint: envelope.system_fingerprint.clone(),
+                cache_usage,
+                pricing_snapshot: None,
             }));
         }
         for choice in envelope.choices {

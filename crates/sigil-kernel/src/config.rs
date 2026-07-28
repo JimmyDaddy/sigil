@@ -3073,8 +3073,16 @@ impl Default for SkillConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct CompactionConfig {
+    /// Request-layout and admission policy. V3 remains provider-capability gated at runtime.
+    #[serde(default)]
+    pub strategy: CompactionStrategy,
     #[serde(default = "default_compaction_enabled")]
     pub enabled: bool,
+    /// Explicit opt-in for a provider-native acceleration carrier after portable truth is durable.
+    ///
+    /// This can cause one additional provider request and therefore defaults off.
+    #[serde(default)]
+    pub native_carrier_enabled: bool,
     #[serde(default = "default_soft_threshold_ratio")]
     pub soft_threshold_ratio: f32,
     #[serde(default = "default_hard_threshold_ratio")]
@@ -3100,10 +3108,41 @@ pub enum CompactionThresholdStatus {
     Hard,
 }
 
+/// Configured compaction rollout policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStrategy {
+    /// Legacy fixed-threshold behavior, retained for deterministic migration and rollback.
+    LegacyV2,
+    /// Cache-stable epoch rotation with adaptive tail and economics admission.
+    #[default]
+    CacheAwareV3,
+}
+
+impl CompactionStrategy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyV2 => "legacy_v2",
+            Self::CacheAwareV3 => "cache_aware_v3",
+        }
+    }
+
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::LegacyV2 => Self::CacheAwareV3,
+            Self::CacheAwareV3 => Self::LegacyV2,
+        }
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
+            strategy: CompactionStrategy::default(),
             enabled: default_compaction_enabled(),
+            native_carrier_enabled: false,
             soft_threshold_ratio: default_soft_threshold_ratio(),
             hard_threshold_ratio: default_hard_threshold_ratio(),
             context_window_tokens: None,
@@ -3113,6 +3152,19 @@ impl Default for CompactionConfig {
 }
 
 impl CompactionConfig {
+    /// Returns legacy field names that remain readable but no longer define V3 semantics.
+    #[must_use]
+    pub fn legacy_migration_fields(&self) -> &'static [&'static str] {
+        match self.strategy {
+            CompactionStrategy::LegacyV2 => &[],
+            CompactionStrategy::CacheAwareV3 => &[
+                "soft_threshold_ratio",
+                "hard_threshold_ratio",
+                "tail_messages",
+            ],
+        }
+    }
+
     /// Classifies the latest prompt token count against the configured compaction thresholds.
     pub fn threshold_status(&self, prompt_tokens: u64) -> CompactionThresholdStatus {
         if !self.enabled {

@@ -907,6 +907,8 @@ fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         }),
     ))?;
     let used = application_run_context_view(

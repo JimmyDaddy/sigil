@@ -158,9 +158,11 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[skills].compatibility_auto_discover` | `true` | Imports standard `.agents/skills`, Codex `.codex/agents`, OpenCode `.opencode/{skills,commands,agents}`, and Claude Code `.claude/{skills,commands,agents}` workspace resources. Set `false` to disable the default compatibility set. |
 | `[skills].compatibility_sources` | `[]` | Adds compatibility sources beyond the default set, such as `"reasonix"` for `.reasonix/agents`; it can also select exact sources while `compatibility_auto_discover = false`. |
 | `[compaction].enabled` | `true` | Enables conversation compaction. |
-| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | Warning and limited idle-auto threshold; automatic apply still requires a ready local review. |
+| `[compaction].strategy` | `"cache_aware_v3"` | Cache-stable whole-turn/economics policy. Normal semantic compaction makes one additional no-tool LLM summary request on the current route and accounts for its observed usage. Use `"legacy_v2"` only for rollback or unsupported-route fallback. |
+| `[compaction].native_carrier_enabled` | `false` | Reserved migration flag. Native materialization stays fail-closed until its exact-route resume contract ships, so setting this currently issues no additional provider request. |
+| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | Legacy V2 warning/idle thresholds; still readable for migration but not the V3 economic admission rule. |
 | `[compaction].fallback_context_window_tokens` | unset | Fallback model-window value. |
-| `[compaction].tail_messages` | `6` | Recent messages retained verbatim. |
+| `[compaction].tail_messages` | `6` | Legacy-compatible input translated by V3 into a minimum number of complete recent turns. |
 
 ## Code Intelligence, Terminal, Plugins, And MCP
 

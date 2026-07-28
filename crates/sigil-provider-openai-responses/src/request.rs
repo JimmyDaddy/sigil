@@ -2,11 +2,14 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use sigil_kernel::{
     CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ProviderContinuationState,
-    ReasoningEffort, ToolSpec, strip_request_image_attachments_for_compaction,
-    validate_image_input_capability, validate_request_image_attachments,
+    ReasoningEffort, ToolSpec, canonicalize_cache_stable_json,
+    strip_request_image_attachments_for_compaction, validate_image_input_capability,
+    validate_request_image_attachments,
 };
 
 use crate::{
@@ -20,8 +23,24 @@ use crate::{
 pub const OPENAI_RESPONSES_PROVIDER_NAME: &str = "openai_responses";
 pub const OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND: &str = "openai.responses.output_items.v1";
 const OUTPUT_ITEMS_STATE_SCHEMA_VERSION: u64 = 1;
+const PROMPT_CACHE_LAYOUT_VERSION: &str = "cache_aware_v3";
+const PROMPT_CACHE_SHARD_COUNT: u8 = 16;
 
 pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResponsesRequest> {
+    Ok(build_responses_request_with_cache_routing(request, false)?.0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenAiLogicalCachePlan {
+    pub(crate) a0_input_end: Option<usize>,
+    pub(crate) a2_input_end: Option<usize>,
+    pub(crate) prompt_cache_key: String,
+}
+
+pub(crate) fn build_responses_request_with_cache_routing(
+    request: &CompletionRequest,
+    enabled: bool,
+) -> Result<(OpenAiResponsesRequest, Option<OpenAiLogicalCachePlan>)> {
     validate_request_image_attachments(request)?;
     validate_image_input_capability(
         openai_responses_image_input_capability(&request.model_name),
@@ -39,7 +58,21 @@ pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResp
 
     let output_items_by_message = index_output_item_states(&request.continuation_states)?;
     let mut input = Vec::new();
-    for message in &request.messages {
+    let leading_system_count = request
+        .messages
+        .iter()
+        .take_while(|message| message.role == MessageRole::System)
+        .count();
+    let active_turn_start = request
+        .messages
+        .iter()
+        .rposition(|message| message.role == MessageRole::User);
+    let mut a0_input_end = None;
+    let mut a2_input_end = None;
+    for (message_index, message) in request.messages.iter().enumerate() {
+        if active_turn_start == Some(message_index) && !input.is_empty() {
+            a2_input_end = Some(input.len());
+        }
         if let Some(output_items) = output_items_by_message.get(&message.id) {
             if !matches!(message.role, MessageRole::Assistant) {
                 bail!("OpenAI Responses output-item state must bind an assistant message")
@@ -48,27 +81,88 @@ pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResp
         } else {
             input.extend(model_message_to_input_items(message)?);
         }
+        if leading_system_count == message_index + 1 {
+            a0_input_end = Some(input.len());
+        }
     }
 
-    let tools = responses_tools(&request.tools);
+    let tools = responses_tools(&request.tools)?;
     let reasoning = request
         .reasoning_effort
         .as_ref()
         .map(reasoning_effort)
         .transpose()?;
-    Ok(OpenAiResponsesRequest {
-        model: request.model_name.clone(),
-        input,
-        stream: true,
-        store: request.store,
-        include: (reasoning.is_some() && !request.store)
-            .then(|| vec!["reasoning.encrypted_content".to_owned()]),
-        tool_choice: tools.as_ref().map(|_| "auto".to_owned()),
-        tools,
-        temperature: request.temperature,
-        max_output_tokens: request.max_tokens,
-        reasoning,
-    })
+    let logical_cache_plan = if enabled {
+        prompt_cache_key(request)?.map(|prompt_cache_key| OpenAiLogicalCachePlan {
+            a0_input_end,
+            a2_input_end: a2_input_end.filter(|end| Some(*end) != a0_input_end),
+            prompt_cache_key,
+        })
+    } else {
+        None
+    };
+    let prompt_cache_key = logical_cache_plan
+        .as_ref()
+        .map(|plan| plan.prompt_cache_key.clone());
+    Ok((
+        OpenAiResponsesRequest {
+            model: request.model_name.clone(),
+            input,
+            stream: true,
+            store: request.store,
+            include: (reasoning.is_some() && !request.store)
+                .then(|| vec!["reasoning.encrypted_content".to_owned()]),
+            tool_choice: tools.as_ref().map(|_| "auto".to_owned()),
+            tools,
+            temperature: request.temperature,
+            max_output_tokens: request.max_tokens,
+            reasoning,
+            prompt_cache_key,
+            // Extended retention is incompatible with some zero-retention policies. Sigil leaves the
+            // provider default in force until the connection owns an explicit retention decision.
+            prompt_cache_retention: None,
+        },
+        logical_cache_plan,
+    ))
+}
+
+fn prompt_cache_key(request: &CompletionRequest) -> Result<Option<String>> {
+    let Some(tenant_partition) = request
+        .traffic_partition_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(session_seed) = request
+        .messages
+        .iter()
+        .find(|message| message.role != MessageRole::System)
+        .or_else(|| request.messages.first())
+        .map(|message| message.id.as_str())
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(tenant_partition.as_bytes())
+        .map_err(|_| anyhow!("failed to initialize OpenAI prompt-cache HMAC"))?;
+    for (label, value) in [
+        ("domain", "sigil-openai-prompt-cache-key-v1"),
+        ("session", session_seed),
+        ("route", OPENAI_RESPONSES_PROVIDER_NAME),
+        ("model", request.model_name.as_str()),
+        ("layout", PROMPT_CACHE_LAYOUT_VERSION),
+    ] {
+        mac.update(&(label.len() as u64).to_be_bytes());
+        mac.update(label.as_bytes());
+        mac.update(&(value.len() as u64).to_be_bytes());
+        mac.update(value.as_bytes());
+    }
+    let digest = format!("{:x}", mac.finalize().into_bytes());
+    let shard = u8::from_str_radix(&digest[..2], 16)
+        .map_err(|error| anyhow!("invalid OpenAI prompt-cache HMAC shard: {error}"))?
+        % PROMPT_CACHE_SHARD_COUNT;
+    Ok(Some(format!("s3v3-{shard:x}-{}", &digest[..56])))
 }
 
 /// Materializes the exact Responses input window used by the native compact endpoint.
@@ -305,23 +399,23 @@ fn is_dated_snapshot_of(model_name: &str, alias: &str) -> bool {
             .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
 }
 
-fn responses_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {
+fn responses_tools(tools: &[ToolSpec]) -> Result<Option<Vec<Value>>> {
     if tools.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(
+    Ok(Some(
         tools
             .iter()
             .map(|tool| {
-                json!({
+                Ok(json!({
                     "type": "function",
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.input_schema,
-                })
+                    "parameters": canonicalize_cache_stable_json(&tool.input_schema)?,
+                }))
             })
-            .collect(),
-    )
+            .collect::<Result<Vec<_>>>()?,
+    ))
 }
 
 fn reasoning_effort(effort: &ReasoningEffort) -> Result<OpenAiResponsesReasoning> {

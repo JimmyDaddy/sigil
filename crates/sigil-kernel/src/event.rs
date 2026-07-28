@@ -482,7 +482,7 @@ pub enum TypedDomainEvent {
     ProviderPhysicalAttemptTerminal(ProviderPhysicalAttemptTerminalEntry),
     ProviderContinuationObserved(ProviderContinuationObservedEntry),
     ProviderContinuationPayloadLifecycleRecorded(ProviderContinuationPayloadLifecycleEntry),
-    ProviderContinuationCandidateRecorded(ProviderContinuationCandidateRecordedEntry),
+    ProviderContinuationCandidateRecorded(Box<ProviderContinuationCandidateRecordedEntry>),
     ProviderContinuationCandidateInvalidated(ProviderContinuationCandidateInvalidatedEntry),
     ProviderContinuationToolClosureRecorded(ProviderContinuationToolClosureRecordedEntry),
     ProviderObservedResolutionPlanRecorded(Box<ProviderObservedResolutionPlanRecordedEntry>),
@@ -576,7 +576,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         DurableEventType::ProviderContinuationCandidateRecorded => {
             let entry: ProviderContinuationCandidateRecordedEntry = decode_event_payload(&event)?;
             entry.validate_shape()?;
-            TypedDomainEvent::ProviderContinuationCandidateRecorded(entry)
+            TypedDomainEvent::ProviderContinuationCandidateRecorded(Box::new(entry))
         }
         DurableEventType::ProviderContinuationCandidateInvalidated => {
             let entry: ProviderContinuationCandidateInvalidatedEntry =
@@ -1534,6 +1534,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ExternalProvenance(_) => "external_provenance",
         ControlEntry::WebUrlCapabilityDescriptor(_) => "web_url_capability_descriptor",
         ControlEntry::UsageSnapshot(_) => "usage_snapshot",
+        ControlEntry::SemanticCompactionUsageSnapshot(_) => "semantic_compaction_usage_snapshot",
         ControlEntry::ToolApproval(_) => "tool_approval",
         ControlEntry::ToolApprovalSessionGrant(_) => "tool_approval_session_grant",
         ControlEntry::ToolExecution(_) => "tool_execution",

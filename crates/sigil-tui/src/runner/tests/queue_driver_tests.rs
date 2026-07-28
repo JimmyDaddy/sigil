@@ -44,6 +44,7 @@ fn append_queue_physical_attempt_named(
         request_material_fingerprint: request_material_fingerprint.to_owned(),
         provider_name: "test".to_owned(),
         model_name: "model".to_owned(),
+        cache_layout_proof: None,
         started_at_unix_ms: 1,
     };
     let started_record = DurableAuditRecord::new(

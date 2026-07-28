@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::json;
 
-use sigil_kernel::{ProviderChunk, ProviderContinuationState, ToolCall, UsageStats};
+use sigil_kernel::{CacheUsageV1, ProviderChunk, ProviderContinuationState, ToolCall, UsageStats};
 
 use crate::{
     errors::GeminiProviderError,
@@ -113,6 +113,11 @@ impl StreamMapper {
                 output_cost: 0.0,
                 cache_savings: 0.0,
                 system_fingerprint: None,
+                cache_usage: Some(CacheUsageV1::reported_read_with_derived_uncached(
+                    usage.prompt_token_count,
+                    cache_hit_tokens,
+                )),
+                pricing_snapshot: None,
             }));
         }
         chunks

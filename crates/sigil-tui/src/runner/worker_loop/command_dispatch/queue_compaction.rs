@@ -171,6 +171,7 @@ where
                 }
             }
             QueueCompactionCommand::PreviewV2Compaction => {
+                state.compaction.local_preview = None;
                 state.compaction.pending = None;
                 state.session.pending_queued_pre_turn_preparation = None;
                 state.compaction.preparation_tasks.abort_all();
@@ -197,7 +198,10 @@ where
                     ));
                     continue;
                 }
-                match session.v2_compaction_preview(effective_config.tail_messages) {
+                match sigil_runtime::context_window::compaction_preview_for_strategy(
+                    session,
+                    &effective_config,
+                ) {
                     Ok(Some(preview)) => {
                         let request_id = state.compaction.next_request_id;
                         state.compaction.next_request_id =
@@ -208,10 +212,6 @@ where
                         let root_config = root_config.clone();
                         let workspace_root = workspace_root.clone();
                         let session_log_path = state.session.log_path.clone();
-                        let options = options.clone();
-                        let tools = agent.tool_registry().specs();
-                        let runtime_handle = runtime.handle().clone();
-                        let manual_context_resolver = context_resolver.clone();
                         let runtime_attachments =
                             CapturedSessionRuntimeAttachments::from_session(Some(session));
                         state.compaction.preparation_tasks.start_manual(
@@ -233,20 +233,20 @@ where
                                             .to_owned(),
                                     );
                                 }
-                                let (review, pending) = prepare_v2_compaction_review(
+                                let (review, local_preview) = prepare_v2_compaction_review(
                                     request_id,
                                     &root_config,
                                     &workspace_root,
                                     &session_log_path,
                                     &session,
-                                    &options,
-                                    tools,
-                                    &manual_context_resolver,
-                                    &runtime_handle,
                                     preview,
                                 )
                                 .map_err(|error| format!("{error:#}"))?;
-                                Ok(ManualV2CompactionPreparation { review, pending })
+                                Ok(ManualV2CompactionPreparation {
+                                    review,
+                                    local_preview: Some(local_preview),
+                                    pending: None,
+                                })
                             },
                         );
                     }
@@ -285,6 +285,93 @@ where
                     });
                     continue;
                 }
+                if let Some(local_preview) = state.compaction.local_preview.take() {
+                    if local_preview.request_id() != request_id {
+                        let reviewed_request_id = local_preview.request_id();
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!(
+                                "stale local compaction confirmation (review request is {reviewed_request_id})"
+                            ),
+                        });
+                        continue;
+                    }
+                    let Some(session) = state.session.current.as_ref() else {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: "session state is unavailable".to_owned(),
+                        });
+                        continue;
+                    };
+                    if session.session_scope_id() != local_preview.session_scope_id() {
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: "local compaction review belongs to a different session scope"
+                                .to_owned(),
+                        });
+                        continue;
+                    }
+                    let expected_session_scope_id = session.session_scope_id().to_owned();
+                    let provider_name = session.provider_name().to_owned();
+                    let model_name = session.model_name().to_owned();
+                    let root_config = root_config.clone();
+                    let workspace_root = workspace_root.clone();
+                    let session_log_path = state.session.log_path.clone();
+                    let options = options.clone();
+                    let tools = agent.tool_registry().specs();
+                    let runtime_handle = runtime.handle().clone();
+                    let manual_context_resolver = context_resolver.clone();
+                    let runtime_attachments =
+                        CapturedSessionRuntimeAttachments::from_session(Some(session));
+                    let preparation_agent = std::sync::Arc::clone(agent);
+                    let preview = local_preview.preview().clone();
+                    state.compaction.preparation_tasks.start_manual(
+                        runtime,
+                        request_id,
+                        expected_session_scope_id.clone(),
+                        state.compaction.preparation_tx.clone(),
+                        move || {
+                            let mut session = load_session_with_captured_runtime_attachments(
+                                &provider_name,
+                                &model_name,
+                                &session_log_path,
+                                &runtime_attachments,
+                            )
+                            .map_err(|error| format!("{error:#}"))?;
+                            if session.session_scope_id() != expected_session_scope_id {
+                                return Err(
+                                    "semantic compaction preparation loaded a different session scope"
+                                        .to_owned(),
+                                );
+                            }
+                            let (review, pending) = prepare_v2_compaction_summary_review(
+                                request_id,
+                                &root_config,
+                                &workspace_root,
+                                &session_log_path,
+                                preparation_agent.provider(),
+                                &mut session,
+                                &options,
+                                tools,
+                                &manual_context_resolver,
+                                &runtime_handle,
+                                preview,
+                            )
+                            .map_err(|error| format!("{error:#}"))?;
+                            Ok(ManualV2CompactionPreparation {
+                                review,
+                                local_preview: None,
+                                pending,
+                            })
+                        },
+                    );
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "generating one billed semantic compaction summary".to_owned(),
+                    ));
+                    continue;
+                }
                 let Some(pending) = state.compaction.pending.take() else {
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
@@ -313,9 +400,18 @@ where
                 let provider_name = session.provider_name().to_owned();
                 let model_name = session.model_name().to_owned();
                 let folded_event_count = pending.folded_event_count();
-                let applied = pending.apply(session, &state.session.log_path);
+                let applied = pending.apply_with_optional_native(
+                    session,
+                    &state.session.log_path,
+                    agent.provider(),
+                    runtime,
+                    root_config.compaction.native_carrier_enabled,
+                );
                 match applied {
-                    Ok(outcome) => {
+                    Ok((outcome, native_notice)) => {
+                        if let Some(notice) = native_notice {
+                            let _ = message_tx.send(WorkerMessage::Notice(notice));
+                        }
                         let reloaded = load_session_with_runtime_attachments(
                             &provider_name,
                             &model_name,
@@ -356,6 +452,191 @@ where
                     }
                 }
             }
+            QueueCompactionCommand::ApplyStandaloneToolOutputShrink { request_id } => {
+                if state.run.active.is_some() {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "cannot clean tool outputs while the agent is running".to_owned(),
+                    });
+                    continue;
+                }
+                let Some(local_preview) = state.compaction.local_preview.take() else {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "no local compaction review is pending".to_owned(),
+                    });
+                    continue;
+                };
+                if local_preview.request_id() != request_id {
+                    let reviewed_request_id = local_preview.request_id();
+                    state.compaction.local_preview = Some(local_preview);
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: format!(
+                            "stale standalone shrink confirmation (review request is {reviewed_request_id})"
+                        ),
+                    });
+                    continue;
+                }
+                let Some(session) = state.session.current.as_ref() else {
+                    state.compaction.local_preview = Some(local_preview);
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "session state is unavailable".to_owned(),
+                    });
+                    continue;
+                };
+                if session.session_scope_id() != local_preview.session_scope_id() {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "standalone shrink review belongs to a different session scope"
+                            .to_owned(),
+                    });
+                    continue;
+                }
+                let records = match JsonlSessionStore::read_event_records(&state.session.log_path) {
+                    Ok(records) => records,
+                    Err(error) => {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!("failed to read shrink source: {error:#}"),
+                        });
+                        continue;
+                    }
+                };
+                let sidecars =
+                    match sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(
+                        &records,
+                    ) {
+                        Ok(sidecars) => sidecars,
+                        Err(error) => {
+                            state.compaction.local_preview = Some(local_preview);
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                                request_id,
+                                error: format!(
+                                    "failed to resolve current context epoch: {error:#}"
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                let active_sources = sidecars.active_standalone_source_event_ids();
+                let projection = match sigil_kernel::ToolOutputProjection::from_fold_plan(
+                    &records,
+                    &local_preview.preview().plan,
+                    &sigil_kernel::ToolOutputProjectionPolicy::default(),
+                ) {
+                    Ok(projection) => projection,
+                    Err(error) => {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!("standalone shrink plan is stale: {error:#}"),
+                        });
+                        continue;
+                    }
+                };
+                let projected_output_count = projection
+                    .outputs
+                    .iter()
+                    .filter(|output| !active_sources.contains(&output.shrink.source_event.event_id))
+                    .count();
+                if projected_output_count == 0 {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "no new large historical tool outputs are eligible".to_owned(),
+                    });
+                    continue;
+                }
+                let source_epoch_id = sidecars.latest_context_epoch_id().map_or_else(
+                    || {
+                        local_preview
+                            .preview()
+                            .active_compaction_id
+                            .as_ref()
+                            .map_or_else(
+                                || "context-epoch:root".to_owned(),
+                                |compaction_id| format!("context-epoch:{compaction_id}"),
+                            )
+                    },
+                    str::to_owned,
+                );
+                let context_epoch_id = format!(
+                    "context-epoch:standalone-{}",
+                    stable_event_uuid(
+                        "sigil-tui-standalone-tool-output-shrink",
+                        &format!(
+                            "{}:{}:{request_id}",
+                            session.session_scope_id(),
+                            local_preview
+                                .preview()
+                                .plan
+                                .base_stream_cursor
+                                .last_applied_event_id,
+                        ),
+                    )
+                );
+                let store = match JsonlSessionStore::new(&state.session.log_path) {
+                    Ok(store) => store,
+                    Err(error) => {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!("failed to open shrink writer: {error:#}"),
+                        });
+                        continue;
+                    }
+                };
+                match store.append_standalone_tool_output_projection(
+                    source_epoch_id,
+                    context_epoch_id.clone(),
+                    local_preview.preview().plan.clone(),
+                    sigil_kernel::ToolOutputProjectionPolicy::default(),
+                ) {
+                    Ok(Some(_)) => {
+                        let provider_name = session.provider_name().to_owned();
+                        let model_name = session.model_name().to_owned();
+                        match load_session_with_runtime_attachments(
+                            &provider_name,
+                            &model_name,
+                            &state.session.log_path,
+                            state.session.current.as_ref(),
+                        ) {
+                            Ok(reloaded) => {
+                                let entries = reloaded.entries().to_vec();
+                                state.session.current = Some(reloaded);
+                                let _ = message_tx.send(
+                                    WorkerMessage::StandaloneToolOutputShrinkApplied {
+                                        request_id,
+                                        context_epoch_id,
+                                        projected_output_count,
+                                        entries,
+                                    },
+                                );
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                    "tool-output cleanup applied, but session reload was deferred: {error:#}"
+                                )));
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: "no standalone tool-output projection was appended".to_owned(),
+                        });
+                    }
+                    Err(error) => {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!("standalone tool-output cleanup failed: {error:#}"),
+                        });
+                    }
+                }
+            }
             QueueCompactionCommand::CancelV2CompactionReview { request_id } => {
                 let preparation_cancelled = state.compaction.preparation_tasks.cancel(request_id);
                 if state
@@ -367,6 +648,16 @@ where
                     state.compaction.pending = None;
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "discarded pending V2 compaction review".to_owned(),
+                    ));
+                } else if state
+                    .compaction
+                    .local_preview
+                    .as_ref()
+                    .is_some_and(|pending| pending.request_id() == request_id)
+                {
+                    state.compaction.local_preview = None;
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "discarded local compaction review without provider consumption".to_owned(),
                     ));
                 } else if preparation_cancelled {
                     let _ = message_tx.send(WorkerMessage::Notice(

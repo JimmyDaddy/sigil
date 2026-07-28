@@ -9,13 +9,14 @@ use tracing::debug;
 
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderRequestRejection, ProviderStreamTimeoutState,
-    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
-    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
+    ProviderCapabilities, ProviderChunk, ProviderContextCapabilities, ProviderRequestRejection,
+    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor,
+    provider_status_error, read_provider_error_body, timeout_provider_request,
+    timeout_provider_stream_next,
 };
 
 use crate::{
-    capabilities::deepseek_capabilities,
+    capabilities::{deepseek_capabilities, deepseek_context_capabilities},
     client::build_http_client,
     config::{DeepSeekProviderConfig, DeepSeekProviderProfile},
     endpoint::DeepSeekEndpointClass,
@@ -64,11 +65,15 @@ impl DeepSeekProvider {
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
         let profile = config.profile();
+        let mut capabilities = deepseek_capabilities();
+        if profile.primary_base_url.trim_end_matches('/') != "https://api.deepseek.com" {
+            capabilities.exact_prefix_cache = false;
+        }
         Ok(Self {
             profile,
             timeouts,
             client: build_http_client()?,
-            capabilities: deepseek_capabilities(),
+            capabilities,
             config,
         })
     }
@@ -143,6 +148,21 @@ impl Provider for DeepSeekProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
+        deepseek_context_capabilities(
+            self.profile.primary_base_url.trim_end_matches('/') == "https://api.deepseek.com",
+        )
+    }
+
+    fn usage_pricing_snapshot(
+        &self,
+        model_name: &str,
+    ) -> Option<sigil_kernel::ModelPricingSnapshotV1> {
+        (self.profile.primary_base_url.trim_end_matches('/') == "https://api.deepseek.com")
+            .then(|| crate::pricing::pricing_snapshot(model_name))
+            .flatten()
     }
 
     fn classify_pre_generation_rejection(
@@ -449,7 +469,7 @@ fn completion_response_stream(
 
             match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
                 Ok(Some(Ok(bytes))) => {
-                    match enqueue_completion_frames(&mut state.1, &mut state.2, &bytes, &state.5) {
+                    match enqueue_completion_frames(&mut state.1, &mut state.2, &bytes) {
                         Ok(done_seen) => {
                             state.4 |= done_seen;
                             if done_seen {
@@ -473,22 +493,20 @@ fn completion_response_stream(
                         state,
                     ));
                 }
-                Ok(None) => {
-                    match enqueue_finished_completion_frames(&mut state.1, &mut state.2, &state.5) {
-                        Ok(done_seen) => {
-                            state.4 |= done_seen;
-                            if !state.4 {
-                                state.2.push_back(ProviderChunk::Done);
-                                state.4 = true;
-                            }
-                            state.3 = true;
+                Ok(None) => match enqueue_finished_completion_frames(&mut state.1, &mut state.2) {
+                    Ok(done_seen) => {
+                        state.4 |= done_seen;
+                        if !state.4 {
+                            state.2.push_back(ProviderChunk::Done);
+                            state.4 = true;
                         }
-                        Err(error) => {
-                            state.3 = true;
-                            return Some((Err(error), state));
-                        }
+                        state.3 = true;
                     }
-                }
+                    Err(error) => {
+                        state.3 = true;
+                        return Some((Err(error), state));
+                    }
+                },
             }
         }
     }))
@@ -547,11 +565,10 @@ fn enqueue_completion_frames(
     decoder: &mut DeepSeekSseDecoder,
     pending: &mut VecDeque<ProviderChunk>,
     raw: impl AsRef<[u8]>,
-    model_name: &str,
 ) -> Result<bool> {
     let mut done_seen = false;
     for frame in decoder.push_bytes(raw.as_ref())? {
-        done_seen |= enqueue_completion_frame(pending, frame, model_name)?;
+        done_seen |= enqueue_completion_frame(pending, frame)?;
         if done_seen {
             break;
         }
@@ -584,11 +601,10 @@ async fn read_error_response_body(
 fn enqueue_finished_completion_frames(
     decoder: &mut DeepSeekSseDecoder,
     pending: &mut VecDeque<ProviderChunk>,
-    model_name: &str,
 ) -> Result<bool> {
     let mut done_seen = false;
     for frame in decoder.finish()? {
-        done_seen |= enqueue_completion_frame(pending, frame, model_name)?;
+        done_seen |= enqueue_completion_frame(pending, frame)?;
         if done_seen {
             break;
         }
@@ -599,7 +615,6 @@ fn enqueue_finished_completion_frames(
 fn enqueue_completion_frame(
     pending: &mut VecDeque<ProviderChunk>,
     frame: crate::response::DeepSeekSseFrame,
-    model_name: &str,
 ) -> Result<bool> {
     match frame {
         crate::response::DeepSeekSseFrame::Blank | crate::response::DeepSeekSseFrame::Comment => {
@@ -628,19 +643,32 @@ fn enqueue_completion_frame(
                 }
             }
             if let Some(usage) = envelope.usage {
-                pending.push_back(ProviderChunk::Usage(crate::pricing::enrich_usage_costs(
-                    model_name,
-                    sigil_kernel::UsageStats {
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                        cache_hit_tokens: usage.prompt_cache_hit_tokens.unwrap_or_default(),
-                        cache_miss_tokens: usage.prompt_cache_miss_tokens.unwrap_or_default(),
-                        input_cost: 0.0,
-                        output_cost: 0.0,
-                        cache_savings: 0.0,
-                        system_fingerprint: envelope.system_fingerprint.clone(),
-                    },
-                )));
+                let cache_usage = match (
+                    usage.prompt_cache_hit_tokens,
+                    usage.prompt_cache_miss_tokens,
+                ) {
+                    (None, None) => None,
+                    (read, uncached) => Some(sigil_kernel::CacheUsageV1 {
+                        schema_version: sigil_kernel::CacheUsageV1::SCHEMA_VERSION,
+                        read: read.map(sigil_kernel::CacheTokenCountV1::provider_reported),
+                        write: None,
+                        uncached: uncached.map(sigil_kernel::CacheTokenCountV1::provider_reported),
+                        local_layout_mutation: None,
+                        provider_miss_without_local_mutation: false,
+                    }),
+                };
+                pending.push_back(ProviderChunk::Usage(sigil_kernel::UsageStats {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    cache_hit_tokens: usage.prompt_cache_hit_tokens.unwrap_or_default(),
+                    cache_miss_tokens: usage.prompt_cache_miss_tokens.unwrap_or_default(),
+                    input_cost: 0.0,
+                    output_cost: 0.0,
+                    cache_savings: 0.0,
+                    system_fingerprint: envelope.system_fingerprint.clone(),
+                    cache_usage,
+                    pricing_snapshot: None,
+                }));
             }
             if frame_done {
                 pending.push_back(ProviderChunk::Done);

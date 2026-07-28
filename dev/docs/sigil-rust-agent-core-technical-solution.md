@@ -272,8 +272,8 @@ sigil/
 - `sigil-kernel`：承载 provider、tool、session、event、approval、permission、memory、config 和 agent loop 等通用契约。当前采用 flat public module 文件，测试统一收纳在 `src/tests/*_tests.rs`；这里不出现 DeepSeek 专有字段，也不持有 TUI 状态。
 - `sigil-provider-deepseek`：首个旗舰 provider，内部拆成 transport、endpoint、request、response、stream、mapper、reasoning、tools、pricing 等模块。DeepSeek 专项能力在这里解释和降级，不反向污染 kernel。
 - `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions provider，覆盖通用 streaming text、tool call、usage 和 endpoint/header 配置，不承载 DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint 语义。
-- `sigil-provider-openai-responses`：OpenAI Responses provider，独立处理 Responses 的 `input` / output-item / SSE 协议，并将每轮完整、原样的原生 output items 作为 provider continuation state 绑定到对应 assistant message；它不修改 Chat Completions wire contract，也不把 OpenAI 字段泄漏到 kernel。后续 `/responses/compact` 返回的 opaque window 仍须走独立的加密 candidate 生命周期，不能把候选明文写入 JSONL。
-- `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result`、incremental tool argument，以及 provider-native `web_search_20250305` server tool / citation / continuation 映射。公开 beta `compact-2026-01-12` 仅以 provider-local paused driver 实现：它发送 `context_management.edits=[compact_20260112]` 和 `pause_after_compaction=true`，只接受一个完整 raw `compaction` content array，再将该数组交给 kernel 的加密 candidate 生命周期；它不是 TUI action、不会自动启用、不会激活 boundary，也不支持 Anthropic-compatible endpoint。kernel 只看到中立的 message、tool spec、hosted evidence、usage 和 `ProviderChunk`，不会看到 Anthropic tool version、server block 或 encrypted carrier。
+- `sigil-provider-openai-responses`：OpenAI Responses provider，独立处理 Responses 的 `input` / output-item / SSE 协议，并将每轮完整、原样的原生 output items 作为 provider continuation state 绑定到对应 assistant message；它不修改 Chat Completions wire contract，也不把 OpenAI 字段泄漏到 kernel。官方 route 的 cache key 使用 tenant partition 下的 HMAC 稳定分片，logical A0/A2 boundary 不触碰 active A4；`/responses/compact` 返回的 opaque window 只有在同 cursor 的 portable checkpoint 已激活后才能写成加密 native carrier，不能把候选明文写入 JSONL。
+- `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result`、incremental tool argument，以及 provider-native `web_search_20250305` server tool / citation / continuation 映射。官方 route 在 A0/A2 使用不超过四个 slot 的 `cache_control`，active A4 不写 breakpoint。公开 beta `compact-2026-01-12` 仅在 official route、精确 version/model 和已有 portable checkpoint 时，以 provider-local paused driver 生成加密 native carrier；route/model/protocol/store/retention/expiry 或 payload validation 失败时机械回退 portable checkpoint。kernel 只看到中立的 message、tool spec、hosted evidence、usage、capability 和受保护 carrier ref，不会看到 Anthropic tool version、server block 或 encrypted carrier。
 - `sigil-provider-gemini`：Gemini GenerateContent provider，负责 `systemInstruction`、`functionDeclarations`、`functionCall` / `functionResponse`、block reason，以及 provider-native `google_search` / grounding metadata 映射；Gemini 的 function-response、hosted model eligibility、streaming grounding index 与 retry 细节保留在 provider crate 内。
 - `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
 - `sigil-process`：只承载跨 crate 复用的进程树 lifecycle ownership、整树终止和离线 capability probe。Windows 使用 kill-on-close Job Object，Unix 提供独立process-group配置和整组终止primitive；等待、grace policy与receipt仍由调用crate拥有。它不承载shell选择、sandbox、terminal I/O、MCP framing、desktop bootstrap、receipt或TUI状态。
@@ -1075,21 +1075,59 @@ Memory 必须遵循 cache-first 思路。
 
 ### 10.3 Cache-Safe Compaction
 
-`sigil` 必须支持 compaction，但 compaction 只能作为“受控的稀有 cache reset 点”，不能退化成普通 agent 常见的随手改写历史。
+`sigil` 必须支持 compaction，但 compaction 只能作为“受控的稀有 cache epoch rotation”，不能退化成普通 agent 常见的随手改写历史。默认配置是
+`compaction.strategy = "cache_aware_v3"`；`legacy_v2` 只用于显式回滚。旧
+`soft_threshold_ratio`、`hard_threshold_ratio` 与 `tail_messages` 仍可读取，前两项只保留 legacy
+诊断/回滚语义，`tail_messages` 被确定性翻译为 whole-turn 最小保留量，不再表示可以从 tool pair 中间切开的消息数。
 
-compaction 规则建议如下：
+V3 request projection 固定为 `ProviderStatic -> SessionAnchor -> ContinuityCheckpoint ->
+VerbatimTail -> DynamicOverlay`。正常 turn 只追加 active tail；epoch rotation 才创建新的稳定前缀：
 
-- 只有当上下文占用达到阈值时才触发
-- compaction 只折叠较旧的中间段，不动 prefix
-- 最近一段消息尾巴必须保持 verbatim，避免留下孤立的 tool message
-- 折叠后的 summary 必须是稳定、简洁、可复用的，不引入每轮波动字段
-- compaction 前的原始历史应归档，保证可追溯
-- 手动 compaction 前，TUI 应先给出 provider-visible before/after preview，让用户知道会折叠掉什么，再决定是否真正提交 `/compact`
+- `SessionAnchorV1` 只投影 accepted Intent、Task 与 user-control authority，保留 active exact source
+  spans，不无条件 pin 第一条用户消息；
+- `ConversationContinuityV2` 每轮从 durable truth、上一个 active ledger 与本次 delta 重建，所有
+  decision/progress/pending/artifact/verification/risk 都必须有 durable source ref；
+- 正常 semantic rotation 使用当前同一 provider/model route 额外发起一次 bounded LLM 摘要请求：
+  旧 epoch request 保持为 cache-stable 前缀，只追加 strict JSON instruction 和 closed source index；
+  不创建子 agent/session，不执行 client tool，不开放 hosted tool。输出只能成为
+  `ModelGeneratedUnverified` narrative，objective/constraint/authorization/completion/verification
+  继续由 deterministic durable projection 决定；
+- tail 按 token target 选择完整 turn，user/assistant/tool pair、approval、queued input 与 active turn
+  保持原子；大型 tool output 先形成可恢复 shrink candidate，当前 epoch 的旧 bytes 不原地改写；
+- automatic trigger 是 `fit required OR trusted expected cost wins`。forecast 扣除 output、tool growth、
+  provider state 与 safety error，同时核算 cache read/write/miss、首轮 reset 与 break-even turns；
+- 无可信价格或 forecast confidence 不足时，cost-only automatic fail closed；manual `/compact`
+  先完成零 provider I/O 的 local prepare，展示 keep / standalone tool-output shrink / full semantic
+  compaction 三种选择。只有用户选择 full semantic compaction 后才发送一次计费摘要请求，并在摘要与
+  exact admission 完成后再次确认 activation。相同 cursor/layout 不重复尝试，连续失败和
+  post-rotation emergency 由 durable circuit breaker 截止；
+- 首版在摘要调用前的 exact upper-bound economics gate 闭合前，idle cost-only automatic 一律
+  fail closed，避免为了判断是否省钱而先产生一次确定账单；fit-required/pre-turn/overflow 不受此限制；
+- 只有具备 exact portable proof profile 且 adapter 在受信 official route 上声明有效 cache capability
+  时才启用 automatic V3；custom/compatible/未知 route 自动降到 legacy threshold 路径。
 
-第一版可以先定义两个阈值：
+TUI、serve 与 Desktop 消费同一个两阶段 typed preview。`prepared` 表示 local plan 已完成且没有
+provider consumption；`ready` 表示摘要调用已经发生、actual usage 与 exact target admission 已通过但
+尚未 activation。两阶段共同展示 strategy、pressure phase、forecast confidence、admission reason、
+预计 savings/break-even、native carrier availability 和 legacy migration fields；只有 `ready`
+展示摘要调用实际 cache-read/uncached/output/cost。standalone tool-output shrink 只消费
+`prepared` plan，追加独立 context epoch sidecar，不创建 semantic checkpoint。
+原始 JSONL 永远不覆盖；manual/automatic activation 都通过同一 portable lifecycle、stale-frontier CAS
+和 continuity validation。
 
-- `soft threshold`：上下文窗口 50% 左右时允许手动或后台建议 compaction
-- `hard threshold`：上下文窗口 80% 左右时只在当前 chat run 已成功结束、无排队输入且 session idle 的安全边界尝试 compaction；仍需本地精确 target admission。未准入不写 session 并进入有限 cooldown；已 Started 后失败按 durable scope fingerprint latch 阻止同一 fold material/target policy 重试。pre-turn、model-switch、mid-turn 与 overflow recovery 不属于这一自动路径
+摘要请求以 `ProviderPhysicalAttemptPurpose::SemanticCompaction` 单独审计，usage 计入 session 总成本，
+但不覆盖最近正常 conversation generation 的 cache 观测。manual 与 idle/cost-only 路径摘要失败时
+不静默应用空 narrative；只有 pre-turn fit-required 或 overflow emergency 可以追加明确的
+`semantic_compaction_deterministic_emergency_fallback` 后使用确定性 continuity floor。
+
+provider-native compaction 只是可丢弃加速层。OpenAI Responses/Anthropic carrier 的 schema、
+加密 materialization、exact-route validation 与 portable fallback 已由 provider/kernel 拥有，但当前
+产品路径保持 fail-closed：`compaction.native_carrier_enabled` 默认关闭，且即使显式设为 `true`，
+在同 cursor carrier 能被下一次请求实际消费的 resume contract 落地前也不会发起额外 provider 请求。
+未来启用时必须先完成 portable activation，再绑定 connection fingerprint、model snapshot、protocol、
+source cursor、store/retention/expiry 与 protected payload；carrier 丢失、过期、route/model 切换或
+policy 不兼容时追加失效审计并直接从 portable checkpoint 组装请求，不调用模型修复记忆。native
+失败只能降级为 notice，不能回滚或污染 portable truth。
 
 发生 context-window 拒绝也不能仅凭 HTTP status 或错误文本自动重试。唯一启用的 overflow recovery 是官方 OpenAI Responses `https://api.openai.com/v1` 上固定 `gpt-4.1-2025-04-14` snapshot：同一 foreground logical run 必须恰好一条 `context_window_exceeded + ConfirmedNoModelConsumption` durable terminal 且没有 output/side-effect refs；随后对同一冻结 post-compaction target 调用官方 `/responses/input_tokens`，并以该计数、显式 32K output reservation 与 8K safety buffer 完成完整 fit proof。计数本身先写同步、non-generating 的 `InputTokenMeasurement` start/terminal，成功后才允许新的 portable lifecycle；TUI 先刷新 lifecycle，再把仅存在进程内的一个冻结 target 交给一次新的 conversation attempt。alias、兼容 endpoint、普通错误、计数失败、profile drift、多个 physical attempt、任何 crash/restart 均 fail closed，不重发计数、不 apply、不 replay conversation；恢复后的 run 也不具备递归恢复资格。DeepSeek V4 Flash 仍没有本项 provider rejection contract，因此不进入 overflow path。
 
@@ -1097,7 +1135,9 @@ compaction 规则建议如下：
 
 除此之外，还应加一条和成本直接相关的策略：
 
-- 大型 tool result 在完成其所在回合的消费后，应允许做 turn-end compaction，只保留后续回合真正需要的摘要；如果以后还要精读，让模型重新读取文件或重新执行只读查询
+- 大型 tool result 在完成其所在回合的消费后，应允许单独切换 context epoch，只保留带 hash、bounded
+  head/tail 和 durable transcript ref 的可恢复 preview；如果以后还要精读，让模型按引用重新读取，
+  或重新执行只读查询
 
 ### 10.4 Auto Memory
 

@@ -542,6 +542,18 @@ impl AppState {
                     entries,
                 );
             }
+            WorkerMessage::StandaloneToolOutputShrinkApplied {
+                request_id: _,
+                context_epoch_id,
+                projected_output_count,
+                entries,
+            } => {
+                self.apply_standalone_tool_output_shrink(
+                    context_epoch_id,
+                    projected_output_count,
+                    entries,
+                );
+            }
             WorkerMessage::V2CompactionApplyFailed {
                 request_id: _,
                 error,

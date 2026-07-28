@@ -177,6 +177,7 @@ where
     let entries = session.entries().to_vec();
 
     state.compaction.preparation_tasks.abort_all();
+    state.compaction.local_preview = None;
     state.compaction.pending = None;
     state.compaction.idle_auto = IdleAutoCompactionState::default();
     state.session.pending_queued_pre_turn_preparation = None;

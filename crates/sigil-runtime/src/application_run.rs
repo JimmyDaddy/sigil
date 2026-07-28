@@ -2572,7 +2572,7 @@ fn application_selected_model_route(
         .map_err(ApplicationRunPrepareError::configuration)
 }
 
-fn load_application_session_for_route(
+pub(crate) fn load_application_session_for_route(
     root_config: &RootConfig,
     fallback_route: &ResolvedModelRoute,
     store: JsonlSessionStore,

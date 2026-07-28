@@ -4,9 +4,10 @@ use std::{
 };
 
 use sigil_kernel::{
-    CodeIntelStartup, ConnectionId, ModelRef, PermissionMode, PluginManifestSnapshot, RootConfig,
-    SecretString, SkillDescriptor, SyntaxThemeId, TerminalKeyboardEnhancement,
-    TerminalNotificationMethod, ThemeId, UsageCostCurrency, VerificationAutoRunPolicy,
+    CodeIntelStartup, CompactionStrategy, ConnectionId, ModelRef, PermissionMode,
+    PluginManifestSnapshot, RootConfig, SecretString, SkillDescriptor, SyntaxThemeId,
+    TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId, UsageCostCurrency,
+    VerificationAutoRunPolicy,
 };
 #[cfg(test)]
 pub(crate) use sigil_runtime::{
@@ -88,6 +89,8 @@ pub(crate) struct ConfigDraft {
     pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
     pub(crate) compaction_enabled: bool,
+    pub(crate) compaction_native_carrier_enabled: bool,
+    pub(crate) compaction_strategy: CompactionStrategy,
     pub(crate) compaction_soft_threshold_ratio: String,
     pub(crate) compaction_hard_threshold_ratio: String,
     pub(crate) compaction_context_window_tokens: String,
@@ -127,6 +130,10 @@ impl fmt::Debug for ConfigDraft {
             .field("web_enabled", &self.web_enabled)
             .field("memory_enabled", &self.memory_enabled)
             .field("compaction_enabled", &self.compaction_enabled)
+            .field(
+                "compaction_native_carrier_enabled",
+                &self.compaction_native_carrier_enabled,
+            )
             .finish_non_exhaustive()
     }
 }

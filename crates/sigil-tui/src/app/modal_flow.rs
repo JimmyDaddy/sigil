@@ -344,6 +344,9 @@ pub(super) enum ModalOutcome {
     V2CompactionDismissed {
         request_id: u64,
     },
+    StandaloneToolOutputShrinkConfirmed {
+        request_id: u64,
+    },
 }
 
 impl AppState {
@@ -1504,6 +1507,16 @@ impl AppState {
                     self.modal_state = None;
                     ModalOutcome::V2CompactionConfirmed { request_id }
                 }
+                KeyCode::Enter if state.is_locally_prepared() => {
+                    let request_id = state.request_id();
+                    self.modal_state = None;
+                    ModalOutcome::V2CompactionConfirmed { request_id }
+                }
+                KeyCode::Char('s' | 'S') if state.can_apply_standalone_shrink() => {
+                    let request_id = state.request_id();
+                    self.modal_state = None;
+                    ModalOutcome::StandaloneToolOutputShrinkConfirmed { request_id }
+                }
                 KeyCode::Enter => {
                     let request_id = state.request_id();
                     self.modal_state = None;
@@ -1657,7 +1670,7 @@ impl AppState {
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::IntentStack(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => {
-                if state.is_admitted() {
+                if state.is_admitted() || state.is_locally_prepared() {
                     let request_id = state.request_id();
                     self.modal_state = None;
                     ModalOutcome::V2CompactionConfirmed { request_id }
@@ -1837,6 +1850,9 @@ impl AppState {
             }
             ModalOutcome::V2CompactionDismissed { .. } => {
                 self.last_notice = Some("closed V2 compaction preview".to_owned());
+            }
+            ModalOutcome::StandaloneToolOutputShrinkConfirmed { .. } => {
+                self.last_notice = Some("applying standalone large tool-output cleanup".to_owned());
             }
         }
     }

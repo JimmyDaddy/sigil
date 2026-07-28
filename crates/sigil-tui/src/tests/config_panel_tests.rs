@@ -534,6 +534,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::fields_for_section(ConfigSection::Compaction),
         &[
             ConfigField::CompactionEnabled,
+            ConfigField::CompactionNativeCarrierEnabled,
+            ConfigField::CompactionStrategy,
             ConfigField::CompactionContextWindowTokens,
             ConfigField::CompactionSoftThresholdRatio,
             ConfigField::CompactionHardThresholdRatio,
@@ -1215,6 +1217,8 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     draft.permission_mode = sigil_kernel::PermissionMode::ReadOnly;
     draft.memory_enabled = true;
     draft.compaction_enabled = true;
+    draft.compaction_strategy = sigil_kernel::CompactionStrategy::LegacyV2;
+    draft.compaction_native_carrier_enabled = true;
     draft.compaction_soft_threshold_ratio = "0.5".to_owned();
     draft.compaction_hard_threshold_ratio = "0.75".to_owned();
     draft.compaction_context_window_tokens = "128000".to_owned();
@@ -1246,6 +1250,11 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     );
     assert_eq!(config.compaction.context_window_tokens, Some(128000));
     assert_eq!(config.compaction.tail_messages, 8);
+    assert_eq!(
+        config.compaction.strategy,
+        sigil_kernel::CompactionStrategy::LegacyV2
+    );
+    assert!(config.compaction.native_carrier_enabled);
     assert_eq!(config.model_request.request_timeout_secs, 60);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 90);
     assert_eq!(provider.base_url, "https://proxy.example.test");

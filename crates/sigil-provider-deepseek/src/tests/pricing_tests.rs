@@ -1,6 +1,33 @@
-use sigil_kernel::UsageStats;
+use sigil_kernel::{CacheTokenCountV1, CacheUsageV1, UsageStats};
 
 use super::{context_window_tokens, enrich_usage_costs};
+
+fn reported_usage(
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_hit_tokens: u64,
+    cache_miss_tokens: u64,
+) -> UsageStats {
+    UsageStats {
+        prompt_tokens,
+        completion_tokens,
+        cache_hit_tokens,
+        cache_miss_tokens,
+        input_cost: 0.0,
+        output_cost: 0.0,
+        cache_savings: 0.0,
+        system_fingerprint: None,
+        cache_usage: Some(CacheUsageV1 {
+            schema_version: CacheUsageV1::SCHEMA_VERSION,
+            read: Some(CacheTokenCountV1::provider_reported(cache_hit_tokens)),
+            write: None,
+            uncached: Some(CacheTokenCountV1::provider_reported(cache_miss_tokens)),
+            local_layout_mutation: None,
+            provider_miss_without_local_mutation: false,
+        }),
+        pricing_snapshot: None,
+    }
+}
 
 #[test]
 fn context_window_tokens_returns_v4_budget_for_known_models() {
@@ -13,19 +40,7 @@ fn context_window_tokens_returns_v4_budget_for_known_models() {
 
 #[test]
 fn enrich_usage_costs_populates_cost_fields_for_flash() {
-    let usage = enrich_usage_costs(
-        "deepseek-v4-flash",
-        UsageStats {
-            prompt_tokens: 100,
-            completion_tokens: 40,
-            cache_hit_tokens: 80,
-            cache_miss_tokens: 20,
-            input_cost: 0.0,
-            output_cost: 0.0,
-            cache_savings: 0.0,
-            system_fingerprint: None,
-        },
-    );
+    let usage = enrich_usage_costs("deepseek-v4-flash", reported_usage(100, 40, 80, 20));
 
     assert!(usage.input_cost > 0.0);
     assert!(usage.output_cost > 0.0);
@@ -37,14 +52,8 @@ fn enrich_usage_costs_uses_pro_rates_and_preserves_unknown_models() {
     let pro = enrich_usage_costs(
         "deepseek-v4-pro",
         UsageStats {
-            prompt_tokens: 100,
-            completion_tokens: 25,
-            cache_hit_tokens: 50,
-            cache_miss_tokens: 50,
-            input_cost: 0.0,
-            output_cost: 0.0,
-            cache_savings: 0.0,
             system_fingerprint: Some("fp-pro".to_owned()),
+            ..reported_usage(100, 25, 50, 50)
         },
     );
     assert!(pro.input_cost > 0.0);
@@ -60,6 +69,8 @@ fn enrich_usage_costs_uses_pro_rates_and_preserves_unknown_models() {
         output_cost: 8.0,
         cache_savings: 9.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     };
     let unchanged = enrich_usage_costs("unknown-model", original);
     assert_eq!(unchanged.prompt_tokens, 1);
@@ -73,19 +84,7 @@ fn enrich_usage_costs_uses_pro_rates_and_preserves_unknown_models() {
 
 #[test]
 fn enrich_usage_costs_rounds_serialized_cost_estimates() {
-    let usage = enrich_usage_costs(
-        "deepseek-v4-pro",
-        UsageStats {
-            prompt_tokens: 20621,
-            completion_tokens: 1015,
-            cache_hit_tokens: 7296,
-            cache_miss_tokens: 13325,
-            input_cost: 0.0,
-            output_cost: 0.0,
-            cache_savings: 0.0,
-            system_fingerprint: None,
-        },
-    );
+    let usage = enrich_usage_costs("deepseek-v4-pro", reported_usage(20621, 1015, 7296, 13325));
 
     assert_eq!(usage.input_cost, 0.005822823);
     assert_eq!(usage.output_cost, 0.00088305);

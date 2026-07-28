@@ -60,6 +60,8 @@ impl ConfigState {
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
+            | ConfigField::CompactionNativeCarrierEnabled
+            | ConfigField::CompactionStrategy
             | ConfigField::CodeIntelEnabled
             | ConfigField::CodeIntelServerStartup
             | ConfigField::CodeIntelAutoDiscover
@@ -128,6 +130,8 @@ impl ConfigState {
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
+            | ConfigField::CompactionNativeCarrierEnabled
+            | ConfigField::CompactionStrategy
             | ConfigField::CodeIntelEnabled
             | ConfigField::CodeIntelServerStartup
             | ConfigField::CodeIntelAutoDiscover
@@ -226,6 +230,12 @@ impl ConfigState {
             }
             ConfigField::CompactionEnabled => {
                 return bool_label(self.draft.compaction_enabled).to_owned();
+            }
+            ConfigField::CompactionNativeCarrierEnabled => {
+                return bool_label(self.draft.compaction_native_carrier_enabled).to_owned();
+            }
+            ConfigField::CompactionStrategy => {
+                return self.draft.compaction_strategy.as_str().to_owned();
             }
             ConfigField::CodeIntelEnabled => {
                 return bool_label(self.draft.code_intelligence_enabled).to_owned();
@@ -374,6 +384,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::VerificationAutoRun
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled
+        | ConfigField::CompactionNativeCarrierEnabled
+        | ConfigField::CompactionStrategy
         | ConfigField::CodeIntelEnabled
         | ConfigField::CodeIntelServerStartup
         | ConfigField::CodeIntelAutoDiscover

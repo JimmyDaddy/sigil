@@ -41,6 +41,32 @@ fn failed(attempt_id: &str) -> CompactionFailureEntry {
     }
 }
 
+fn circuit_scope(source: &str, layout: &str, route: &str) -> CompactionCircuitScopeV1 {
+    CompactionCircuitScopeV1 {
+        source_cursor_event_id: source.to_owned(),
+        layout_hash: layout.to_owned(),
+        route_fingerprint: route.to_owned(),
+    }
+}
+
+fn circuit_started(
+    attempt_id: &str,
+    source: &str,
+    layout: &str,
+    route: &str,
+) -> CompactionStartedEntry {
+    CompactionStartedEntry {
+        attempt_id: attempt_id.to_owned(),
+        fallback_parent: CompactionFallbackParent::Root,
+        initiation: CompactionInitiation::IdleAutomatic {
+            scope_fingerprint: format!("{source}:{layout}:{route}"),
+            circuit_scope: Some(circuit_scope(source, layout, route)),
+        },
+        base_projection_revision: "projection-r1".to_owned(),
+        started_at_unix_ms: 1,
+    }
+}
+
 fn lifecycle_event(
     event_type: DurableEventType,
     event_id: &str,
@@ -116,6 +142,7 @@ fn idle_automatic_failure_latch_survives_projection_reload_for_the_same_scope() 
         fallback_parent: CompactionFallbackParent::Root,
         initiation: CompactionInitiation::IdleAutomatic {
             scope_fingerprint: scope_fingerprint.to_owned(),
+            circuit_scope: None,
         },
         base_projection_revision: "projection-r1".to_owned(),
         started_at_unix_ms: 1,
@@ -143,6 +170,172 @@ fn idle_automatic_failure_latch_survives_projection_reload_for_the_same_scope() 
     let reloaded = CompactionLifecycleProjection::from_records(&records)?;
     assert!(reloaded.has_failed_idle_automatic_scope(scope_fingerprint));
     assert!(!reloaded.has_failed_idle_automatic_scope("different-fold-material"));
+    Ok(())
+}
+
+#[test]
+fn circuit_breaker_blocks_the_same_failed_cursor_and_layout() -> Result<()> {
+    let start = circuit_started("attempt-1", "source-1", "layout-1", "route-1");
+    let records = vec![
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionStarted,
+            "event-start",
+            1,
+            serde_json::to_value(start)?,
+            Some("event-start"),
+            None,
+        )),
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionFailed,
+            "event-failed",
+            2,
+            serde_json::to_value(failed("attempt-1"))?,
+            Some("event-start"),
+            Some("event-start"),
+        )),
+    ];
+    let projection = CompactionLifecycleProjection::from_records(&records)?;
+
+    let decision = projection.circuit_breaker_decision(&CompactionCircuitBreakerInputV1 {
+        scope: circuit_scope("source-1", "layout-1", "route-2"),
+        latest_completed_real_turn_sequence: Some(3),
+        emergency: false,
+        post_activation_emergency_layer: None,
+        manual_retry: true,
+    })?;
+    assert_eq!(
+        decision,
+        CompactionCircuitBreakerDecisionV1::SameCursorAndLayoutFailed
+    );
+    Ok(())
+}
+
+#[test]
+fn circuit_breaker_disables_route_after_two_semantic_failures_until_manual_retry() -> Result<()> {
+    let mut timeout = failed("attempt-1");
+    timeout.reason = CompactionFailureReason::SemanticSummaryTimeout;
+    let mut inflated = failed("attempt-2");
+    inflated.reason = CompactionFailureReason::SemanticSummaryInvalid;
+    let records = vec![
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionStarted,
+            "event-start-1",
+            1,
+            serde_json::to_value(circuit_started(
+                "attempt-1",
+                "source-1",
+                "layout-1",
+                "route-1",
+            ))?,
+            Some("event-start-1"),
+            None,
+        )),
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionFailed,
+            "event-failed-1",
+            2,
+            serde_json::to_value(timeout)?,
+            Some("event-start-1"),
+            Some("event-start-1"),
+        )),
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionStarted,
+            "event-start-2",
+            3,
+            serde_json::to_value(circuit_started(
+                "attempt-2",
+                "source-2",
+                "layout-2",
+                "route-1",
+            ))?,
+            Some("event-start-2"),
+            None,
+        )),
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionFailed,
+            "event-failed-2",
+            4,
+            serde_json::to_value(inflated)?,
+            Some("event-start-2"),
+            Some("event-start-2"),
+        )),
+    ];
+    let projection = CompactionLifecycleProjection::from_records(&records)?;
+    let mut input = CompactionCircuitBreakerInputV1 {
+        scope: circuit_scope("source-3", "layout-3", "route-1"),
+        latest_completed_real_turn_sequence: Some(5),
+        emergency: false,
+        post_activation_emergency_layer: None,
+        manual_retry: false,
+    };
+
+    assert_eq!(
+        projection.circuit_breaker_decision(&input)?,
+        CompactionCircuitBreakerDecisionV1::SemanticSummarizerRouteDisabled {
+            consecutive_failures: 2
+        }
+    );
+    input.manual_retry = true;
+    assert_eq!(
+        projection.circuit_breaker_decision(&input)?,
+        CompactionCircuitBreakerDecisionV1::Allowed
+    );
+    Ok(())
+}
+
+#[test]
+fn circuit_breaker_requires_a_real_turn_and_stops_first_turn_emergency_loops() -> Result<()> {
+    let records = vec![
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionStarted,
+            "event-start",
+            1,
+            serde_json::to_value(circuit_started(
+                "attempt-1",
+                "source-1",
+                "layout-1",
+                "route-1",
+            ))?,
+            Some("event-start"),
+            None,
+        )),
+        SessionStreamRecord::Stored(lifecycle_event(
+            DurableEventType::CompactionAppliedV2,
+            "event-applied",
+            2,
+            serde_json::to_value(applied("attempt-1", "compaction-1"))?,
+            Some("event-start"),
+            Some("event-start"),
+        )),
+    ];
+    let projection = CompactionLifecycleProjection::from_records(&records)?;
+    let mut input = CompactionCircuitBreakerInputV1 {
+        scope: circuit_scope("source-2", "layout-2", "route-1"),
+        latest_completed_real_turn_sequence: None,
+        emergency: false,
+        post_activation_emergency_layer: None,
+        manual_retry: false,
+    };
+
+    assert_eq!(
+        projection.circuit_breaker_decision(&input)?,
+        CompactionCircuitBreakerDecisionV1::RealTurnRequired {
+            latest_compaction_sequence: 2
+        }
+    );
+    input.latest_completed_real_turn_sequence = Some(3);
+    assert_eq!(
+        projection.circuit_breaker_decision(&input)?,
+        CompactionCircuitBreakerDecisionV1::Allowed
+    );
+    input.emergency = true;
+    input.post_activation_emergency_layer = Some(CompactionEmergencyBlockingLayerV1::ActiveTurn);
+    assert_eq!(
+        projection.circuit_breaker_decision(&input)?,
+        CompactionCircuitBreakerDecisionV1::PostActivationEmergency {
+            layer: CompactionEmergencyBlockingLayerV1::ActiveTurn
+        }
+    );
     Ok(())
 }
 

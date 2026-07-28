@@ -670,6 +670,8 @@ fn restored_session_view_shows_v2_compaction_invitation_and_restored_prompt_pres
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         })),
         SessionLogEntry::User(ModelMessage::user("latest prompt")),
     ];
@@ -1169,6 +1171,8 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         })),
         SessionLogEntry::Control(ControlEntry::ToolApproval(
             sigil_kernel::ToolApprovalEntry {
@@ -1274,7 +1278,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
     assert!(rendered.contains("[ctl] prefix sha=abcdef1234567890"));
     assert!(rendered.contains("[ctl] memory docs=2 fp=memory-fingerpri"));
     assert!(rendered.contains("[ctl] context skipped candidates=2 items=1 reason=context item"));
-    assert!(rendered.contains("[ctl] usage p=10 c=5 hit=3 miss=7"));
+    assert!(rendered.contains("[ctl] usage p=10 c=5 read=3 write=- miss=7 layout=unknown"));
     assert!(rendered.contains("[ctl] approval call-write-1 write_file action=requested"));
     assert!(rendered.contains("[ctl] execution call-write-1 write_file status=completed"));
     assert!(rendered.contains("[ctl] egress call-net-1 fetch_url"));

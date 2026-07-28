@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sigil_kernel::{ProviderChunk, ProviderContinuationState, ToolCall, UsageStats};
+use sigil_kernel::{CacheUsageV1, ProviderChunk, ProviderContinuationState, ToolCall, UsageStats};
 
 use crate::request::{
     OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND, OPENAI_RESPONSES_PROVIDER_NAME, output_items_state,
@@ -172,12 +172,12 @@ impl StreamMapper {
 fn map_usage(usage: &Value, response: &Value) -> Result<UsageStats> {
     let input_tokens = required_u64(usage, "input_tokens")?;
     let output_tokens = required_u64(usage, "output_tokens")?;
-    let cache_hit_tokens = usage
+    let reported_cache_hit_tokens = usage
         .get("input_tokens_details")
         .and_then(Value::as_object)
         .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
+        .and_then(Value::as_u64);
+    let cache_hit_tokens = reported_cache_hit_tokens.unwrap_or_default();
     Ok(UsageStats {
         prompt_tokens: input_tokens,
         completion_tokens: output_tokens,
@@ -190,6 +190,9 @@ fn map_usage(usage: &Value, response: &Value) -> Result<UsageStats> {
             .get("system_fingerprint")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        cache_usage: reported_cache_hit_tokens
+            .map(|read| CacheUsageV1::reported_read_with_derived_uncached(input_tokens, read)),
+        pricing_snapshot: None,
     })
 }
 

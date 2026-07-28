@@ -121,6 +121,8 @@ fn recovery_receipt(command_id: &str) -> HttpConversationRecoveryCommandReceipt 
         session_id: "session-1".to_owned(),
         action: HttpConversationRecoveryCommandActionKind::ForkConversation,
         compaction: None,
+        compaction_review: None,
+        tool_output_shrink: None,
         restore: None,
         fork: None,
         recovery: HttpConversationRecoveryView {

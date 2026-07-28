@@ -113,10 +113,8 @@ impl SessionContextProjection {
             .max_by_key(|(stream_sequence, _, _)| *stream_sequence);
 
         if let Some((_, applied, sidecar)) = activated {
-            let outputs = output_sidecars
-                .outputs_for_compaction(&applied.compaction_id)
-                .unwrap_or_default();
-            let raw_messages = raw_model_messages_from_durable_records(records, outputs)?;
+            let outputs = output_sidecars.active_outputs(Some(&applied.compaction_id));
+            let raw_messages = raw_model_messages_from_durable_records(records, &outputs)?;
             let portable_retained_raw_event_ids = (sidecar.is_some()
                 && applied.checkpoint.kind == ContinuationCheckpointKind::PortableSemantic)
                 .then(|| portable_retained_raw_event_ids(records, &applied))
@@ -127,6 +125,17 @@ impl SessionContextProjection {
                 raw_messages,
                 portable_retained_raw_event_ids.as_ref(),
             )?;
+        } else {
+            let outputs = output_sidecars.active_outputs(None);
+            if !outputs.is_empty() {
+                let raw_messages = raw_model_messages_from_durable_records(records, &outputs)?;
+                projection.retained_entries = into_projection_entries(repair_orphan_tool_results(
+                    &raw_messages
+                        .into_iter()
+                        .map(|message| message.message)
+                        .collect::<Vec<_>>(),
+                ));
+            }
         }
         Ok(projection)
     }

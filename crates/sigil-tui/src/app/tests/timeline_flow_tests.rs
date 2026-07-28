@@ -2190,6 +2190,8 @@ fn compaction_status_tracks_latest_prompt_tokens_instead_of_cumulative_totals() 
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
     assert_eq!(app.runtime.compaction_status, "soft");
 
@@ -2202,6 +2204,8 @@ fn compaction_status_tracks_latest_prompt_tokens_instead_of_cumulative_totals() 
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
 
     assert_eq!(app.runtime.compaction_status, "ready");
@@ -2226,6 +2230,8 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
 
     assert_eq!(
@@ -2253,6 +2259,8 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
     assert_eq!(
         fallback_app.context_usage_line(),
@@ -2274,6 +2282,8 @@ fn usage_display_shows_session_and_delta_costs() -> Result<()> {
         output_cost: 0.03,
         cache_savings: 0.45,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
 
     assert!(
@@ -2330,6 +2340,8 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         output_cost: 0.05,
         cache_savings: 0.10,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
     assert_eq!(app.runtime.session_delta_stats.input_cost, 0.20);
 
@@ -2347,6 +2359,8 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
                 output_cost: 0.50,
                 cache_savings: 2.00,
                 system_fingerprint: None,
+                cache_usage: None,
+                pricing_snapshot: None,
             },
         ))],
     })?;
@@ -2379,6 +2393,8 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         output_cost: 0.03,
         cache_savings: 0.45,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
 
     assert!(
@@ -2419,6 +2435,8 @@ fn usage_display_prefers_configured_cost_currency_over_balance_currency() -> Res
         output_cost: 0.03,
         cache_savings: 0.45,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
 
     assert!(
@@ -2837,5 +2855,48 @@ fn push_assistant_message_once_deduplicates_and_ignores_empty() -> Result<()> {
         3
     );
 
+    Ok(())
+}
+
+#[test]
+fn usage_sidebar_explains_cache_write_and_proven_local_layout_change() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 10,
+        cache_hit_tokens: 40,
+        cache_miss_tokens: 60,
+        cache_usage: Some(sigil_kernel::CacheUsageV1 {
+            schema_version: sigil_kernel::CacheUsageV1::SCHEMA_VERSION,
+            read: Some(sigil_kernel::CacheTokenCountV1::provider_reported(40)),
+            write: Some(sigil_kernel::CacheTokenCountV1::provider_reported(20)),
+            uncached: Some(sigil_kernel::CacheTokenCountV1::provider_reported(40)),
+            local_layout_mutation: Some(sigil_kernel::CacheLayoutMutationKind::ToolSchemaChanged),
+            provider_miss_without_local_mutation: false,
+        }),
+        ..UsageStats::default()
+    }))?;
+
+    assert!(app.usage_sidebar_lines().iter().any(|line| {
+        line == "cache io: read 40 · write 20 · miss 60 · layout tool_schema_changed"
+    }));
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        cache_miss_tokens: 100,
+        cache_usage: Some(sigil_kernel::CacheUsageV1 {
+            schema_version: sigil_kernel::CacheUsageV1::SCHEMA_VERSION,
+            read: Some(sigil_kernel::CacheTokenCountV1::provider_reported(0)),
+            write: None,
+            uncached: Some(sigil_kernel::CacheTokenCountV1::provider_reported(100)),
+            local_layout_mutation: Some(sigil_kernel::CacheLayoutMutationKind::Identical),
+            provider_miss_without_local_mutation: true,
+        }),
+        ..UsageStats::default()
+    }))?;
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| { line == "cache miss source: provider miss without local mutation" })
+    );
     Ok(())
 }

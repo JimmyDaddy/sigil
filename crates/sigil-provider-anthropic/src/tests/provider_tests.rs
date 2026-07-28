@@ -6,10 +6,15 @@ use std::{
 
 use futures::StreamExt;
 use sigil_kernel::{
-    CompactionCursor, CompletionRequest, DurableEventType, FrozenProviderRequestMaterial,
-    HostedEvidence, HostedToolKind, HostedToolLimits, HostedToolRequest, ImageInputCapability,
-    JsonlSessionStore, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk, Session,
-    SessionLogEntry,
+    COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionFoldPlan, CompactionId, CompactionInitiation,
+    CompactionSidecarProjection, CompletionRequest, ContinuationItemPriority,
+    ContinuationModelOutputItemV1, ContinuationModelOutputV1, DurableEventType,
+    EffectiveTokenBudget, FrozenProviderRequestMaterial, HostedEvidence, HostedToolKind,
+    HostedToolLimits, HostedToolRequest, ImageInputCapability, InputTokenEvidence,
+    JsonlSessionStore, ModelMessage, ModelRequestTimeouts, NativeCarrierPolicyV1,
+    PortableSemanticCompactionRequest, PortableTargetRequestMaterial, Provider, ProviderChunk,
+    ProviderRetentionPolicyV1, RequestFitProof, Session, TokenMeasurementBinding,
+    TokenMeasurementScope, ToolOutputProjectionPolicy, VersionedProfileIdentity,
 };
 
 use super::*;
@@ -60,6 +65,123 @@ impl Drop for EnvScope {
 
 fn new_anthropic_provider(config: AnthropicProviderConfig) -> anyhow::Result<AnthropicProvider> {
     AnthropicProvider::new(config, ModelRequestTimeouts::default())
+}
+
+fn profile(id: &str) -> VersionedProfileIdentity {
+    VersionedProfileIdentity::from_content(id, 1, id.as_bytes())
+}
+
+fn carrier_policy() -> NativeCarrierPolicyV1 {
+    NativeCarrierPolicyV1 {
+        provider_retention: ProviderRetentionPolicyV1::Disallowed,
+        request_store_mode: false,
+        expires_at_unix_ms: None,
+    }
+}
+
+fn seed_portable_checkpoint(
+    session: &mut Session,
+    store: &JsonlSessionStore,
+) -> anyhow::Result<(CompactionId, sigil_kernel::CompactionCursor)> {
+    session.append_user_message(ModelMessage::user("portable root objective"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("portable progress".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("continue with native acceleration"))?;
+    let records = store.read_event_records_writer()?;
+    let plan = CompactionFoldPlan::from_records_after(&records, 1, None)?;
+    let source_event_id = plan
+        .folded_event_ids
+        .first()
+        .cloned()
+        .expect("portable fixture has foldable history");
+    let compaction_id = "portable-before-anthropic-native".to_owned();
+    let preflight =
+        store.prepare_portable_semantic_compaction(PortableSemanticCompactionRequest {
+            attempt_id: "portable-before-anthropic-native-attempt".to_owned(),
+            compaction_id: compaction_id.clone(),
+            initiation: CompactionInitiation::Manual,
+            base_projection_revision: "anthropic-native-dual-write-r1".to_owned(),
+            branch_id: None,
+            valid_for_snapshot: "snapshot-anthropic-native-dual-write".to_owned(),
+            objective: Some("portable truth remains authoritative".to_owned()),
+            language: "en".to_owned(),
+            plan,
+            model_output: ContinuationModelOutputV1 {
+                in_progress: vec![ContinuationModelOutputItemV1 {
+                    text: "native carrier is optional".to_owned(),
+                    source_event_ids: vec![source_event_id],
+                    priority: ContinuationItemPriority::Critical,
+                }],
+                pending_actions: Vec::new(),
+                provider_continuity: Vec::new(),
+                model_notes: Vec::new(),
+            },
+            tool_output_projection_policy: ToolOutputProjectionPolicy::default(),
+            started_at_unix_ms: 10,
+            completed_at_unix_ms: 11,
+        })?;
+    let target_request = CompletionRequest {
+        provider_name: "anthropic".to_owned(),
+        model_name: "claude-sonnet-4-6".to_owned(),
+        messages: preflight.candidate_messages().to_vec(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: Some(20),
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+        hosted_tools: Vec::new(),
+    };
+    let frozen = FrozenProviderRequestMaterial::freeze(session.session_scope_id(), target_request)?;
+    let binding = TokenMeasurementBinding {
+        schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        provider_name: "anthropic".to_owned(),
+        model_name: "claude-sonnet-4-6".to_owned(),
+        wire_profile: profile("anthropic-portable-native-wire"),
+        token_measurement_profile: profile("anthropic-portable-native-tokenizer"),
+        hosted_parity_profile: Some(profile("anthropic-portable-native-hosted-parity")),
+    };
+    let proof = RequestFitProof {
+        schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        input: InputTokenEvidence::Exact {
+            tokens: 10,
+            material_fingerprint: frozen.fingerprint().to_owned(),
+            measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+            binding: binding.clone(),
+            provider_model_snapshot: None,
+            provider_system_fingerprint: None,
+        },
+        budget: EffectiveTokenBudget {
+            schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+            budget_profile: profile("anthropic-portable-native-budget"),
+            context_window_tokens: 100,
+            requested_output_tokens: 20,
+            safety_buffer_tokens: 10,
+        },
+    };
+    let before_input = InputTokenEvidence::Exact {
+        tokens: 80,
+        material_fingerprint: frozen.fingerprint().to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    let target = PortableTargetRequestMaterial::new(frozen.clone(), binding, proof)
+        .with_portable_economics(&frozen, before_input)?;
+    store.execute_portable_semantic_compaction(preflight, target)?;
+    let records = store.read_event_records_writer()?;
+    let sidecar = CompactionSidecarProjection::from_records(&records)?
+        .resolved_compaction(&compaction_id)
+        .cloned()
+        .expect("portable checkpoint is active");
+    Ok((compaction_id, sidecar.folded_through))
 }
 
 #[test]
@@ -220,10 +342,8 @@ async fn provider_native_compact_records_a_completed_durable_attempt_when_the_th
     request.model_name = "claude-sonnet-4-6".to_owned();
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let session = Session::new("anthropic", "claude-sonnet-4-6").with_store(store.clone());
-    let covered = store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user(
-        "durable native compaction seed",
-    )))?;
+    let mut session = Session::new("anthropic", "claude-sonnet-4-6").with_store(store.clone());
+    let (portable_compaction_id, covers_through) = seed_portable_checkpoint(&mut session, &store)?;
     let frozen = FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)?;
 
     let materialized = provider
@@ -231,11 +351,9 @@ async fn provider_native_compact_records_a_completed_durable_attempt_when_the_th
             &session,
             "native-compaction-run-1",
             frozen,
-            CompactionCursor {
-                session_id: session.session_scope_id().to_owned(),
-                through_stream_sequence: covered.stream_sequence,
-                through_event_id: covered.event_id,
-            },
+            covers_through,
+            portable_compaction_id,
+            carrier_policy(),
             AnthropicNativeCompactionOptions {
                 trigger_input_tokens: 50_000,
                 instructions: None,

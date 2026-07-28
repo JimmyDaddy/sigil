@@ -647,8 +647,11 @@ where
                             session.model_name(),
                             &options.compaction_config,
                         );
-                        let current_preview = session
-                            .v2_compaction_preview(effective_config.tail_messages)
+                        let current_preview =
+                            sigil_runtime::context_window::compaction_preview_for_strategy(
+                                session,
+                                &effective_config,
+                            )
                             .ok()
                             .flatten();
                         if current_preview.as_ref() != Some(&prepared.review.preview) {
@@ -658,6 +661,7 @@ where
                                 ));
                             continue;
                         }
+                        state.compaction.local_preview = prepared.local_preview;
                         state.compaction.pending = prepared.pending;
                         let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
                             state: V2CompactionPreviewState::Review(Box::new(prepared.review)),
@@ -707,6 +711,9 @@ where
                             &mut state.session.current,
                             &state.session.log_path,
                             message_tx,
+                            agent.provider(),
+                            runtime,
+                            root_config.compaction.native_carrier_enabled,
                         );
                     }
                     Err(error) => {
@@ -818,13 +825,22 @@ where
                 let compaction_request_id = pending.request_id();
                 let folded_event_count = pending.folded_event_count();
                 let frozen_request = pending.frozen_target_request();
-                let applied = state
-                    .session
-                    .current
-                    .as_ref()
-                    .map(|session| pending.apply(session, &state.session.log_path));
+                let applied = state.session.current.as_ref().map(|session| {
+                    pending.apply_with_optional_native(
+                        session,
+                        &state.session.log_path,
+                        agent.provider(),
+                        runtime,
+                        root_config.compaction.native_carrier_enabled,
+                    )
+                });
                 let outcome = match applied {
-                    Some(Ok(outcome)) => outcome,
+                    Some(Ok((outcome, native_notice))) => {
+                        if let Some(notice) = native_notice {
+                            let _ = message_tx.send(WorkerMessage::Notice(notice));
+                        }
+                        outcome
+                    }
                     Some(Err(apply_error)) => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
                             "overflow recovery compaction was not applied: {apply_error:#}"
@@ -1131,7 +1147,7 @@ where
                                 state.compaction.preparation_tx.clone(),
                                 move || {
                                     let preparation = (|| {
-                                        let session =
+                                        let mut session =
                                             load_session_with_captured_runtime_attachments(
                                                 &provider_name,
                                                 &model_name,
@@ -1151,7 +1167,7 @@ where
                                                 &root_config,
                                                 &workspace_root,
                                                 &session_log_path,
-                                                &session,
+                                                &mut session,
                                                 &options,
                                                 tools,
                                                 source_physical_attempt_id.clone(),
@@ -1288,14 +1304,27 @@ where
         let expected_session_scope_id = session.session_scope_id().to_owned();
         let provider_name = session.provider_name().to_owned();
         let model_name = session.model_name().to_owned();
-        let root_config = root_config.clone();
+        let context_capabilities = agent.provider().context_capabilities(&model_name);
+        let cache_aware_v3_supported = sigil_runtime::cache_aware_v3_automatic_supported(
+            &provider_name,
+            &model_name,
+            &context_capabilities,
+        );
+        let mut root_config = root_config.clone();
         let workspace_root = workspace_root.clone();
         let session_log_path = state.session.log_path.clone();
-        let options = options.clone();
+        let mut options = options.clone();
+        if root_config.compaction.strategy == sigil_kernel::CompactionStrategy::CacheAwareV3
+            && !cache_aware_v3_supported
+        {
+            root_config.compaction.strategy = sigil_kernel::CompactionStrategy::LegacyV2;
+            options.compaction_config.strategy = sigil_kernel::CompactionStrategy::LegacyV2;
+        }
         let tools = agent.tool_registry().specs();
         let runtime_handle = runtime.handle().clone();
         let idle_context_resolver = context_resolver.clone();
         let runtime_attachments = CapturedSessionRuntimeAttachments::from_session(Some(session));
+        let preparation_agent = Arc::clone(agent);
         let mut idle_auto_state = state.compaction.idle_auto.clone();
         state.compaction.idle_auto.cancel_requested_run();
         state.compaction.preparation_tasks.start_idle(
@@ -1304,7 +1333,7 @@ where
             expected_session_scope_id.clone(),
             state.compaction.preparation_tx.clone(),
             move || {
-                let session = load_session_with_captured_runtime_attachments(
+                let mut session = load_session_with_captured_runtime_attachments(
                     &provider_name,
                     &model_name,
                     &session_log_path,
@@ -1322,7 +1351,8 @@ where
                     &root_config,
                     &workspace_root,
                     &session_log_path,
-                    &session,
+                    preparation_agent.provider(),
+                    &mut session,
                     &options,
                     tools,
                     &idle_context_resolver,
@@ -1552,13 +1582,14 @@ where
             let queue_context_resolver = context_resolver.clone();
             let runtime_attachments =
                 CapturedSessionRuntimeAttachments::from_session(Some(session));
+            let preparation_agent = Arc::clone(agent);
             state.compaction.preparation_tasks.start_pre_turn(
                 runtime,
                 request_id,
                 expected_session_scope_id.clone(),
                 state.compaction.preparation_tx.clone(),
                 move || {
-                    let session = load_session_with_captured_runtime_attachments(
+                    let mut session = load_session_with_captured_runtime_attachments(
                         &provider_name,
                         &model_name,
                         &session_log_path,
@@ -1586,7 +1617,8 @@ where
                         &root_config,
                         &workspace_root,
                         &session_log_path,
-                        &session,
+                        preparation_agent.provider(),
+                        &mut session,
                         &exact_prompts,
                         &options.memory_config,
                         tools,
@@ -1665,8 +1697,17 @@ where
                     return WorkerAdvancementControl::SkipCommandPoll;
                 };
                 let folded_event_count = pending.folded_event_count();
-                match pending.apply_compaction(session, &state.session.log_path) {
-                    Ok((candidate, outcome)) => {
+                match pending.apply_compaction(
+                    session,
+                    &state.session.log_path,
+                    agent.provider(),
+                    runtime,
+                    root_config.compaction.native_carrier_enabled,
+                ) {
+                    Ok((candidate, outcome, native_notice)) => {
+                        if let Some(notice) = native_notice {
+                            let _ = message_tx.send(WorkerMessage::Notice(notice));
+                        }
                         match load_session_with_runtime_attachments(
                             session.provider_name(),
                             session.model_name(),

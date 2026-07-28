@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -8,7 +9,8 @@ use super::*;
 use crate::{EventId, SessionId, projection_apply_decision};
 
 /// Schema version for the provider physical-attempt direct payloads.
-pub const PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION: u16 = 2;
+pub const PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION: u16 = 3;
+const MIN_SUPPORTED_PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION: u16 = 2;
 
 /// Projection schema version for provider physical attempts.
 pub const PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -24,6 +26,20 @@ pub const MAX_PROVIDER_PHYSICAL_ATTEMPT_REFERENCE_BYTES: usize = 16 * 1024;
 
 /// Stable identity of one provider physical attempt.
 pub type ProviderPhysicalAttemptId = String;
+
+/// Maximum assistant text retained in memory from one semantic-compaction model request.
+pub const MAX_SEMANTIC_COMPACTION_GENERATION_BYTES: usize =
+    super::compaction_sidecar::MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES;
+
+/// Process-local result of one completed semantic-compaction provider request.
+///
+/// The raw text is never persisted as a conversation message. Only the validated portable
+/// checkpoint may later become durable; usage is recorded separately under the physical attempt.
+#[derive(Debug, Clone)]
+pub struct SemanticCompactionGeneration {
+    pub output_text: String,
+    pub usage: Option<crate::UsageStats>,
+}
 
 /// Why a provider physical attempt was issued.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,16 +67,24 @@ pub struct ProviderPhysicalAttemptStartedEntry {
     pub request_material_fingerprint: String,
     pub provider_name: String,
     pub model_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_layout_proof: Option<crate::CacheLayoutProofV1>,
     pub started_at_unix_ms: u64,
 }
 
 impl ProviderPhysicalAttemptStartedEntry {
     pub(crate) fn validate_shape(&self) -> Result<()> {
-        if self.schema_version != PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION {
+        if !(MIN_SUPPORTED_PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION
+            ..=PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION)
+            .contains(&self.schema_version)
+        {
             bail!(
                 "unsupported provider physical-attempt schema version {}",
                 self.schema_version
             );
+        }
+        if self.schema_version < 3 && self.cache_layout_proof.is_some() {
+            bail!("provider physical-attempt cache layout requires schema version 3");
         }
         validate_identity("provider physical attempt id", &self.physical_attempt_id)?;
         validate_identity("provider logical run id", &self.logical_run_id)?;
@@ -70,6 +94,9 @@ impl ProviderPhysicalAttemptStartedEntry {
         )?;
         validate_label("provider name", &self.provider_name)?;
         validate_label("provider model name", &self.model_name)?;
+        if let Some(proof) = &self.cache_layout_proof {
+            proof.validate()?;
+        }
         Ok(())
     }
 }
@@ -105,7 +132,10 @@ pub struct ProviderPhysicalAttemptTerminalEntry {
 
 impl ProviderPhysicalAttemptTerminalEntry {
     pub(crate) fn validate_shape(&self) -> Result<()> {
-        if self.schema_version != PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION {
+        if !(MIN_SUPPORTED_PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION
+            ..=PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION)
+            .contains(&self.schema_version)
+        {
             bail!(
                 "unsupported provider physical-attempt schema version {}",
                 self.schema_version
@@ -315,6 +345,22 @@ impl ProviderPhysicalAttemptProjection {
             .collect()
     }
 
+    pub(super) fn latest_cache_layout_proof_for_internal_use(
+        &self,
+    ) -> Option<&crate::CacheLayoutProofV1> {
+        self.attempts
+            .values()
+            .filter_map(|attempt| {
+                attempt
+                    .entry
+                    .cache_layout_proof
+                    .as_ref()
+                    .map(|proof| (attempt.started_stream_sequence, proof))
+            })
+            .max_by_key(|(sequence, _)| *sequence)
+            .map(|(_, proof)| proof)
+    }
+
     fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         let decision = projection_apply_decision(self.cursor.as_ref(), event)?;
@@ -463,7 +509,9 @@ impl ProviderPhysicalAttemptProjection {
 /// Store-backed sessions receive a synced start barrier before provider I/O. In-memory sessions
 /// retain existing behavior and deliberately do not manufacture non-resumable audit facts.
 pub(crate) enum ProviderPhysicalAttemptAudit {
-    InMemory,
+    InMemory {
+        cache_layout_proof: crate::CacheLayoutProofV1,
+    },
     Durable(DurableProviderPhysicalAttemptAudit),
 }
 
@@ -473,6 +521,7 @@ pub(crate) struct DurableProviderPhysicalAttemptAudit {
     start_event_id: EventId,
     last_causation_event_id: EventId,
     durable_output_event_ids: Vec<EventId>,
+    cache_layout_proof: crate::CacheLayoutProofV1,
     terminal_recorded: bool,
 }
 
@@ -618,9 +667,27 @@ impl ProviderPhysicalAttemptAudit {
         purpose: ProviderPhysicalAttemptPurpose,
     ) -> Result<Self> {
         let Some(store) = session.durable_store() else {
-            return Ok(Self::InMemory);
+            return Ok(Self::InMemory {
+                cache_layout_proof: frozen_request.cache_layout_proof(None)?,
+            });
         };
         let request = frozen_request.request();
+        let prior_cache_layout = {
+            let store = store.clone();
+            tokio::task::spawn_blocking(move || {
+                let records = store.read_event_records_writer()?;
+                let projection = ProviderPhysicalAttemptProjection::from_records(&records)?;
+                Ok::<_, anyhow::Error>(
+                    projection
+                        .latest_cache_layout_proof_for_internal_use()
+                        .cloned(),
+                )
+            })
+            .await
+            .context("provider cache layout projection task failed")??
+        };
+        let cache_layout_proof =
+            Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?);
         let physical_attempt_id = format!("provider-attempt-{}", Uuid::new_v4());
         let start_event_id = Uuid::new_v4().to_string();
         let entry = ProviderPhysicalAttemptStartedEntry {
@@ -631,6 +698,7 @@ impl ProviderPhysicalAttemptAudit {
             request_material_fingerprint: frozen_request.fingerprint().to_owned(),
             provider_name: request.provider_name.clone(),
             model_name: request.model_name.clone(),
+            cache_layout_proof,
             started_at_unix_ms: unix_time_ms(),
         };
         entry.validate_shape()?;
@@ -655,8 +723,19 @@ impl ProviderPhysicalAttemptAudit {
             start_event_id: start_event_id.clone(),
             last_causation_event_id: start_event_id,
             durable_output_event_ids: Vec::new(),
+            cache_layout_proof: entry
+                .cache_layout_proof
+                .expect("new physical attempts always carry a cache layout proof"),
             terminal_recorded: false,
         }))
+    }
+
+    #[must_use]
+    pub(crate) fn cache_layout_mutation(&self) -> crate::CacheLayoutMutationKind {
+        match self {
+            Self::InMemory { cache_layout_proof } => cache_layout_proof.mutation_from_previous.kind,
+            Self::Durable(audit) => audit.cache_layout_proof.mutation_from_previous.kind,
+        }
     }
 
     pub(crate) async fn append_output_control(
@@ -768,6 +847,171 @@ impl ProviderPhysicalAttemptAudit {
     #[must_use]
     pub(crate) fn has_durable_output_or_side_effect(&self) -> bool {
         matches!(self, Self::Durable(audit) if !audit.durable_output_event_ids.is_empty())
+    }
+}
+
+/// Executes one bounded, no-side-effect semantic-compaction model request.
+///
+/// Client tool schemas may remain in the frozen request to preserve the provider cache prefix,
+/// but tool chunks are rejected and are never executed. Hosted tools must be absent because they
+/// can execute remotely. Response handles and continuation states from this internal request are
+/// deliberately ignored.
+///
+/// # Errors
+///
+/// Returns an error when request identity is inconsistent, durable attempt barriers fail, the
+/// provider emits a tool/hosted/background action, output is empty or oversized, or the stream
+/// terminates unsuccessfully.
+pub async fn generate_semantic_compaction(
+    provider: &dyn crate::Provider,
+    session: &mut Session,
+    logical_run_id: &str,
+    frozen_request: crate::FrozenProviderRequestMaterial,
+) -> Result<SemanticCompactionGeneration> {
+    if frozen_request.session_scope_id() != session.session_scope_id() {
+        bail!("semantic compaction request belongs to a different session scope");
+    }
+    let request = frozen_request.request();
+    if request.provider_name != session.provider_name()
+        || request.model_name != session.model_name()
+        || provider.name() != session.provider_name()
+    {
+        bail!("semantic compaction request route does not match the durable session");
+    }
+    if request.background {
+        bail!("semantic compaction request cannot run in background mode");
+    }
+    if !request.hosted_tools.is_empty() {
+        bail!("semantic compaction request cannot expose hosted tools");
+    }
+
+    let request = request.clone();
+    let pricing_snapshot = provider.usage_pricing_snapshot(&request.model_name);
+    let mut physical_attempt = ProviderPhysicalAttemptAudit::start_with_purpose(
+        session,
+        logical_run_id,
+        &frozen_request,
+        ProviderPhysicalAttemptPurpose::SemanticCompaction,
+    )
+    .await?;
+    let mut generation_observed = false;
+    let result = async {
+        let mut stream = provider.stream(request).await?;
+        let mut output_text = String::new();
+        let mut latest_usage = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("semantic compaction provider stream failed")?;
+            match chunk {
+                crate::ProviderChunk::TextDelta(delta) => {
+                    generation_observed = true;
+                    if output_text.len().saturating_add(delta.len())
+                        > MAX_SEMANTIC_COMPACTION_GENERATION_BYTES
+                    {
+                        bail!("semantic compaction output exceeds its bounded size");
+                    }
+                    output_text.push_str(&delta);
+                }
+                crate::ProviderChunk::ReasoningDelta(_)
+                | crate::ProviderChunk::ReasoningSummaryDelta(_) => {
+                    generation_observed = true;
+                }
+                crate::ProviderChunk::Usage(mut usage) => {
+                    generation_observed |= usage.completion_tokens > 0;
+                    let mutation = physical_attempt.cache_layout_mutation();
+                    usage
+                        .cache_usage
+                        .get_or_insert(crate::CacheUsageV1 {
+                            schema_version: crate::CacheUsageV1::SCHEMA_VERSION,
+                            read: None,
+                            write: None,
+                            uncached: None,
+                            local_layout_mutation: None,
+                            provider_miss_without_local_mutation: false,
+                        })
+                        .observe_local_layout(mutation, usage.cache_miss_tokens);
+                    if let Some(cache_usage) = &usage.cache_usage {
+                        cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
+                    }
+                    if let Some(snapshot) = &pricing_snapshot {
+                        usage = snapshot.apply_to_usage(usage)?;
+                    }
+                    session.stats_mut().apply_semantic_compaction_usage(&usage);
+                    physical_attempt
+                        .append_output_control(
+                            session,
+                            ControlEntry::SemanticCompactionUsageSnapshot(usage.clone()),
+                        )
+                        .await?;
+                    latest_usage = Some(usage);
+                }
+                crate::ProviderChunk::ResponseHandle(_)
+                | crate::ProviderChunk::ReasoningArtifact(_)
+                | crate::ProviderChunk::ContinuationState(_) => {
+                    generation_observed = true;
+                }
+                crate::ProviderChunk::Done => break,
+                crate::ProviderChunk::ToolCallStart { .. }
+                | crate::ProviderChunk::ToolCallArgsDelta { .. }
+                | crate::ProviderChunk::ToolCallComplete(_)
+                | crate::ProviderChunk::ToolCallStreamError(_) => {
+                    generation_observed = true;
+                    bail!("semantic compaction provider attempted a client tool call");
+                }
+                crate::ProviderChunk::HostedToolStarted { .. }
+                | crate::ProviderChunk::HostedEvidence { .. }
+                | crate::ProviderChunk::HostedToolFailed { .. }
+                | crate::ProviderChunk::HostedRequestUsage { .. } => {
+                    generation_observed = true;
+                    bail!("semantic compaction provider attempted a hosted tool action");
+                }
+                crate::ProviderChunk::BackgroundTaskAccepted(_)
+                | crate::ProviderChunk::BackgroundTaskStatus(_) => {
+                    generation_observed = true;
+                    bail!("semantic compaction provider attempted a background action");
+                }
+            }
+        }
+        if output_text.trim().is_empty() {
+            bail!("semantic compaction provider returned no summary JSON");
+        }
+        Ok(SemanticCompactionGeneration {
+            output_text,
+            usage: latest_usage,
+        })
+    }
+    .await;
+
+    let rejection = (!generation_observed && !physical_attempt.has_durable_output_or_side_effect())
+        .then(|| {
+            result
+                .as_ref()
+                .err()
+                .and_then(|error| provider.classify_pre_generation_rejection(error))
+        })
+        .flatten();
+    let outcome = match &result {
+        Ok(_) => ProviderPhysicalAttemptOutcome::Completed,
+        Err(_) if rejection.is_some() => {
+            ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+        }
+        Err(_) if physical_attempt.has_durable_output_or_side_effect() => {
+            ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect
+        }
+        Err(_) if generation_observed => {
+            ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
+        }
+        Err(_) => ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+    };
+    let terminal = physical_attempt.finish(session, outcome, rejection).await;
+    match (result, terminal) {
+        (Ok(generation), Ok(())) => Ok(generation),
+        (Ok(_), Err(error)) => {
+            Err(error.context("semantic compaction physical-attempt terminal append failed"))
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(terminal_error)) => Err(error.context(format!(
+            "semantic compaction failed and its physical terminal also failed: {terminal_error:#}"
+        ))),
     }
 }
 

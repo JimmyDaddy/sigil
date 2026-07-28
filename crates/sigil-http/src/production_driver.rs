@@ -27,7 +27,8 @@ use sigil_kernel::{
     tool_approval_session_grant_available_for_facets,
 };
 use sigil_runtime::application_compaction::{
-    PendingApplicationCompaction, prepare_application_compaction,
+    PendingApplicationCompaction, PendingApplicationCompactionPreview,
+    prepare_application_compaction_from_preview, preview_application_compaction,
 };
 use sigil_runtime::application_intent_stack::{
     ApplicationIntentConfirmationSource, ApplicationIntentStackCommandOutputV1,
@@ -84,8 +85,9 @@ use crate::{
     HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunTerminalOutcome,
     HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpToolOutputShrinkReceipt,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -266,7 +268,21 @@ pub struct HttpProductionRunDriver {
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
-    pending_compactions: Arc<Mutex<BTreeMap<String, PendingApplicationCompaction>>>,
+    pending_compactions: Arc<Mutex<BTreeMap<String, PendingHttpCompaction>>>,
+}
+
+enum PendingHttpCompaction {
+    Local(Box<PendingApplicationCompactionPreview>),
+    Ready(Box<PendingApplicationCompaction>),
+}
+
+impl PendingHttpCompaction {
+    fn session_scope_id(&self) -> &str {
+        match self {
+            Self::Local(pending) => pending.session_scope_id(),
+            Self::Ready(pending) => pending.session_scope_id(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1405,15 +1421,13 @@ impl HttpRunDriver for HttpProductionRunDriver {
         &self,
         session: &crate::HttpSessionSnapshot,
     ) -> Result<HttpCompactionReview, HttpConversationRecoveryDriverError> {
-        let (review, pending) = self
-            .runtime
-            .block_on(prepare_application_compaction(
-                &self.options.config_path,
-                &self.options.launch_cwd,
-                Path::new(&session.session_log_path),
-                &session.durable_session_scope_id,
-            ))
-            .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
+        let (review, pending) = preview_application_compaction(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+        )
+        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
         let mut previews = self
             .pending_compactions
             .lock()
@@ -1426,7 +1440,10 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     previews.remove(&oldest);
                 }
             }
-            previews.insert(pending.preview_id().to_owned(), pending);
+            previews.insert(
+                pending.preview_id().to_owned(),
+                PendingHttpCompaction::Local(Box::new(pending)),
+            );
         }
         Ok(review.into())
     }
@@ -1464,9 +1481,42 @@ impl HttpRunDriver for HttpProductionRunDriver {
         command: &HttpConversationRecoveryDriverCommand,
     ) -> Result<HttpConversationRecoveryDriverOutput, HttpConversationRecoveryDriverError> {
         let mut compaction_receipt = None;
+        let mut compaction_review = None;
+        let mut tool_output_shrink = None;
         let mut restore_receipt = None;
         let mut fork_receipt = None;
         match &command.action {
+            HttpConversationRecoveryCommandAction::PrepareCompaction { preview_id } => {
+                let pending = self
+                    .pending_compactions
+                    .lock()
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
+                    .remove(preview_id)
+                    .ok_or(HttpConversationRecoveryDriverError::StaleBinding)?;
+                let PendingHttpCompaction::Local(pending) = pending else {
+                    return Err(HttpConversationRecoveryDriverError::StaleBinding);
+                };
+                let (review, ready) = self
+                    .runtime
+                    .block_on(prepare_application_compaction_from_preview(
+                        &self.options.config_path,
+                        &self.options.launch_cwd,
+                        Path::new(&session.session_log_path),
+                        &session.durable_session_scope_id,
+                        *pending,
+                    ))
+                    .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+                if let Some(ready) = ready {
+                    self.pending_compactions
+                        .lock()
+                        .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
+                        .insert(
+                            preview_id.clone(),
+                            PendingHttpCompaction::Ready(Box::new(ready)),
+                        );
+                }
+                compaction_review = Some(review.into());
+            }
             HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
                 let pending = self
                     .pending_compactions
@@ -1474,12 +1524,16 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
                     .remove(preview_id)
                     .ok_or(HttpConversationRecoveryDriverError::StaleBinding)?;
-                let receipt = pending
-                    .apply(
+                let PendingHttpCompaction::Ready(pending) = pending else {
+                    return Err(HttpConversationRecoveryDriverError::StaleBinding);
+                };
+                let receipt = self
+                    .runtime
+                    .block_on((*pending).apply_with_optional_native(
                         Path::new(&session.session_log_path),
                         &session.durable_session_scope_id,
                         preview_id,
-                    )
+                    ))
                     .map_err(|_| HttpConversationRecoveryDriverError::StaleBinding)?;
                 compaction_receipt = Some(HttpCompactionReceipt {
                     compaction_id: receipt.compaction_id,
@@ -1487,6 +1541,32 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     task_memory_id: receipt.task_memory_id,
                     folded_event_count: receipt.folded_event_count,
                     tool_output_projection_recorded: receipt.tool_output_projection_recorded,
+                    native_carrier_materialized: receipt.native_carrier_materialized,
+                    native_carrier_status: receipt.native_carrier_status,
+                });
+            }
+            HttpConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink {
+                preview_id,
+            } => {
+                let pending = self
+                    .pending_compactions
+                    .lock()
+                    .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?
+                    .remove(preview_id)
+                    .ok_or(HttpConversationRecoveryDriverError::StaleBinding)?;
+                let PendingHttpCompaction::Local(pending) = pending else {
+                    return Err(HttpConversationRecoveryDriverError::StaleBinding);
+                };
+                let receipt = (*pending)
+                    .apply_standalone_tool_output_shrink(
+                        Path::new(&session.session_log_path),
+                        &session.durable_session_scope_id,
+                        preview_id,
+                    )
+                    .map_err(|_| HttpConversationRecoveryDriverError::Conflict)?;
+                tool_output_shrink = Some(HttpToolOutputShrinkReceipt {
+                    context_epoch_id: receipt.context_epoch_id,
+                    projected_output_count: receipt.projected_output_count,
                 });
             }
             HttpConversationRecoveryCommandAction::RestoreCheckpoint {
@@ -1586,6 +1666,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
         .map_err(|_| HttpConversationRecoveryDriverError::Unavailable)?;
         Ok(HttpConversationRecoveryDriverOutput {
             compaction: compaction_receipt,
+            compaction_review,
+            tool_output_shrink,
             restore: restore_receipt,
             fork: fork_receipt,
             recovery,

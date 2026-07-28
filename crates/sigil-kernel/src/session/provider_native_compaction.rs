@@ -20,6 +20,8 @@ pub struct NativeProviderCompactionRequest {
     pub logical_run_id: String,
     pub frozen_request: FrozenProviderRequestMaterial,
     pub covers_through: CompactionCursor,
+    pub portable_compaction_id: CompactionId,
+    pub carrier_policy: NativeCarrierPolicyV1,
     pub metadata: NativeProviderCompactionMetadata,
 }
 
@@ -31,6 +33,8 @@ pub struct NativeProviderCompactionMaterialization {
     pub candidate_id: ProviderContinuationCandidateId,
     pub payload_id: ProviderContinuationPayloadId,
     pub artifact_id: ProviderContinuationArtifactId,
+    pub portable_compaction_id: CompactionId,
+    pub portable_checkpoint_id: String,
 }
 
 /// A provider-native compaction physical attempt whose start barrier is already durable.
@@ -54,6 +58,9 @@ pub(super) struct NativeProviderCompactionAttemptInner<C> {
     last_causation_event_id: EventId,
     durable_output_event_ids: Vec<EventId>,
     covers_through: CompactionCursor,
+    portable_compaction_id: CompactionId,
+    portable_checkpoint_id: String,
+    carrier_policy: NativeCarrierPolicyV1,
     metadata: NativeProviderCompactionMetadata,
     coordinator: Option<C>,
     terminal_recorded: bool,
@@ -174,6 +181,42 @@ where
             &provider_request.provider_name,
             &provider_request.model_name,
         )?;
+        request
+            .carrier_policy
+            .validate_for_request(provider_request.store)?;
+        if request
+            .carrier_policy
+            .expires_at_unix_ms
+            .is_some_and(|expires_at| expires_at <= unix_time_ms())
+        {
+            bail!("native carrier expiry must be in the future before provider dispatch");
+        }
+        let (prior_cache_layout, portable_checkpoint_id) = {
+            let store = store.clone();
+            let session_scope_id = session_scope_id.clone();
+            let portable_compaction_id = request.portable_compaction_id.clone();
+            let covers_through = request.covers_through.clone();
+            tokio::task::spawn_blocking(move || {
+                let records = store.read_event_records_writer()?;
+                let projection = ProviderPhysicalAttemptProjection::from_records(&records)?;
+                let portable_checkpoint_id = resolve_portable_fallback_binding(
+                    &records,
+                    &session_scope_id,
+                    &portable_compaction_id,
+                    &covers_through,
+                )?;
+                Ok::<_, anyhow::Error>((
+                    projection
+                        .latest_cache_layout_proof_for_internal_use()
+                        .cloned(),
+                    portable_checkpoint_id,
+                ))
+            })
+            .await
+            .context("native compaction cache layout projection task failed")??
+        };
+        let cache_layout_proof =
+            Some(frozen_request.cache_layout_proof(prior_cache_layout.as_ref())?);
 
         let physical_attempt_id = format!("native-provider-compaction-{}", Uuid::new_v4());
         let start_event_id = Uuid::new_v4().to_string();
@@ -185,6 +228,7 @@ where
             request_material_fingerprint: frozen_request.fingerprint().to_owned(),
             provider_name: provider_request.provider_name.clone(),
             model_name: provider_request.model_name.clone(),
+            cache_layout_proof,
             started_at_unix_ms: unix_time_ms(),
         };
         entry.validate_shape()?;
@@ -215,6 +259,9 @@ where
             last_causation_event_id: start_event_id,
             durable_output_event_ids: Vec::new(),
             covers_through: request.covers_through,
+            portable_compaction_id: request.portable_compaction_id,
+            portable_checkpoint_id,
+            carrier_policy: request.carrier_policy,
             metadata: request.metadata,
             coordinator: Some(coordinator),
             terminal_recorded: false,
@@ -286,6 +333,38 @@ where
             "sha256:{:x}",
             Sha256::digest(&opaque_payload)
         ));
+        let mut invalidates_on = vec![
+            NativeCarrierInvalidationV1::NativePayloadUnavailable,
+            NativeCarrierInvalidationV1::ConnectionChanged,
+            NativeCarrierInvalidationV1::ModelChanged,
+            NativeCarrierInvalidationV1::ProtocolChanged,
+            NativeCarrierInvalidationV1::SourceCursorChanged,
+            NativeCarrierInvalidationV1::PortableCheckpointUnavailable,
+            NativeCarrierInvalidationV1::RetentionPolicyChanged,
+            NativeCarrierInvalidationV1::StoreModeChanged,
+        ];
+        if self.carrier_policy.expires_at_unix_ms.is_some() {
+            invalidates_on.push(NativeCarrierInvalidationV1::Expired);
+        }
+        let carrier = NativeCompactionCarrierV1 {
+            schema_version: NATIVE_COMPACTION_CARRIER_SCHEMA_VERSION,
+            connection_fingerprint: self.metadata.provider_route_fingerprint.clone(),
+            model_snapshot_id: self.metadata.model_metadata_profile.content_hash.clone(),
+            protocol_version: format!(
+                "{}:{}:{}",
+                self.metadata.wire_protocol,
+                self.metadata.wire_schema_version,
+                self.metadata.wire_profile.content_hash
+            ),
+            source_cursor: self.covers_through.clone(),
+            portable_compaction_id: self.portable_compaction_id.clone(),
+            portable_checkpoint_id: self.portable_checkpoint_id.clone(),
+            protected_payload_id: payload_id.clone(),
+            protected_storage_id: artifact_id.clone(),
+            policy: self.carrier_policy.clone(),
+            expires_or_invalidates_on: invalidates_on,
+        };
+        carrier.validate_shape()?;
         let candidate = ProviderContinuationCandidateRecordedEntry {
             schema_version: PROVIDER_CONTINUATION_SCHEMA_VERSION,
             candidate_id: candidate_id.clone(),
@@ -311,8 +390,9 @@ where
                 covers_through: self.covers_through.clone(),
                 request_fingerprint: self.request_material_fingerprint.clone(),
                 sensitivity: self.metadata.sensitivity,
+                carrier: Some(carrier),
             }),
-            resolution_mode: ProviderContinuationResolutionMode::NativeOnly,
+            resolution_mode: ProviderContinuationResolutionMode::NativePlusPortableModelCheckpoint,
             activation_gate: ProviderContinuationActivationGate::Immediate,
             source_event_id: observation_event_id.clone(),
             created_at_unix_ms: unix_time_ms(),
@@ -356,6 +436,8 @@ where
             candidate_id,
             payload_id,
             artifact_id,
+            portable_compaction_id: self.portable_compaction_id.clone(),
+            portable_checkpoint_id: self.portable_checkpoint_id.clone(),
         })
     }
 
@@ -432,6 +514,41 @@ where
         self.coordinator = Some(joined.0);
         joined.1.map(|_| ())
     }
+}
+
+fn resolve_portable_fallback_binding(
+    records: &[SessionStreamRecord],
+    session_scope_id: &str,
+    portable_compaction_id: &str,
+    covers_through: &CompactionCursor,
+) -> Result<String> {
+    if portable_compaction_id.trim().is_empty() {
+        bail!("native provider compaction requires a portable compaction id");
+    }
+    let sidecars = CompactionSidecarProjection::from_records(records)?;
+    let sidecar = sidecars
+        .resolved_compaction(portable_compaction_id)
+        .context("native provider compaction portable checkpoint is not active")?;
+    if sidecar.checkpoint.kind != ContinuationCheckpointKind::PortableSemantic {
+        bail!("native provider compaction fallback must be a portable semantic checkpoint");
+    }
+    if sidecar.folded_through != *covers_through
+        || sidecar.folded_through.session_id != session_scope_id
+    {
+        bail!("native provider compaction source cursor does not match its portable checkpoint");
+    }
+    let continuity =
+        sidecar.checkpoint.continuity_v2.as_ref().context(
+            "native provider compaction portable checkpoint has no V2 continuity binding",
+        )?;
+    continuity.validate_shape(
+        sidecar
+            .checkpoint
+            .session_anchor
+            .as_ref()
+            .context("native provider compaction portable checkpoint has no session anchor")?,
+    )?;
+    Ok(continuity.checkpoint_id.clone())
 }
 
 fn validate_covers_through(

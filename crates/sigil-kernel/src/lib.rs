@@ -1,9 +1,11 @@
 pub mod agent;
 pub mod agent_thread;
 pub mod approval;
+pub mod cache_layout;
 pub mod cancellation;
 pub mod changeset;
 pub mod checkpoint;
+pub mod compaction_economics_v2;
 pub mod compaction_token_proof;
 pub mod config;
 pub mod context_engine;
@@ -87,6 +89,10 @@ pub use agent_thread::{
     stale_expired_agent_approval_routes,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval, ToolApprovalContext};
+pub use cache_layout::{
+    CACHE_LAYOUT_PROOF_SCHEMA_VERSION, CacheLayoutMutationKind, CacheLayoutMutationProofV1,
+    CacheLayoutProofV1, canonicalize_cache_stable_json,
+};
 pub use cancellation::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequested, RunCancellationRequestedEntry,
@@ -106,6 +112,18 @@ pub use checkpoint::{
     ControlledCheckpointRestoreOutput, ControlledCheckpointRestorePreview,
     ControlledCheckpointRestorePreviewFile, ControlledCheckpointRestoreRequest,
 };
+pub use compaction_economics_v2::{
+    COMPACTION_ECONOMICS_V2_SCHEMA_VERSION, CompactionAdmissionDecisionV2,
+    CompactionAdmissionOptionsV2, CompactionAdmissionReasonV2, CompactionAdmissionV2,
+    CompactionCacheScenarioV1, CompactionCostModelInputV1, CompactionCostProjectionV1,
+    CompactionEconomicsPolicyV1, CompactionEconomicsV2, CompactionFitForecastInputV1,
+    CompactionFitForecastV1, CompactionForecastConfidenceV1, CompactionForecastSourceV1,
+    CompactionPressureStateV1, CompactionRolloutModeV1, DEFAULT_COMPACTION_ECONOMICS_HORIZON_TURNS,
+    DEFAULT_COMPACTION_EMERGENCY_RATIO_PPM, DEFAULT_COMPACTION_MAX_BREAK_EVEN_TURNS,
+    DEFAULT_COMPACTION_MIN_SAVINGS_RATIO_PPM, DEFAULT_COMPACTION_MIN_SAVINGS_TOKENS_EQUIVALENT,
+    DEFAULT_COMPACTION_OBSERVE_RATIO_PPM, DEFAULT_COMPACTION_PREPARE_RATIO_PPM,
+    ExpectedRemainingTurnsV1, TrustedCompactionPricingV1,
+};
 pub use compaction_token_proof::{
     COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, EffectiveTokenBudget, InputTokenEvidence,
     PORTABLE_COMPACTION_MINIMUM_SAVINGS_RATIO_PPM, PORTABLE_COMPACTION_MINIMUM_SAVINGS_TOKENS,
@@ -114,8 +132,9 @@ pub use compaction_token_proof::{
 };
 pub use config::{
     AgentConfig, AppearanceConfig, CONFIG_VERSION_V2, CodeIntelStartup, CodeIntelligenceConfig,
-    CompactionConfig, CompactionThresholdStatus, ConfigPublishError, ConfigUpdateLockGuard,
-    CredentialStorageMode, DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
+    CompactionConfig, CompactionStrategy, CompactionThresholdStatus, ConfigPublishError,
+    ConfigUpdateLockGuard, CredentialStorageMode,
+    DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS,
     DEFAULT_SESSION_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_MAX_SESSIONS,
@@ -424,10 +443,13 @@ pub use projection::{
     session_list_projection_from_records,
 };
 pub use provider::{
-    AssistantMessageKind, BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest,
-    MessageRole, ModelMessage, PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ProviderRequestRejection, ReasoningArtifact, ReasoningEffort,
-    ReasoningStreamSupport, ResponseHandle, SessionStats, ToolCall, ToolCallCompletionIdPolicy,
+    AssistantMessageKind, BackgroundTaskHandle, BackgroundTaskStatus, CacheMode,
+    CacheTokenCountProvenance, CacheTokenCountV1, CacheTtl, CacheUsageCapabilities, CacheUsageV1,
+    CompletionRequest, MessageRole, ModelMessage, ModelPricingSnapshotV1, NativeCarrierPortability,
+    NativeCompactionCapability, PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContextCapabilities, ProviderContinuationState, ProviderRequestRejection,
+    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
+    StatefulContinuationCapability, ToolCall, ToolCallCompletionIdPolicy,
     ToolCallStreamAccumulator, UsageStats,
 };
 pub use provider_error::{
@@ -449,33 +471,45 @@ pub use resume::{
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
-    COMPACTION_FOLD_PLAN_SCHEMA_VERSION, COMPACTION_LIFECYCLE_PROJECTION_SCHEMA_VERSION,
-    COMPACTION_SIDECAR_PROJECTION_SCHEMA_VERSION, CONTINUATION_CHECKPOINT_V1_SCHEMA_VERSION,
+    ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION, ActiveConstraintV1, AdaptiveTailPolicyV3,
+    AdaptiveTailSelectionV3, AnchoredStatementV1, COMPACTION_FOLD_PLAN_SCHEMA_VERSION,
+    COMPACTION_LIFECYCLE_PROJECTION_SCHEMA_VERSION, COMPACTION_SIDECAR_PROJECTION_SCHEMA_VERSION,
+    CONTINUATION_CHECKPOINT_V1_SCHEMA_VERSION, CONVERSATION_CONTINUITY_V2_SCHEMA_VERSION,
     CompactionAppliedV2, CompactionAttemptId, CompactionAttemptState, CompactionAttemptTerminal,
-    CompactionCursor, CompactionEventRef, CompactionFailureEntry, CompactionFailureReason,
-    CompactionFallbackParent, CompactionFoldPlan, CompactionFoldProtectionReason, CompactionId,
-    CompactionInitiation, CompactionLifecycleProjection, CompactionSidecarProjection,
-    CompactionStartedEntry, ContextAssemblySkippedEntry, ContextTrustProjection,
+    CompactionCircuitBreakerDecisionV1, CompactionCircuitBreakerInputV1, CompactionCircuitScopeV1,
+    CompactionCursor, CompactionEmergencyBlockingLayerV1, CompactionEventRef,
+    CompactionFailureEntry, CompactionFailureReason, CompactionFallbackParent, CompactionFoldPlan,
+    CompactionFoldProtectionReason, CompactionId, CompactionInitiation,
+    CompactionLifecycleProjection, CompactionSidecarProjection, CompactionStartedEntry,
+    ConstraintStatusV1, ContextAssemblySkippedEntry, ContextTrustProjection,
     ContinuationCheckpointKind, ContinuationCheckpointV1, ContinuationEvidenceStatus,
     ContinuationItemAuthority, ContinuationItemOrigin, ContinuationItemPriority,
     ContinuationItemV1, ContinuationModelOutputItemV1, ContinuationModelOutputV1,
     ContinuationRedaction, ContinuationSnapshotScope, ContinuationSourceCatalog,
-    ContinuationSourceRef, ContinuationTargetRequestFitV1, ControlEntry, DomainEventRecord,
+    ContinuationSourceRef, ContinuationTargetRequestFitV1, ControlEntry, ConversationContinuityV2,
+    DEFAULT_TAIL_MAX_USABLE_CONTEXT_RATIO_PPM, DEFAULT_TAIL_MIN_COMPLETE_TURNS,
+    DEFAULT_TAIL_RECENT_TURN_P95_MULTIPLIER_PPM, DEFAULT_TAIL_RECENT_TURN_SAMPLE_LIMIT,
+    DEFAULT_TAIL_TARGET_MAX_TOKENS, DEFAULT_TAIL_TARGET_MIN_TOKENS, DomainEventRecord,
     DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
-    DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableAuditBatch,
-    DurableAuditError, DurableAuditRecord, DurableAuditWriter, DurableEventReconciliation,
-    DurableEventReconciliationExpectation, JsonlSessionStore,
-    MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES, MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS,
-    MAX_PROVIDER_CONTINUATION_PAYLOAD_BYTES, MAX_PROVIDER_CONTINUATION_RESOLUTION_PROTECTED_REFS,
+    DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableArtifactRefV1,
+    DurableAuditBatch, DurableAuditError, DurableAuditRecord, DurableAuditWriter,
+    DurableEventReconciliation, DurableEventReconciliationExpectation, GroundedContinuityItemV2,
+    JsonlSessionStore, MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES,
+    MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS, MAX_PROVIDER_CONTINUATION_PAYLOAD_BYTES,
+    MAX_PROVIDER_CONTINUATION_RESOLUTION_PROTECTED_REFS,
     MAX_PROVIDER_CONTINUATION_RESOLUTION_REFERENCE_BYTES,
     MAX_PROVIDER_CONTINUATION_RESOLUTION_RETAINED_REFS,
     MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_LEASE_MS,
     MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFERENCE_BYTES,
     MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFS, MAX_PROVIDER_PHYSICAL_ATTEMPT_OUTPUT_REFS,
     MAX_PROVIDER_PHYSICAL_ATTEMPT_REFERENCE_BYTES, MAX_PROVIDER_PHYSICAL_ATTEMPT_SIDE_EFFECT_REFS,
-    MAX_TOOL_OUTPUT_PROJECTION_SHRINKS, McpElicitationDecision, McpElicitationEntry,
-    MemorySnapshot, NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
-    NativeProviderCompactionMetadata, NativeProviderCompactionRequest,
+    MAX_SEMANTIC_COMPACTION_GENERATION_BYTES, MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES,
+    MAX_SEMANTIC_COMPACTION_SOURCE_INDEX_ENTRIES, MAX_TOOL_OUTPUT_PROJECTION_SHRINKS,
+    McpElicitationDecision, McpElicitationEntry, MemorySnapshot,
+    NATIVE_COMPACTION_CARRIER_SCHEMA_VERSION, NativeCarrierInvalidationV1, NativeCarrierPolicyV1,
+    NativeCarrierResumeContextV1, NativeCarrierResumeDecisionV1, NativeCompactionCarrierV1,
+    NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
+    NativeProviderCompactionMetadata, NativeProviderCompactionRequest, ObjectiveAuthorityRefV1,
     PROVIDER_CONTINUATION_PROJECTION_SCHEMA_VERSION, PROVIDER_CONTINUATION_SCHEMA_VERSION,
     PROVIDER_CONTINUATION_SESSION_KEY_SLOT_ID, PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION,
     PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, PortableSemanticCompactionOutcome,
@@ -515,19 +549,28 @@ pub use session::{
     ProviderObservedResolutionPlanState, ProviderPhysicalAttemptId, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptProjection, ProviderPhysicalAttemptPurpose,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptState,
-    ProviderPhysicalAttemptTerminalEntry, ProviderToolCallClosureRef, ResolvedCompactionSidecar,
-    SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, Session, SessionContextProjection, SessionLogEntry,
-    SessionProjectionEntry, SessionStreamCompatibilityError, SessionStreamRecord,
-    TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION,
+    ProviderPhysicalAttemptTerminalEntry, ProviderRetentionPolicyV1, ProviderToolCallClosureRef,
+    RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
+    RecoverableToolOutputShrinkCandidateV1, ResolvedCompactionSidecar, RetainedTurnGroupV3,
+    SESSION_ANCHOR_V1_SCHEMA_VERSION, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION,
+    SemanticCompactionGeneration, Session, SessionAnchorRefV1, SessionAnchorV1,
+    SessionContextProjection, SessionLogEntry, SessionProjectionEntry,
+    SessionStreamCompatibilityError, SessionStreamRecord, SourceSpanRefV1,
+    TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_OUTPUT_CONTEXT_EPOCH_TRANSITION_SCHEMA_VERSION,
+    TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION,
     TOOL_OUTPUT_PROJECTION_SIDECAR_PROJECTION_SCHEMA_VERSION,
-    TOOL_OUTPUT_PROJECTION_SIDECAR_SCHEMA_VERSION, TaskMemoryInvalidatedEntry,
+    TOOL_OUTPUT_PROJECTION_SIDECAR_SCHEMA_VERSION, TailTurnStateV3, TaskMemoryInvalidatedEntry,
     TaskMemoryInvalidationReason, TaskMemoryRecordedV1, TaskMemorySnapshotRelation,
     ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
     ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
-    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolOutputProjection,
-    ToolOutputProjectionPolicy, ToolOutputProjectionShrink, ToolOutputProjectionShrinkRecorded,
-    ToolOutputProjectionSidecarProjection, ToolOutputProjectionSourceRef, ToolSubjectAudit,
-    TypedDomainEventRecord, V2CompactionPreview, conversation_transcript_entry_from_record,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolOutputArtifactRefV1,
+    ToolOutputContextEpochTransitionReasonV1, ToolOutputContextEpochTransitionV1,
+    ToolOutputProjection, ToolOutputProjectionPolicy, ToolOutputProjectionShrink,
+    ToolOutputProjectionShrinkRecorded, ToolOutputProjectionSidecarProjection,
+    ToolOutputProjectionSourceRef, ToolOutputShrinkReasonV1, ToolSubjectAudit,
+    TypedDomainEventRecord, UntrustedModelNarrativeV2, V2CompactionPreview,
+    build_semantic_compaction_instruction, conversation_transcript_entry_from_record,
+    generate_semantic_compaction, parse_semantic_compaction_output,
     provider_continuation_candidate_id_from_initiated,
     provider_continuation_candidate_id_from_observation,
     provider_continuation_candidate_invalidated_event_id,

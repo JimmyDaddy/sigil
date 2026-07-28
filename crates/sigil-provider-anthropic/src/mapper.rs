@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use sigil_kernel::{
-    HostedCitationCandidate, HostedEvidence, HostedSourceCandidate, HostedToolKind, ProviderChunk,
-    SecretString, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
-    WebSearchFailureClass,
+    CacheTokenCountV1, CacheUsageV1, HostedCitationCandidate, HostedEvidence,
+    HostedSourceCandidate, HostedToolKind, ProviderChunk, SecretString, ToolCallCompletionIdPolicy,
+    ToolCallStreamAccumulator, UsageStats, WebSearchFailureClass,
 };
 
 use crate::{
@@ -43,6 +43,7 @@ pub struct StreamMapper {
     hosted_started: bool,
     input_tokens: u64,
     output_tokens: u64,
+    cache_creation_input_tokens: u64,
     cache_read_input_tokens: u64,
     web_search_requests: u32,
     stop_reason: Option<String>,
@@ -65,6 +66,7 @@ impl StreamMapper {
             hosted_started: false,
             input_tokens: 0,
             output_tokens: 0,
+            cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
             web_search_requests: 0,
             stop_reason: None,
@@ -510,13 +512,15 @@ impl StreamMapper {
         self.cache_read_input_tokens = self
             .cache_read_input_tokens
             .max(usage.cache_read_input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .max(usage.cache_creation_input_tokens);
         self.web_search_requests = self.web_search_requests.max(
             usage
                 .server_tool_use
                 .as_ref()
                 .map_or(0, |server| server.web_search_requests),
         );
-        let _ = usage.cache_creation_input_tokens;
     }
 
     fn complete_open_tool_calls(&mut self, chunks: &mut Vec<ProviderChunk>) {
@@ -537,20 +541,35 @@ impl StreamMapper {
         if self.usage_emitted
             || (self.input_tokens == 0
                 && self.output_tokens == 0
+                && self.cache_creation_input_tokens == 0
                 && self.cache_read_input_tokens == 0)
         {
             return;
         }
         let cache_hit_tokens = self.cache_read_input_tokens;
+        let cache_write_tokens = self.cache_creation_input_tokens;
+        let total_input_tokens = self
+            .input_tokens
+            .saturating_add(cache_hit_tokens)
+            .saturating_add(cache_write_tokens);
         chunks.push(ProviderChunk::Usage(UsageStats {
-            prompt_tokens: self.input_tokens,
+            prompt_tokens: total_input_tokens,
             completion_tokens: self.output_tokens,
             cache_hit_tokens,
-            cache_miss_tokens: self.input_tokens.saturating_sub(cache_hit_tokens),
+            cache_miss_tokens: self.input_tokens.saturating_add(cache_write_tokens),
             input_cost: 0.0,
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: Some(CacheUsageV1 {
+                schema_version: CacheUsageV1::SCHEMA_VERSION,
+                read: Some(CacheTokenCountV1::provider_reported(cache_hit_tokens)),
+                write: Some(CacheTokenCountV1::provider_reported(cache_write_tokens)),
+                uncached: Some(CacheTokenCountV1::provider_reported(self.input_tokens)),
+                local_layout_mutation: None,
+                provider_miss_without_local_mutation: false,
+            }),
+            pricing_snapshot: None,
         }));
         self.usage_emitted = true;
     }

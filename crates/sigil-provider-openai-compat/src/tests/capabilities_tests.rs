@@ -1,5 +1,5 @@
-use super::openai_compatible_capabilities;
-use sigil_kernel::ReasoningStreamSupport;
+use super::{openai_compatible_capabilities, openai_compatible_context_capabilities};
+use sigil_kernel::{CacheMode, ReasoningStreamSupport};
 
 #[test]
 fn capabilities_are_generic_chat_completion_defaults() {
@@ -16,4 +16,15 @@ fn capabilities_are_generic_chat_completion_defaults() {
     assert!(!capabilities.supports_reasoning_effort);
     assert!(!capabilities.supports_infill_completion);
     assert_eq!(capabilities.tool_name_max_chars, 64);
+}
+
+#[test]
+fn compatible_route_is_observation_only_even_for_vendor_named_models() {
+    let capabilities = openai_compatible_context_capabilities();
+
+    capabilities.validate().expect("capability must validate");
+    assert_eq!(capabilities.cache_mode, CacheMode::ObservedImplicitOrNone);
+    assert_eq!(capabilities.explicit_breakpoint_limit, None);
+    assert!(capabilities.native_compaction.is_none());
+    assert!(capabilities.stateful_continuation.is_none());
 }

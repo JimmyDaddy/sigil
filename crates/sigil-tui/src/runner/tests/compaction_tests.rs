@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
@@ -7,8 +7,8 @@ use sigil_kernel::{
     FrozenProviderRequestMaterial, InputTokenEvidence, JsonlSessionStore, ModelMessage,
     PortableTargetRequestMaterial, Provider, ProviderCapabilities, ProviderChunk,
     ProviderRequestRejection, ReasoningEffort, RequestFitProof, Session, SessionLogEntry,
-    StorageRoot, TokenMeasurementBinding, TokenMeasurementScope, ToolRegistry, UsageStats,
-    VersionedProfileIdentity,
+    StorageRoot, TokenMeasurementBinding, TokenMeasurementScope, ToolCall, ToolRegistry,
+    UsageStats, VersionedProfileIdentity,
 };
 use std::{
     collections::VecDeque,
@@ -264,12 +264,47 @@ impl Provider for OverflowRecoveryProvider {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         *self
             .stream_calls
             .lock()
             .expect("stream call mutex should not be poisoned") += 1;
+        if let Some(instruction) = request
+            .messages
+            .last()
+            .filter(|message| message.id.starts_with("semantic-compaction-instruction:"))
+        {
+            let content = instruction
+                .content
+                .as_deref()
+                .context("semantic compaction instruction has no content")?;
+            let (_, source_json) = content
+                .split_once("SOURCE_INDEX=")
+                .context("semantic compaction instruction has no source index")?;
+            let source_index: Vec<serde_json::Value> = serde_json::from_str(source_json)?;
+            let source_event_id = source_index
+                .first()
+                .and_then(|entry| entry.get("event_id"))
+                .and_then(serde_json::Value::as_str)
+                .context("semantic compaction source index is empty")?;
+            let output = serde_json::json!({
+                "in_progress": [{
+                    "text": "Preserve the earlier technical context for the retry.",
+                    "source_event_ids": [source_event_id],
+                    "priority": "normal"
+                }],
+                "pending_actions": [],
+                "provider_continuity": [],
+                "model_notes": []
+            })
+            .to_string();
+            return Ok(Box::pin(stream::iter(
+                [ProviderChunk::TextDelta(output), ProviderChunk::Done]
+                    .into_iter()
+                    .map(Ok::<_, anyhow::Error>),
+            )));
+        }
         let plan = self
             .plans
             .lock()
@@ -365,7 +400,7 @@ fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() ->
     ));
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
     assert_eq!(observed_provider.target_proof_calls(), 2);
-    assert_eq!(observed_provider.stream_calls(), 2);
+    assert_eq!(observed_provider.stream_calls(), 3);
 
     let records = JsonlSessionStore::read_event_records(&session_log_path)?;
     assert_eq!(
@@ -432,7 +467,7 @@ fn overflow_recovery_is_not_recursively_retried() -> Result<()> {
     }
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
     assert_eq!(observed_provider.target_proof_calls(), 2);
-    assert_eq!(observed_provider.stream_calls(), 2);
+    assert_eq!(observed_provider.stream_calls(), 3);
     assert!(has_v2_compaction_lifecycle_event(&session_log_path)?);
 
     worker.shutdown()?;
@@ -440,7 +475,7 @@ fn overflow_recovery_is_not_recursively_retried() -> Result<()> {
 }
 
 #[test]
-fn compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
+fn unsupported_compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-compact.jsonl");
@@ -481,11 +516,106 @@ fn compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
     assert_eq!(review.preview.plan.retained_event_ids.len(), 2);
     assert!(matches!(
         review.admission,
-        V2CompactionAdmission::Unavailable { ref reason }
-            if reason.contains("local exact target proof is unavailable")
+        V2CompactionAdmission::Prepared { .. }
     ));
     assert_eq!(std::fs::read(&session_log_path)?, before);
 
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    let session_log_path = temp.path().join("session-standalone-shrink.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.compaction.tail_messages = 1;
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "planned".to_owned(),
+        model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
+    }))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "inspect old output",
+    )))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "call-large".to_owned(),
+            name: "shell".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    )))?;
+    store.append(&SessionLogEntry::ToolResult(ModelMessage::tool(
+        "call-large",
+        serde_json::json!({
+            "status": "ok",
+            "content": format!("head:{}:tail", "middle-".repeat(2_000)),
+        })
+        .to_string(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let before = std::fs::read(&session_log_path)?;
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new()),
+        workspace_root,
+    )?;
+
+    worker.send(WorkerCommand::PreviewV2Compaction)?;
+    let preview = worker
+        .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
+    let WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::Review(review),
+    } = preview
+    else {
+        panic!("expected a local compaction review");
+    };
+    assert!(matches!(
+        review.admission,
+        V2CompactionAdmission::Prepared {
+            standalone_tool_output_shrink_available: true,
+        }
+    ));
+    assert_eq!(review.tool_output_shrink_candidates.len(), 1);
+    assert_eq!(std::fs::read(&session_log_path)?, before);
+
+    worker.send(WorkerCommand::ApplyStandaloneToolOutputShrink {
+        request_id: review.request_id,
+    })?;
+    let applied = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::StandaloneToolOutputShrinkApplied { .. }
+        )
+    })?;
+    assert!(matches!(
+        applied,
+        WorkerMessage::StandaloneToolOutputShrinkApplied {
+            projected_output_count: 1,
+            ..
+        }
+    ));
+    assert!(!has_v2_compaction_lifecycle_event(&session_log_path)?);
+    let reloaded = Session::load_from_store(
+        "planned",
+        "planned-model",
+        JsonlSessionStore::new(&session_log_path)?,
+    )?;
+    let context = reloaded
+        .try_context_projection_from_durable()?
+        .expect("standalone shrink creates a provider-visible projection");
+    assert!(context.model_messages().iter().any(|message| {
+        message.tool_call_id.as_deref() == Some("call-large")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("next-epoch recoverable tool output"))
+    }));
     worker.shutdown()?;
     Ok(())
 }
@@ -546,8 +676,7 @@ fn compact_preview_rehydrates_folded_image_from_captured_runtime_cache() -> Resu
     };
     assert!(matches!(
         review.admission,
-        V2CompactionAdmission::Unavailable { ref reason }
-            if reason.contains("local exact target proof is unavailable")
+        V2CompactionAdmission::Prepared { .. }
     ));
 
     worker.shutdown()?;
@@ -708,11 +837,26 @@ fn manual_compaction_applies_reloads_and_repeats_with_installed_tokenizer() -> R
             panic!("expected an admitted manual compaction review");
         };
         assert!(
-            matches!(review.admission, V2CompactionAdmission::Ready { .. }),
-            "manual compaction was not admitted: {:?}",
+            matches!(review.admission, V2CompactionAdmission::Prepared { .. }),
+            "manual compaction was not locally prepared: {:?}",
             review.admission
         );
         let request_id = review.request_id;
+        worker.send(WorkerCommand::ApplyV2Compaction { request_id })?;
+        let generated = worker
+            .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
+        let WorkerMessage::V2CompactionPreviewed {
+            state: V2CompactionPreviewState::Review(generated),
+        } = generated
+        else {
+            panic!("expected a semantic compaction review");
+        };
+        assert_eq!(generated.request_id, request_id);
+        assert!(
+            matches!(generated.admission, V2CompactionAdmission::Ready { .. }),
+            "semantic summary was not admitted: {:?}",
+            generated.admission
+        );
         worker.send(WorkerCommand::ApplyV2Compaction { request_id })?;
         let applied = worker
             .recv_until(|message| matches!(message, WorkerMessage::V2CompactionApplied { .. }))?;
@@ -802,6 +946,8 @@ fn hard_threshold_idle_compaction_applies_after_owned_preparation() -> Result<()
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         }),
         ProviderChunk::TextDelta("finished the threshold turn".to_owned()),
         ProviderChunk::Done,
@@ -981,6 +1127,8 @@ fn hard_threshold_idle_run_checks_local_admission_without_writing_an_unadmitted_
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         }),
         ProviderChunk::TextDelta("finished turn".to_owned()),
         ProviderChunk::Done,
@@ -1031,6 +1179,8 @@ fn provider_context_window_prevents_early_auto_compaction() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         }),
         ProviderChunk::TextDelta("finished turn".to_owned()),
         ProviderChunk::Done,

@@ -8,6 +8,22 @@ use crate::{EventId, MessageRole, ProjectionCursor, decode_stored_event};
 
 /// Schema version for the durable-cursor safe-fold planning shape.
 pub const COMPACTION_FOLD_PLAN_SCHEMA_VERSION: u16 = 1;
+/// Schema version for the adaptive whole-turn tail selection evidence.
+pub const ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION: u16 = 1;
+/// Default number of complete turns that remain raw after a V3 rotation.
+pub const DEFAULT_TAIL_MIN_COMPLETE_TURNS: usize = 2;
+/// Default lower bound for the adaptive raw-tail target.
+pub const DEFAULT_TAIL_TARGET_MIN_TOKENS: u64 = 8 * 1024;
+/// Default ordinary upper bound for the adaptive raw-tail target.
+pub const DEFAULT_TAIL_TARGET_MAX_TOKENS: u64 = 64 * 1024;
+/// Default `2.0` multiplier, represented in parts per million for deterministic persistence.
+pub const DEFAULT_TAIL_RECENT_TURN_P95_MULTIPLIER_PPM: u32 = 2_000_000;
+/// Default `0.25` usable-context cap, represented in parts per million.
+pub const DEFAULT_TAIL_MAX_USABLE_CONTEXT_RATIO_PPM: u32 = 250_000;
+/// Number of recent complete turns sampled for the deterministic p95.
+pub const DEFAULT_TAIL_RECENT_TURN_SAMPLE_LIMIT: usize = 20;
+const LEGACY_MESSAGES_PER_COMPLETE_TURN: usize = 3;
+const TURN_MESSAGE_TOKEN_OVERHEAD: u64 = 16;
 
 /// Stable reference to one raw durable event without copying its payload into a plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -15,6 +31,119 @@ pub const COMPACTION_FOLD_PLAN_SCHEMA_VERSION: u16 = 1;
 pub struct CompactionEventRef {
     pub stream_sequence: u64,
     pub event_id: EventId,
+}
+
+/// Provider-neutral V3 policy for selecting a raw tail by complete turn and token target.
+///
+/// Floating-point policy values are persisted as parts per million so replay and stale-plan
+/// validation produce byte-identical decisions on every supported platform.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AdaptiveTailPolicyV3 {
+    pub tail_min_complete_turns: usize,
+    pub tail_target_min_tokens: u64,
+    pub tail_target_max_tokens: u64,
+    pub tail_recent_turn_p95_multiplier_ppm: u32,
+    pub tail_max_usable_context_ratio_ppm: u32,
+    pub recent_turn_sample_limit: usize,
+    /// Compatibility input only. It is translated once into `tail_min_complete_turns`; it never
+    /// selects individual messages in the V3 planner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated_legacy_tail_messages: Option<usize>,
+}
+
+impl Default for AdaptiveTailPolicyV3 {
+    fn default() -> Self {
+        Self {
+            tail_min_complete_turns: DEFAULT_TAIL_MIN_COMPLETE_TURNS,
+            tail_target_min_tokens: DEFAULT_TAIL_TARGET_MIN_TOKENS,
+            tail_target_max_tokens: DEFAULT_TAIL_TARGET_MAX_TOKENS,
+            tail_recent_turn_p95_multiplier_ppm: DEFAULT_TAIL_RECENT_TURN_P95_MULTIPLIER_PPM,
+            tail_max_usable_context_ratio_ppm: DEFAULT_TAIL_MAX_USABLE_CONTEXT_RATIO_PPM,
+            recent_turn_sample_limit: DEFAULT_TAIL_RECENT_TURN_SAMPLE_LIMIT,
+            translated_legacy_tail_messages: None,
+        }
+    }
+}
+
+impl AdaptiveTailPolicyV3 {
+    /// Deterministically translates the legacy message-count knob into a whole-turn minimum.
+    ///
+    /// The legacy default of six messages maps to two complete turns. The token target remains
+    /// the primary V3 size control, so tool-heavy turns are never approximated as three messages.
+    #[must_use]
+    pub fn from_legacy_tail_messages(tail_messages: usize) -> Self {
+        let tail_messages = tail_messages.max(1);
+        Self {
+            tail_min_complete_turns: tail_messages
+                .div_ceil(LEGACY_MESSAGES_PER_COMPLETE_TURN)
+                .max(DEFAULT_TAIL_MIN_COMPLETE_TURNS),
+            translated_legacy_tail_messages: Some(tail_messages),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.tail_min_complete_turns < DEFAULT_TAIL_MIN_COMPLETE_TURNS
+            || self.tail_target_min_tokens == 0
+            || self.tail_target_max_tokens < self.tail_target_min_tokens
+            || self.tail_recent_turn_p95_multiplier_ppm == 0
+            || self.tail_max_usable_context_ratio_ppm == 0
+            || self.tail_max_usable_context_ratio_ppm > 1_000_000
+            || self.recent_turn_sample_limit == 0
+            || self
+                .translated_legacy_tail_messages
+                .is_some_and(|count| count == 0)
+        {
+            bail!("adaptive tail policy is invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Completion state of one provider-visible turn group.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TailTurnStateV3 {
+    Complete,
+    Active,
+}
+
+/// Stable evidence for one complete or active turn retained as an atomic raw group.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RetainedTurnGroupV3 {
+    pub first_event: CompactionEventRef,
+    pub last_event: CompactionEventRef,
+    pub event_ids: Vec<EventId>,
+    /// Deterministic UTF-8/wire-structure upper bound used only for tail planning.
+    pub token_upper_bound: u64,
+    pub state: TailTurnStateV3,
+}
+
+/// Self-contained proof of one V3 whole-turn raw-tail decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AdaptiveTailSelectionV3 {
+    pub schema_version: u16,
+    pub policy: AdaptiveTailPolicyV3,
+    /// Tail budget after caller-owned static/provider/output/safety reservations.
+    pub exact_fit_limit_tokens: u64,
+    pub recent_complete_turn_p95_tokens: u64,
+    pub ordinary_target_tokens: u64,
+    /// Actual whole-turn target after an oversized active turn extension.
+    pub effective_target_tokens: u64,
+    pub folded_token_upper_bound: u64,
+    pub retained_token_upper_bound: u64,
+    pub protected_tail_token_upper_bound: u64,
+    pub folded_complete_turns: usize,
+    pub retained_complete_turns: usize,
+    pub active_turn_extended: bool,
+    pub exact_fit_saturated: bool,
+    pub retained_turns: Vec<RetainedTurnGroupV3>,
+    /// Controls or unsafe message groups at/after the raw-tail frontier that remain replayable
+    /// outside the fold rather than being silently split.
+    pub protected_tail_events: Vec<ProtectedCompactionEventRef>,
 }
 
 /// Why a durable event cannot be folded from the provider-visible raw history.
@@ -34,6 +163,12 @@ pub enum CompactionFoldProtectionReason {
     UnsafeToolPair,
     /// A tool result has no uniquely matching prior assistant tool call.
     UnpairedToolResult,
+    /// A message belongs to a turn containing an unsafe or cross-turn tool pair.
+    WholeTurnAtomicity,
+    /// A message belongs to a turn with a requested approval or running tool execution.
+    ActiveToolOrApproval,
+    /// A provider-visible message appeared before any user turn boundary.
+    OrphanTurnMessage,
 }
 
 /// One protected raw event and the reason it remains outside the fold range.
@@ -73,6 +208,10 @@ pub struct CompactionFoldPlan {
     pub retained_event_ids: Vec<EventId>,
     /// Controls, non-message events, and unsafe message pairs that are never candidates here.
     pub protected_events: Vec<ProtectedCompactionEventRef>,
+    /// Present only for V3 whole-turn planning. Legacy V2 plans omit it and retain their exact
+    /// message-count replay behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_tail: Option<AdaptiveTailSelectionV3>,
 }
 
 /// Read-only V2 compaction planning result for a durable session stream.
@@ -254,7 +393,91 @@ impl CompactionFoldPlan {
                 .into_iter()
                 .map(|(event, reason)| ProtectedCompactionEventRef { event, reason })
                 .collect(),
+            adaptive_tail: None,
         })
+    }
+
+    /// Builds a V3 safe-fold plan whose raw tail consists only of complete turn groups.
+    ///
+    /// `exact_fit_limit_tokens` is a caller-computed tail budget after static request segments,
+    /// provider state, output reservation, tool-growth reservation and safety margin. The planner
+    /// uses a deterministic UTF-8/wire upper bound for relative tail selection; final activation
+    /// still requires the exact frozen-request proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stream or policy is invalid, an active/required atomic tail
+    /// exceeds the supplied exact-fit limit, or the prior boundary is stale.
+    pub fn from_records_after_adaptive_tail(
+        records: &[SessionStreamRecord],
+        policy: AdaptiveTailPolicyV3,
+        exact_fit_limit_tokens: u64,
+        prior_folded_through: Option<&CompactionCursor>,
+    ) -> Result<Self> {
+        policy.validate()?;
+        if exact_fit_limit_tokens == 0 {
+            bail!("adaptive tail exact-fit limit must be non-zero");
+        }
+
+        // Reuse the production V2 parser, checksum validation, promotion resolution and tool-pair
+        // classifier. The legacy retain decision is discarded below.
+        let mut plan = Self::from_records_after(records, 1, prior_folded_through)?;
+        let mut protected = plan
+            .protected_events
+            .iter()
+            .cloned()
+            .map(|entry| (entry.event, entry.reason))
+            .collect::<BTreeMap<_, _>>();
+        let messages = fold_messages_from_records(records)?;
+        let tool_groups = classify_tool_pair_groups(&messages, &mut protected);
+        let pending_calls = pending_tool_or_approval_call_ids(records)?;
+        let turns = classify_turn_groups(
+            &messages,
+            &tool_groups,
+            &pending_calls,
+            &mut protected,
+            prior_folded_through,
+        )?;
+        let (retained_indexes, adaptive_tail) = select_adaptive_tail(
+            &turns,
+            &messages,
+            &protected,
+            policy,
+            exact_fit_limit_tokens,
+        )?;
+
+        let mut folded_event_ids = Vec::new();
+        let mut retained_event_ids = Vec::new();
+        let mut folded_through = None;
+        for (index, candidate) in messages.iter().enumerate() {
+            if protected.contains_key(&candidate.event) {
+                continue;
+            }
+            if retained_indexes.contains(&index) {
+                retained_event_ids.push(candidate.event.event_id.clone());
+            } else {
+                folded_through = Some(CompactionCursor {
+                    session_id: plan.session_id.clone(),
+                    through_stream_sequence: candidate.event.stream_sequence,
+                    through_event_id: candidate.event.event_id.clone(),
+                });
+                folded_event_ids.push(candidate.event.event_id.clone());
+            }
+        }
+
+        plan.requested_tail_message_count = adaptive_tail
+            .policy
+            .translated_legacy_tail_messages
+            .unwrap_or(1);
+        plan.folded_through = folded_through;
+        plan.folded_event_ids = folded_event_ids;
+        plan.retained_event_ids = retained_event_ids;
+        plan.protected_events = protected
+            .into_iter()
+            .map(|(event, reason)| ProtectedCompactionEventRef { event, reason })
+            .collect();
+        plan.adaptive_tail = Some(adaptive_tail);
+        Ok(plan)
     }
 
     /// Rebuilds and compares the plan against the current complete durable stream.
@@ -267,11 +490,20 @@ impl CompactionFoldPlan {
         if self.schema_version != COMPACTION_FOLD_PLAN_SCHEMA_VERSION {
             bail!("unsupported compaction fold-plan schema version");
         }
-        let current = Self::from_records_after(
-            records,
-            self.requested_tail_message_count,
-            self.prior_folded_through.as_ref(),
-        )?;
+        let current = if let Some(adaptive_tail) = &self.adaptive_tail {
+            Self::from_records_after_adaptive_tail(
+                records,
+                adaptive_tail.policy.clone(),
+                adaptive_tail.exact_fit_limit_tokens,
+                self.prior_folded_through.as_ref(),
+            )?
+        } else {
+            Self::from_records_after(
+                records,
+                self.requested_tail_message_count,
+                self.prior_folded_through.as_ref(),
+            )?
+        };
         if &current != self {
             bail!("compaction fold plan is stale against the current durable stream");
         }
@@ -325,6 +557,47 @@ impl JsonlSessionStore {
             active_compaction_id: active.map(|sidecar| sidecar.compaction_id.clone()),
         }))
     }
+
+    /// Rebuilds a read-only V3 whole-turn compaction preview from the durable stream.
+    ///
+    /// This shares the V2 lifecycle and active sidecar resolver; only the raw-tail selection is
+    /// upgraded. It never appends an epoch, checkpoint, shrink sidecar or provider request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unfinished attempt, invalid adaptive policy/budget, or malformed
+    /// durable stream.
+    pub fn adaptive_compaction_preview(
+        &self,
+        policy: AdaptiveTailPolicyV3,
+        exact_fit_limit_tokens: u64,
+        branch_id: Option<&str>,
+    ) -> Result<Option<V2CompactionPreview>> {
+        let records = Self::read_event_records(self.path())?;
+        if records.is_empty() {
+            return Ok(None);
+        }
+        let lifecycle = CompactionLifecycleProjection::from_records(&records)?;
+        if !lifecycle.unfinished_attempts().is_empty() {
+            bail!("cannot preview adaptive compaction while another attempt is unfinished");
+        }
+        let sidecars = CompactionSidecarProjection::from_records(&records)?;
+        let active = sidecars.latest_for_branch(branch_id);
+        let prior_folded_through = active.map(|sidecar| sidecar.folded_through.clone());
+        let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+            &records,
+            policy,
+            exact_fit_limit_tokens,
+            prior_folded_through.as_ref(),
+        )?;
+        if !plan.has_foldable_history() {
+            return Ok(None);
+        }
+        Ok(Some(V2CompactionPreview {
+            plan,
+            active_compaction_id: active.map(|sidecar| sidecar.compaction_id.clone()),
+        }))
+    }
 }
 
 fn validate_prior_folded_through(
@@ -353,6 +626,447 @@ fn validate_prior_folded_through(
 struct FoldMessage {
     event: CompactionEventRef,
     message: crate::ModelMessage,
+}
+
+#[derive(Debug, Clone)]
+struct TurnGroup {
+    indexes: Vec<usize>,
+    token_upper_bound: u64,
+    state: TailTurnStateV3,
+    protected: bool,
+}
+
+fn fold_messages_from_records(records: &[SessionStreamRecord]) -> Result<Vec<FoldMessage>> {
+    let visible_promotions = super::conversation_promotion_projection::
+        provider_visible_conversation_promotion_event_ids(records)?;
+    let promoted_message_ids = records
+        .iter()
+        .filter(|record| visible_promotions.contains(record.event_id()))
+        .filter_map(|record| session_entry_from_stored_event(record.stored_event()).transpose())
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
+                Some(promotion.durable_user_message.id)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut messages = Vec::new();
+    for record in records {
+        let event = record.stored_event();
+        match session_entry_from_stored_event(event)? {
+            Some(SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)))
+                if visible_promotions.contains(&event.event_id) =>
+            {
+                messages.push(FoldMessage {
+                    event: event_ref(event),
+                    message: promotion.durable_user_message,
+                });
+            }
+            Some(SessionLogEntry::User(message)) if promoted_message_ids.contains(&message.id) => {}
+            Some(SessionLogEntry::User(message))
+            | Some(SessionLogEntry::Assistant(message))
+            | Some(SessionLogEntry::ToolResult(message)) => {
+                messages.push(FoldMessage {
+                    event: event_ref(event),
+                    message,
+                });
+            }
+            Some(SessionLogEntry::Control(_)) | None => {}
+        }
+    }
+    Ok(messages)
+}
+
+fn pending_tool_or_approval_call_ids(records: &[SessionStreamRecord]) -> Result<BTreeSet<String>> {
+    let mut pending = BTreeSet::new();
+    for record in records {
+        match session_entry_from_stored_event(record.stored_event())? {
+            Some(SessionLogEntry::Control(ControlEntry::ToolApproval(approval))) => {
+                match approval.action {
+                    ToolApprovalAuditAction::Requested => {
+                        pending.insert(approval.call_id);
+                    }
+                    ToolApprovalAuditAction::Resolved | ToolApprovalAuditAction::PreviewFailed => {
+                        pending.remove(&approval.call_id);
+                    }
+                    ToolApprovalAuditAction::PolicyEvaluated => {}
+                }
+            }
+            Some(SessionLogEntry::Control(ControlEntry::ToolExecution(execution))) => {
+                match execution.status {
+                    ToolExecutionStatus::Started => {
+                        pending.insert(execution.call_id);
+                    }
+                    ToolExecutionStatus::Completed
+                    | ToolExecutionStatus::Failed
+                    | ToolExecutionStatus::Cancelled
+                    | ToolExecutionStatus::Interrupted => {
+                        pending.remove(&execution.call_id);
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    Ok(pending)
+}
+
+fn classify_turn_groups(
+    messages: &[FoldMessage],
+    tool_groups: &[BTreeSet<usize>],
+    pending_calls: &BTreeSet<String>,
+    protected: &mut BTreeMap<CompactionEventRef, CompactionFoldProtectionReason>,
+    prior_folded_through: Option<&CompactionCursor>,
+) -> Result<Vec<TurnGroup>> {
+    let first_current_sequence = prior_folded_through
+        .map(|cursor| cursor.through_stream_sequence.saturating_add(1))
+        .unwrap_or(1);
+    let mut raw_groups = Vec::<Vec<usize>>::new();
+    let mut current = Vec::new();
+    for (index, candidate) in messages.iter().enumerate() {
+        if candidate.event.stream_sequence < first_current_sequence {
+            continue;
+        }
+        if matches!(candidate.message.role, MessageRole::User) {
+            if !current.is_empty() {
+                raw_groups.push(std::mem::take(&mut current));
+            }
+            current.push(index);
+        } else if current.is_empty() {
+            protect(
+                protected,
+                candidate,
+                CompactionFoldProtectionReason::OrphanTurnMessage,
+            );
+        } else {
+            current.push(index);
+        }
+    }
+    if !current.is_empty() {
+        raw_groups.push(current);
+    }
+
+    let mut turn_by_message = BTreeMap::<usize, usize>::new();
+    for (turn_index, indexes) in raw_groups.iter().enumerate() {
+        for index in indexes {
+            turn_by_message.insert(*index, turn_index);
+        }
+    }
+    for tool_group in tool_groups {
+        let owner_turns = tool_group
+            .iter()
+            .filter_map(|index| turn_by_message.get(index).copied())
+            .collect::<BTreeSet<_>>();
+        if owner_turns.len() > 1 {
+            for turn_index in owner_turns {
+                for index in &raw_groups[turn_index] {
+                    protect(
+                        protected,
+                        &messages[*index],
+                        CompactionFoldProtectionReason::WholeTurnAtomicity,
+                    );
+                }
+            }
+        }
+    }
+
+    let last_turn_index = raw_groups.len().saturating_sub(1);
+    let mut turns = Vec::with_capacity(raw_groups.len());
+    for (turn_index, indexes) in raw_groups.into_iter().enumerate() {
+        let terminally_complete = indexes
+            .last()
+            .is_some_and(|index| is_terminal_assistant_message(&messages[*index].message));
+        let state = if terminally_complete {
+            TailTurnStateV3::Complete
+        } else {
+            TailTurnStateV3::Active
+        };
+        let has_pending_call = indexes.iter().any(|index| {
+            messages[*index]
+                .message
+                .tool_calls
+                .iter()
+                .any(|call| pending_calls.contains(&call.id))
+                || messages[*index]
+                    .message
+                    .tool_call_id
+                    .as_ref()
+                    .is_some_and(|call_id| pending_calls.contains(call_id))
+        });
+        if has_pending_call {
+            for index in &indexes {
+                protect(
+                    protected,
+                    &messages[*index],
+                    CompactionFoldProtectionReason::ActiveToolOrApproval,
+                );
+            }
+        }
+        if state == TailTurnStateV3::Active && turn_index != last_turn_index {
+            for index in &indexes {
+                protect(
+                    protected,
+                    &messages[*index],
+                    CompactionFoldProtectionReason::WholeTurnAtomicity,
+                );
+            }
+        }
+        if indexes
+            .iter()
+            .any(|index| protected.contains_key(&messages[*index].event))
+        {
+            for index in &indexes {
+                protect(
+                    protected,
+                    &messages[*index],
+                    CompactionFoldProtectionReason::WholeTurnAtomicity,
+                );
+            }
+        }
+        let token_upper_bound = indexes.iter().try_fold(0_u64, |total, index| {
+            total
+                .checked_add(message_token_upper_bound(&messages[*index].message)?)
+                .context("adaptive tail turn token upper bound overflowed")
+        })?;
+        let is_protected = indexes
+            .iter()
+            .any(|index| protected.contains_key(&messages[*index].event));
+        turns.push(TurnGroup {
+            indexes,
+            token_upper_bound,
+            state,
+            protected: is_protected,
+        });
+    }
+    Ok(turns)
+}
+
+fn is_terminal_assistant_message(message: &crate::ModelMessage) -> bool {
+    matches!(message.role, MessageRole::Assistant)
+        && message.tool_calls.is_empty()
+        && !matches!(
+            message.assistant_kind,
+            Some(
+                crate::AssistantMessageKind::ToolPreamble
+                    | crate::AssistantMessageKind::Progress
+                    | crate::AssistantMessageKind::ReasoningTrace
+            )
+        )
+}
+
+fn message_token_upper_bound(message: &crate::ModelMessage) -> Result<u64> {
+    let mut tokens = TURN_MESSAGE_TOKEN_OVERHEAD
+        .checked_add(message.id.len() as u64)
+        .and_then(|value| value.checked_add(message.content.as_deref().map_or(0, str::len) as u64))
+        .and_then(|value| {
+            value.checked_add(message.tool_call_id.as_deref().map_or(0, str::len) as u64)
+        })
+        .context("adaptive tail message token upper bound overflowed")?;
+    for call in &message.tool_calls {
+        tokens = tokens
+            .checked_add(TURN_MESSAGE_TOKEN_OVERHEAD)
+            .and_then(|value| value.checked_add(call.id.len() as u64))
+            .and_then(|value| value.checked_add(call.name.len() as u64))
+            .and_then(|value| value.checked_add(call.args_json.len() as u64))
+            .context("adaptive tail tool-call token upper bound overflowed")?;
+    }
+    for attachment in &message.image_attachments {
+        tokens = tokens
+            .checked_add(TURN_MESSAGE_TOKEN_OVERHEAD)
+            .and_then(|value| value.checked_add(attachment.estimated_visual_tokens))
+            .context("adaptive tail image token upper bound overflowed")?;
+    }
+    Ok(tokens.max(1))
+}
+
+fn select_adaptive_tail(
+    turns: &[TurnGroup],
+    messages: &[FoldMessage],
+    protected: &BTreeMap<CompactionEventRef, CompactionFoldProtectionReason>,
+    policy: AdaptiveTailPolicyV3,
+    exact_fit_limit_tokens: u64,
+) -> Result<(BTreeSet<usize>, AdaptiveTailSelectionV3)> {
+    let mut complete_samples = turns
+        .iter()
+        .rev()
+        .filter(|turn| turn.state == TailTurnStateV3::Complete && !turn.protected)
+        .take(policy.recent_turn_sample_limit)
+        .map(|turn| turn.token_upper_bound)
+        .collect::<Vec<_>>();
+    complete_samples.sort_unstable();
+    let recent_complete_turn_p95_tokens = nearest_rank_percentile(&complete_samples, 95);
+    let multiplied_p95 = (u128::from(recent_complete_turn_p95_tokens)
+        * u128::from(policy.tail_recent_turn_p95_multiplier_ppm))
+    .div_ceil(1_000_000) as u64;
+    let ratio_cap = (u128::from(exact_fit_limit_tokens)
+        * u128::from(policy.tail_max_usable_context_ratio_ppm)
+        / 1_000_000) as u64;
+    let ordinary_ceiling = policy.tail_target_max_tokens.min(ratio_cap).max(1);
+    let ordinary_floor = policy.tail_target_min_tokens.min(ordinary_ceiling);
+    let ordinary_target_tokens = multiplied_p95.max(ordinary_floor).min(ordinary_ceiling);
+
+    let mut retained_indexes = BTreeSet::new();
+    let mut protected_tail_token_upper_bound = 0_u64;
+    for turn in turns.iter().filter(|turn| turn.protected) {
+        protected_tail_token_upper_bound = protected_tail_token_upper_bound
+            .checked_add(turn.token_upper_bound)
+            .context("adaptive protected-tail token upper bound overflowed")?;
+    }
+    if protected_tail_token_upper_bound > exact_fit_limit_tokens {
+        bail!("protected atomic tail exceeds the adaptive exact-fit limit");
+    }
+
+    let active_turn = turns
+        .last()
+        .filter(|turn| turn.state == TailTurnStateV3::Active);
+    let active_turn_tokens = active_turn.map_or(0, |turn| turn.token_upper_bound);
+    let mut retained_token_upper_bound = 0_u64;
+    if let Some(active) = active_turn.filter(|turn| !turn.protected) {
+        for index in &active.indexes {
+            retained_indexes.insert(*index);
+        }
+        retained_token_upper_bound = active.token_upper_bound;
+    }
+    let mut required_raw_tokens = protected_tail_token_upper_bound
+        .checked_add(retained_token_upper_bound)
+        .context("adaptive required-tail token upper bound overflowed")?;
+    if required_raw_tokens > exact_fit_limit_tokens {
+        bail!("active turn exceeds the adaptive exact-fit limit");
+    }
+
+    let mut retained_complete_turns = 0;
+    let mut exact_fit_saturated = false;
+    for turn in turns
+        .iter()
+        .rev()
+        .filter(|turn| turn.state == TailTurnStateV3::Complete && !turn.protected)
+    {
+        if retained_complete_turns >= policy.tail_min_complete_turns
+            && required_raw_tokens >= ordinary_target_tokens
+        {
+            break;
+        }
+        let next_required = required_raw_tokens
+            .checked_add(turn.token_upper_bound)
+            .context("adaptive retained-tail token upper bound overflowed")?;
+        if next_required > exact_fit_limit_tokens {
+            if retained_complete_turns < policy.tail_min_complete_turns {
+                bail!("minimum complete-turn tail exceeds the adaptive exact-fit limit");
+            }
+            exact_fit_saturated = true;
+            break;
+        }
+        for index in &turn.indexes {
+            retained_indexes.insert(*index);
+        }
+        retained_token_upper_bound = retained_token_upper_bound
+            .checked_add(turn.token_upper_bound)
+            .context("adaptive retained-tail token upper bound overflowed")?;
+        required_raw_tokens = next_required;
+        retained_complete_turns += 1;
+    }
+
+    let active_turn_extended = active_turn_tokens > ordinary_target_tokens;
+    let effective_target_tokens = ordinary_target_tokens
+        .max(required_raw_tokens)
+        .min(exact_fit_limit_tokens);
+    let mut folded_token_upper_bound = 0_u64;
+    let mut folded_complete_turns = 0_usize;
+    for turn in turns
+        .iter()
+        .filter(|turn| turn.state == TailTurnStateV3::Complete && !turn.protected)
+        .filter(|turn| {
+            !turn
+                .indexes
+                .iter()
+                .any(|index| retained_indexes.contains(index))
+        })
+    {
+        folded_token_upper_bound = folded_token_upper_bound
+            .checked_add(turn.token_upper_bound)
+            .context("adaptive folded-tail token upper bound overflowed")?;
+        folded_complete_turns += 1;
+    }
+    let retained_turns = turns
+        .iter()
+        .filter(|turn| {
+            !turn.protected
+                && turn
+                    .indexes
+                    .iter()
+                    .any(|index| retained_indexes.contains(index))
+        })
+        .map(|turn| {
+            let first = turn.indexes.first().expect("classified turn is non-empty");
+            let last = turn.indexes.last().expect("classified turn is non-empty");
+            RetainedTurnGroupV3 {
+                first_event: messages[*first].event.clone(),
+                last_event: messages[*last].event.clone(),
+                event_ids: turn
+                    .indexes
+                    .iter()
+                    .map(|index| messages[*index].event.event_id.clone())
+                    .collect(),
+                token_upper_bound: turn.token_upper_bound,
+                state: turn.state,
+            }
+        })
+        .collect::<Vec<_>>();
+    let raw_frontier = turns
+        .iter()
+        .filter(|turn| {
+            turn.protected
+                || turn
+                    .indexes
+                    .iter()
+                    .any(|index| retained_indexes.contains(index))
+        })
+        .filter_map(|turn| turn.indexes.first())
+        .map(|index| messages[*index].event.stream_sequence)
+        .min()
+        .unwrap_or(u64::MAX);
+    let protected_tail_events = protected
+        .iter()
+        .filter(|(event, reason)| {
+            event.stream_sequence >= raw_frontier
+                && **reason != CompactionFoldProtectionReason::ExistingCompactionBoundary
+        })
+        .map(|(event, reason)| ProtectedCompactionEventRef {
+            event: event.clone(),
+            reason: reason.clone(),
+        })
+        .collect();
+
+    Ok((
+        retained_indexes,
+        AdaptiveTailSelectionV3 {
+            schema_version: ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION,
+            policy,
+            exact_fit_limit_tokens,
+            recent_complete_turn_p95_tokens,
+            ordinary_target_tokens,
+            effective_target_tokens,
+            folded_token_upper_bound,
+            retained_token_upper_bound,
+            protected_tail_token_upper_bound,
+            folded_complete_turns,
+            retained_complete_turns,
+            active_turn_extended,
+            exact_fit_saturated,
+            retained_turns,
+            protected_tail_events,
+        },
+    ))
+}
+
+fn nearest_rank_percentile(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (sorted.len() * percentile).div_ceil(100).max(1);
+    sorted[rank - 1]
 }
 
 fn validate_complete_stream(records: &[SessionStreamRecord]) -> Result<crate::SessionId> {

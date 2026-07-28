@@ -1,6 +1,9 @@
 use super::*;
 use crate::app::modal_flow::ModelCatalogState;
-use crate::runner::{V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview};
+use crate::runner::{
+    ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview,
+    V2ContinuityPreview,
+};
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
 fn connection_catalog_result(
@@ -750,6 +753,8 @@ fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_histor
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }))?;
     assert_eq!(app.runtime.compaction_status, "hard");
 
@@ -3223,10 +3228,14 @@ fn v2_compaction_review_requires_admission_before_it_can_apply() -> Result<()> {
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 41,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
             preview,
             admission: V2CompactionAdmission::Unavailable {
                 reason: "verified tokenizer is not installed".to_owned(),
             },
+            tool_output_shrink_candidates: Vec::new(),
+            continuity: None,
+            native_carrier_requested: false,
         })),
     })?;
 
@@ -3267,6 +3276,7 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 42,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
             preview,
             admission: V2CompactionAdmission::Ready {
                 before_input_tokens: 200,
@@ -3278,12 +3288,25 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
                 savings_ratio_ppm: 400_000,
                 minimum_savings_tokens: 64,
                 minimum_savings_ratio_ppm: 50_000,
+                summary_usage_observed: true,
+                deterministic_emergency_fallback: false,
+                summary_cache_read_tokens: 80,
+                summary_uncached_input_tokens: 20,
+                summary_output_tokens: 10,
+                summary_cost_nano_usd: Some(42),
+                economics_v2: None,
             },
+            tool_output_shrink_candidates: Vec::new(),
+            continuity: None,
+            native_carrier_requested: false,
         })),
     })?;
 
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("target request: verified locally"));
+    assert!(
+        lines.contains("summary call: cache-read 80 · uncached 20 · output 10 tokens · 42 nUSD")
+    );
     assert!(lines.contains("Enter apply"));
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
@@ -3292,6 +3315,165 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
     ));
     assert!(!app.has_modal());
     assert_eq!(app.last_notice(), Some("applying V2 compaction"));
+    Ok(())
+}
+
+#[test]
+fn locally_prepared_compaction_requires_an_explicit_billed_summary_choice() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("local-preview.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("old request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("old response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let preview = store
+        .v2_compaction_preview(1, None)?
+        .expect("fixture should have foldable history");
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
+            request_id: 45,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
+            preview,
+            admission: V2CompactionAdmission::Prepared {
+                standalone_tool_output_shrink_available: false,
+            },
+            tool_output_shrink_candidates: Vec::new(),
+            continuity: None,
+            native_carrier_requested: false,
+        })),
+    })?;
+
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("local prepare only; no summary/provider request has been sent"));
+    assert!(lines.contains("Enter generates one billed semantic summary"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::ApplyV2Compaction { request_id: 45 })
+    ));
+    Ok(())
+}
+
+#[test]
+fn locally_prepared_compaction_can_choose_standalone_tool_output_cleanup() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("local-shrink-preview.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("old request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("old response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let preview = store
+        .v2_compaction_preview(1, None)?
+        .expect("fixture should have foldable history");
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
+            request_id: 46,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
+            preview,
+            admission: V2CompactionAdmission::Prepared {
+                standalone_tool_output_shrink_available: true,
+            },
+            tool_output_shrink_candidates: Vec::new(),
+            continuity: None,
+            native_carrier_requested: false,
+        })),
+    })?;
+
+    assert!(
+        app.modal_lines()
+            .join("\n")
+            .contains("S clean large tool outputs only")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::ApplyStandaloneToolOutputShrink { request_id: 46 })
+    ));
+    Ok(())
+}
+
+#[test]
+fn adaptive_compaction_review_shows_protected_tail_and_recoverable_artifact_refs() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("adaptive-preview.jsonl"))?;
+    for index in 0..5 {
+        store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+            "request-{index}"
+        ))))?;
+        store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!("response-{index}")),
+            Vec::new(),
+        )))?;
+    }
+    let preview = store
+        .adaptive_compaction_preview(
+            sigil_kernel::AdaptiveTailPolicyV3 {
+                tail_min_complete_turns: 2,
+                tail_target_min_tokens: 64,
+                tail_target_max_tokens: 128,
+                tail_recent_turn_p95_multiplier_ppm: 2_000_000,
+                tail_max_usable_context_ratio_ppm: 250_000,
+                recent_turn_sample_limit: 20,
+                translated_legacy_tail_messages: Some(6),
+            },
+            8 * 1024,
+            None,
+        )?
+        .expect("adaptive fixture should have foldable history");
+
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
+            request_id: 44,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
+            preview,
+            admission: V2CompactionAdmission::Unavailable {
+                reason: "preview-only fixture".to_owned(),
+            },
+            tool_output_shrink_candidates: vec![ToolOutputShrinkPreview {
+                tool_name: "shell".to_owned(),
+                tool_call_id: "call-large".to_owned(),
+                status: "ok".to_owned(),
+                original_content_bytes: 120_000,
+                original_content_token_upper_bound: 120_000,
+                head_excerpt: "head".to_owned(),
+                tail_excerpt: "tail".to_owned(),
+                content_sha256: format!("sha256:{}", "a".repeat(64)),
+                artifact_ref: "durable transcript event event-large".to_owned(),
+                reason: "large completed historical result".to_owned(),
+                recovery_instruction:
+                    "Re-read the durable transcript event when omitted details are required."
+                        .to_owned(),
+            }],
+            continuity: Some(V2ContinuityPreview {
+                root_objective: "preserve the current implementation objective".to_owned(),
+                active_constraints: Vec::new(),
+                active_constraint_count: 2,
+                authorization_boundary_count: 1,
+                recoverable_attachment_count: 1,
+                pending_work_count: 3,
+                unresolved_question_count: 1,
+                source_ref_count: 7,
+            }),
+            native_carrier_requested: true,
+        })),
+    })?;
+
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("adaptive tail:"));
+    assert!(lines.contains("protected tail:"));
+    assert!(lines.contains("next-epoch tool artifacts: 1 recoverable candidate"));
+    assert!(lines.contains("durable transcript event event-large"));
+    assert!(lines.contains("continuity root: preserve the current implementation objective"));
+    assert!(lines.contains("7 source ref(s)"));
+    assert!(lines.contains("continuity work: 3 pending · 1 unresolved"));
+    assert!(lines.contains("native carrier: explicitly requested"));
     Ok(())
 }
 
@@ -3313,6 +3495,7 @@ fn dismissed_v2_compaction_review_clears_the_worker_pending_state() -> Result<()
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 43,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
             preview,
             admission: V2CompactionAdmission::Ready {
                 before_input_tokens: 200,
@@ -3324,10 +3507,24 @@ fn dismissed_v2_compaction_review_clears_the_worker_pending_state() -> Result<()
                 savings_ratio_ppm: 400_000,
                 minimum_savings_tokens: 64,
                 minimum_savings_ratio_ppm: 50_000,
+                summary_usage_observed: false,
+                deterministic_emergency_fallback: true,
+                summary_cache_read_tokens: 0,
+                summary_uncached_input_tokens: 0,
+                summary_output_tokens: 0,
+                summary_cost_nano_usd: None,
+                economics_v2: None,
             },
+            tool_output_shrink_candidates: Vec::new(),
+            continuity: None,
+            native_carrier_requested: false,
         })),
     })?;
 
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("provider usage unavailable"));
+    assert!(lines.contains("audited deterministic emergency floor"));
+    assert!(!lines.contains("summary call: cache-read 0"));
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(matches!(
         action,

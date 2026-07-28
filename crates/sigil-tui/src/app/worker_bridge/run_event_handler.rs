@@ -235,10 +235,24 @@ impl EventHandler for AppState {
                 self.runtime.session_delta_stats.apply_usage(&usage);
                 self.recompute_compaction_status(true);
                 self.refresh_usage_sidebar_cache();
+                let write = usage
+                    .cache_usage
+                    .as_ref()
+                    .and_then(|cache| cache.write.as_ref())
+                    .map_or_else(|| "-".to_owned(), |count| count.tokens.to_string());
+                let mutation = usage
+                    .cache_usage
+                    .as_ref()
+                    .and_then(|cache| cache.local_layout_mutation)
+                    .map_or("unknown", sigil_kernel::CacheLayoutMutationKind::as_str);
+                let provider_miss_without_local_mutation = usage
+                    .cache_usage
+                    .as_ref()
+                    .is_some_and(|cache| cache.provider_miss_without_local_mutation);
                 self.push_event(
                     "usage",
                     format!(
-                        "prompt={} completion={} cache_hit={} cache_miss={}",
+                        "prompt={} completion={} cache_read={} cache_write={write} cache_miss={} layout={mutation} provider_miss_without_local_mutation={provider_miss_without_local_mutation}",
                         usage.prompt_tokens,
                         usage.completion_tokens,
                         usage.cache_hit_tokens,

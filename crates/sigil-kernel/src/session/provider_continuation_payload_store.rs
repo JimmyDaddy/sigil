@@ -8,7 +8,10 @@ use std::{
 };
 
 #[cfg(test)]
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::FileExt;
@@ -820,9 +823,9 @@ fn sha256_hex(value: &[u8]) -> String {
 }
 
 #[cfg(test)]
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct InMemoryProviderContinuationSessionKeyStore {
-    keys: Mutex<BTreeMap<String, Vec<u8>>>,
+    keys: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
 }
 
 #[cfg(test)]

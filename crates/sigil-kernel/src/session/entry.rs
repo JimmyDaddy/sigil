@@ -190,6 +190,11 @@ pub enum ControlEntry {
     ExternalProvenance(ExternalProvenanceEntry),
     WebUrlCapabilityDescriptor(crate::WebUrlCapabilityDescriptor),
     UsageSnapshot(UsageStats),
+    /// Usage emitted by the internal semantic-compaction model request.
+    ///
+    /// It contributes to total session cost but must not replace the latest ordinary
+    /// conversation-generation usage used for current-epoch cache forecasting.
+    SemanticCompactionUsageSnapshot(UsageStats),
     ToolApproval(ToolApprovalEntry),
     ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry),
     ToolExecution(Box<ToolExecutionEntry>),

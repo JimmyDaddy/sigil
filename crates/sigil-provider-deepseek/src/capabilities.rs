@@ -1,4 +1,7 @@
-use sigil_kernel::{ProviderCapabilities, ReasoningStreamSupport};
+use sigil_kernel::{
+    CacheMode, CacheUsageCapabilities, NativeCarrierPortability, ProviderCapabilities,
+    ProviderContextCapabilities, ReasoningStreamSupport,
+};
 
 pub fn deepseek_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
@@ -21,3 +24,30 @@ pub fn deepseek_capabilities() -> ProviderCapabilities {
         tool_name_max_chars: 64,
     }
 }
+
+pub fn deepseek_context_capabilities(trusted_official_route: bool) -> ProviderContextCapabilities {
+    if !trusted_official_route {
+        return ProviderContextCapabilities::observed_implicit_or_none(CacheUsageCapabilities {
+            read_tokens: true,
+            write_tokens: false,
+            miss_tokens: true,
+        });
+    }
+    ProviderContextCapabilities {
+        cache_mode: CacheMode::ImplicitPrefix,
+        explicit_breakpoint_limit: None,
+        cache_ttls: Vec::new(),
+        cache_usage_fields: CacheUsageCapabilities {
+            read_tokens: true,
+            write_tokens: false,
+            miss_tokens: true,
+        },
+        stateful_continuation: None,
+        native_compaction: None,
+        native_carrier_portability: NativeCarrierPortability::Unavailable,
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/capabilities_tests.rs"]
+mod tests;

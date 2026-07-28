@@ -1,11 +1,16 @@
+use std::pin::Pin;
+
 use anyhow::Result;
+use async_trait::async_trait;
+use futures::{Stream, stream};
 use sigil_kernel::{
     AgentConfig, ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
     DurableAuditRecord, DurableAuditWriter, DurableEventType, MemoryConfig, ModelMessage,
-    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, ProviderPhysicalAttemptOutcome,
-    ProviderPhysicalAttemptPurpose, ProviderPhysicalAttemptStartedEntry,
-    ProviderPhysicalAttemptTerminalEntry, ProviderRequestRejection, ReasoningEffort, RootConfig,
-    SessionConfig, StorageRoot, WorkspaceConfig,
+    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptPurpose,
+    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
+    ProviderRequestRejection, ReasoningEffort, RootConfig, SessionConfig, StorageRoot,
+    WorkspaceConfig,
 };
 
 use crate::runner::worker_loop::queue_conversation_input;
@@ -16,6 +21,44 @@ use crate::runner::worker_loop::queue_driver::{
 use super::*;
 
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
+
+struct NoopProvider;
+
+#[async_trait]
+impl Provider for NoopProvider {
+    fn name(&self) -> &str {
+        "deepseek"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            reasoning_stream: sigil_kernel::ReasoningStreamSupport::Unsupported,
+            supports_reasoning_effort: false,
+            supports_tool_stream: false,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_agent_background_resume: false,
+            supports_agent_thread_usage: false,
+            supports_agent_result_replay: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: sigil_kernel::CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter([Ok(ProviderChunk::Done)])))
+    }
+}
 
 fn append_context_window_rejection(
     store: &JsonlSessionStore,
@@ -34,6 +77,7 @@ fn append_context_window_rejection(
         request_material_fingerprint: fingerprint.clone(),
         provider_name: "openai_responses".to_owned(),
         model_name: "gpt-4.1-2025-04-14".to_owned(),
+        cache_layout_proof: None,
         started_at_unix_ms: 1,
     };
     let started_record = DurableAuditRecord::new(
@@ -201,7 +245,7 @@ fn queued_pre_turn_admission_blocks_without_local_proof_and_never_mutates_sessio
         ReasoningEffort::High,
     )
     .map_err(anyhow::Error::msg)?;
-    let session = session.expect("store-backed session should remain available");
+    let mut session = session.expect("store-backed session should remain available");
     let before_stream = std::fs::read(store.path())?;
     let runtime = tokio::runtime::Runtime::new()?;
     let context_resolver =
@@ -211,7 +255,8 @@ fn queued_pre_turn_admission_blocks_without_local_proof_and_never_mutates_sessio
         &root_config,
         temp.path(),
         store.path(),
-        &session,
+        &NoopProvider,
+        &mut session,
         &exact_prompts,
         &MemoryConfig { enabled: false },
         Vec::new(),
@@ -255,7 +300,7 @@ fn queued_portable_preflight_with_no_prior_history_is_read_only_and_not_ready() 
         ReasoningEffort::High,
     )
     .map_err(anyhow::Error::msg)?;
-    let session = session.expect("store-backed session should remain available");
+    let mut session = session.expect("store-backed session should remain available");
     let before_stream = std::fs::read(store.path())?;
     let preparation = prepare_next_queued_conversation_candidate(
         &session,
@@ -272,15 +317,17 @@ fn queued_portable_preflight_with_no_prior_history_is_read_only_and_not_ready() 
     };
 
     assert!(
-        prepare_queued_portable_preflight(
-            &root_config,
-            temp.path(),
-            store.path(),
-            &session,
-            &MemoryConfig { enabled: false },
-            *candidate,
-        )?
-        .is_none()
+        tokio::runtime::Runtime::new()?
+            .block_on(prepare_queued_portable_preflight(
+                &root_config,
+                temp.path(),
+                store.path(),
+                &NoopProvider,
+                &mut session,
+                &MemoryConfig { enabled: false },
+                *candidate,
+            ))?
+            .is_none()
     );
     assert_eq!(std::fs::read(store.path())?, before_stream);
     Ok(())
@@ -298,6 +345,16 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
         let stream = session
             .as_mut()
             .expect("store-backed session should remain available");
+        for index in 0..3 {
+            stream.append_user_message(ModelMessage::user(format!(
+                "large completed request {index}: {}",
+                "x".repeat(400_000)
+            )))?;
+            stream.append_assistant_message(ModelMessage::assistant(
+                Some(format!("large completed response {index}")),
+                Vec::new(),
+            ))?;
+        }
         stream.append_user_message(ModelMessage::user("older request"))?;
         stream.append_assistant_message(ModelMessage::assistant(
             Some("older response".to_owned()),
@@ -316,7 +373,7 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
         ReasoningEffort::High,
     )
     .map_err(anyhow::Error::msg)?;
-    let session = session.expect("store-backed session should remain available");
+    let mut session = session.expect("store-backed session should remain available");
     let before_stream = std::fs::read(store.path())?;
     let preparation = prepare_next_queued_conversation_candidate(
         &session,
@@ -332,15 +389,17 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
         panic!("queued chat should materialize an exact pre-turn candidate");
     };
 
-    let error = prepare_queued_portable_preflight(
-        &root_config,
-        temp.path(),
-        store.path(),
-        &session,
-        &MemoryConfig { enabled: false },
-        *candidate,
-    )
-    .expect_err("missing local target proof must block pre-turn compaction");
+    let error = tokio::runtime::Runtime::new()?
+        .block_on(prepare_queued_portable_preflight(
+            &root_config,
+            temp.path(),
+            store.path(),
+            &NoopProvider,
+            &mut session,
+            &MemoryConfig { enabled: false },
+            *candidate,
+        ))
+        .expect_err("missing local target proof must block pre-turn compaction");
 
     assert!(
         error

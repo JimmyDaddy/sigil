@@ -17,6 +17,70 @@ pub type CompactionId = String;
 /// Stable domain identity for one V2 compaction attempt.
 pub type CompactionAttemptId = String;
 
+/// Provider-neutral, content-free identity used by automatic-compaction circuit breakers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CompactionCircuitScopeV1 {
+    pub source_cursor_event_id: EventId,
+    pub layout_hash: String,
+    pub route_fingerprint: String,
+}
+
+impl CompactionCircuitScopeV1 {
+    fn validate_shape(&self) -> Result<()> {
+        if [
+            self.source_cursor_event_id.as_str(),
+            self.layout_hash.as_str(),
+            self.route_fingerprint.as_str(),
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+        {
+            bail!("compaction circuit scope is invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Layer that still dominates an emergency-sized request after one epoch rotation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionEmergencyBlockingLayerV1 {
+    StableSystemAndTools,
+    RetainedConversation,
+    ActiveTurn,
+    ProviderState,
+    Unknown,
+}
+
+/// Input to the durable automatic-compaction circuit breaker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CompactionCircuitBreakerInputV1 {
+    pub scope: CompactionCircuitScopeV1,
+    pub latest_completed_real_turn_sequence: Option<u64>,
+    pub emergency: bool,
+    pub post_activation_emergency_layer: Option<CompactionEmergencyBlockingLayerV1>,
+    pub manual_retry: bool,
+}
+
+/// Deterministic circuit result. Only `Allowed` permits a new automatic lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum CompactionCircuitBreakerDecisionV1 {
+    Allowed,
+    SameCursorAndLayoutFailed,
+    SemanticSummarizerRouteDisabled {
+        consecutive_failures: u8,
+    },
+    RealTurnRequired {
+        latest_compaction_sequence: u64,
+    },
+    PostActivationEmergency {
+        layer: CompactionEmergencyBlockingLayerV1,
+    },
+}
+
 /// Durable cursor delimiting the raw session stream folded by a compaction attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -67,6 +131,8 @@ pub enum CompactionInitiation {
     Manual,
     IdleAutomatic {
         scope_fingerprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        circuit_scope: Option<CompactionCircuitScopeV1>,
     },
     /// An exact queued conversation input exceeded its locally proven target budget.
     ///
@@ -90,10 +156,16 @@ impl CompactionInitiation {
     fn validate_shape(&self) -> Result<()> {
         match self {
             Self::Manual => {}
-            Self::IdleAutomatic { scope_fingerprint } if scope_fingerprint.trim().is_empty() => {
+            Self::IdleAutomatic {
+                scope_fingerprint, ..
+            } if scope_fingerprint.trim().is_empty() => {
                 bail!("idle automatic compaction scope fingerprint is empty");
             }
-            Self::IdleAutomatic { .. } => {}
+            Self::IdleAutomatic { circuit_scope, .. } => {
+                if let Some(circuit_scope) = circuit_scope {
+                    circuit_scope.validate_shape()?;
+                }
+            }
             Self::PreTurnPressure { queue_id } => {
                 let _validated = crate::ConversationInputQueueId::new(queue_id.as_str())?;
             }
@@ -117,6 +189,9 @@ pub enum CompactionFailureReason {
     RecoveryInterrupted,
     ValidationFailed,
     ExecutionFailed,
+    SemanticSummaryTimeout,
+    SemanticSummaryInflated,
+    SemanticSummaryInvalid,
 }
 
 /// Recovery-critical record that opens one initiated V2 compaction attempt.
@@ -346,12 +421,135 @@ impl CompactionLifecycleProjection {
                 &attempt.entry.initiation,
                 CompactionInitiation::IdleAutomatic {
                     scope_fingerprint: attempt_scope,
+                    ..
                 } if attempt_scope == scope_fingerprint
             ) && matches!(
                 attempt.terminal,
                 Some(CompactionAttemptTerminal::Failed { .. })
             )
         })
+    }
+
+    /// Evaluates retry, route-failure and post-activation loop guards from durable lifecycle
+    /// evidence. The caller supplies only the current scope and the latest completed real turn.
+    ///
+    /// Manual retry may re-enable a disabled semantic route and bypass the inter-rotation turn
+    /// delay, but it never retries the same failed source cursor and layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current scope is malformed.
+    pub fn circuit_breaker_decision(
+        &self,
+        input: &CompactionCircuitBreakerInputV1,
+    ) -> Result<CompactionCircuitBreakerDecisionV1> {
+        input.scope.validate_shape()?;
+        let same_failed_scope = self.attempts.values().any(|attempt| {
+            let CompactionInitiation::IdleAutomatic {
+                circuit_scope: Some(scope),
+                ..
+            } = &attempt.entry.initiation
+            else {
+                return false;
+            };
+            scope.source_cursor_event_id == input.scope.source_cursor_event_id
+                && scope.layout_hash == input.scope.layout_hash
+                && matches!(
+                    attempt.terminal,
+                    Some(CompactionAttemptTerminal::Failed { .. })
+                )
+        });
+        if same_failed_scope {
+            return Ok(CompactionCircuitBreakerDecisionV1::SameCursorAndLayoutFailed);
+        }
+
+        let consecutive_failures =
+            self.consecutive_semantic_failures_for_route(&input.scope.route_fingerprint);
+        if consecutive_failures >= 2 && !input.manual_retry {
+            return Ok(
+                CompactionCircuitBreakerDecisionV1::SemanticSummarizerRouteDisabled {
+                    consecutive_failures,
+                },
+            );
+        }
+
+        let latest_compaction_sequence = self
+            .attempts
+            .values()
+            .filter_map(|attempt| match &attempt.terminal {
+                Some(CompactionAttemptTerminal::Applied {
+                    stream_sequence, ..
+                }) => Some(*stream_sequence),
+                Some(CompactionAttemptTerminal::Failed { .. }) | None => None,
+            })
+            .max();
+        if let (Some(_), Some(layer)) = (
+            latest_compaction_sequence,
+            input.post_activation_emergency_layer,
+        ) {
+            return Ok(CompactionCircuitBreakerDecisionV1::PostActivationEmergency { layer });
+        }
+        if let Some(latest_compaction_sequence) = latest_compaction_sequence
+            && !input.emergency
+            && !input.manual_retry
+            && input
+                .latest_completed_real_turn_sequence
+                .is_none_or(|sequence| sequence <= latest_compaction_sequence)
+        {
+            return Ok(CompactionCircuitBreakerDecisionV1::RealTurnRequired {
+                latest_compaction_sequence,
+            });
+        }
+        Ok(CompactionCircuitBreakerDecisionV1::Allowed)
+    }
+
+    /// Returns the latest successfully activated compaction terminal sequence.
+    #[must_use]
+    pub fn latest_applied_stream_sequence(&self) -> Option<u64> {
+        self.attempts
+            .values()
+            .filter_map(|attempt| match &attempt.terminal {
+                Some(CompactionAttemptTerminal::Applied {
+                    stream_sequence, ..
+                }) => Some(*stream_sequence),
+                Some(CompactionAttemptTerminal::Failed { .. }) | None => None,
+            })
+            .max()
+    }
+
+    fn consecutive_semantic_failures_for_route(&self, route_fingerprint: &str) -> u8 {
+        let mut route_attempts = self
+            .attempts
+            .values()
+            .filter(|attempt| {
+                matches!(
+                    &attempt.entry.initiation,
+                    CompactionInitiation::IdleAutomatic {
+                        circuit_scope: Some(scope),
+                        ..
+                    } if scope.route_fingerprint == route_fingerprint
+                )
+            })
+            .collect::<Vec<_>>();
+        route_attempts.sort_by_key(|attempt| std::cmp::Reverse(attempt.started_stream_sequence));
+        route_attempts
+            .into_iter()
+            .take_while(|attempt| {
+                matches!(
+                    &attempt.terminal,
+                    Some(CompactionAttemptTerminal::Failed {
+                        entry: CompactionFailureEntry {
+                            reason: CompactionFailureReason::SemanticSummaryTimeout
+                                | CompactionFailureReason::SemanticSummaryInflated
+                                | CompactionFailureReason::SemanticSummaryInvalid,
+                            ..
+                        },
+                        ..
+                    })
+                )
+            })
+            .count()
+            .min(usize::from(u8::MAX)) as u8
     }
 
     pub(crate) fn attempts(&self) -> impl Iterator<Item = &CompactionAttemptState> {

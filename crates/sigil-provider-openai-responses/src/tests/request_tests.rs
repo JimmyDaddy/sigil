@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde_json::Value;
 use sigil_kernel::{
     CompletionRequest, ImageAttachment, ImageInputCapability, ImageMimeType, ModelMessage,
     ProviderContinuationState, ReasoningEffort, ToolAccess, ToolCall, ToolCategory,
@@ -9,7 +10,8 @@ use crate::{
     OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND,
     request::{
         OPENAI_RESPONSES_PROVIDER_NAME, build_compaction_request, build_input_token_count_request,
-        build_responses_request, openai_responses_image_input_capability, output_items_state,
+        build_responses_request, build_responses_request_with_cache_routing,
+        openai_responses_image_input_capability, output_items_state,
     },
 };
 
@@ -70,6 +72,78 @@ fn responses_request_maps_messages_tools_and_reasoning() -> Result<()> {
     assert_eq!(body["input"][3]["type"], "function_call_output");
     assert_eq!(body["input"][3]["call_id"], "call-1");
     assert_eq!(body["tools"][0]["type"], "function");
+    Ok(())
+}
+
+#[test]
+fn official_cache_wire_uses_stable_hmac_key_and_a0_a2_logical_boundaries() -> Result<()> {
+    let mut system = ModelMessage::system("stable system");
+    system.id = "system-opaque".to_owned();
+    let mut first_user = ModelMessage::user("turn one");
+    first_user.id = "session-opaque-seed".to_owned();
+    let mut assistant = ModelMessage::assistant(Some("answer one".to_owned()), Vec::new());
+    assistant.id = "assistant-opaque".to_owned();
+    let mut active = ModelMessage::user("active turn");
+    active.id = "active-opaque".to_owned();
+    let mut request = simple_request(vec![system, first_user, assistant, active]);
+    request.traffic_partition_key = Some("tenant/path/that-must-not-leak".to_owned());
+
+    let (body, plan) = build_responses_request_with_cache_routing(&request, true)?;
+    let plan = plan.expect("official cache plan");
+    let wire = serde_json::to_value(&body)?;
+
+    assert_eq!(plan.a0_input_end, Some(1));
+    assert_eq!(plan.a2_input_end, Some(3));
+    assert_eq!(
+        wire["input"]
+            .as_array()
+            .expect("canonical input array")
+            .iter()
+            .map(|item| item["role"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["developer", "user", "assistant", "user"]
+    );
+    assert_eq!(
+        wire["prompt_cache_key"],
+        Value::String(plan.prompt_cache_key.clone())
+    );
+    assert!(plan.prompt_cache_key.len() <= 64);
+    assert!(!plan.prompt_cache_key.contains("tenant"));
+    assert!(!plan.prompt_cache_key.contains("path"));
+    assert!(wire.get("prompt_cache_retention").is_none());
+
+    request.messages.last_mut().expect("active message").content =
+        Some("changed active turn".to_owned());
+    let (_, changed_plan) = build_responses_request_with_cache_routing(&request, true)?;
+    assert_eq!(
+        changed_plan.expect("changed cache plan").prompt_cache_key,
+        plan.prompt_cache_key,
+        "dynamic A4 overlays must not randomly reshuffle a hot session"
+    );
+    Ok(())
+}
+
+#[test]
+fn cache_routing_is_omitted_without_route_conformance_or_partition_evidence() -> Result<()> {
+    let mut request = simple_request(vec![ModelMessage::user("hello")]);
+    request.traffic_partition_key = Some("tenant".to_owned());
+
+    let (custom_route, plan) = build_responses_request_with_cache_routing(&request, false)?;
+    assert!(plan.is_none());
+    assert!(
+        serde_json::to_value(custom_route)?
+            .get("prompt_cache_key")
+            .is_none()
+    );
+
+    request.traffic_partition_key = None;
+    let (missing_partition, plan) = build_responses_request_with_cache_routing(&request, true)?;
+    assert!(plan.is_none());
+    assert!(
+        serde_json::to_value(missing_partition)?
+            .get("prompt_cache_key")
+            .is_none()
+    );
     Ok(())
 }
 

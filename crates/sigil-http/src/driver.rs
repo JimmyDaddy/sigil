@@ -131,6 +131,8 @@ pub struct HttpConversationRecoveryDriverCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConversationRecoveryDriverOutput {
     pub compaction: Option<HttpCompactionReceipt>,
+    pub compaction_review: Option<HttpCompactionReview>,
+    pub tool_output_shrink: Option<crate::HttpToolOutputShrinkReceipt>,
     pub restore: Option<HttpCheckpointRestoreReceipt>,
     pub fork: Option<HttpConversationForkReceipt>,
     pub recovery: HttpConversationRecoveryView,
@@ -344,7 +346,10 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpConversationRecoveryDriverError::Unavailable)
     }
 
-    /// Builds one no-write portable compaction review and retains its exact process-local target.
+    /// Builds one local-only portable compaction review and retains its exact process-local plan.
+    ///
+    /// Provider consumption requires the separate `prepare_compaction` recovery action; this
+    /// query never activates compaction or sends a semantic-summary request.
     fn conversation_compaction_review(
         &self,
         _session: &HttpSessionSnapshot,

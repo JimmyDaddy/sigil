@@ -21,6 +21,22 @@ impl V2CompactionPreviewModalState {
         matches!(self.review.admission, V2CompactionAdmission::Ready { .. })
     }
 
+    pub(super) fn is_locally_prepared(&self) -> bool {
+        matches!(
+            self.review.admission,
+            V2CompactionAdmission::Prepared { .. }
+        )
+    }
+
+    pub(super) fn can_apply_standalone_shrink(&self) -> bool {
+        matches!(
+            self.review.admission,
+            V2CompactionAdmission::Prepared {
+                standalone_tool_output_shrink_available: true,
+            }
+        )
+    }
+
     pub(super) fn lines(&self) -> Vec<String> {
         let plan = &self.review.preview.plan;
         let mut protections = BTreeMap::<&str, usize>::new();
@@ -46,14 +62,141 @@ impl V2CompactionPreviewModalState {
             .unwrap_or("none");
         let mut lines = vec![
             "Review — no session data has been changed yet.".to_owned(),
-            "strategy: portable semantic checkpoint".to_owned(),
+            format!("strategy: {}", self.review.strategy.as_str()),
             format!("fold: {} message(s)", plan.folded_event_ids.len()),
             format!("keep raw: {} message(s)", plan.retained_event_ids.len()),
             format!("protected: {protection_summary}"),
             format!("active boundary: {active_boundary}"),
-            "risk: no checkpoint, summary, or provider request has been created.".to_owned(),
         ];
+        lines.push(match &self.review.admission {
+            V2CompactionAdmission::Prepared { .. } => {
+                "stage: local prepare only; no summary/provider request has been sent.".to_owned()
+            }
+            V2CompactionAdmission::Ready { .. } => {
+                "stage: semantic summary generated and charged; activation is still pending."
+                    .to_owned()
+            }
+            V2CompactionAdmission::Unavailable { .. } => {
+                "stage: semantic preparation failed; the current epoch remains active.".to_owned()
+            }
+        });
+        if let Some(adaptive) = &plan.adaptive_tail {
+            lines.push(format!(
+                "adaptive tail: fold {} complete turn(s) / {} tokens; keep {} complete turn(s) / {} raw token upper bound (target {} / effective {})",
+                adaptive.folded_complete_turns,
+                adaptive.folded_token_upper_bound,
+                adaptive.retained_complete_turns,
+                adaptive
+                    .retained_token_upper_bound
+                    .saturating_add(adaptive.protected_tail_token_upper_bound),
+                adaptive.ordinary_target_tokens,
+                adaptive.effective_target_tokens,
+            ));
+            lines.push(format!(
+                "protected tail: {} event(s), {} token upper bound{}",
+                adaptive.protected_tail_events.len(),
+                adaptive.protected_tail_token_upper_bound,
+                if adaptive.active_turn_extended {
+                    " · active turn extended to exact-fit"
+                } else {
+                    ""
+                },
+            ));
+        }
+        if let Some(continuity) = &self.review.continuity {
+            lines.push(format!(
+                "continuity root: {}",
+                continuity.root_objective.replace('\n', " ")
+            ));
+            lines.push(format!(
+                "continuity evidence: {} active constraint(s) · {} authorization boundary item(s) · {} source ref(s)",
+                continuity.active_constraint_count,
+                continuity.authorization_boundary_count,
+                continuity.source_ref_count,
+            ));
+            lines.extend(
+                continuity
+                    .active_constraints
+                    .iter()
+                    .take(8)
+                    .map(|constraint| {
+                        format!(
+                            "  constraint: {} [{} · {}]",
+                            constraint.text.replace('\n', " "),
+                            constraint.source_event_id,
+                            constraint.source_field_path,
+                        )
+                    }),
+            );
+            lines.push(format!(
+                "continuity work: {} pending · {} unresolved · {} recoverable attachment(s)",
+                continuity.pending_work_count,
+                continuity.unresolved_question_count,
+                continuity.recoverable_attachment_count,
+            ));
+        }
+        lines.push(if self.review.native_carrier_requested {
+            "native carrier: explicitly requested; exact-route capability is revalidated after portable apply"
+                .to_owned()
+        } else {
+            "native carrier: disabled; portable checkpoint only".to_owned()
+        });
+        if self.review.tool_output_shrink_candidates.is_empty() {
+            lines.push("next-epoch tool artifacts: none".to_owned());
+        } else {
+            lines.push(format!(
+                "next-epoch tool artifacts: {} recoverable candidate(s)",
+                self.review.tool_output_shrink_candidates.len()
+            ));
+            lines.extend(
+                self.review
+                    .tool_output_shrink_candidates
+                    .iter()
+                    .take(4)
+                    .map(|candidate| {
+                        format!(
+                            "  {} [{}] {} · {} bytes / <= {} tokens · {} · {}",
+                            candidate.tool_name,
+                            candidate.tool_call_id,
+                            candidate.status,
+                            candidate.original_content_bytes,
+                            candidate.original_content_token_upper_bound,
+                            candidate.content_sha256,
+                            candidate.artifact_ref,
+                        )
+                    }),
+            );
+            if let Some(candidate) = self.review.tool_output_shrink_candidates.first() {
+                lines.push(format!(
+                    "  head: {}",
+                    bounded_preview(&candidate.head_excerpt, 160)
+                ));
+                lines.push(format!(
+                    "  tail: {}",
+                    bounded_preview(&candidate.tail_excerpt, 160)
+                ));
+                lines.push(format!(
+                    "  reason: {} · {}",
+                    candidate.reason, candidate.recovery_instruction
+                ));
+            }
+        }
         match &self.review.admission {
+            V2CompactionAdmission::Prepared {
+                standalone_tool_output_shrink_available,
+            } => {
+                lines.push(
+                    "full compaction: Enter generates one billed semantic summary".to_owned(),
+                );
+                if *standalone_tool_output_shrink_available {
+                    lines.push(
+                        "S clean large tool outputs only · Enter full compaction · Esc keep current"
+                            .to_owned(),
+                    );
+                } else {
+                    lines.push("Enter full compaction · Esc keep current".to_owned());
+                }
+            }
             V2CompactionAdmission::Ready {
                 before_input_tokens,
                 input_tokens,
@@ -64,6 +207,13 @@ impl V2CompactionPreviewModalState {
                 savings_ratio_ppm,
                 minimum_savings_tokens,
                 minimum_savings_ratio_ppm,
+                summary_usage_observed,
+                deterministic_emergency_fallback,
+                summary_cache_read_tokens,
+                summary_uncached_input_tokens,
+                summary_output_tokens,
+                summary_cost_nano_usd,
+                economics_v2,
             } => {
                 lines.push("target request: verified locally".to_owned());
                 lines.push(format!(
@@ -73,6 +223,49 @@ impl V2CompactionPreviewModalState {
                     "savings: {before_input_tokens} -> {input_tokens} ({savings_tokens} tokens, {} ppm; minimum {minimum_savings_tokens} tokens / {minimum_savings_ratio_ppm} ppm)",
                     savings_ratio_ppm,
                 ));
+                if *summary_usage_observed {
+                    lines.push(format!(
+                        "summary call: cache-read {summary_cache_read_tokens} · uncached {summary_uncached_input_tokens} · output {summary_output_tokens} tokens{}",
+                        summary_cost_nano_usd.map_or_else(
+                            String::new,
+                            |cost| format!(" · {cost} nUSD"),
+                        ),
+                    ));
+                } else {
+                    lines.push(
+                        "summary call: provider usage unavailable; token and cost totals are unknown"
+                            .to_owned(),
+                    );
+                }
+                if *deterministic_emergency_fallback {
+                    lines.push(
+                        "continuity: audited deterministic emergency floor (semantic narrative unavailable)"
+                            .to_owned(),
+                    );
+                }
+                if let Some(economics) = economics_v2 {
+                    lines.push(format!(
+                        "forecast: {:?} · confidence {:?} · admission {:?} ({:?})",
+                        economics.forecast.pressure_state,
+                        economics.forecast.input.expected_remaining_turns.confidence,
+                        economics.admission.decision,
+                        economics.admission.reason,
+                    ));
+                    if let Some(cost) = &economics.cost_projection {
+                        lines.push(format!(
+                            "cost horizon: keep {} nUSD · rotate {} nUSD · break-even {}",
+                            cost.keep_cost_nano_usd,
+                            cost.rotate_cost_nano_usd,
+                            cost.break_even_turns
+                                .map_or_else(|| "none".to_owned(), |turns| turns.to_string()),
+                        ));
+                    } else {
+                        lines.push(
+                            "cost horizon: unavailable; token heuristic remains manual-only"
+                                .to_owned(),
+                        );
+                    }
+                }
                 lines.push("Enter apply  Esc cancel".to_owned());
             }
             V2CompactionAdmission::Unavailable { reason } => {
@@ -83,6 +276,15 @@ impl V2CompactionPreviewModalState {
         }
         lines
     }
+}
+
+fn bounded_preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.replace('\n', " ").chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return chars.into_iter().collect();
+    }
+    chars.truncate(max_chars);
+    chars.into_iter().chain(std::iter::once('…')).collect()
 }
 
 impl AppState {
@@ -105,13 +307,17 @@ impl AppState {
 
         let fold_count = review.preview.plan.folded_event_ids.len();
         let keep_count = review.preview.plan.retained_event_ids.len();
-        let admitted = matches!(review.admission, V2CompactionAdmission::Ready { .. });
+        let admitted = matches!(&review.admission, V2CompactionAdmission::Ready { .. });
+        let locally_prepared = matches!(&review.admission, V2CompactionAdmission::Prepared { .. });
         self.modal_state = Some(ModalState::V2CompactionPreview(Box::new(
             V2CompactionPreviewModalState { review },
         )));
         self.active_pane = PaneFocus::Activity;
         self.last_notice = Some(if admitted {
             "review V2 compaction; Enter applies the admitted checkpoint".to_owned()
+        } else if locally_prepared {
+            "review local compaction plan; Enter generates the billed summary, S cleans only large tool outputs"
+                .to_owned()
         } else {
             "review V2 compaction; local target request admission is unavailable".to_owned()
         });
@@ -119,9 +325,30 @@ impl AppState {
             "compact:preview",
             format!(
                 "fold={fold_count} keep={keep_count} apply={}",
-                if admitted { "admitted" } else { "unavailable" }
+                if admitted {
+                    "admitted"
+                } else if locally_prepared {
+                    "local_prepare"
+                } else {
+                    "unavailable"
+                }
             ),
         );
+    }
+
+    pub(super) fn apply_standalone_tool_output_shrink(
+        &mut self,
+        context_epoch_id: String,
+        projected_output_count: usize,
+        entries: Vec<sigil_kernel::SessionLogEntry>,
+    ) {
+        self.sync_current_session_state(entries);
+        let message = format!(
+            "Large tool outputs cleaned for the next context epoch: {projected_output_count} output(s) ({context_epoch_id})"
+        );
+        self.push_timeline(TimelineRole::Notice, message.clone());
+        self.push_event("compact:tool-output-shrink", message.clone());
+        self.last_notice = Some(message);
     }
 
     pub(super) fn apply_v2_compaction_applied(
@@ -163,5 +390,8 @@ fn protection_reason_label(reason: &CompactionFoldProtectionReason) -> &'static 
         CompactionFoldProtectionReason::MalformedMessage => "malformed message",
         CompactionFoldProtectionReason::UnsafeToolPair => "unsafe tool pair",
         CompactionFoldProtectionReason::UnpairedToolResult => "unpaired tool result",
+        CompactionFoldProtectionReason::WholeTurnAtomicity => "whole-turn atomicity",
+        CompactionFoldProtectionReason::ActiveToolOrApproval => "active tool/approval",
+        CompactionFoldProtectionReason::OrphanTurnMessage => "orphan turn message",
     }
 }

@@ -6,15 +6,16 @@ use futures::{Stream, stream};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 
 use sigil_kernel::{
-    CompletionRequest, HostedWebSearchCapability, ImageInputCapability, ModelRequestTimeouts,
-    PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor,
-    provider_status_error, read_provider_error_body, timeout_provider_request,
-    timeout_provider_stream_next,
+    CompactionCursor, CompletionRequest, FrozenProviderRequestMaterial, HostedWebSearchCapability,
+    ImageInputCapability, ModelRequestTimeouts, NativeCarrierPolicyV1,
+    NativeProviderCompactionMaterialization, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderContextCapabilities, ProviderStreamTimeoutState,
+    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, Session, provider_status_error,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
-    capabilities::anthropic_capabilities,
+    capabilities::{anthropic_capabilities, anthropic_context_capabilities},
     client::build_http_client,
     config::AnthropicProviderConfig,
     errors::{AnthropicProviderError, classify_status},
@@ -24,7 +25,14 @@ use crate::{
     },
     mapper::StreamMapper,
     models::AnthropicStreamEnvelope,
-    request::{anthropic_image_input_capability, build_messages_request_with_continuations},
+    native_compaction::{
+        ANTHROPIC_NATIVE_COMPACTION_MIN_TRIGGER_TOKENS, AnthropicNativeCompactionOptions,
+        is_native_compaction_model,
+    },
+    request::{
+        AnthropicCachePolicy, anthropic_image_input_capability,
+        build_messages_request_with_continuations,
+    },
     stream::{AnthropicSseDecoder, AnthropicSseFrame},
 };
 
@@ -90,8 +98,42 @@ impl Provider for AnthropicProvider {
         self.capabilities.clone()
     }
 
+    fn context_capabilities(&self, model_name: &str) -> ProviderContextCapabilities {
+        let official_route = self.hosted_platform == AnthropicHostedPlatform::ClaudeApi;
+        anthropic_context_capabilities(
+            official_route,
+            official_route
+                && self.config.anthropic_version == "2023-06-01"
+                && is_native_compaction_model(model_name),
+        )
+    }
+
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
         anthropic_image_input_capability(model_name)
+    }
+
+    async fn materialize_native_compaction_carrier(
+        &self,
+        session: &Session,
+        logical_run_id: String,
+        frozen_request: FrozenProviderRequestMaterial,
+        covers_through: CompactionCursor,
+        portable_compaction_id: sigil_kernel::CompactionId,
+        carrier_policy: NativeCarrierPolicyV1,
+    ) -> Result<Option<NativeProviderCompactionMaterialization>> {
+        self.compact_and_materialize_durable(
+            session,
+            logical_run_id,
+            frozen_request,
+            covers_through,
+            portable_compaction_id,
+            carrier_policy,
+            AnthropicNativeCompactionOptions {
+                trigger_input_tokens: ANTHROPIC_NATIVE_COMPACTION_MIN_TRIGGER_TOKENS,
+                instructions: None,
+            },
+        )
+        .await
     }
 
     fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {
@@ -118,6 +160,11 @@ impl Provider for AnthropicProvider {
             &request,
             self.config.max_tokens,
             &self.hosted_continuations,
+            if self.hosted_platform == AnthropicHostedPlatform::ClaudeApi {
+                AnthropicCachePolicy::StablePrefix
+            } else {
+                AnthropicCachePolicy::Disabled
+            },
         )?;
         let hosted_context = hosted_search.map(|hosted_search| AnthropicHostedStreamContext {
             authorization_id: hosted_search.authorization_id.clone(),

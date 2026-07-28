@@ -223,6 +223,7 @@ async fn collect_provider_turn_after_send_barrier<H>(
 where
     H: EventHandler + Send,
 {
+    let pricing_snapshot = provider.usage_pricing_snapshot(&request.model_name);
     let stream_result = match cancellation {
         Some(cancellation) => tokio::select! {
             biased;
@@ -243,6 +244,7 @@ where
             hosted_context,
             physical_attempt,
             generation_observed,
+            pricing_snapshot.as_ref(),
         )
         .await;
     }
@@ -366,7 +368,25 @@ where
                 handler.handle(RunEvent::ToolCallCompleted(projection.durable_call.clone()))?;
                 completed_calls.push(projection);
             }
-            ProviderChunk::Usage(usage) => {
+            ProviderChunk::Usage(mut usage) => {
+                let mutation = physical_attempt.cache_layout_mutation();
+                usage
+                    .cache_usage
+                    .get_or_insert(crate::CacheUsageV1 {
+                        schema_version: crate::CacheUsageV1::SCHEMA_VERSION,
+                        read: None,
+                        write: None,
+                        uncached: None,
+                        local_layout_mutation: None,
+                        provider_miss_without_local_mutation: false,
+                    })
+                    .observe_local_layout(mutation, usage.cache_miss_tokens);
+                if let Some(cache_usage) = &usage.cache_usage {
+                    cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
+                }
+                if let Some(snapshot) = &pricing_snapshot {
+                    usage = snapshot.apply_to_usage(usage)?;
+                }
                 session.stats_mut().apply_usage(&usage);
                 physical_attempt
                     .append_output_control(session, ControlEntry::UsageSnapshot(usage.clone()))
@@ -437,6 +457,7 @@ async fn collect_hosted_provider_turn<H>(
     context: crate::HostedFinalizationContext,
     physical_attempt: &mut ProviderPhysicalAttemptAudit,
     generation_observed: &mut bool,
+    pricing_snapshot: Option<&crate::ModelPricingSnapshotV1>,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
@@ -539,11 +560,30 @@ where
         .map_err(|_| crate::HostedTurnError::FinalizationFailed)?;
 
     for usage in buffer.usages() {
-        session.stats_mut().apply_usage(usage);
+        let mut usage = usage.clone();
+        let mutation = physical_attempt.cache_layout_mutation();
+        usage
+            .cache_usage
+            .get_or_insert(crate::CacheUsageV1 {
+                schema_version: crate::CacheUsageV1::SCHEMA_VERSION,
+                read: None,
+                write: None,
+                uncached: None,
+                local_layout_mutation: None,
+                provider_miss_without_local_mutation: false,
+            })
+            .observe_local_layout(mutation, usage.cache_miss_tokens);
+        if let Some(cache_usage) = &usage.cache_usage {
+            cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
+        }
+        if let Some(snapshot) = pricing_snapshot {
+            usage = snapshot.apply_to_usage(usage)?;
+        }
+        session.stats_mut().apply_usage(&usage);
         physical_attempt
             .append_output_control(session, ControlEntry::UsageSnapshot(usage.clone()))
             .await?;
-        handler.handle(RunEvent::Usage(usage.clone()))?;
+        handler.handle(RunEvent::Usage(usage))?;
     }
     for handle in buffer.response_handles() {
         *previous_response_handle = Some(handle.clone());

@@ -7,13 +7,13 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY
 
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
-    ProviderTimeoutPhase, SecretRedactor, provider_status_error, read_provider_error_body,
-    timeout_provider_request, timeout_provider_stream_next,
+    ProviderCapabilities, ProviderChunk, ProviderContextCapabilities, ProviderStreamTimeoutState,
+    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
-    capabilities::openai_compatible_capabilities,
+    capabilities::{openai_compatible_capabilities, openai_compatible_context_capabilities},
     client::build_http_client,
     config::OpenAiCompatibleProviderConfig,
     errors::{OpenAiCompatibleProviderError, classify_status},
@@ -98,6 +98,10 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
+        openai_compatible_context_capabilities()
     }
 
     async fn stream(

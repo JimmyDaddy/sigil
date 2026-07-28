@@ -82,6 +82,22 @@ impl FrozenProviderRequestMaterial {
         &self.canonical_bytes
     }
 
+    /// Builds a deterministic, hash-only cache shape proof for this frozen request.
+    ///
+    /// The proof is independent from the process-keyed request fingerprint and is therefore
+    /// suitable for cross-restart comparison. It never contains raw request material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request subsets cannot be canonicalized or the previous proof is
+    /// malformed.
+    pub fn cache_layout_proof(
+        &self,
+        previous: Option<&crate::CacheLayoutProofV1>,
+    ) -> Result<crate::CacheLayoutProofV1> {
+        crate::CacheLayoutProofV1::from_request(&self.request, previous)
+    }
+
     /// Consumes the frozen material and yields the exact request that was frozen.
     #[must_use]
     pub fn into_request(self) -> CompletionRequest {

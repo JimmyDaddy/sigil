@@ -189,6 +189,7 @@ fn append_candidate_backed_payload(
             },
             request_fingerprint: hmac('e'),
             sensitivity: ContextSensitivity::Repository,
+            carrier: None,
         }),
         resolution_mode: ProviderContinuationResolutionMode::NativeOnly,
         activation_gate: ProviderContinuationActivationGate::Immediate,
@@ -258,6 +259,7 @@ fn append_observed_physical_start(store: &JsonlSessionStore) -> Result<()> {
         request_material_fingerprint: hmac('a'),
         provider_name: "test-provider".to_owned(),
         model_name: "test-model".to_owned(),
+        cache_layout_proof: None,
         started_at_unix_ms: 1,
     };
     store

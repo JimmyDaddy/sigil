@@ -5410,7 +5410,7 @@ fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() ->
         },
     ))?;
     let locked_file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
-    locked_file.try_lock_exclusive()?;
+    lock_test_file_exclusive_with_retry(&locked_file)?;
 
     let options = run_options(temp.path().to_path_buf());
     let outcome = AgentRunOutcome {
@@ -5425,6 +5425,32 @@ fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() ->
         "an allowed network read must short-circuit before durable readiness projection"
     );
     Ok(())
+}
+
+fn lock_test_file_exclusive_with_retry(file: &fs::File) -> Result<()> {
+    const RETRIES: usize = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(5);
+
+    let mut last_error = None;
+    for attempt in 0..=RETRIES {
+        match FileExt::try_lock_exclusive(file) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+            {
+                last_error = Some(error);
+                if attempt < RETRIES {
+                    std::thread::sleep(RETRY_DELAY);
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(last_error
+        .expect("a contended test file lock records its final error")
+        .into())
 }
 
 #[test]

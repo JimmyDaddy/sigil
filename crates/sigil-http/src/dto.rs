@@ -10,7 +10,8 @@ use sigil_kernel::{
     TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
 };
 use sigil_runtime::application_compaction::{
-    ApplicationCompactionAdmission, ApplicationCompactionReview,
+    ApplicationCompactionAdmission, ApplicationCompactionDetailsView,
+    ApplicationCompactionPolicyView, ApplicationCompactionReview,
 };
 use sigil_runtime::application_recovery::{
     ApplicationCheckpointRestoreReview, ApplicationConversationRecoveryView,
@@ -2187,12 +2188,20 @@ pub struct HttpCompactionEconomics {
     pub savings_ratio_ppm: u32,
     pub minimum_savings_tokens: u64,
     pub minimum_savings_ratio_ppm: u32,
+    pub summary_cache_read_tokens: u64,
+    pub summary_uncached_input_tokens: u64,
+    pub summary_output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_cost_nano_usd: Option<u64>,
 }
 
-/// Typed portable-compaction admission returned by a read-only preview.
+/// Typed portable-compaction admission returned before activation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum HttpCompactionAdmission {
+    Prepared {
+        standalone_tool_output_shrink_available: bool,
+    },
     Ready {
         economics: HttpCompactionEconomics,
     },
@@ -2205,7 +2214,7 @@ pub enum HttpCompactionAdmission {
     },
 }
 
-/// Read-only exact compaction review. `preview_id` is process-local and required for apply.
+/// Exact pre-activation compaction review. `preview_id` is process-local and required for apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HttpCompactionReview {
@@ -2213,6 +2222,9 @@ pub struct HttpCompactionReview {
     pub preview_id: Option<String>,
     pub folded_event_count: usize,
     pub retained_event_count: usize,
+    pub policy: ApplicationCompactionPolicyView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<ApplicationCompactionDetailsView>>,
     pub admission: HttpCompactionAdmission,
 }
 
@@ -2222,7 +2234,14 @@ impl From<ApplicationCompactionReview> for HttpCompactionReview {
             preview_id: review.preview_id,
             folded_event_count: review.folded_event_count,
             retained_event_count: review.retained_event_count,
+            policy: review.policy,
+            details: review.details,
             admission: match review.admission {
+                ApplicationCompactionAdmission::Prepared {
+                    standalone_tool_output_shrink_available,
+                } => HttpCompactionAdmission::Prepared {
+                    standalone_tool_output_shrink_available,
+                },
                 ApplicationCompactionAdmission::Ready { economics } => {
                     HttpCompactionAdmission::Ready {
                         economics: HttpCompactionEconomics {
@@ -2235,6 +2254,10 @@ impl From<ApplicationCompactionReview> for HttpCompactionReview {
                             savings_ratio_ppm: economics.savings_ratio_ppm,
                             minimum_savings_tokens: economics.minimum_savings_tokens,
                             minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
+                            summary_cache_read_tokens: economics.summary_cache_read_tokens,
+                            summary_uncached_input_tokens: economics.summary_uncached_input_tokens,
+                            summary_output_tokens: economics.summary_output_tokens,
+                            summary_cost_nano_usd: economics.summary_cost_nano_usd,
                         },
                     }
                 }
@@ -2444,7 +2467,13 @@ impl From<ApplicationCheckpointRestoreReview> for HttpCheckpointRestoreReview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum HttpConversationRecoveryCommandAction {
+    PrepareCompaction {
+        preview_id: String,
+    },
     ApplyCompaction {
+        preview_id: String,
+    },
+    ApplyStandaloneToolOutputShrink {
         preview_id: String,
     },
     RestoreCheckpoint {
@@ -2461,7 +2490,9 @@ pub enum HttpConversationRecoveryCommandAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpConversationRecoveryCommandActionKind {
+    PrepareCompaction,
     ApplyCompaction,
+    ApplyStandaloneToolOutputShrink,
     RestoreCheckpoint,
     ForkConversation,
 }
@@ -2470,8 +2501,14 @@ impl HttpConversationRecoveryCommandAction {
     #[must_use]
     pub fn kind(&self) -> HttpConversationRecoveryCommandActionKind {
         match self {
+            Self::PrepareCompaction { .. } => {
+                HttpConversationRecoveryCommandActionKind::PrepareCompaction
+            }
             Self::ApplyCompaction { .. } => {
                 HttpConversationRecoveryCommandActionKind::ApplyCompaction
+            }
+            Self::ApplyStandaloneToolOutputShrink { .. } => {
+                HttpConversationRecoveryCommandActionKind::ApplyStandaloneToolOutputShrink
             }
             Self::RestoreCheckpoint { .. } => {
                 HttpConversationRecoveryCommandActionKind::RestoreCheckpoint
@@ -2492,6 +2529,16 @@ pub struct HttpCompactionReceipt {
     pub task_memory_id: String,
     pub folded_event_count: usize,
     pub tool_output_projection_recorded: bool,
+    pub native_carrier_materialized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_carrier_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpToolOutputShrinkReceipt {
+    pub context_epoch_id: String,
+    pub projected_output_count: usize,
 }
 
 /// Durable restore-specific receipt fields.
@@ -2524,6 +2571,10 @@ pub struct HttpConversationRecoveryCommandReceipt {
     pub action: HttpConversationRecoveryCommandActionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<HttpCompactionReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_review: Option<HttpCompactionReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_shrink: Option<HttpToolOutputShrinkReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<HttpCheckpointRestoreReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

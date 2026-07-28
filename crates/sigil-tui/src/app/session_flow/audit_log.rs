@@ -102,13 +102,36 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             truncate_session_view_text(&entry.durable_entry_id, 48),
             entry.restart_policy
         ),
-        ControlEntry::UsageSnapshot(usage) => format!(
-            "[ctl] usage p={} c={} hit={} miss={}",
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.cache_hit_tokens,
-            usage.cache_miss_tokens
-        ),
+        control @ (ControlEntry::UsageSnapshot(usage)
+        | ControlEntry::SemanticCompactionUsageSnapshot(usage)) => {
+            let write = usage
+                .cache_usage
+                .as_ref()
+                .and_then(|cache| cache.write.as_ref())
+                .map_or_else(|| "-".to_owned(), |count| count.tokens.to_string());
+            let mutation = usage
+                .cache_usage
+                .as_ref()
+                .and_then(|cache| cache.local_layout_mutation)
+                .map_or("unknown", sigil_kernel::CacheLayoutMutationKind::as_str);
+            let provider_miss_without_local_mutation = usage
+                .cache_usage
+                .as_ref()
+                .is_some_and(|cache| cache.provider_miss_without_local_mutation);
+            let usage_kind = if matches!(control, ControlEntry::SemanticCompactionUsageSnapshot(_))
+            {
+                "semantic-compaction usage"
+            } else {
+                "usage"
+            };
+            format!(
+                "[ctl] {usage_kind} p={} c={} read={} write={write} miss={} layout={mutation} provider_miss_without_local_mutation={provider_miss_without_local_mutation}",
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_hit_tokens,
+                usage.cache_miss_tokens
+            )
+        }
         ControlEntry::ToolApproval(approval) => format!(
             "[ctl] approval {} {} action={} effect={} local={} network={} source={} final={}",
             approval.call_id,

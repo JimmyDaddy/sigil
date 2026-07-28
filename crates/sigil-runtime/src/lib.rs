@@ -215,12 +215,19 @@ pub use plugins::{
     discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
 };
 pub use portable_compaction::{
-    DeepSeekV4FlashPortableTargetPressure, deepseek_v4_flash_portable_target_material,
+    DeepSeekV4FlashPortableTargetPressure, PortableCompactionEconomicsV2Input,
+    PortableCompactionSummary, SEMANTIC_COMPACTION_MAX_OUTPUT_TOKENS,
+    SemanticCompactionFallbackPolicy, attach_portable_compaction_economics_v2,
+    cache_aware_v3_automatic_supported, deepseek_v4_flash_portable_target_material,
     deepseek_v4_flash_portable_target_material_with_economics,
+    deepseek_v4_flash_portable_target_material_with_economics_v2_candidate,
     deepseek_v4_flash_portable_target_output_tokens, deepseek_v4_flash_portable_target_pressure,
-    deepseek_v4_flash_portable_target_proof, install_default_deepseek_v4_flash_tokenizer,
-    is_deepseek_v4_flash_portable_target_profile, is_openai_responses_portable_target_profile,
-    portable_compaction_target_output_tokens, require_default_deepseek_v4_flash_portable_transport,
+    deepseek_v4_flash_portable_target_proof, generate_portable_compaction_summary,
+    install_default_deepseek_v4_flash_tokenizer, is_deepseek_v4_flash_portable_target_profile,
+    is_openai_responses_portable_target_profile, materialize_native_compaction_carrier,
+    native_compaction_carrier_supported, portable_compaction_target_output_tokens,
+    record_semantic_compaction_failure, require_deepseek_v4_flash_portable_transport_for_model_ref,
+    require_default_deepseek_v4_flash_portable_transport,
 };
 pub use product_view::{
     AgentGraphProductSummary, ApplicationAgentActivityItem, ApplicationAgentActivityStatus,

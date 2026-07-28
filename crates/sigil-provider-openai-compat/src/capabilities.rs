@@ -1,4 +1,7 @@
-use sigil_kernel::{ProviderCapabilities, ReasoningStreamSupport};
+use sigil_kernel::{
+    CacheUsageCapabilities, ProviderCapabilities, ProviderContextCapabilities,
+    ReasoningStreamSupport,
+};
 
 pub fn openai_compatible_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
@@ -20,6 +23,14 @@ pub fn openai_compatible_capabilities() -> ProviderCapabilities {
         supports_system_fingerprint: true,
         tool_name_max_chars: 64,
     }
+}
+
+pub fn openai_compatible_context_capabilities() -> ProviderContextCapabilities {
+    ProviderContextCapabilities::observed_implicit_or_none(CacheUsageCapabilities {
+        read_tokens: true,
+        write_tokens: false,
+        miss_tokens: false,
+    })
 }
 
 #[cfg(test)]

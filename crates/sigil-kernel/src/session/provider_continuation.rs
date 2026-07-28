@@ -23,6 +23,8 @@ pub const PROVIDER_CONTINUATION_SCHEMA_VERSION: u16 = 1;
 /// Projection schema version for native-continuation observations, candidates, payloads, and
 /// provider-observed resolution plans.
 pub const PROVIDER_CONTINUATION_PROJECTION_SCHEMA_VERSION: u16 = 2;
+/// Schema version for a provider-neutral native acceleration carrier.
+pub const NATIVE_COMPACTION_CARRIER_SCHEMA_VERSION: u16 = 1;
 
 /// Maximum retained durable refs recorded by one provider-observed resolution plan.
 pub const MAX_PROVIDER_CONTINUATION_RESOLUTION_RETAINED_REFS: usize = 512;
@@ -56,6 +58,261 @@ pub struct NativeProviderCompactionMetadata {
     pub artifact_kind: String,
     /// Sensitivity inherited by the encrypted artifact.
     pub sensitivity: ContextSensitivity,
+}
+
+/// Whether one native carrier was created under a connection that permits provider retention.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderRetentionPolicyV1 {
+    Disallowed,
+    Allowed,
+}
+
+/// Retention/store facts frozen before a native compaction request is dispatched.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct NativeCarrierPolicyV1 {
+    pub provider_retention: ProviderRetentionPolicyV1,
+    pub request_store_mode: bool,
+    pub expires_at_unix_ms: Option<u64>,
+}
+
+impl NativeCarrierPolicyV1 {
+    pub(crate) fn validate_for_request(&self, request_store_mode: bool) -> Result<()> {
+        if self.request_store_mode != request_store_mode {
+            bail!("native carrier store policy does not match its frozen request");
+        }
+        if self.provider_retention == ProviderRetentionPolicyV1::Disallowed
+            && self.request_store_mode
+        {
+            bail!("native carrier cannot enable provider storage when retention is disallowed");
+        }
+        if self.expires_at_unix_ms == Some(0) {
+            bail!("native carrier expiry must be non-zero when present");
+        }
+        Ok(())
+    }
+}
+
+/// A condition that makes a native acceleration carrier unusable while leaving portable truth
+/// intact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeCarrierInvalidationV1 {
+    NativePayloadUnavailable,
+    ConnectionChanged,
+    ModelChanged,
+    ProtocolChanged,
+    SourceCursorChanged,
+    PortableCheckpointUnavailable,
+    RetentionPolicyChanged,
+    StoreModeChanged,
+    Expired,
+}
+
+/// Frozen facts used to decide whether a provider-native acceleration carrier remains usable.
+///
+/// A mismatch never damages portable truth: callers receive a deterministic portable fallback
+/// reason and can compose the already-validated checkpoint without a model call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCarrierResumeContextV1 {
+    pub connection_fingerprint: String,
+    pub model_snapshot_id: String,
+    pub protocol_version: String,
+    pub source_cursor: CompactionCursor,
+    pub portable_compaction_id: CompactionId,
+    pub portable_checkpoint_id: String,
+    pub policy: NativeCarrierPolicyV1,
+    pub native_payload_available: bool,
+    pub portable_checkpoint_available: bool,
+    pub now_unix_ms: u64,
+}
+
+/// Result of validating one optional native acceleration layer during resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCarrierResumeDecisionV1 {
+    UseNative,
+    UsePortable { reason: NativeCarrierInvalidationV1 },
+}
+
+/// Provider-neutral durable binding around one protected provider-native payload.
+///
+/// The opaque bytes remain in the encrypted payload store. This record only proves how that
+/// acceleration layer is bound to an already-active portable checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct NativeCompactionCarrierV1 {
+    pub schema_version: u16,
+    pub connection_fingerprint: String,
+    pub model_snapshot_id: String,
+    pub protocol_version: String,
+    pub source_cursor: CompactionCursor,
+    pub portable_compaction_id: CompactionId,
+    pub portable_checkpoint_id: String,
+    pub protected_payload_id: ProviderContinuationPayloadId,
+    pub protected_storage_id: String,
+    pub policy: NativeCarrierPolicyV1,
+    pub expires_or_invalidates_on: Vec<NativeCarrierInvalidationV1>,
+}
+
+impl NativeCompactionCarrierV1 {
+    pub(crate) fn validate_shape(&self) -> Result<()> {
+        if self.schema_version != NATIVE_COMPACTION_CARRIER_SCHEMA_VERSION {
+            bail!("unsupported native compaction carrier schema version");
+        }
+        validate_digest(
+            "native carrier connection fingerprint",
+            &self.connection_fingerprint,
+            "hmac-sha256:",
+        )?;
+        validate_digest(
+            "native carrier model snapshot id",
+            &self.model_snapshot_id,
+            "sha256:",
+        )?;
+        validate_identity(
+            "native carrier protocol version",
+            &self.protocol_version,
+            512,
+        )?;
+        validate_cursor_shape(&self.source_cursor)?;
+        validate_identity(
+            "native carrier portable compaction id",
+            &self.portable_compaction_id,
+            512,
+        )?;
+        validate_identity(
+            "native carrier portable checkpoint id",
+            &self.portable_checkpoint_id,
+            512,
+        )?;
+        validate_identity(
+            "native carrier protected payload id",
+            &self.protected_payload_id,
+            512,
+        )?;
+        validate_identity(
+            "native carrier protected storage id",
+            &self.protected_storage_id,
+            512,
+        )?;
+        self.policy
+            .validate_for_request(self.policy.request_store_mode)?;
+        let unique = self
+            .expires_or_invalidates_on
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if unique.len() != self.expires_or_invalidates_on.len() {
+            bail!("native carrier invalidation conditions must be unique");
+        }
+        for required in [
+            NativeCarrierInvalidationV1::NativePayloadUnavailable,
+            NativeCarrierInvalidationV1::ConnectionChanged,
+            NativeCarrierInvalidationV1::ModelChanged,
+            NativeCarrierInvalidationV1::ProtocolChanged,
+            NativeCarrierInvalidationV1::SourceCursorChanged,
+            NativeCarrierInvalidationV1::PortableCheckpointUnavailable,
+            NativeCarrierInvalidationV1::RetentionPolicyChanged,
+            NativeCarrierInvalidationV1::StoreModeChanged,
+        ] {
+            if !unique.contains(&required) {
+                bail!("native carrier is missing a required invalidation condition");
+            }
+        }
+        if self.policy.expires_at_unix_ms.is_some()
+            != unique.contains(&NativeCarrierInvalidationV1::Expired)
+        {
+            bail!("native carrier expiry and invalidation condition are inconsistent");
+        }
+        Ok(())
+    }
+
+    /// Validates the complete route/model/protocol/policy binding before native reuse.
+    ///
+    /// Carrier incompatibility is intentionally returned as `UsePortable`, not as an error.
+    /// Errors are reserved for malformed durable data or malformed resume facts.
+    pub fn resume_decision(
+        &self,
+        context: &NativeCarrierResumeContextV1,
+    ) -> Result<NativeCarrierResumeDecisionV1> {
+        self.validate_shape()?;
+        context
+            .policy
+            .validate_for_request(context.policy.request_store_mode)?;
+        validate_digest(
+            "native carrier resume connection fingerprint",
+            &context.connection_fingerprint,
+            "hmac-sha256:",
+        )?;
+        validate_digest(
+            "native carrier resume model snapshot id",
+            &context.model_snapshot_id,
+            "sha256:",
+        )?;
+        validate_identity(
+            "native carrier resume protocol version",
+            &context.protocol_version,
+            512,
+        )?;
+        validate_cursor_shape(&context.source_cursor)?;
+        validate_identity(
+            "native carrier resume portable compaction id",
+            &context.portable_compaction_id,
+            512,
+        )?;
+        validate_identity(
+            "native carrier resume portable checkpoint id",
+            &context.portable_checkpoint_id,
+            512,
+        )?;
+        if context.now_unix_ms == 0 {
+            bail!("native carrier resume time must be non-zero");
+        }
+
+        let portable = |reason| NativeCarrierResumeDecisionV1::UsePortable { reason };
+        if !context.portable_checkpoint_available
+            || self.portable_compaction_id != context.portable_compaction_id
+            || self.portable_checkpoint_id != context.portable_checkpoint_id
+        {
+            return Ok(portable(
+                NativeCarrierInvalidationV1::PortableCheckpointUnavailable,
+            ));
+        }
+        if !context.native_payload_available {
+            return Ok(portable(
+                NativeCarrierInvalidationV1::NativePayloadUnavailable,
+            ));
+        }
+        if self.connection_fingerprint != context.connection_fingerprint {
+            return Ok(portable(NativeCarrierInvalidationV1::ConnectionChanged));
+        }
+        if self.model_snapshot_id != context.model_snapshot_id {
+            return Ok(portable(NativeCarrierInvalidationV1::ModelChanged));
+        }
+        if self.protocol_version != context.protocol_version {
+            return Ok(portable(NativeCarrierInvalidationV1::ProtocolChanged));
+        }
+        if self.source_cursor != context.source_cursor {
+            return Ok(portable(NativeCarrierInvalidationV1::SourceCursorChanged));
+        }
+        if self.policy.provider_retention != context.policy.provider_retention {
+            return Ok(portable(
+                NativeCarrierInvalidationV1::RetentionPolicyChanged,
+            ));
+        }
+        if self.policy.request_store_mode != context.policy.request_store_mode {
+            return Ok(portable(NativeCarrierInvalidationV1::StoreModeChanged));
+        }
+        if self
+            .policy
+            .expires_at_unix_ms
+            .is_some_and(|expires_at| expires_at <= context.now_unix_ms)
+        {
+            return Ok(portable(NativeCarrierInvalidationV1::Expired));
+        }
+        Ok(NativeCarrierResumeDecisionV1::UseNative)
+    }
 }
 
 impl NativeProviderCompactionMetadata {
@@ -236,6 +493,8 @@ pub struct ProviderCompactionArtifactRef {
     pub covers_through: CompactionCursor,
     pub request_fingerprint: String,
     pub sensitivity: ContextSensitivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<NativeCompactionCarrierV1>,
 }
 
 impl ProviderCompactionArtifactRef {
@@ -258,7 +517,19 @@ impl ProviderCompactionArtifactRef {
         )?;
         validate_identity("provider continuation artifact id", &self.artifact_id, 512)?;
         validate_label("provider continuation artifact kind", &self.artifact_kind)?;
-        validate_cursor_shape(&self.covers_through)
+        validate_cursor_shape(&self.covers_through)?;
+        if let Some(carrier) = &self.carrier {
+            carrier.validate_shape()?;
+            if carrier.connection_fingerprint != self.provider_route_fingerprint
+                || carrier.model_snapshot_id != self.model_metadata_profile.content_hash
+                || carrier.source_cursor != self.covers_through
+                || carrier.protected_payload_id != self.payload.payload_id
+                || carrier.protected_storage_id != self.artifact_id
+            {
+                bail!("native carrier does not match its provider artifact reference");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -281,6 +552,8 @@ pub struct ProviderContinuationHandleRef {
     pub request_fingerprint: String,
     pub sensitivity: ContextSensitivity,
     pub expires_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<NativeCompactionCarrierV1>,
 }
 
 impl ProviderContinuationHandleRef {
@@ -305,7 +578,19 @@ impl ProviderContinuationHandleRef {
         if self.expires_at_unix_ms == Some(0) {
             bail!("provider continuation handle expiry must be non-zero when present")
         }
-        validate_cursor_shape(&self.covers_through)
+        validate_cursor_shape(&self.covers_through)?;
+        if let Some(carrier) = &self.carrier {
+            carrier.validate_shape()?;
+            if carrier.connection_fingerprint != self.provider_route_fingerprint
+                || carrier.model_snapshot_id != self.model_metadata_profile.content_hash
+                || carrier.source_cursor != self.covers_through
+                || carrier.protected_payload_id != self.payload.payload_id
+                || carrier.protected_storage_id != self.state_id
+            {
+                bail!("native carrier does not match its provider handle reference");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -767,6 +1052,7 @@ pub enum ProviderContinuationCandidateInvalidationReason {
     ResolutionPlanPersistenceAbsent,
     ActivationLeaseExpired,
     SourceAttemptDidNotComplete,
+    NativeCarrierUnavailable,
 }
 
 /// Which durable evidence authorizes a provider-observed candidate invalidation.
@@ -1725,7 +2011,7 @@ impl ProviderContinuationProjection {
                     self.apply_payload_lifecycle(event, entry)?;
                 }
                 TypedDomainEvent::ProviderContinuationCandidateRecorded(entry) => {
-                    self.apply_candidate(event, entry)?;
+                    self.apply_candidate(event, *entry)?;
                 }
                 TypedDomainEvent::ProviderContinuationCandidateInvalidated(entry) => {
                     self.apply_candidate_invalidation(event, entry, physical_attempts)?;

@@ -875,6 +875,23 @@ impl AppState {
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
+                        ConfigField::CompactionNativeCarrierEnabled => {
+                            config_state.draft.compaction_native_carrier_enabled =
+                                !config_state.draft.compaction_native_carrier_enabled;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::CompactionStrategy => {
+                            config_state.draft.compaction_strategy =
+                                config_state.draft.compaction_strategy.next();
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!(
+                                "updated {} · legacy threshold/tail fields remain readable for migration",
+                                field.label()
+                            ));
+                            return Ok(None);
+                        }
                         ConfigField::CodeIntelEnabled => {
                             config_state.draft.code_intelligence_enabled =
                                 !config_state.draft.code_intelligence_enabled;

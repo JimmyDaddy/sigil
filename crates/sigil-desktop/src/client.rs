@@ -1510,9 +1510,11 @@ fn validate_conversation_recovery_action(
     action: &DesktopConversationRecoveryCommandAction,
 ) -> Result<(), DesktopClientError> {
     match action {
-        DesktopConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
-            validate_recovery_token(preview_id)
-        }
+        DesktopConversationRecoveryCommandAction::PrepareCompaction { preview_id }
+        | DesktopConversationRecoveryCommandAction::ApplyCompaction { preview_id }
+        | DesktopConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink {
+            preview_id,
+        } => validate_recovery_token(preview_id),
         DesktopConversationRecoveryCommandAction::RestoreCheckpoint {
             checkpoint_id,
             checkpoint_digest,

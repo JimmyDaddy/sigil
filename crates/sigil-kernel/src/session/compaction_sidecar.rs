@@ -25,6 +25,10 @@ pub const CONTINUATION_CHECKPOINT_V1_SCHEMA_VERSION: u16 = 1;
 pub const MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS: usize = 128;
 /// A checkpoint must remain a bounded continuation artifact, not a second raw transcript.
 pub const MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES: usize = 16 * 1024;
+/// Maximum raw JSON bytes accepted from one semantic-compaction model response.
+pub const MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES: usize = 64 * 1024;
+/// Maximum folded source identities included in one semantic-compaction instruction.
+pub const MAX_SEMANTIC_COMPACTION_SOURCE_INDEX_ENTRIES: usize = 2_048;
 
 /// How the checkpoint is materialized for the next provider turn.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,6 +270,124 @@ pub struct ContinuationModelOutputItemV1 {
     pub priority: ContinuationItemPriority,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SemanticCompactionSourceIndexEntry<'a> {
+    transcript_ordinal: usize,
+    event_id: &'a str,
+    message_id: Option<&'a str>,
+    role: &'a str,
+}
+
+/// Builds the one append-only instruction added after the exact current-epoch request.
+///
+/// The instruction carries only a bounded identity/role index. It does not duplicate transcript
+/// content, so providers can reuse the preceding request prefix while the model can still return
+/// closed-catalog event references.
+///
+/// # Errors
+///
+/// Returns an error when the fold plan is stale, the source index is too large, or the bounded
+/// instruction cannot be serialized.
+pub fn build_semantic_compaction_instruction(
+    records: &[SessionStreamRecord],
+    plan: &super::compaction_plan::CompactionFoldPlan,
+) -> Result<crate::ModelMessage> {
+    let catalog = ContinuationSourceCatalog::from_fold_plan(records, plan)?;
+    if catalog.entries.is_empty()
+        || catalog.entries.len() > MAX_SEMANTIC_COMPACTION_SOURCE_INDEX_ENTRIES
+    {
+        bail!(
+            "semantic compaction source index must contain 1..={MAX_SEMANTIC_COMPACTION_SOURCE_INDEX_ENTRIES} entries"
+        );
+    }
+    let mut entries = catalog.entries.values().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.source.stream_sequence);
+    let source_index = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| SemanticCompactionSourceIndexEntry {
+            transcript_ordinal: index.saturating_add(1),
+            event_id: entry.source.event_id.as_str(),
+            message_id: entry.source.message_id.as_deref(),
+            role: match entry.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+                MessageRole::System => "system",
+            },
+        })
+        .collect::<Vec<_>>();
+    let source_json =
+        serde_json::to_string(&source_index).context("failed to encode compaction source index")?;
+    let content = format!(
+        "Create a compact semantic continuation for the prior conversation. Return exactly one JSON object and no markdown. \
+The object schema is {{\"in_progress\":[item],\"pending_actions\":[item],\"provider_continuity\":[item],\"model_notes\":[item]}}. \
+Each item is {{\"text\":string,\"source_event_ids\":[string,...],\"priority\":\"critical\"|\"normal\"}}. \
+Every item must cite one or more event_id values from SOURCE_INDEX. The source index follows the foldable transcript messages in transcript_ordinal order. \
+Summarize technical rationale, causal context, unresolved work, and provider-specific continuity that would otherwise require rediscovery. \
+Do not claim that work is completed, verified, approved, or authorized. Do not create, replace, or revoke user constraints or objectives. \
+Use at most {MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS} items per section and keep each text under {MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES} bytes. \
+SOURCE_INDEX={source_json}"
+    );
+    if content.len() > MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES.saturating_mul(2) {
+        bail!("semantic compaction instruction exceeds its bounded size");
+    }
+    Ok(crate::ModelMessage {
+        id: format!(
+            "semantic-compaction-instruction:{}",
+            plan.base_stream_cursor.last_applied_event_id
+        ),
+        role: MessageRole::User,
+        content: Some(content),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        assistant_kind: None,
+        image_attachments: Vec::new(),
+    })
+}
+
+/// Parses the strict, bounded JSON response returned by the semantic compressor.
+///
+/// # Errors
+///
+/// Returns an error for markdown wrappers, malformed/oversized JSON, an empty candidate, or
+/// section cardinality beyond the portable checkpoint contract.
+pub fn parse_semantic_compaction_output(text: &str) -> Result<ContinuationModelOutputV1> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES {
+        bail!("semantic compaction output is empty or exceeds its bounded size");
+    }
+    let output: ContinuationModelOutputV1 =
+        serde_json::from_str(text).context("semantic compaction output is not strict JSON")?;
+    let sections = [
+        output.in_progress.as_slice(),
+        output.pending_actions.as_slice(),
+        output.provider_continuity.as_slice(),
+        output.model_notes.as_slice(),
+    ];
+    if sections.iter().all(|section| section.is_empty()) {
+        bail!("semantic compaction output contains no narrative items");
+    }
+    for section in sections {
+        if section.len() > MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS {
+            bail!("semantic compaction output section exceeds its item limit");
+        }
+        for item in section {
+            if item.text.trim().is_empty()
+                || item.text.len() > MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES
+                || item.source_event_ids.is_empty()
+                || contains_authority_claim(&item.text)
+            {
+                bail!(
+                    "semantic compaction output item is empty, oversized, ungrounded, or claims authority"
+                );
+            }
+        }
+    }
+    Ok(output)
+}
+
 /// Closed deterministic catalog exposed to the semantic compressor for one exact fold plan.
 ///
 /// The source text is intentionally in-memory only. Persisted checkpoints keep just validated
@@ -401,7 +523,10 @@ impl ContinuationSourceCatalog {
                 entry
                     .text
                     .as_ref()
-                    .filter(|text| !text.trim().is_empty())
+                    .filter(|text| {
+                        !text.trim().is_empty()
+                            && text.len() <= MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES
+                    })
                     .map(|text| ContinuationItemV1 {
                         text: text.clone(),
                         source_refs: vec![entry.source.clone()],
@@ -436,8 +561,14 @@ pub struct ContinuationCheckpointV1 {
     pub valid_for_snapshot: Option<crate::WorkspaceSnapshotId>,
     pub source_plan_cursor: Option<ProjectionCursor>,
     pub requested_tail_message_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_tail: Option<AdaptiveTailSelectionV3>,
     pub prior_folded_through: Option<CompactionCursor>,
     pub target_request_fit: Option<ContinuationTargetRequestFitV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_anchor: Option<SessionAnchorV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity_v2: Option<ConversationContinuityV2>,
     pub pinned_user_constraints: Vec<ContinuationItemV1>,
     pub in_progress: Vec<ContinuationItemV1>,
     pub pending_actions: Vec<ContinuationItemV1>,
@@ -456,8 +587,11 @@ impl ContinuationCheckpointV1 {
             valid_for_snapshot: None,
             source_plan_cursor: None,
             requested_tail_message_count: None,
+            adaptive_tail: None,
             prior_folded_through: None,
             target_request_fit: None,
+            session_anchor: None,
+            continuity_v2: None,
             pinned_user_constraints: Vec::new(),
             in_progress: Vec::new(),
             pending_actions: Vec::new(),
@@ -493,16 +627,50 @@ impl ContinuationCheckpointV1 {
     /// are invalid.
     pub fn from_catalog_and_model_output(
         language: impl Into<String>,
+        records: &[SessionStreamRecord],
         task_memory: &TaskMemoryV1,
         catalog: &ContinuationSourceCatalog,
         plan: &CompactionFoldPlan,
         output: ContinuationModelOutputV1,
+        previous_checkpoint_id: Option<String>,
+        completed_at_unix_ms: u64,
     ) -> Result<Self> {
         task_memory.validate()?;
         if plan.session_id != catalog.session_id {
             bail!("continuation checkpoint plan and source catalog sessions do not match");
         }
         let valid_for_snapshot = task_memory.valid_for_snapshot.clone();
+        let in_progress =
+            model_items_from_output(catalog, &valid_for_snapshot, output.in_progress)?;
+        let pending_actions =
+            model_items_from_output(catalog, &valid_for_snapshot, output.pending_actions)?;
+        let provider_continuity =
+            model_items_from_output(catalog, &valid_for_snapshot, output.provider_continuity)?;
+        let model_notes =
+            model_items_from_output(catalog, &valid_for_snapshot, output.model_notes)?;
+        let session_anchor = SessionAnchorV1::derive(records, task_memory, completed_at_unix_ms)?;
+        let narrative_items = [
+            in_progress.as_slice(),
+            pending_actions.as_slice(),
+            provider_continuity.as_slice(),
+            model_notes.as_slice(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|item| grounded_narrative_item(records, item))
+        .collect::<Result<Vec<_>>>()?;
+        let continuity_v2 = ConversationContinuityV2::derive(
+            records,
+            task_memory,
+            &session_anchor,
+            previous_checkpoint_id,
+            narrative_items,
+        )?;
+        let pinned_user_constraints = if session_anchor.uses_legacy_authority() {
+            catalog.pinned_user_items()?
+        } else {
+            Vec::new()
+        };
         let checkpoint = Self {
             schema_version: CONTINUATION_CHECKPOINT_V1_SCHEMA_VERSION,
             kind: ContinuationCheckpointKind::PortableSemantic,
@@ -511,21 +679,16 @@ impl ContinuationCheckpointV1 {
             valid_for_snapshot: Some(valid_for_snapshot.clone()),
             source_plan_cursor: Some(plan.base_stream_cursor.clone()),
             requested_tail_message_count: Some(plan.requested_tail_message_count),
+            adaptive_tail: plan.adaptive_tail.clone(),
             prior_folded_through: plan.prior_folded_through.clone(),
             target_request_fit: None,
-            pinned_user_constraints: catalog.pinned_user_items()?,
-            in_progress: model_items_from_output(catalog, &valid_for_snapshot, output.in_progress)?,
-            pending_actions: model_items_from_output(
-                catalog,
-                &valid_for_snapshot,
-                output.pending_actions,
-            )?,
-            provider_continuity: model_items_from_output(
-                catalog,
-                &valid_for_snapshot,
-                output.provider_continuity,
-            )?,
-            model_notes: model_items_from_output(catalog, &valid_for_snapshot, output.model_notes)?,
+            session_anchor: Some(session_anchor),
+            continuity_v2: Some(continuity_v2),
+            pinned_user_constraints,
+            in_progress,
+            pending_actions,
+            provider_continuity,
+            model_notes,
         };
         checkpoint.validate_against_catalog(task_memory, catalog)?;
         Ok(checkpoint)
@@ -553,6 +716,8 @@ impl ContinuationCheckpointV1 {
                 "language": self.language,
                 "task_memory_id": self.task_memory_id,
                 "valid_for_snapshot": self.valid_for_snapshot,
+                "session_anchor": self.session_anchor,
+                "continuity_v2": self.continuity_v2,
                 "pinned_user_constraints": self.pinned_user_constraints,
                 "in_progress": self.in_progress,
                 "pending_actions": self.pending_actions,
@@ -642,13 +807,22 @@ impl ContinuationCheckpointV1 {
         if self.task_memory_id.is_some() != self.valid_for_snapshot.is_some() {
             bail!("continuation checkpoint memory and snapshot bindings must appear together");
         }
+        if self.session_anchor.is_some() != self.continuity_v2.is_some() {
+            bail!("continuation checkpoint anchor and V2 continuity must appear together");
+        }
+        if let (Some(anchor), Some(continuity)) = (&self.session_anchor, &self.continuity_v2) {
+            anchor.validate_shape()?;
+            continuity.validate_shape(anchor)?;
+        }
         match self.kind {
             ContinuationCheckpointKind::None => {
                 if self.task_memory_id.is_some()
                     || self.source_plan_cursor.is_some()
                     || self.requested_tail_message_count.is_some()
+                    || self.adaptive_tail.is_some()
                     || self.prior_folded_through.is_some()
                     || self.target_request_fit.is_some()
+                    || self.session_anchor.is_some()
                 {
                     bail!("empty continuation checkpoint has durable bindings");
                 }
@@ -657,8 +831,10 @@ impl ContinuationCheckpointV1 {
                 if self.task_memory_id.is_none()
                     || self.source_plan_cursor.is_some()
                     || self.requested_tail_message_count.is_some()
+                    || self.adaptive_tail.is_some()
                     || self.prior_folded_through.is_some()
                     || self.target_request_fit.is_some()
+                    || self.session_anchor.is_some()
                 {
                     bail!("provider-native continuation checkpoint bindings are invalid");
                 }
@@ -679,6 +855,12 @@ impl ContinuationCheckpointV1 {
                     || cursor.last_applied_record_checksum.trim().is_empty()
                 {
                     bail!("portable continuation checkpoint bindings are invalid");
+                }
+                if let Some(adaptive_tail) = &self.adaptive_tail {
+                    adaptive_tail.policy.validate()?;
+                    if adaptive_tail.exact_fit_limit_tokens == 0 {
+                        bail!("portable continuation checkpoint adaptive tail is invalid");
+                    }
                 }
             }
         }
@@ -727,7 +909,15 @@ impl ContinuationCheckpointV1 {
         if catalog.session_id.trim().is_empty() {
             bail!("continuation source catalog session id is empty");
         }
-        let expected_pinned = catalog.pinned_user_items()?;
+        let expected_pinned = if self
+            .session_anchor
+            .as_ref()
+            .is_some_and(|anchor| !anchor.uses_legacy_authority())
+        {
+            Vec::new()
+        } else {
+            catalog.pinned_user_items()?
+        };
         if self.pinned_user_constraints != expected_pinned {
             bail!("continuation checkpoint does not preserve exact pinned user constraints");
         }
@@ -854,6 +1044,33 @@ fn model_items_from_output(
         .collect()
 }
 
+fn grounded_narrative_item(
+    records: &[SessionStreamRecord],
+    item: &ContinuationItemV1,
+) -> Result<GroundedContinuityItemV2> {
+    let grounded = GroundedContinuityItemV2 {
+        text: item.text.clone(),
+        source_refs: item
+            .source_refs
+            .iter()
+            .map(|source| {
+                let record = records
+                    .iter()
+                    .find(|record| record.event_id() == source.event_id)
+                    .context("continuity narrative source event is absent")?;
+                SourceSpanRefV1::from_whole_event(record, source.message_id.clone())
+            })
+            .collect::<Result<Vec<_>>>()?,
+        artifact_ref: item
+            .source_refs
+            .iter()
+            .find_map(|source| source.artifact_id.clone()),
+        receipt_ref: None,
+    };
+    grounded.validate_shape()?;
+    Ok(grounded)
+}
+
 fn validate_model_item_against_catalog(
     item: &ContinuationItemV1,
     catalog: &ContinuationSourceCatalog,
@@ -941,6 +1158,12 @@ fn render_portable_checkpoint(
     checkpoint: &ContinuationCheckpointV1,
     memory: &TaskMemoryV1,
 ) -> Result<String> {
+    if let (Some(anchor), Some(continuity)) =
+        (&checkpoint.session_anchor, &checkpoint.continuity_v2)
+        && !anchor.uses_legacy_authority()
+    {
+        return render_portable_checkpoint_v2(anchor, continuity);
+    }
     let mut rendered = String::from(
         "Sigil continuation checkpoint (durable facts and unverified model notes):\n\n",
     );
@@ -1069,6 +1292,136 @@ fn render_portable_checkpoint(
             ),
     );
     Ok(rendered)
+}
+
+fn render_portable_checkpoint_v2(
+    anchor: &SessionAnchorV1,
+    continuity: &ConversationContinuityV2,
+) -> Result<String> {
+    anchor.validate_shape()?;
+    continuity.validate_shape(anchor)?;
+    let mut rendered = String::from(
+        "Sigil continuity V2 (accepted authority, grounded durable evidence, and explicitly untrusted narrative):\n\n",
+    );
+    render_section(
+        &mut rendered,
+        "Root Objective",
+        std::iter::once(format!(
+            "{} [authority event: {}]",
+            anchor.root_objective.exact_text, anchor.root_objective.source.event_id
+        )),
+    );
+    render_section(
+        &mut rendered,
+        "Active Subgoal",
+        anchor.active_subgoal.iter().map(|statement| {
+            format!(
+                "{} [authority event: {}]",
+                statement.exact_text, statement.source.event_id
+            )
+        }),
+    );
+    render_section(
+        &mut rendered,
+        "Active Constraints",
+        anchor
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.status == ConstraintStatusV1::Active)
+            .map(render_anchored_constraint)
+            .chain(
+                anchor
+                    .authorization_boundary
+                    .iter()
+                    .filter(|constraint| constraint.status == ConstraintStatusV1::Active)
+                    .map(render_anchored_constraint),
+            ),
+    );
+    render_section(
+        &mut rendered,
+        "Active Plan",
+        continuity
+            .progress
+            .iter()
+            .map(|item| format!("[Completed] {}", render_grounded_item(item)))
+            .chain(
+                continuity
+                    .pending_work
+                    .iter()
+                    .map(|item| format!("[Pending] {}", render_grounded_item(item))),
+            ),
+    );
+    render_section(
+        &mut rendered,
+        "Key Decisions",
+        continuity.decisions.iter().map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Files & Artifacts",
+        continuity
+            .files_and_artifacts
+            .iter()
+            .map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Commands",
+        continuity.commands.iter().map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Verification",
+        continuity.verification.iter().map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Failures & Dead Ends",
+        continuity
+            .failures_and_dead_ends
+            .iter()
+            .map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Risks",
+        continuity.risks.iter().map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Unresolved Questions",
+        continuity
+            .unresolved_questions
+            .iter()
+            .map(render_grounded_item),
+    );
+    render_section(
+        &mut rendered,
+        "Untrusted Model Narrative",
+        continuity
+            .narrative
+            .iter()
+            .flat_map(|narrative| &narrative.items)
+            .map(|item| format!("[model-generated, unverified] {}", item.text)),
+    );
+    Ok(rendered)
+}
+
+fn render_anchored_constraint(constraint: &ActiveConstraintV1) -> String {
+    format!(
+        "{} [authority event: {}]",
+        constraint.exact_text, constraint.source.event_id
+    )
+}
+
+fn render_grounded_item(item: &GroundedContinuityItemV2) -> String {
+    let sources = item
+        .source_refs
+        .iter()
+        .map(|source| source.event_id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{} [durable sources: {sources}]", item.text)
 }
 
 fn render_section<I, S>(rendered: &mut String, heading: &str, items: I)
@@ -1404,6 +1757,27 @@ impl CompactionSidecarProjection {
             if parent.task_memory.branch_id != recorded.entry.memory.branch_id {
                 bail!("task memory supersedes lineage crosses branches");
             }
+            let expected_previous = parent
+                .checkpoint
+                .continuity_v2
+                .as_ref()
+                .map(|continuity| continuity.checkpoint_id.as_str());
+            if entry
+                .checkpoint
+                .continuity_v2
+                .as_ref()
+                .and_then(|continuity| continuity.previous_checkpoint_id.as_deref())
+                != expected_previous
+            {
+                bail!("conversation continuity previous checkpoint does not match parent");
+            }
+        } else if entry
+            .checkpoint
+            .continuity_v2
+            .as_ref()
+            .is_some_and(|continuity| continuity.previous_checkpoint_id.is_some())
+        {
+            bail!("root conversation continuity cannot reference a previous checkpoint");
         }
         self.active.insert(
             entry.compaction_id.clone(),
@@ -1670,16 +2044,33 @@ fn validate_portable_checkpoint_activation(
         bail!("portable checkpoint source plan cursor does not match raw history");
     }
     let source_records = &records[..source_count];
-    let plan = CompactionFoldPlan::from_records_after(
-        source_records,
-        entry
-            .checkpoint
-            .requested_tail_message_count
-            .expect("portable checkpoint shape was validated before activation"),
-        entry.checkpoint.prior_folded_through.as_ref(),
-    )?;
+    if let (Some(anchor), Some(continuity)) = (
+        &entry.checkpoint.session_anchor,
+        &entry.checkpoint.continuity_v2,
+    ) {
+        anchor.validate_against_records(source_records)?;
+        continuity.validate_against_records(source_records, anchor)?;
+    }
+    let plan = if let Some(adaptive_tail) = &entry.checkpoint.adaptive_tail {
+        CompactionFoldPlan::from_records_after_adaptive_tail(
+            source_records,
+            adaptive_tail.policy.clone(),
+            adaptive_tail.exact_fit_limit_tokens,
+            entry.checkpoint.prior_folded_through.as_ref(),
+        )?
+    } else {
+        CompactionFoldPlan::from_records_after(
+            source_records,
+            entry
+                .checkpoint
+                .requested_tail_message_count
+                .expect("portable checkpoint shape was validated before activation"),
+            entry.checkpoint.prior_folded_through.as_ref(),
+        )?
+    };
     if plan.base_stream_cursor != *source_cursor
         || plan.folded_through.as_ref() != Some(&entry.folded_through)
+        || plan.adaptive_tail != entry.checkpoint.adaptive_tail
     {
         bail!("portable checkpoint does not match its deterministic fold plan");
     }

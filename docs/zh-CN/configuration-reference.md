@@ -154,9 +154,11 @@ task-config digest 与 binary build 全部精确匹配 qualified release manifes
 | `[skills].compatibility_auto_discover` | `true` | 导入标准 `.agents/skills`、Codex `.codex/agents`、OpenCode `.opencode/{skills,commands,agents}` 和 Claude Code `.claude/{skills,commands,agents}` 工作区资源。设为 `false` 可关闭默认兼容集合。 |
 | `[skills].compatibility_sources` | `[]` | 在默认集合之外添加兼容来源，例如为 `.reasonix/agents` 加入 `"reasonix"`；也可配合 `compatibility_auto_discover = false` 精确选择来源。 |
 | `[compaction].enabled` | `true` | 开启对话上下文精简。 |
-| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | 提醒阈值和有限的空闲自动处理阈值；自动应用前仍要求本地检查结果为 `ready`。 |
+| `[compaction].strategy` | `"cache_aware_v3"` | cache-stable 的完整回合与成本准入策略；正常 semantic compact 会在当前 route 额外调用一次无工具 LLM 摘要并核算实际 usage，`"legacy_v2"` 仅用于回滚或不支持 route 的回退。 |
+| `[compaction].native_carrier_enabled` | `false` | 迁移预留开关。精确 route 的 resume contract 落地前，native materialization 保持 fail-closed；当前设为 `true` 也不会额外发起 provider 请求。 |
+| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | Legacy V2 的提醒/空闲阈值；迁移期继续可读，但不再是 V3 的经济性准入规则。 |
 | `[compaction].fallback_context_window_tokens` | 未设置 | 无法获知模型上下文窗口时使用的备用值。 |
-| `[compaction].tail_messages` | `6` | 原样保留的最近消息数。 |
+| `[compaction].tail_messages` | `6` | 兼容旧配置；V3 会将其翻译成至少保留多少个完整 recent turn。 |
 
 ## 代码智能、终端、插件与 MCP
 

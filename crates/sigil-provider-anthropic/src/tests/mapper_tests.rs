@@ -30,7 +30,7 @@ fn stream_mapper_reconstructs_text_tool_use_usage_and_done() -> anyhow::Result<(
 
     chunks.extend(map_json(
         &mut mapper,
-        r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":4}}}"#,
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":4,"cache_creation_input_tokens":3}}}"#,
     )?);
     chunks.extend(map_json(
         &mut mapper,
@@ -72,10 +72,15 @@ fn stream_mapper_reconstructs_text_tool_use_usage_and_done() -> anyhow::Result<(
     assert!(chunks.iter().any(|chunk| matches!(
         chunk,
         ProviderChunk::Usage(usage)
-            if usage.prompt_tokens == 10
+            if usage.prompt_tokens == 17
                 && usage.completion_tokens == 8
                 && usage.cache_hit_tokens == 4
-                && usage.cache_miss_tokens == 6
+                && usage.cache_miss_tokens == 13
+                && usage.cache_usage.as_ref().is_some_and(|cache| {
+                    cache.read.as_ref().is_some_and(|count| count.tokens == 4)
+                        && cache.write.as_ref().is_some_and(|count| count.tokens == 3)
+                        && cache.uncached.as_ref().is_some_and(|count| count.tokens == 10)
+                })
     )));
     assert!(matches!(chunks.last(), Some(ProviderChunk::Done)));
     Ok(())

@@ -244,6 +244,8 @@ fn sample_usage() -> UsageStats {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }
 }
 

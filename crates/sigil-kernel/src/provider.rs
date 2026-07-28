@@ -110,6 +110,160 @@ impl ProviderCapabilities {
     }
 }
 
+/// Provider-neutral cache behavior exposed by one exact configured route.
+///
+/// Adapter implementations must return [`Self::Unknown`] for unverified compatible endpoints.
+/// In particular, a model name alone is never sufficient evidence for a vendor cache contract.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CacheMode {
+    #[default]
+    Unknown,
+    /// The adapter can observe cache usage but has no conformance evidence for how entries are
+    /// created or addressed.
+    ObservedImplicitOrNone,
+    /// Exact serialized prefixes are cached without client-authored breakpoints.
+    ImplicitPrefix,
+    /// The wire protocol accepts explicit cache breakpoints.
+    ExplicitBreakpoints,
+    /// Prefix caching is implicit, while the client owns stable logical routing boundaries.
+    ImplicitPrefixWithLogicalBreakpoints,
+}
+
+impl CacheMode {
+    fn supports_explicit_breakpoint_limit(self) -> bool {
+        matches!(
+            self,
+            Self::ExplicitBreakpoints | Self::ImplicitPrefixWithLogicalBreakpoints
+        )
+    }
+}
+
+/// One provider-selectable cache lifetime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CacheTtl {
+    pub seconds: u32,
+    /// Whether omitting a wire-level TTL selects this lifetime.
+    pub is_default: bool,
+}
+
+/// Cache counters that a configured adapter can map into [`CacheUsageV1`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CacheUsageCapabilities {
+    pub read_tokens: bool,
+    pub write_tokens: bool,
+    pub miss_tokens: bool,
+}
+
+/// Provider-neutral constraints on a server-retained conversation handle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct StatefulContinuationCapability {
+    /// Whether using the handle requires the connection to permit provider-side retention.
+    pub requires_provider_retention: bool,
+    /// Whether Sigil can fall back to a fully portable, stateless request.
+    pub supports_stateless_fallback: bool,
+}
+
+/// Provider-neutral constraints on an adapter-owned native compaction operation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct NativeCompactionCapability {
+    /// Whether activation is restricted to an exact connection/model/protocol binding.
+    pub requires_exact_route_binding: bool,
+    /// Whether every native result is paired with a portable recovery checkpoint.
+    pub supports_portable_fallback: bool,
+}
+
+/// How far an opaque native carrier may move without revalidation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeCarrierPortability {
+    #[default]
+    Unavailable,
+    ConnectionModelProtocolBound,
+    RouteFamilyBound,
+}
+
+/// Cache and continuation contract for one exact configured provider route and model.
+///
+/// This contract deliberately contains no vendor field names. Provider adapters retain
+/// ownership of wire-specific keys, beta headers and opaque carrier formats.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderContextCapabilities {
+    pub cache_mode: CacheMode,
+    pub explicit_breakpoint_limit: Option<u8>,
+    pub cache_ttls: Vec<CacheTtl>,
+    pub cache_usage_fields: CacheUsageCapabilities,
+    pub stateful_continuation: Option<StatefulContinuationCapability>,
+    pub native_compaction: Option<NativeCompactionCapability>,
+    pub native_carrier_portability: NativeCarrierPortability,
+}
+
+impl ProviderContextCapabilities {
+    /// Conservative contract for an unknown or unverified route.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Conservative compatible-route contract that permits telemetry only after observation.
+    #[must_use]
+    pub fn observed_implicit_or_none(cache_usage_fields: CacheUsageCapabilities) -> Self {
+        Self {
+            cache_mode: CacheMode::ObservedImplicitOrNone,
+            cache_usage_fields,
+            ..Self::default()
+        }
+    }
+
+    /// Validates cross-field invariants before a capability is used for request shaping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for impossible breakpoint, TTL, or native-carrier combinations.
+    pub fn validate(&self) -> Result<()> {
+        if self.explicit_breakpoint_limit.is_some()
+            != self.cache_mode.supports_explicit_breakpoint_limit()
+        {
+            anyhow::bail!(
+                "cache breakpoint limit must be present exactly for an explicit or logical-breakpoint mode"
+            );
+        }
+        if self.explicit_breakpoint_limit == Some(0) {
+            anyhow::bail!("cache breakpoint limit must be positive");
+        }
+        let mut ttl_seconds = BTreeSet::new();
+        let mut default_ttl_count = 0_u8;
+        for ttl in &self.cache_ttls {
+            if ttl.seconds == 0 {
+                anyhow::bail!("cache TTL must be positive");
+            }
+            if !ttl_seconds.insert(ttl.seconds) {
+                anyhow::bail!("cache TTL entries must be unique");
+            }
+            default_ttl_count = default_ttl_count.saturating_add(u8::from(ttl.is_default));
+        }
+        if default_ttl_count > 1 {
+            anyhow::bail!("at most one cache TTL may be the default");
+        }
+        if self.native_compaction.is_some()
+            == matches!(
+                self.native_carrier_portability,
+                NativeCarrierPortability::Unavailable
+            )
+        {
+            anyhow::bail!(
+                "native compaction and native carrier portability must be declared together"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Incremental stream events emitted by a provider while serving a request.
 #[derive(Clone)]
 pub enum ProviderChunk {
@@ -613,6 +767,10 @@ pub struct UsageStats {
     pub output_cost: f64,
     pub cache_savings: f64,
     pub system_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_usage: Option<CacheUsageV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_snapshot: Option<ModelPricingSnapshotV1>,
 }
 
 impl Default for UsageStats {
@@ -626,8 +784,232 @@ impl Default for UsageStats {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         }
     }
+}
+
+/// Origin of one normalized provider cache token count.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CacheTokenCountProvenance {
+    /// The provider response exposed this exact cache category.
+    ProviderReported,
+    /// Sigil derived this value from a provider-reported total and another reported category.
+    DerivedFromProviderTotal,
+}
+
+/// One cache token count plus evidence describing how it was obtained.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CacheTokenCountV1 {
+    pub tokens: u64,
+    pub provenance: CacheTokenCountProvenance,
+}
+
+impl CacheTokenCountV1 {
+    #[must_use]
+    pub fn provider_reported(tokens: u64) -> Self {
+        Self {
+            tokens,
+            provenance: CacheTokenCountProvenance::ProviderReported,
+        }
+    }
+
+    #[must_use]
+    pub fn derived_from_provider_total(tokens: u64) -> Self {
+        Self {
+            tokens,
+            provenance: CacheTokenCountProvenance::DerivedFromProviderTotal,
+        }
+    }
+}
+
+/// Provider-neutral cache read/write/uncached accounting for one request.
+///
+/// Missing fields are unknown, not zero. Legacy `cache_hit_tokens` / `cache_miss_tokens` remain
+/// available during migration, while this shape preserves the provider-report provenance needed
+/// by economics admission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CacheUsageV1 {
+    pub schema_version: u16,
+    pub read: Option<CacheTokenCountV1>,
+    pub write: Option<CacheTokenCountV1>,
+    pub uncached: Option<CacheTokenCountV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_layout_mutation: Option<crate::CacheLayoutMutationKind>,
+    /// Provider-reported uncached input was observed even though the immediately preceding local
+    /// request layout was byte-identical. This is deliberately narrower than a TTL or eviction
+    /// diagnosis: it proves only that Sigil did not mutate the compared logical request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provider_miss_without_local_mutation: bool,
+}
+
+impl CacheUsageV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    #[must_use]
+    pub fn reported_read_with_derived_uncached(total_input: u64, read_tokens: u64) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            read: Some(CacheTokenCountV1::provider_reported(read_tokens)),
+            write: None,
+            uncached: Some(CacheTokenCountV1::derived_from_provider_total(
+                total_input.saturating_sub(read_tokens),
+            )),
+            local_layout_mutation: None,
+            provider_miss_without_local_mutation: false,
+        }
+    }
+
+    /// Attaches the local request-layout evidence and derives the narrow provider-miss diagnostic.
+    ///
+    /// A positive value never claims why the provider missed; TTL expiry, eviction and remote
+    /// routing remain unproven.
+    pub fn observe_local_layout(
+        &mut self,
+        mutation: crate::CacheLayoutMutationKind,
+        legacy_cache_miss_tokens: u64,
+    ) {
+        self.local_layout_mutation = Some(mutation);
+        let uncached_tokens = self
+            .uncached
+            .as_ref()
+            .map_or(legacy_cache_miss_tokens, |count| count.tokens);
+        self.provider_miss_without_local_mutation =
+            mutation == crate::CacheLayoutMutationKind::Identical && uncached_tokens > 0;
+    }
+
+    /// Validates schema and rejects internally inconsistent cache totals.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported versions or when the sum of all known cache categories
+    /// exceeds the provider-reported input total.
+    pub fn validate_for_prompt_tokens(&self, prompt_tokens: u64) -> Result<()> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported cache usage schema version {}",
+                self.schema_version
+            );
+        }
+        let known_cache_tokens = [&self.read, &self.write, &self.uncached]
+            .into_iter()
+            .flatten()
+            .fold(0_u64, |total, count| total.saturating_add(count.tokens));
+        if known_cache_tokens > prompt_tokens {
+            anyhow::bail!("known cache token categories exceed provider prompt tokens");
+        }
+        Ok(())
+    }
+}
+
+/// Trusted, versioned price evidence used to explain one request's effective cost.
+///
+/// Prices are USD per `unit_tokens`. A missing cache-write price means the route does not expose a
+/// separately billable write category in this snapshot; it must not be interpreted as zero when a
+/// provider reports write tokens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ModelPricingSnapshotV1 {
+    pub schema_version: u16,
+    pub snapshot_id: String,
+    pub currency: String,
+    pub unit_tokens: u64,
+    pub cache_read_per_unit: f64,
+    pub cache_write_per_unit: Option<f64>,
+    pub uncached_input_per_unit: f64,
+    pub output_per_unit: f64,
+    pub source: String,
+    pub verified_at: String,
+}
+
+impl ModelPricingSnapshotV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    /// Validates trusted price evidence before it is attached to durable usage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported schema, incomplete identity or non-finite/negative prices.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported model pricing snapshot schema version {}",
+                self.schema_version
+            );
+        }
+        if self.snapshot_id.trim().is_empty()
+            || self.currency != "USD"
+            || self.unit_tokens == 0
+            || self.source.trim().is_empty()
+            || self.verified_at.trim().is_empty()
+        {
+            anyhow::bail!("model pricing snapshot identity is incomplete");
+        }
+        for (label, value) in [
+            ("cache read", Some(self.cache_read_per_unit)),
+            ("cache write", self.cache_write_per_unit),
+            ("uncached input", Some(self.uncached_input_per_unit)),
+            ("output", Some(self.output_per_unit)),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                anyhow::bail!("model pricing snapshot {label} price is invalid");
+            }
+        }
+        Ok(())
+    }
+
+    /// Attaches this snapshot and calculates request costs when all billable categories are known.
+    ///
+    /// A reported cache-write count without a write price leaves existing cost fields unchanged,
+    /// rather than silently treating the write as free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the price or cache usage evidence is malformed.
+    pub fn apply_to_usage(&self, mut usage: UsageStats) -> Result<UsageStats> {
+        self.validate()?;
+        let Some(cache_usage) = usage.cache_usage.as_ref() else {
+            usage.pricing_snapshot = Some(self.clone());
+            return Ok(usage);
+        };
+        cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
+        let (Some(read), Some(uncached)) = (&cache_usage.read, &cache_usage.uncached) else {
+            usage.pricing_snapshot = Some(self.clone());
+            return Ok(usage);
+        };
+        if cache_usage.write.is_some() && self.cache_write_per_unit.is_none() {
+            usage.pricing_snapshot = Some(self.clone());
+            return Ok(usage);
+        }
+
+        let unit = self.unit_tokens as f64;
+        let write_cost = match (&cache_usage.write, self.cache_write_per_unit) {
+            (Some(write), Some(price)) => write.tokens as f64 * price / unit,
+            (None, _) => 0.0,
+            (Some(_), None) => unreachable!("missing write price returned above"),
+        };
+        usage.input_cost = round_usage_cost(
+            read.tokens as f64 * self.cache_read_per_unit / unit
+                + uncached.tokens as f64 * self.uncached_input_per_unit / unit
+                + write_cost,
+        );
+        usage.output_cost =
+            round_usage_cost(usage.completion_tokens as f64 * self.output_per_unit / unit);
+        usage.cache_savings = round_usage_cost(
+            read.tokens as f64 * (self.uncached_input_per_unit - self.cache_read_per_unit) / unit,
+        );
+        usage.pricing_snapshot = Some(self.clone());
+        Ok(usage)
+    }
+}
+
+fn round_usage_cost(value: f64) -> f64 {
+    const COST_DECIMAL_SCALE: f64 = 1_000_000_000.0;
+    (value * COST_DECIMAL_SCALE).round() / COST_DECIMAL_SCALE
 }
 
 /// Stable snapshot of the deterministic prefix materialization for auditing and resume.
@@ -702,11 +1084,37 @@ pub struct SessionStats {
     pub cache_savings: f64,
     #[serde(default)]
     pub last_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    #[serde(default)]
+    pub cache_write_observed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cache_layout_mutation: Option<crate::CacheLayoutMutationKind>,
+    #[serde(default)]
+    pub last_provider_miss_without_local_mutation: bool,
 }
 
 impl SessionStats {
     /// Merges one request's usage counters into the running session totals.
     pub fn apply_usage(&mut self, usage: &UsageStats) {
+        self.apply_usage_totals(usage);
+        self.last_prompt_tokens = usage.prompt_tokens;
+        if let Some(cache_usage) = &usage.cache_usage {
+            if let Some(mutation) = cache_usage.local_layout_mutation {
+                self.last_cache_layout_mutation = Some(mutation);
+            }
+            self.last_provider_miss_without_local_mutation =
+                cache_usage.provider_miss_without_local_mutation;
+        }
+    }
+
+    /// Merges an internal compactor request into session billing totals without replacing the
+    /// latest ordinary conversation-turn pressure/cache observation.
+    pub fn apply_semantic_compaction_usage(&mut self, usage: &UsageStats) {
+        self.apply_usage_totals(usage);
+    }
+
+    fn apply_usage_totals(&mut self, usage: &UsageStats) {
         self.prompt_tokens += usage.prompt_tokens;
         self.completion_tokens += usage.completion_tokens;
         self.cache_hit_tokens += usage.cache_hit_tokens;
@@ -714,7 +1122,12 @@ impl SessionStats {
         self.input_cost += usage.input_cost;
         self.output_cost += usage.output_cost;
         self.cache_savings += usage.cache_savings;
-        self.last_prompt_tokens = usage.prompt_tokens;
+        if let Some(cache_usage) = &usage.cache_usage
+            && let Some(write) = &cache_usage.write
+        {
+            self.cache_write_tokens = self.cache_write_tokens.saturating_add(write.tokens);
+            self.cache_write_observed = true;
+        }
     }
 }
 
@@ -725,6 +1138,39 @@ pub trait Provider: Send + Sync {
 
     /// Returns the provider's declared runtime capabilities.
     fn capabilities(&self) -> ProviderCapabilities;
+
+    /// Returns the context/cache contract for one model on this exact configured route.
+    ///
+    /// The default fails closed. Compatible adapters may expose observed counters, but must not
+    /// infer vendor-only cache or native-continuation behavior from a model identifier.
+    fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
+        ProviderContextCapabilities::unknown()
+    }
+
+    /// Returns trusted, exact-model pricing evidence for usage accounting.
+    ///
+    /// Unknown or compatible routes return `None`; callers must never treat absence as zero cost.
+    fn usage_pricing_snapshot(&self, _model_name: &str) -> Option<ModelPricingSnapshotV1> {
+        None
+    }
+
+    /// Optionally dual-writes a provider-native acceleration carrier after the portable
+    /// checkpoint is already durable.
+    ///
+    /// The default fails closed. Implementations must use the kernel native-compaction physical
+    /// attempt and encrypted payload lifecycle; returning a carrier must never activate it or
+    /// replace portable continuity truth.
+    async fn materialize_native_compaction_carrier(
+        &self,
+        _session: &crate::Session,
+        _logical_run_id: String,
+        _frozen_request: crate::FrozenProviderRequestMaterial,
+        _covers_through: crate::CompactionCursor,
+        _portable_compaction_id: crate::CompactionId,
+        _carrier_policy: crate::NativeCarrierPolicyV1,
+    ) -> Result<Option<crate::NativeProviderCompactionMaterialization>> {
+        anyhow::bail!("provider-native compaction carrier is unavailable on this route")
+    }
 
     /// Returns native hosted web-search support for one exact model id.
     fn hosted_web_search_capability(&self, _model_name: &str) -> crate::HostedWebSearchCapability {
@@ -792,6 +1238,14 @@ where
 
     fn capabilities(&self) -> ProviderCapabilities {
         (**self).capabilities()
+    }
+
+    fn context_capabilities(&self, model_name: &str) -> ProviderContextCapabilities {
+        (**self).context_capabilities(model_name)
+    }
+
+    fn usage_pricing_snapshot(&self, model_name: &str) -> Option<ModelPricingSnapshotV1> {
+        (**self).usage_pricing_snapshot(model_name)
     }
 
     fn hosted_web_search_capability(&self, model_name: &str) -> crate::HostedWebSearchCapability {

@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 
 use sigil_kernel::{
     CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ToolCall,
-    validate_image_input_capability, validate_request_image_attachments,
+    canonicalize_cache_stable_json, validate_image_input_capability,
+    validate_request_image_attachments,
 };
 
 use crate::{
@@ -185,13 +186,13 @@ fn gemini_tools(request: &CompletionRequest) -> Result<Option<Vec<Value>>> {
         "functionDeclarations": request.tools
             .iter()
             .map(|tool| {
-                json!({
+                Ok(json!({
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.input_schema,
-                })
+                    "parameters": canonicalize_cache_stable_json(&tool.input_schema)?,
+                }))
             })
-            .collect::<Vec<_>>(),
+            .collect::<Result<Vec<_>>>()?,
         }));
     }
     if hosted.is_some() {

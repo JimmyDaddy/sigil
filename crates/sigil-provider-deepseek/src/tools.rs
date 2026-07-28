@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 
-use sigil_kernel::ToolSpec;
+use sigil_kernel::{ToolSpec, canonicalize_cache_stable_json};
 
 use crate::config::StrictToolsMode;
 
@@ -34,7 +34,12 @@ pub fn prepare_tools(specs: &[ToolSpec], mode: StrictToolsMode) -> Result<Prepar
 
     match mode {
         StrictToolsMode::Off => Ok(PreparedTools {
-            payload: Some(specs.iter().map(prepare_standard_tool).collect()),
+            payload: Some(
+                specs
+                    .iter()
+                    .map(prepare_standard_tool)
+                    .collect::<Result<Vec<_>>>()?,
+            ),
             strict_mode_enabled: false,
             diagnostics: Vec::new(),
         }),
@@ -49,7 +54,12 @@ pub fn prepare_tools(specs: &[ToolSpec], mode: StrictToolsMode) -> Result<Prepar
                 diagnostics: Vec::new(),
             }),
             Err(error) => Ok(PreparedTools {
-                payload: Some(specs.iter().map(prepare_standard_tool).collect()),
+                payload: Some(
+                    specs
+                        .iter()
+                        .map(prepare_standard_tool)
+                        .collect::<Result<Vec<_>>>()?,
+                ),
                 strict_mode_enabled: false,
                 diagnostics: vec![ToolSchemaDiagnostic {
                     level: ToolSchemaDiagnosticLevel::Notice,
@@ -72,15 +82,15 @@ pub fn prepare_tools(specs: &[ToolSpec], mode: StrictToolsMode) -> Result<Prepar
     }
 }
 
-fn prepare_standard_tool(spec: &ToolSpec) -> Value {
-    json!({
+fn prepare_standard_tool(spec: &ToolSpec) -> Result<Value> {
+    Ok(json!({
         "type": "function",
         "function": {
             "name": spec.name,
             "description": spec.description,
-            "parameters": spec.input_schema,
+            "parameters": canonicalize_cache_stable_json(&spec.input_schema)?,
         }
-    })
+    }))
 }
 
 fn prepare_strict_tool(spec: &ToolSpec) -> Result<Value> {
@@ -90,8 +100,10 @@ fn prepare_strict_tool(spec: &ToolSpec) -> Result<Value> {
             "name": spec.name,
             "description": spec.description,
             "strict": true,
-            "parameters": normalize_schema(&spec.input_schema)
-                .with_context(|| format!("tool `{}` strict schema normalization failed", spec.name))?,
+            "parameters": canonicalize_cache_stable_json(
+                &normalize_schema(&spec.input_schema)
+                    .with_context(|| format!("tool `{}` strict schema normalization failed", spec.name))?
+            )?,
         }
     }))
 }

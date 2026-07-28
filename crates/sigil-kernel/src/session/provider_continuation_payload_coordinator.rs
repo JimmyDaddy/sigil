@@ -39,6 +39,8 @@ pub struct ProviderContinuationPayloadRecoveryReport {
     pub orphaned: usize,
     /// Invalidated/orphaned manifests durably marked deleted after physical deletion.
     pub deleted: usize,
+    /// Missing native carriers invalidated while their portable checkpoints remained authoritative.
+    pub portable_fallbacks: usize,
 }
 
 /// Outcome of invalidating and deleting one continuation payload through its durable lifecycle.
@@ -246,7 +248,7 @@ where
                         )?;
                         report.deleted += usize::from(result.deleted);
                     } else {
-                        self.recover_committed_payload(&state, &mut report)?;
+                        self.recover_committed_payload(&projection, &state, &mut report)?;
                     }
                 }
                 ProviderContinuationPayloadLifecycleState::Invalidated
@@ -413,6 +415,7 @@ where
 
     fn recover_committed_payload(
         &self,
+        projection: &ProviderContinuationProjection,
         state: &ProviderContinuationPayloadState,
         report: &mut ProviderContinuationPayloadRecoveryReport,
     ) -> Result<()> {
@@ -428,6 +431,56 @@ where
                 }
                 ProviderContinuationPayloadPresence::Missing => {
                     if state.candidate_event_id.is_some() {
+                        let candidate = projection
+                            .candidate(&state.manifest.candidate_id)
+                            .context("missing native carrier candidate is absent")?;
+                        let has_portable_fallback = match &candidate.entry.candidate {
+                            ProviderContinuationCandidate::Artifact(reference) => {
+                                reference.carrier.is_some()
+                            }
+                            ProviderContinuationCandidate::Handle(reference) => {
+                                reference.carrier.is_some()
+                            }
+                        };
+                        if has_portable_fallback {
+                            let persistence =
+                                ProviderContinuationCandidateInvalidationCoordinator::new(
+                                    self.store.clone(),
+                                )
+                                .append_or_reconcile(
+                                    ProviderContinuationCandidateInvalidatedEntry {
+                                        schema_version: PROVIDER_CONTINUATION_SCHEMA_VERSION,
+                                        candidate_id: state.manifest.candidate_id.clone(),
+                                        observation_id: candidate
+                                            .entry
+                                            .observation_id
+                                            .clone()
+                                            .context(
+                                                "native carrier candidate has no observation id",
+                                            )?,
+                                        source_event_id:
+                                            provider_continuation_candidate_recorded_event_id(
+                                                &state.manifest.candidate_id,
+                                            ),
+                                        reason: ProviderContinuationCandidateInvalidationReason::NativeCarrierUnavailable,
+                                        basis: ProviderContinuationCandidateInvalidationBasis::SourceOnly,
+                                        invalidated_at_unix_ms: unix_time_ms(),
+                                    },
+                                )?;
+                            if matches!(
+                                persistence,
+                                ProviderContinuationCandidateInvalidationPersistence::Recorded { .. }
+                                    | ProviderContinuationCandidateInvalidationPersistence::AlreadyPresent { .. }
+                                    | ProviderContinuationCandidateInvalidationPersistence::ExactPresentAfterAckFailure { .. }
+                            ) {
+                                report.portable_fallbacks =
+                                    report.portable_fallbacks.saturating_add(1);
+                                return Ok(());
+                            }
+                            bail!(
+                                "native carrier invalidation was not durably acknowledged; portable fallback remains quarantined"
+                            );
+                        }
                         bail!(
                             "recorded provider continuation candidate has no authenticated payload"
                         )
@@ -706,6 +759,13 @@ where
         }
         Ok(())
     }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

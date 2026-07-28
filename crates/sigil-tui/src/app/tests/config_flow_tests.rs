@@ -4968,6 +4968,22 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .draft
             .compaction_enabled
     );
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.selected_field = Some(ConfigField::CompactionStrategy);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .compaction_strategy,
+        sigil_kernel::CompactionStrategy::LegacyV2
+    );
 
     {
         let state = app

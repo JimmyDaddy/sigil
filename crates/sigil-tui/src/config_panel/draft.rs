@@ -47,6 +47,8 @@ impl ConfigDraft {
             verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
+            compaction_native_carrier_enabled: root_config.compaction.native_carrier_enabled,
+            compaction_strategy: root_config.compaction.strategy,
             compaction_soft_threshold_ratio: root_config
                 .compaction
                 .soft_threshold_ratio
@@ -201,6 +203,8 @@ impl ConfigDraft {
         root_config.verification.auto_run = self.verification_auto_run;
         root_config.memory.enabled = self.memory_enabled;
         root_config.compaction.enabled = self.compaction_enabled;
+        root_config.compaction.native_carrier_enabled = self.compaction_native_carrier_enabled;
+        root_config.compaction.strategy = self.compaction_strategy;
         root_config.compaction.soft_threshold_ratio = soft_threshold_ratio;
         root_config.compaction.hard_threshold_ratio = hard_threshold_ratio;
         root_config.compaction.context_window_tokens = context_window_tokens;

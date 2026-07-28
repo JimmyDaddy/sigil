@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 
 use super::*;
@@ -21,6 +23,57 @@ fn store_backed_session() -> Result<(tempfile::TempDir, Session)> {
         temp,
         Session::new("deepseek", "deepseek-v4-flash").with_store(store),
     ))
+}
+
+fn append_complete_turn(session: &mut Session, label: &str, payload_bytes: usize) -> Result<()> {
+    session.append_user_message(ModelMessage::user(format!(
+        "user-{label}-{}",
+        "u".repeat(payload_bytes)
+    )))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some(format!("assistant-{label}-{}", "a".repeat(payload_bytes))),
+        Vec::new(),
+    ))?;
+    Ok(())
+}
+
+fn small_adaptive_policy() -> AdaptiveTailPolicyV3 {
+    AdaptiveTailPolicyV3 {
+        tail_min_complete_turns: 2,
+        tail_target_min_tokens: 100,
+        tail_target_max_tokens: 1_000,
+        tail_recent_turn_p95_multiplier_ppm: 2_000_000,
+        tail_max_usable_context_ratio_ppm: 250_000,
+        recent_turn_sample_limit: 20,
+        translated_legacy_tail_messages: Some(6),
+    }
+}
+
+fn requested_tool_approval(call_id: &str) -> ControlEntry {
+    ControlEntry::ToolApproval(ToolApprovalEntry {
+        action: ToolApprovalAuditAction::Requested,
+        call_id: call_id.to_owned(),
+        tool_name: "shell".to_owned(),
+        access: crate::ToolAccess::Read,
+        network_effect: None,
+        local_policy_decision: crate::ApprovalMode::Ask,
+        network_policy_decision: crate::ApprovalMode::Allow,
+        source_policy_decision: crate::ApprovalMode::Allow,
+        operation: None,
+        risk: None,
+        subjects: Vec::new(),
+        subject_zones: Vec::new(),
+        policy_decision: crate::ApprovalMode::Ask,
+        external_directory_required: false,
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        allow_source: None,
+        grant_call_id: None,
+        user_decision: None,
+        reason: None,
+        preview_hash: None,
+    })
 }
 
 #[test]
@@ -212,5 +265,213 @@ fn safe_fold_plan_folds_delivered_promotion_at_its_durable_event_identity() -> R
     assert_eq!(plan.folded_event_ids, vec![promotion.event_id]);
     assert_eq!(plan.retained_event_ids.len(), 1);
     assert!(plan.validate_against(&stream).is_ok());
+    Ok(())
+}
+
+#[test]
+fn adaptive_tail_translates_legacy_messages_and_selects_complete_turns_by_p95_target() -> Result<()>
+{
+    let (_temp, mut session) = store_backed_session()?;
+    for index in 0..40 {
+        append_complete_turn(&mut session, &index.to_string(), 128)?;
+    }
+    let stream = records(&session)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &stream,
+        AdaptiveTailPolicyV3::from_legacy_tail_messages(6),
+        64 * 1024,
+        None,
+    )?;
+    let adaptive = plan
+        .adaptive_tail
+        .as_ref()
+        .expect("adaptive plan records its selection proof");
+
+    assert_eq!(adaptive.policy.tail_min_complete_turns, 2);
+    assert_eq!(adaptive.policy.translated_legacy_tail_messages, Some(6));
+    assert!(adaptive.recent_complete_turn_p95_tokens > 0);
+    assert_eq!(
+        adaptive.ordinary_target_tokens,
+        DEFAULT_TAIL_TARGET_MIN_TOKENS
+    );
+    assert!(adaptive.retained_complete_turns >= 2);
+    assert!(
+        adaptive
+            .retained_turns
+            .iter()
+            .all(|turn| { turn.state == TailTurnStateV3::Complete && turn.event_ids.len() == 2 })
+    );
+    assert!(plan.has_foldable_history());
+    assert!(plan.validate_against(&stream).is_ok());
+    Ok(())
+}
+
+#[test]
+fn adaptive_tail_clamps_p95_to_usable_context_ratio_deterministically() -> Result<()> {
+    let (_temp, mut session) = store_backed_session()?;
+    for index in 0..5 {
+        append_complete_turn(&mut session, &index.to_string(), 100)?;
+    }
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records(&session)?,
+        small_adaptive_policy(),
+        1_000,
+        None,
+    )?;
+    let adaptive = plan.adaptive_tail.expect("adaptive selection");
+
+    assert_eq!(adaptive.ordinary_target_tokens, 250);
+    assert_eq!(adaptive.retained_complete_turns, 2);
+    assert!(adaptive.retained_token_upper_bound <= adaptive.exact_fit_limit_tokens);
+    Ok(())
+}
+
+#[test]
+fn adaptive_tail_keeps_a_tool_heavy_active_turn_atomic_and_extends_target() -> Result<()> {
+    let (_temp, mut session) = store_backed_session()?;
+    for index in 0..3 {
+        append_complete_turn(&mut session, &index.to_string(), 32)?;
+    }
+    session.append_user_message(ModelMessage::user("active tool-heavy request"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "active-call".to_owned(),
+            name: "shell".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    ))?;
+    session.append_tool_message(ModelMessage::tool(
+        "active-call",
+        serde_json::json!({
+            "status": "ok",
+            "content": "x".repeat(4_000),
+        })
+        .to_string(),
+    ))?;
+    let stream = records(&session)?;
+    let active_ids = stream
+        .iter()
+        .rev()
+        .take(3)
+        .map(|record| record.event_id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut policy = small_adaptive_policy();
+    policy.tail_target_min_tokens = 128;
+    policy.tail_target_max_tokens = 128;
+    let plan =
+        CompactionFoldPlan::from_records_after_adaptive_tail(&stream, policy, 16 * 1024, None)?;
+    let adaptive = plan.adaptive_tail.as_ref().expect("adaptive selection");
+    let active_turn = adaptive
+        .retained_turns
+        .iter()
+        .find(|turn| turn.state == TailTurnStateV3::Active)
+        .expect("active turn remains raw");
+
+    assert_eq!(
+        active_turn
+            .event_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        active_ids
+    );
+    assert!(adaptive.active_turn_extended);
+    assert!(active_turn.token_upper_bound > adaptive.ordinary_target_tokens);
+    assert!(
+        active_ids
+            .iter()
+            .all(|id| plan.retained_event_ids.contains(id))
+    );
+    assert!(
+        active_ids
+            .iter()
+            .all(|id| !plan.folded_event_ids.contains(id))
+    );
+    assert!(plan.has_foldable_history());
+    Ok(())
+}
+
+#[test]
+fn adaptive_tail_rejects_an_active_turn_beyond_the_exact_fit_limit() -> Result<()> {
+    let (_temp, mut session) = store_backed_session()?;
+    append_complete_turn(&mut session, "old-1", 8)?;
+    append_complete_turn(&mut session, "old-2", 8)?;
+    session.append_user_message(ModelMessage::user("x".repeat(2_000)))?;
+
+    let error = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records(&session)?,
+        small_adaptive_policy(),
+        1_000,
+        None,
+    )
+    .expect_err("oversized active turn must reject ordinary compaction");
+    assert!(error.to_string().contains("exact-fit limit"));
+    Ok(())
+}
+
+#[test]
+fn adaptive_tail_never_splits_a_waiting_approval_from_its_active_turn() -> Result<()> {
+    let (_temp, mut session) = store_backed_session()?;
+    for index in 0..3 {
+        append_complete_turn(&mut session, &index.to_string(), 16)?;
+    }
+    session.append_user_message(ModelMessage::user("approve the active call"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "approval-call".to_owned(),
+            name: "shell".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    ))?;
+    session.append_tool_message(ModelMessage::tool(
+        "approval-call",
+        serde_json::json!({"status": "preview", "content": "pending"}).to_string(),
+    ))?;
+    session.append_control(requested_tool_approval("approval-call"))?;
+    let stream = records(&session)?;
+    let active_message_ids = stream
+        .iter()
+        .rev()
+        .filter(|record| {
+            matches!(
+                session_entry_from_stored_event(record.stored_event()),
+                Ok(Some(
+                    SessionLogEntry::User(_)
+                        | SessionLogEntry::Assistant(_)
+                        | SessionLogEntry::ToolResult(_)
+                ))
+            )
+        })
+        .take(3)
+        .map(|record| record.event_id().to_owned())
+        .collect::<BTreeSet<_>>();
+
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &stream,
+        small_adaptive_policy(),
+        8 * 1024,
+        None,
+    )?;
+    let adaptive = plan.adaptive_tail.as_ref().expect("adaptive selection");
+
+    assert!(active_message_ids.iter().all(|id| {
+        plan.protected_events.iter().any(|entry| {
+            entry.event.event_id == *id
+                && entry.reason == CompactionFoldProtectionReason::ActiveToolOrApproval
+        })
+    }));
+    assert!(
+        active_message_ids
+            .iter()
+            .all(|id| !plan.folded_event_ids.contains(id))
+    );
+    assert!(
+        adaptive
+            .protected_tail_events
+            .iter()
+            .any(|entry| entry.reason == CompactionFoldProtectionReason::ActiveToolOrApproval)
+    );
     Ok(())
 }

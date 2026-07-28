@@ -7,14 +7,15 @@ use std::sync::{
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use super::{
-    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
-    QueuedConversationPreTurnAdmission,
+    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingLocalV2Compaction,
+    PendingV2Compaction, QueuedConversationPreTurnAdmission,
 };
 use crate::runner::V2CompactionReview;
 use sigil_kernel::ConversationInputQueueId;
 
 pub(in crate::runner) struct ManualV2CompactionPreparation {
     pub(in crate::runner) review: V2CompactionReview,
+    pub(in crate::runner) local_preview: Option<PendingLocalV2Compaction>,
     pub(in crate::runner) pending: Option<PendingV2Compaction>,
 }
 

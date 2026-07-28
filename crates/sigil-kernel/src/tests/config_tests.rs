@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use super::{
-    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform,
-    ConfigPublishError, DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS, McpServerConfig,
-    McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
+    CodeIntelStartup, CompactionConfig, CompactionStrategy, CompactionThresholdStatus,
+    ConfigPlatform, ConfigPublishError, DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS,
+    McpServerConfig, McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
     SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement,
     TerminalNotificationMethod, ThemeId, UsageCostCurrency, WebPolicyCap, WebProxyMode,
@@ -24,7 +24,9 @@ use crate::{
 #[test]
 fn compaction_threshold_status_follows_configured_window() {
     let config = CompactionConfig {
+        strategy: Default::default(),
         enabled: true,
+        native_carrier_enabled: false,
         soft_threshold_ratio: 0.5,
         hard_threshold_ratio: 0.8,
         context_window_tokens: Some(100),
@@ -57,6 +59,53 @@ fallback_context_window_tokens = 128000
             .lines()
             .any(|line| line.trim_start().starts_with("context_window_tokens ="))
     );
+}
+
+#[test]
+fn compaction_strategy_defaults_to_cache_aware_v3_and_legacy_fields_still_parse() {
+    let defaults: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )
+    .expect("minimal config should load");
+    assert_eq!(
+        defaults.compaction.strategy,
+        CompactionStrategy::CacheAwareV3
+    );
+    assert!(!defaults.compaction.native_carrier_enabled);
+    assert_eq!(
+        defaults.compaction.legacy_migration_fields(),
+        &[
+            "soft_threshold_ratio",
+            "hard_threshold_ratio",
+            "tail_messages",
+        ]
+    );
+
+    let legacy: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[compaction]
+strategy = "legacy_v2"
+native_carrier_enabled = true
+soft_threshold_ratio = 0.4
+hard_threshold_ratio = 0.75
+tail_messages = 9
+"#,
+    )
+    .expect("legacy compaction config should remain readable");
+    assert_eq!(legacy.compaction.strategy, CompactionStrategy::LegacyV2);
+    assert!(legacy.compaction.native_carrier_enabled);
+    assert_eq!(legacy.compaction.soft_threshold_ratio, 0.4);
+    assert_eq!(legacy.compaction.hard_threshold_ratio, 0.75);
+    assert_eq!(legacy.compaction.tail_messages, 9);
+    assert!(legacy.compaction.legacy_migration_fields().is_empty());
 }
 
 #[test]

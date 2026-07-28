@@ -210,12 +210,17 @@ pub(in crate::runner) fn run_worker_loop<P>(
     state.compaction.preparation_tasks.abort_all();
 }
 
-pub(in crate::runner) fn finish_idle_auto_compaction(
+pub(in crate::runner) fn finish_idle_auto_compaction<P>(
     preparation: IdleAutoCompactionPreparation,
     current_session: &mut Option<Session>,
     current_session_log_path: &Path,
     message_tx: &mpsc::Sender<WorkerMessage>,
-) {
+    provider: &P,
+    runtime: &tokio::runtime::Runtime,
+    native_carrier_enabled: bool,
+) where
+    P: sigil_kernel::Provider,
+{
     match preparation {
         IdleAutoCompactionPreparation::Ready(pending) => {
             let Some(session) = current_session.as_ref() else {
@@ -226,30 +231,41 @@ pub(in crate::runner) fn finish_idle_auto_compaction(
             let folded_event_count = pending.folded_event_count();
             let idle_auto_scope_fingerprint =
                 pending.idle_auto_scope_fingerprint().map(str::to_owned);
-            match (*pending).apply(session, current_session_log_path) {
-                Ok(outcome) => match load_session_with_runtime_attachments(
-                    &provider_name,
-                    &model_name,
-                    current_session_log_path,
-                    current_session.as_ref(),
-                ) {
-                    Ok(session) => {
-                        let entries = session.entries().to_vec();
-                        *current_session = Some(session);
-                        let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
-                            request_id: 0,
-                            source: V2CompactionApplySource::IdleAutomatic,
-                            compaction_id: outcome.compaction_id,
-                            folded_event_count,
-                            entries,
-                        });
+            match (*pending).apply_with_optional_native(
+                session,
+                current_session_log_path,
+                provider,
+                runtime,
+                native_carrier_enabled,
+            ) {
+                Ok((outcome, native_notice)) => {
+                    if let Some(notice) = native_notice {
+                        let _ = message_tx.send(WorkerMessage::Notice(notice));
                     }
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "automatic compaction applied, but session reload was deferred: {error:#}"
-                        )));
+                    match load_session_with_runtime_attachments(
+                        &provider_name,
+                        &model_name,
+                        current_session_log_path,
+                        current_session.as_ref(),
+                    ) {
+                        Ok(session) => {
+                            let entries = session.entries().to_vec();
+                            *current_session = Some(session);
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                                request_id: 0,
+                                source: V2CompactionApplySource::IdleAutomatic,
+                                compaction_id: outcome.compaction_id,
+                                folded_event_count,
+                                entries,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "automatic compaction applied, but session reload was deferred: {error:#}"
+                            )));
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     match load_session_with_runtime_attachments(
                         &provider_name,
@@ -298,6 +314,34 @@ pub(in crate::runner) fn finish_idle_auto_compaction(
                 "automatic compaction is held after a previous failed attempt; new fold material or target policy is required"
                     .to_owned(),
             ));
+        }
+        IdleAutoCompactionPreparation::CircuitOpen { decision } => {
+            let reason = match decision {
+                sigil_kernel::CompactionCircuitBreakerDecisionV1::Allowed => {
+                    "circuit unexpectedly reported allowed".to_owned()
+                }
+                sigil_kernel::CompactionCircuitBreakerDecisionV1::SameCursorAndLayoutFailed => {
+                    "the same source cursor and cache layout already failed".to_owned()
+                }
+                sigil_kernel::CompactionCircuitBreakerDecisionV1::SemanticSummarizerRouteDisabled {
+                    consecutive_failures,
+                } => format!(
+                    "the semantic summarizer route is disabled after {consecutive_failures} consecutive timeout/inflation failures"
+                ),
+                sigil_kernel::CompactionCircuitBreakerDecisionV1::RealTurnRequired {
+                    latest_compaction_sequence,
+                } => format!(
+                    "a completed real turn is required after compaction sequence {latest_compaction_sequence}"
+                ),
+                sigil_kernel::CompactionCircuitBreakerDecisionV1::PostActivationEmergency {
+                    layer,
+                } => format!(
+                    "the first post-compaction turn remains at emergency pressure; blocking layer: {layer:?}"
+                ),
+            };
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "automatic compaction circuit is open: {reason}"
+            )));
         }
         IdleAutoCompactionPreparation::CoolingDown {
             retry_after_unix_ms,

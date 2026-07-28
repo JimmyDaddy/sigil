@@ -823,7 +823,9 @@ impl HttpSessionRunRegistry {
         result
     }
 
-    /// Builds one fresh portable compaction preview without appending a lifecycle attempt.
+    /// Builds one fresh portable compaction preview without activating a compaction lifecycle.
+    ///
+    /// Cache-aware V3 still records its bounded semantic-summary provider attempt.
     ///
     /// The driver retains exact process-local target material only when the returned admission is
     /// ready. A later apply must echo that opaque preview binding through the durable command
@@ -904,6 +906,8 @@ impl HttpSessionRunRegistry {
                 session_id: command.session_id.clone(),
                 action,
                 compaction: output.compaction,
+                compaction_review: output.compaction_review,
+                tool_output_shrink: output.tool_output_shrink,
                 restore: output.restore,
                 fork: output.fork,
                 recovery: output.recovery,
@@ -3952,6 +3956,10 @@ fn validate_conversation_recovery_command(
 ) -> Result<(), HttpRegistryError> {
     let valid = match action {
         HttpConversationRecoveryCommandAction::ApplyCompaction { preview_id } => {
+            is_bounded_recovery_token(preview_id)
+        }
+        HttpConversationRecoveryCommandAction::PrepareCompaction { preview_id }
+        | HttpConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink { preview_id } => {
             is_bounded_recovery_token(preview_id)
         }
         HttpConversationRecoveryCommandAction::RestoreCheckpoint {

@@ -53,7 +53,10 @@ fn build_messages_request_maps_system_messages_tools_and_temperature() -> anyhow
     assert_eq!(body.model, "claude-test");
     assert_eq!(body.max_tokens, 2048);
     assert_eq!(body.temperature, Some(0.2));
-    assert_eq!(body.system.as_deref(), Some("system one\n\nsystem two"));
+    assert_eq!(
+        body.system.as_ref().and_then(Value::as_str),
+        Some("system one\n\nsystem two")
+    );
     assert_eq!(body.messages[0]["role"], "user");
     assert_eq!(
         body.tools.as_ref().expect("tools should render")[0]["name"],
@@ -92,6 +95,141 @@ fn build_messages_request_maps_assistant_tool_use_and_tool_result() -> anyhow::R
     assert_eq!(assistant_content[1]["input"]["path"], "src/lib.rs");
     assert_eq!(body.messages[2]["content"][0]["type"], "tool_result");
     assert_eq!(body.messages[2]["content"][0]["tool_use_id"], "toolu_1");
+    Ok(())
+}
+
+#[test]
+fn stable_cache_wire_places_only_a0_and_a2_breakpoints() -> anyhow::Result<()> {
+    let request = completion_request(vec![
+        ModelMessage::system("stable system"),
+        ModelMessage::user("turn one"),
+        ModelMessage::assistant(Some("stable answer".to_owned()), Vec::new()),
+        ModelMessage::user("active turn"),
+    ]);
+
+    let body = build_messages_request_with_stable_cache(&request, 1024)?;
+    let wire = serde_json::to_value(&body)?;
+
+    assert_eq!(
+        wire["system"],
+        json!([{
+            "type": "text",
+            "text": "stable system",
+            "cache_control": {"type": "ephemeral"}
+        }])
+    );
+    assert_eq!(
+        wire["messages"][1]["content"],
+        json!([{
+            "type": "text",
+            "text": "stable answer",
+            "cache_control": {"type": "ephemeral"}
+        }])
+    );
+    assert!(
+        wire["messages"][2]["content"]
+            .as_str()
+            .is_some_and(|content| content == "active turn"),
+        "the active A4 turn must not create a cache write"
+    );
+    assert_eq!(count_cache_breakpoints(&body), 2);
+    assert!(
+        serde_json::to_string(&wire)?.find("\"ttl\"").is_none(),
+        "the 5 minute default is selected by omitting a TTL"
+    );
+    Ok(())
+}
+
+#[test]
+fn stable_cache_wire_uses_last_tool_as_a0_when_system_is_absent() -> anyhow::Result<()> {
+    let request = completion_request(vec![ModelMessage::user("single active turn")]);
+
+    let body = build_messages_request_with_stable_cache(&request, 1024)?;
+    let wire = serde_json::to_value(&body)?;
+
+    assert_eq!(
+        wire["tools"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(count_cache_breakpoints(&body), 1);
+    assert!(
+        wire["messages"][0]["content"]
+            .get("cache_control")
+            .is_none(),
+        "single-turn A4 content must not be cached explicitly"
+    );
+    Ok(())
+}
+
+#[test]
+fn cache_contract_exposes_provider_limit_and_lookback_window() {
+    assert_eq!(ANTHROPIC_CACHE_BREAKPOINT_LIMIT, 4);
+    assert_eq!(ANTHROPIC_CACHE_LOOKBACK_BLOCK_LIMIT, 20);
+}
+
+#[test]
+fn cache_contract_accepts_four_breakpoints_and_long_before_short_ttl() -> anyhow::Result<()> {
+    let request = completion_request(vec![
+        ModelMessage::system("stable system"),
+        ModelMessage::user("turn one"),
+        ModelMessage::assistant(Some("stable answer".to_owned()), Vec::new()),
+        ModelMessage::user("active turn"),
+    ]);
+    let mut body = build_messages_request_with_stable_cache(&request, 1024)?;
+    body.tools.as_mut().expect("tools")[0]["cache_control"] =
+        json!({"type": "ephemeral", "ttl": "1h"});
+    body.system.as_mut().expect("system")[0]["cache_control"] =
+        json!({"type": "ephemeral", "ttl": "1h"});
+    body.messages[0]["content"] = json!([{
+        "type": "text",
+        "text": "turn one",
+        "cache_control": {"type": "ephemeral", "ttl": "5m"}
+    }]);
+
+    validate_cache_breakpoint_contract(&body)?;
+    assert_eq!(count_cache_breakpoints(&body), 4);
+    Ok(())
+}
+
+#[test]
+fn cache_contract_rejects_fifth_breakpoint_and_reversed_mixed_ttl_order() -> anyhow::Result<()> {
+    let request = completion_request(vec![
+        ModelMessage::system("stable system"),
+        ModelMessage::user("turn one"),
+        ModelMessage::assistant(Some("stable answer".to_owned()), Vec::new()),
+        ModelMessage::user("active turn"),
+    ]);
+    let mut too_many = build_messages_request_with_stable_cache(&request, 1024)?;
+    too_many.tools.as_mut().expect("tools")[0]["cache_control"] =
+        json!({"type": "ephemeral", "ttl": "1h"});
+    too_many.messages[0]["content"] = json!([
+        {
+            "type": "text",
+            "text": "one",
+            "cache_control": {"type": "ephemeral"}
+        },
+        {
+            "type": "text",
+            "text": "two",
+            "cache_control": {"type": "ephemeral"}
+        }
+    ]);
+    let error = validate_cache_breakpoint_contract(&too_many)
+        .expect_err("a fifth breakpoint must fail closed");
+    assert!(error.to_string().contains("provider limit is 4"));
+
+    let mut reversed = build_messages_request_with_stable_cache(&request, 1024)?;
+    reversed.tools.as_mut().expect("tools")[0]["cache_control"] =
+        json!({"type": "ephemeral", "ttl": "5m"});
+    reversed.system.as_mut().expect("system")[0]["cache_control"] =
+        json!({"type": "ephemeral", "ttl": "1h"});
+    let error = validate_cache_breakpoint_contract(&reversed)
+        .expect_err("long TTL after short TTL must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("1h cache breakpoints must precede 5m")
+    );
     Ok(())
 }
 
@@ -280,7 +418,12 @@ fn build_messages_request_replays_live_exact_blocks_and_rematerializes_safely_af
         HostedToolLimits::default(),
     )?];
 
-    let live = build_messages_request_with_continuations(&request, 1024, &store)?;
+    let live = build_messages_request_with_continuations(
+        &request,
+        1024,
+        &store,
+        AnthropicCachePolicy::Disabled,
+    )?;
     assert_eq!(live.body.messages[1]["content"], Value::Array(raw_blocks));
     assert_eq!(
         live.prior_hosted_invocations.get("srvtoolu_1"),
@@ -291,6 +434,7 @@ fn build_messages_request_replays_live_exact_blocks_and_rematerializes_safely_af
         &request,
         1024,
         &crate::hosted_search::AnthropicHostedContinuationStore::default(),
+        AnthropicCachePolicy::Disabled,
     )?;
     assert_eq!(
         restarted.body.messages[1]["content"][0]["text"],

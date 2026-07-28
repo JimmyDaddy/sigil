@@ -251,6 +251,14 @@ fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
         "preview_id": "compact-preview-1",
         "folded_event_count": 8,
         "retained_event_count": 4,
+        "policy": {
+            "strategy": "cache_aware_v3",
+            "phase": "prepare",
+            "forecast_confidence": "medium",
+            "admission_reason": "qualified_cost_savings",
+            "native_carrier_available": true,
+            "legacy_migration_fields": ["tail_messages"]
+        },
         "admission": {
             "kind": "ready",
             "economics": {
@@ -262,13 +270,24 @@ fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
                 "savings_tokens": 8_000,
                 "savings_ratio_ppm": 666_666,
                 "minimum_savings_tokens": 1_000,
-                "minimum_savings_ratio_ppm": 100_000
+                "minimum_savings_ratio_ppm": 100_000,
+                "summary_cache_read_tokens": 800,
+                "summary_uncached_input_tokens": 200,
+                "summary_output_tokens": 64,
+                "summary_cost_nano_usd": 42
             }
         }
     }))
     .expect("compaction review should decode");
 
     assert_eq!(review.preview_id.as_deref(), Some("compact-preview-1"));
+    assert_eq!(
+        review
+            .policy
+            .as_ref()
+            .map(|policy| policy.strategy.as_str()),
+        Some("cache_aware_v3")
+    );
     assert!(matches!(
         review.admission,
         crate::DesktopCompactionAdmission::Ready { .. }
@@ -283,6 +302,47 @@ fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
         serde_json::json!({
             "kind": "apply_compaction",
             "preview_id": "compact-preview-1"
+        })
+    );
+
+    let prepared: crate::DesktopCompactionReview = serde_json::from_value(serde_json::json!({
+        "preview_id": "compact-preview-local",
+        "folded_event_count": 8,
+        "retained_event_count": 4,
+        "admission": {
+            "kind": "prepared",
+            "standalone_tool_output_shrink_available": true
+        }
+    }))
+    .expect("local compaction review should decode");
+    assert!(matches!(
+        prepared.admission,
+        crate::DesktopCompactionAdmission::Prepared {
+            standalone_tool_output_shrink_available: true,
+        }
+    ));
+    assert_eq!(
+        serde_json::to_value(
+            crate::DesktopConversationRecoveryCommandAction::PrepareCompaction {
+                preview_id: "compact-preview-local".to_owned(),
+            }
+        )
+        .expect("summary preparation action should encode"),
+        serde_json::json!({
+            "kind": "prepare_compaction",
+            "preview_id": "compact-preview-local"
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(
+            crate::DesktopConversationRecoveryCommandAction::ApplyStandaloneToolOutputShrink {
+                preview_id: "compact-preview-local".to_owned(),
+            }
+        )
+        .expect("standalone shrink action should encode"),
+        serde_json::json!({
+            "kind": "apply_standalone_tool_output_shrink",
+            "preview_id": "compact-preview-local"
         })
     );
 }
@@ -300,7 +360,8 @@ fn recovery_receipt_decodes_compaction_without_weakening_durable_identity() {
                 "attempt_id": "attempt-1",
                 "task_memory_id": "memory-1",
                 "folded_event_count": 8,
-                "tool_output_projection_recorded": true
+                "tool_output_projection_recorded": true,
+                "native_carrier_materialized": false
             },
             "recovery": {
                 "checkpoints": [],

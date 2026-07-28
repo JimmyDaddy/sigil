@@ -149,6 +149,9 @@ impl AppState {
             AppAction::ApplyV2Compaction { request_id } => {
                 WorkerCommand::ApplyV2Compaction { request_id }
             }
+            AppAction::ApplyStandaloneToolOutputShrink { request_id } => {
+                WorkerCommand::ApplyStandaloneToolOutputShrink { request_id }
+            }
             AppAction::CancelV2CompactionReview { request_id } => {
                 WorkerCommand::CancelV2CompactionReview { request_id }
             }

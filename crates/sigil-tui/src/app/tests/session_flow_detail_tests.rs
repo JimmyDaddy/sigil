@@ -18,7 +18,7 @@ use sigil_kernel::{
     SkillTrustState, SourceCacheStatus, SourceFreshness, ToolApprovalAuditAction,
     ToolApprovalEntry, ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry,
     ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind, ToolRestartPolicy,
-    ToolResultMeta, WorkspaceConfig,
+    ToolResultMeta, UsageStats, WorkspaceConfig,
 };
 
 fn audit_integration_verification_receipt() -> sigil_kernel::VerificationReceipt {
@@ -2642,4 +2642,31 @@ fn push_restored_reasoning_timeline_entry_ignores_whitespace_only_delta() {
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].role, TimelineRole::Thinking);
     assert_eq!(timeline[0].text, "Real thinking");
+}
+
+#[test]
+fn usage_control_line_shows_cache_write_and_layout_without_hashes() {
+    let line = render_control_entry_line(&ControlEntry::UsageSnapshot(UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        cache_hit_tokens: 50,
+        cache_miss_tokens: 50,
+        cache_usage: Some(sigil_kernel::CacheUsageV1 {
+            schema_version: sigil_kernel::CacheUsageV1::SCHEMA_VERSION,
+            read: Some(sigil_kernel::CacheTokenCountV1::provider_reported(50)),
+            write: Some(sigil_kernel::CacheTokenCountV1::provider_reported(25)),
+            uncached: Some(sigil_kernel::CacheTokenCountV1::provider_reported(25)),
+            local_layout_mutation: Some(
+                sigil_kernel::CacheLayoutMutationKind::ConversationHistoryRewritten,
+            ),
+            provider_miss_without_local_mutation: false,
+        }),
+        ..UsageStats::default()
+    }));
+
+    assert_eq!(
+        line,
+        "[ctl] usage p=100 c=5 read=50 write=25 miss=50 layout=conversation_history_rewritten provider_miss_without_local_mutation=false"
+    );
+    assert!(!line.contains("sha256"));
 }

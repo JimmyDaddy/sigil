@@ -1,9 +1,10 @@
 use std::{
     collections::VecDeque,
+    env,
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use sigil_kernel::{
     ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderChunk,
@@ -27,6 +28,187 @@ fn deepseek_provider(config: crate::DeepSeekProviderConfig) -> Result<DeepSeekPr
     crate::test_env::with_clean_provider_env(|| {
         DeepSeekProvider::new(config, ModelRequestTimeouts::default())
     })
+}
+
+#[test]
+fn custom_route_does_not_inherit_exact_cache_or_trusted_pricing_from_model_name() -> Result<()> {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: "https://proxy.example.invalid/v1".to_owned(),
+        beta_base_url: "https://proxy.example.invalid/beta".to_owned(),
+        anthropic_base_url: "https://proxy.example.invalid/anthropic".to_owned(),
+        ..crate::DeepSeekProviderConfig::default()
+    })?;
+
+    assert!(!provider.capabilities().exact_prefix_cache);
+    assert_eq!(
+        provider
+            .context_capabilities("deepseek-v4-flash")
+            .cache_mode,
+        sigil_kernel::CacheMode::ObservedImplicitOrNone
+    );
+    assert!(
+        provider
+            .usage_pricing_snapshot("deepseek-v4-flash")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit real-provider opt-in, secret, and local cost admission"]
+async fn real_provider_three_exact_prefix_turns_report_cache_hit_and_miss_usage() -> Result<()> {
+    const REQUEST_COUNT: u64 = 3;
+    const CONSERVATIVE_INPUT_TOKENS_PER_REQUEST: u64 = 64_000;
+    const MAX_OUTPUT_TOKENS_PER_REQUEST: u64 = 32;
+    const REQUIRED_FLAG: &str = "SIGIL_REAL_PROVIDER_CACHE_CONFORMANCE";
+    const BUDGET_ENV: &str = "SIGIL_REAL_PROVIDER_MAX_COST_USD";
+
+    if env::var(REQUIRED_FLAG).as_deref() != Ok("1") {
+        anyhow::bail!(
+            "{REQUIRED_FLAG}=1 is required before this test may contact the real provider"
+        );
+    }
+    let api_key = env::var(crate::SIGIL_API_KEY_ENV)
+        .context("SIGIL_API_KEY is required for real cache conformance")?;
+    let max_cost_usd = env::var(BUDGET_ENV)
+        .context("SIGIL_REAL_PROVIDER_MAX_COST_USD is required")?
+        .parse::<f64>()
+        .context("real-provider cache budget must be a decimal USD value")?;
+    if !(max_cost_usd.is_finite() && 0.0 < max_cost_usd && max_cost_usd <= 1.0) {
+        anyhow::bail!("real-provider cache budget must be greater than zero and at most $1.00");
+    }
+    let provider = DeepSeekProvider::new_exact(
+        crate::DeepSeekProviderConfig {
+            api_key: Some(api_key),
+            ..crate::DeepSeekProviderConfig::default_for_model("deepseek-v4-flash")
+        },
+        ModelRequestTimeouts {
+            request_timeout: Duration::from_secs(30),
+            stream_idle_timeout: Duration::from_secs(30),
+            stream_total_timeout: Some(Duration::from_secs(60)),
+        },
+    )?;
+    let pricing = provider
+        .usage_pricing_snapshot("deepseek-v4-flash")
+        .context("real cache conformance requires a trusted pricing snapshot")?;
+    let unit_tokens = pricing.unit_tokens as f64;
+    let conservative_reservation_usd = REQUEST_COUNT as f64
+        * ((CONSERVATIVE_INPUT_TOKENS_PER_REQUEST as f64 * pricing.uncached_input_per_unit
+            / unit_tokens)
+            + (MAX_OUTPUT_TOKENS_PER_REQUEST as f64 * pricing.output_per_unit / unit_tokens));
+    if conservative_reservation_usd > max_cost_usd {
+        anyhow::bail!(
+            "real-provider cache conformance reserves ${conservative_reservation_usd:.6}, above the admitted ${max_cost_usd:.6}"
+        );
+    }
+    let mut request = simple_chat_request("deepseek-v4-flash");
+    request.messages = vec![
+        sigil_kernel::ModelMessage::system(format!(
+            "SIGIL RFC-0057 exact-prefix cache conformance fixture. {}",
+            "stable-prefix-segment ".repeat(2_000)
+        )),
+        sigil_kernel::ModelMessage::user(
+            "Reply with exactly CACHE-CONFORMANCE and no additional text.",
+        ),
+    ];
+    request.temperature = Some(0.0);
+    request.max_tokens = Some(MAX_OUTPUT_TOKENS_PER_REQUEST as u32);
+    request.traffic_partition_key =
+        Some("sigil:rfc-0057:deepseek-real-cache-conformance".to_owned());
+
+    let mut usage = Vec::new();
+    for _ in 0..REQUEST_COUNT {
+        let mut stream = provider.stream(request.clone()).await?;
+        let mut observed = None;
+        while let Some(chunk) = stream.next().await {
+            if let ProviderChunk::Usage(value) = chunk? {
+                observed = Some(value);
+            }
+        }
+        usage.push(observed.context("DeepSeek response omitted cache usage")?);
+    }
+
+    assert_eq!(usage.len(), REQUEST_COUNT as usize);
+    assert!(usage.iter().all(|usage| {
+        usage.prompt_tokens > 0
+            && usage
+                .cache_hit_tokens
+                .saturating_add(usage.cache_miss_tokens)
+                > 0
+            && usage.cache_usage.is_some()
+    }));
+    assert!(
+        usage[0].cache_miss_tokens > 0,
+        "the cold request must report uncached input"
+    );
+    assert!(
+        usage[1..].iter().any(|usage| usage.cache_hit_tokens > 0),
+        "at least one repeated exact-prefix request must report a cache hit"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn three_exact_prefix_requests_preserve_wire_prefix_and_map_hit_miss_usage() -> Result<()> {
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let response = |hit: u64, miss: u64| {
+        http_response(
+            200,
+            "text/event-stream",
+            &format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"ok\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":1,\"prompt_cache_hit_tokens\":{hit},\"prompt_cache_miss_tokens\":{miss}}}}}\n\ndata: [DONE]\n\n",
+                hit + miss
+            ),
+        )
+    };
+    let responses = Arc::new(Mutex::new(VecDeque::from([
+        response(0, 256),
+        response(224, 32),
+        response(224, 32),
+    ])));
+    let server = spawn_recording_server(Arc::clone(&requests), responses).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        api_key: Some("test-key".to_owned()),
+        user_id_strategy: None,
+        ..crate::DeepSeekProviderConfig::default_for_model("deepseek-v4-flash")
+    })?;
+    let mut request = simple_chat_request("deepseek-v4-flash");
+    request.messages = vec![
+        sigil_kernel::ModelMessage::system(format!(
+            "stable-system-prefix:{}",
+            "same-prefix ".repeat(200)
+        )),
+        sigil_kernel::ModelMessage::user("same active request"),
+    ];
+    request.max_tokens = Some(8);
+    request.temperature = Some(0.0);
+
+    let mut observed = Vec::new();
+    for _ in 0..3 {
+        let mut stream = provider.stream(request.clone()).await?;
+        while let Some(chunk) = stream.next().await {
+            if let ProviderChunk::Usage(usage) = chunk? {
+                observed.push((usage.cache_hit_tokens, usage.cache_miss_tokens));
+            }
+        }
+    }
+    assert_eq!(observed, vec![(0, 256), (224, 32), (224, 32)]);
+
+    let requests = requests.lock().expect("requests poisoned");
+    assert_eq!(requests.len(), 3);
+    let bodies = requests
+        .iter()
+        .map(|request| request.split("\r\n\r\n").nth(1).unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        bodies.iter().all(|body| *body == bodies[0]),
+        "same logical request must keep byte-identical DeepSeek wire content"
+    );
+    assert!(bodies[0].contains("stable-system-prefix"));
+    Ok(())
 }
 
 #[test]
@@ -249,12 +431,10 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
     assert!(!super::enqueue_completion_frame(
         &mut pending,
         crate::response::DeepSeekSseFrame::Blank,
-        "deepseek-v4-flash",
     )?);
     assert!(super::enqueue_completion_frame(
         &mut pending,
         crate::response::DeepSeekSseFrame::Done,
-        "deepseek-v4-flash",
     )?);
     assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
 
@@ -275,7 +455,6 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
         &mut decoder,
         &mut pending,
         "data: [DONE]\n\ndata: {not-json}\n\n",
-        "deepseek-v4-flash",
     )?);
     assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
 
@@ -285,7 +464,6 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
     assert!(super::enqueue_finished_completion_frames(
         &mut decoder,
         &mut pending,
-        "deepseek-v4-flash",
     )?);
     assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
     Ok(())

@@ -8,10 +8,11 @@ use serde_json::{Value, value::RawValue};
 use sigil_kernel::{
     COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionCursor, CompletionRequest, ContextSensitivity,
     EffectiveTokenBudget, FrozenProviderRequestMaterial, ImageInputCapability, InputTokenEvidence,
-    ModelRequestTimeouts, NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
-    NativeProviderCompactionMetadata, NativeProviderCompactionRequest,
-    PROVIDER_ERROR_BODY_LIMIT_BYTES, PortableTargetRequestMaterial, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
+    ModelRequestTimeouts, NativeCarrierPolicyV1, NativeProviderCompactionAttempt,
+    NativeProviderCompactionMaterialization, NativeProviderCompactionMetadata,
+    NativeProviderCompactionRequest, PROVIDER_ERROR_BODY_LIMIT_BYTES,
+    PortableTargetRequestMaterial, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContextCapabilities, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, RequestFitProof,
     SecretRedactor, Session, TokenMeasurementBinding, TokenMeasurementScope,
     VersionedProfileIdentity, provider_continuation_route_fingerprint, provider_status_error,
@@ -19,15 +20,15 @@ use sigil_kernel::{
 };
 
 use crate::{
-    capabilities::openai_responses_capabilities,
+    capabilities::{openai_responses_capabilities, openai_responses_context_capabilities},
     client::build_http_client,
     config::OpenAiResponsesProviderConfig,
     errors::{OpenAiResponsesProviderError, classify_status},
     mapper::StreamMapper,
     models::OpenAiResponsesCompactedWindow,
     request::{
-        build_compaction_request, build_input_token_count_request, build_responses_request,
-        openai_responses_image_input_capability,
+        build_compaction_request, build_input_token_count_request,
+        build_responses_request_with_cache_routing, openai_responses_image_input_capability,
     },
     stream::{OpenAiResponsesSseDecoder, OpenAiResponsesSseFrame},
 };
@@ -167,6 +168,8 @@ impl OpenAiResponsesProvider {
         logical_run_id: impl Into<String>,
         frozen_request: FrozenProviderRequestMaterial,
         covers_through: CompactionCursor,
+        portable_compaction_id: sigil_kernel::CompactionId,
+        carrier_policy: NativeCarrierPolicyV1,
     ) -> Result<NativeProviderCompactionMaterialization> {
         let request = frozen_request.request();
         if request.provider_name != self.name() {
@@ -183,6 +186,8 @@ impl OpenAiResponsesProvider {
                 logical_run_id: logical_run_id.into(),
                 frozen_request,
                 covers_through,
+                portable_compaction_id,
+                carrier_policy,
                 metadata,
             },
         )
@@ -320,8 +325,33 @@ impl Provider for OpenAiResponsesProvider {
         self.capabilities.clone()
     }
 
+    fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
+        openai_responses_context_capabilities(self.uses_official_openai_endpoint())
+    }
+
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
         openai_responses_image_input_capability(model_name)
+    }
+
+    async fn materialize_native_compaction_carrier(
+        &self,
+        session: &Session,
+        logical_run_id: String,
+        frozen_request: FrozenProviderRequestMaterial,
+        covers_through: CompactionCursor,
+        portable_compaction_id: sigil_kernel::CompactionId,
+        carrier_policy: NativeCarrierPolicyV1,
+    ) -> Result<Option<NativeProviderCompactionMaterialization>> {
+        self.compact_and_materialize_durable(
+            session,
+            logical_run_id,
+            frozen_request,
+            covers_through,
+            portable_compaction_id,
+            carrier_policy,
+        )
+        .await
+        .map(Some)
     }
 
     fn classify_pre_generation_rejection(
@@ -405,7 +435,10 @@ impl Provider for OpenAiResponsesProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let body = build_responses_request(&request)?;
+        let (body, _) = build_responses_request_with_cache_routing(
+            &request,
+            self.uses_official_openai_endpoint(),
+        )?;
         let url = self.responses_url();
         let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
             .await

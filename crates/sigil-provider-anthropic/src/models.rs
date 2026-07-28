@@ -10,7 +10,7 @@ pub struct AnthropicMessagesRequest {
     pub max_tokens: u32,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]

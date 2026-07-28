@@ -599,7 +599,7 @@ pub fn http_openapi_document() -> Value {
             "/sessions/{session_id}/recovery/compaction-preview": {
                 "post": {
                     "summary": "Preview one exact portable context compaction",
-                    "description": "Builds and locally proves the exact post-compaction provider request without appending a compaction lifecycle attempt. A ready preview is process-local and must be explicitly applied before it becomes stale.",
+                    "description": "Builds a local-only fold, continuity and recoverable tool-output plan without contacting the provider, activating a compaction lifecycle or changing the visible projection. The returned process-local prepared preview can be kept unchanged, used for standalone tool-output cleanup, or explicitly advanced through prepare_compaction to one billed semantic-summary attempt. A ready semantic preview must still be explicitly applied before it becomes stale.",
                     "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
                     "responses": {
                         "200": { "description": "Fresh compaction review", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompactionReview" } } } },
@@ -2015,7 +2015,7 @@ pub fn http_openapi_document() -> Value {
                 "CompactionEconomics": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["before_input_tokens", "target_input_tokens", "context_window_tokens", "output_tokens", "safety_buffer_tokens", "savings_tokens", "savings_ratio_ppm", "minimum_savings_tokens", "minimum_savings_ratio_ppm"],
+                    "required": ["before_input_tokens", "target_input_tokens", "context_window_tokens", "output_tokens", "safety_buffer_tokens", "savings_tokens", "savings_ratio_ppm", "minimum_savings_tokens", "minimum_savings_ratio_ppm", "summary_cache_read_tokens", "summary_uncached_input_tokens", "summary_output_tokens"],
                     "properties": {
                         "before_input_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
                         "target_input_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
@@ -2025,7 +2025,11 @@ pub fn http_openapi_document() -> Value {
                         "savings_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
                         "savings_ratio_ppm": { "type": "integer", "format": "uint32", "minimum": 0 },
                         "minimum_savings_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
-                        "minimum_savings_ratio_ppm": { "type": "integer", "format": "uint32", "minimum": 0 }
+                        "minimum_savings_ratio_ppm": { "type": "integer", "format": "uint32", "minimum": 0 },
+                        "summary_cache_read_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "summary_uncached_input_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "summary_output_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "summary_cost_nano_usd": { "type": "integer", "format": "uint64", "minimum": 0 }
                     }
                 },
                 "CompactionAdmissionReady": {
@@ -2035,6 +2039,15 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "kind": { "type": "string", "const": "ready" },
                         "economics": { "$ref": "#/components/schemas/CompactionEconomics" }
+                    }
+                },
+                "CompactionAdmissionPrepared": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "standalone_tool_output_shrink_available"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "prepared" },
+                        "standalone_tool_output_shrink_available": { "type": "boolean" }
                     }
                 },
                 "CompactionAdmissionNoHistory": {
@@ -2056,15 +2069,130 @@ pub fn http_openapi_document() -> Value {
                         "reason": { "type": "string", "maxLength": 4096 }
                     }
                 },
+                "CompactionPolicy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["strategy", "phase", "native_carrier_available"],
+                    "properties": {
+                        "strategy": { "type": "string", "enum": ["cache_aware_v3", "legacy_v2"] },
+                        "phase": { "type": "string", "enum": ["below_observe", "observe", "prepare", "admit", "emergency"] },
+                        "forecast_confidence": { "oneOf": [
+                            { "type": "string", "enum": ["low", "medium", "high"] },
+                            { "type": "null" }
+                        ] },
+                        "admission_reason": { "oneOf": [
+                            { "type": "string", "enum": ["emergency_fit", "projected_fit_required", "qualified_cost_savings", "pricing_unavailable", "low_forecast_confidence", "expected_turns_before_break_even", "insufficient_savings"] },
+                            { "type": "null" }
+                        ] },
+                        "native_carrier_available": { "type": "boolean" },
+                        "legacy_migration_fields": {
+                            "type": "array",
+                            "items": { "type": "string", "maxLength": 128 },
+                            "maxItems": 8
+                        }
+                    }
+                },
+                "CompactionConstraint": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["text", "source_event_id", "source_field_path"],
+                    "properties": {
+                        "text": { "type": "string", "minLength": 1, "maxLength": 16384 },
+                        "source_event_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "source_field_path": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "CompactionToolArtifact": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "source_event_id",
+                        "content_sha256",
+                        "tool_name",
+                        "tool_call_id",
+                        "status",
+                        "original_content_bytes",
+                        "original_content_token_upper_bound",
+                        "head_excerpt",
+                        "tail_excerpt",
+                        "reason",
+                        "recovery_instruction"
+                    ],
+                    "properties": {
+                        "source_event_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "content_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                        "tool_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+                        "original_content_bytes": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "original_content_token_upper_bound": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "head_excerpt": { "type": "string", "maxLength": 513 },
+                        "tail_excerpt": { "type": "string", "maxLength": 513 },
+                        "reason": { "type": "string", "const": "large_completed_historical_result" },
+                        "recovery_instruction": { "type": "string", "minLength": 1, "maxLength": 513 }
+                    }
+                },
+                "CompactionDetails": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "active_objective",
+                        "objective_source_event_id",
+                        "active_constraints",
+                        "folded_complete_turn_count",
+                        "folded_token_upper_bound",
+                        "retained_complete_turn_count",
+                        "retained_token_upper_bound",
+                        "tool_artifact_count",
+                        "tool_artifacts",
+                        "pending_work_count",
+                        "unresolved_question_count",
+                        "recoverable_attachment_count",
+                        "protected_control_event_count",
+                        "protected_active_tool_or_approval_count"
+                    ],
+                    "properties": {
+                        "active_objective": { "type": "string", "minLength": 1, "maxLength": 16384 },
+                        "objective_source_event_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "active_constraints": {
+                            "type": "array",
+                            "maxItems": 128,
+                            "items": { "$ref": "#/components/schemas/CompactionConstraint" }
+                        },
+                        "folded_complete_turn_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "folded_token_upper_bound": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "retained_complete_turn_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "retained_token_upper_bound": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "tool_artifact_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "tool_artifacts": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "items": { "$ref": "#/components/schemas/CompactionToolArtifact" }
+                        },
+                        "pending_work_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "unresolved_question_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "recoverable_attachment_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "protected_control_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "protected_active_tool_or_approval_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "current_cache_read_tokens": { "type": ["integer", "null"], "format": "uint64", "minimum": 0 },
+                        "break_even_turns": { "type": ["integer", "null"], "format": "uint32", "minimum": 1 }
+                    }
+                },
                 "CompactionReview": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["folded_event_count", "retained_event_count", "admission"],
+                    "required": ["folded_event_count", "retained_event_count", "policy", "admission"],
                     "properties": {
                         "preview_id": { "type": ["string", "null"], "maxLength": 512 },
                         "folded_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
                         "retained_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "policy": { "$ref": "#/components/schemas/CompactionPolicy" },
+                        "details": { "oneOf": [
+                            { "$ref": "#/components/schemas/CompactionDetails" },
+                            { "type": "null" }
+                        ] },
                         "admission": { "oneOf": [
+                            { "$ref": "#/components/schemas/CompactionAdmissionPrepared" },
                             { "$ref": "#/components/schemas/CompactionAdmissionReady" },
                             { "$ref": "#/components/schemas/CompactionAdmissionNoHistory" },
                             { "$ref": "#/components/schemas/CompactionAdmissionUnavailable" }
@@ -2130,6 +2258,24 @@ pub fn http_openapi_document() -> Value {
                         "preview_id": { "type": "string", "minLength": 1, "maxLength": 512 }
                     }
                 },
+                "ConversationRecoveryPrepareCompactionAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "preview_id"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "prepare_compaction" },
+                        "preview_id": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
+                "ConversationRecoveryToolOutputShrinkAction": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "preview_id"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "apply_standalone_tool_output_shrink" },
+                        "preview_id": { "type": "string", "minLength": 1, "maxLength": 512 }
+                    }
+                },
                 "ConversationRecoveryForkAction": {
                     "type": "object",
                     "additionalProperties": false,
@@ -2142,7 +2288,9 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryCommandAction": {
                     "oneOf": [
+                        { "$ref": "#/components/schemas/ConversationRecoveryPrepareCompactionAction" },
                         { "$ref": "#/components/schemas/ConversationRecoveryCompactionAction" },
+                        { "$ref": "#/components/schemas/ConversationRecoveryToolOutputShrinkAction" },
                         { "$ref": "#/components/schemas/ConversationRecoveryRestoreAction" },
                         { "$ref": "#/components/schemas/ConversationRecoveryForkAction" }
                     ]
@@ -2171,13 +2319,24 @@ pub fn http_openapi_document() -> Value {
                 "CompactionReceipt": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["compaction_id", "attempt_id", "task_memory_id", "folded_event_count", "tool_output_projection_recorded"],
+                    "required": ["compaction_id", "attempt_id", "task_memory_id", "folded_event_count", "tool_output_projection_recorded", "native_carrier_materialized"],
                     "properties": {
                         "compaction_id": { "type": "string", "maxLength": 512 },
                         "attempt_id": { "type": "string", "maxLength": 512 },
                         "task_memory_id": { "type": "string", "maxLength": 512 },
                         "folded_event_count": { "type": "integer", "format": "uint64", "minimum": 0 },
-                        "tool_output_projection_recorded": { "type": "boolean" }
+                        "tool_output_projection_recorded": { "type": "boolean" },
+                        "native_carrier_materialized": { "type": "boolean" },
+                        "native_carrier_status": { "type": "string" }
+                    }
+                },
+                "ToolOutputShrinkReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["context_epoch_id", "projected_output_count"],
+                    "properties": {
+                        "context_epoch_id": { "type": "string", "maxLength": 512 },
+                        "projected_output_count": { "type": "integer", "format": "uint64", "minimum": 1 }
                     }
                 },
                 "ConversationForkReceipt": {
@@ -2199,8 +2358,10 @@ pub fn http_openapi_document() -> Value {
                         "command_id": { "type": "string" },
                         "client_id": { "type": "string" },
                         "session_id": { "type": "string" },
-                        "action": { "type": "string", "enum": ["apply_compaction", "restore_checkpoint", "fork_conversation"] },
+                        "action": { "type": "string", "enum": ["prepare_compaction", "apply_compaction", "apply_standalone_tool_output_shrink", "restore_checkpoint", "fork_conversation"] },
                         "compaction": { "oneOf": [{ "$ref": "#/components/schemas/CompactionReceipt" }, { "type": "null" }] },
+                        "compaction_review": { "oneOf": [{ "$ref": "#/components/schemas/CompactionReview" }, { "type": "null" }] },
+                        "tool_output_shrink": { "oneOf": [{ "$ref": "#/components/schemas/ToolOutputShrinkReceipt" }, { "type": "null" }] },
                         "restore": { "oneOf": [{ "$ref": "#/components/schemas/CheckpointRestoreReceipt" }, { "type": "null" }] },
                         "fork": { "oneOf": [{ "$ref": "#/components/schemas/ConversationForkReceipt" }, { "type": "null" }] },
                         "recovery": { "$ref": "#/components/schemas/ConversationRecoveryView" },

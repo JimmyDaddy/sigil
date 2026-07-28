@@ -67,12 +67,16 @@ Sigil 原生的可复用工作区技能、命令、子智能体和插件分别�
 ```toml
 [compaction]
 enabled = true
+strategy = "cache_aware_v3"
+native_carrier_enabled = false
 soft_threshold_ratio = 0.5
 hard_threshold_ratio = 0.8
 tail_messages = 6
 ```
 
-当预览显示可以应用时，上下文精简会压缩较早的对话内容。手动入口是 `/compact`。无法确定模型上下文窗口大小时，可以设置 `fallback_context_window_tokens`；精简失败不会改变当前对话。
+默认策略是 `cache_aware_v3`：保持 provider/tool 稳定前缀，通过带来源的 portable checkpoint 延续当前意图，按完整回合保留 recent tail，只在上下文即将放不下或可信成本证据证明值得时切换 cache epoch。手动 `/compact` 先进入纯本地 prepare 阶段，不发送 provider 请求、不创建语义压缩 lifecycle，也不改变可见 projection。预览明确提供三种选择：保持当前上下文、只应用可恢复的大型工具输出 projection epoch，或生成完整语义候选。只有第三种选择才会在当前同一 provider/model route 上额外调用一次 LLM：旧 epoch request 原样作为可缓存前缀，只在末尾追加严格 JSON 摘要指令；这不是子 agent，也不会执行工具。模型摘要只补充不可信语义脉络，目标、约束、授权与验证仍以持久化会话记录为准。最终预览和 session 账单会显示摘要调用的 cache read、未缓存输入、输出与成本，且仍需显式确认才激活。自动 V3 只对具备精确 portable proof 且 route capability 受信的 provider 开启；未知或兼容 route 自动回退 `legacy_v2`。手动摘要失败不会静默降级，只有 fit-required/overflow 紧急路径可带明确审计使用确定性 fallback。ratio 与 `tail_messages` 继续可读，供迁移/回滚使用；V3 会把 tail 值翻译成完整回合下限，不再按裸消息数切断工具回合。无法确定模型上下文窗口大小时，可以设置 `fallback_context_window_tokens`；精简失败不会改变当前对话。
+
+`native_carrier_enabled` 是默认关闭的迁移预留开关。当前即使将它设为 `true`，Sigil 也会保持 provider-native materialization fail-closed：只有把 carrier 接回相同精确 route 的下一次请求，额外计费请求才可能产生收益。在该 resume contract 落地前，portable continuity 是唯一启用的精简路径。
 
 <!-- public-doc-topic: code-intelligence -->
 

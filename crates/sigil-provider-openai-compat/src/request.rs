@@ -3,7 +3,8 @@ use serde_json::{Value, json};
 
 use sigil_kernel::{
     CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ToolSpec,
-    validate_image_input_capability, validate_request_image_attachments,
+    canonicalize_cache_stable_json, validate_image_input_capability,
+    validate_request_image_attachments,
 };
 
 use crate::models::{OpenAiChatCompletionRequest, OpenAiStreamOptions};
@@ -16,7 +17,7 @@ pub fn build_chat_request(request: &CompletionRequest) -> Result<OpenAiChatCompl
         .iter()
         .map(model_message_to_json)
         .collect::<Result<Vec<_>>>()?;
-    let tools = openai_tools(&request.tools);
+    let tools = openai_tools(&request.tools)?;
 
     Ok(OpenAiChatCompletionRequest {
         model: request.model_name.clone(),
@@ -76,25 +77,25 @@ fn model_message_to_json(message: &ModelMessage) -> Result<Value> {
     Ok(base)
 }
 
-fn openai_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {
+fn openai_tools(tools: &[ToolSpec]) -> Result<Option<Vec<Value>>> {
     if tools.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(
+    Ok(Some(
         tools
             .iter()
             .map(|tool| {
-                json!({
+                Ok(json!({
                     "type": "function",
                     "function": {
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": tool.input_schema,
+                        "parameters": canonicalize_cache_stable_json(&tool.input_schema)?,
                     }
-                })
+                }))
             })
-            .collect(),
-    )
+            .collect::<Result<Vec<_>>>()?,
+    ))
 }
 
 #[cfg(test)]

@@ -3132,6 +3132,8 @@ fn session_list_projection_replays_from_session_durable_stream() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         },
     )))?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
@@ -4772,6 +4774,8 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         })),
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
             prompt_tokens: 48,
@@ -4782,6 +4786,8 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
             output_cost: 0.0,
             cache_savings: 0.0,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         })),
     ];
 
@@ -4809,6 +4815,8 @@ fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
         output_cost: 4.0,
         cache_savings: 7.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     }));
     store.append_session_entry_event(&usage)?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
@@ -4821,6 +4829,15 @@ fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
             output_cost: 2.0,
             cache_savings: 3.0,
             system_fingerprint: None,
+            cache_usage: Some(crate::CacheUsageV1 {
+                schema_version: crate::CacheUsageV1::SCHEMA_VERSION,
+                read: Some(crate::CacheTokenCountV1::provider_reported(28)),
+                write: None,
+                uncached: Some(crate::CacheTokenCountV1::provider_reported(20)),
+                local_layout_mutation: Some(crate::CacheLayoutMutationKind::Identical),
+                provider_miss_without_local_mutation: true,
+            }),
+            pricing_snapshot: None,
         },
     )))?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
@@ -4837,6 +4854,7 @@ fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
     assert_eq!(stats.output_cost, 6.0);
     assert_eq!(stats.cache_savings, 10.0);
     assert_eq!(stats.last_prompt_tokens, 48);
+    assert!(stats.last_provider_miss_without_local_mutation);
     Ok(())
 }
 
@@ -4862,6 +4880,8 @@ fn usage_stats_projection_record_helper_ignores_idempotent_replay() -> Result<()
             output_cost: 0.3,
             cache_savings: 0.1,
             system_fingerprint: None,
+            cache_usage: None,
+            pricing_snapshot: None,
         },
     )))?;
     let records = JsonlSessionStore::read_event_records(store.path())?;

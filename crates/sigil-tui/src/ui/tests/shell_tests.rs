@@ -502,12 +502,12 @@ fn render_config_mcp_selector_keeps_lifecycle_visible_at_120x32() -> anyhow::Res
     assert!(front.contains("Secrets"));
     assert!(front.contains("Boundary"));
 
-    for _ in 0..5 {
+    for _ in 0..6 {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     }
     terminal.draw(|frame| render(frame, &app))?;
     let back = rendered_content(&terminal);
-    assert!(back.contains("mcp-6"));
+    assert!(back.contains("mcp-7"));
     assert!(back.contains("Live fingerprint"));
     assert!(back.contains("Secrets"));
     assert!(back.contains("Boundary"));
@@ -1604,7 +1604,7 @@ fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     open_config_panel_for_test(&mut app)?;
     select_config_section_for_test(&mut app, ConfigSection::Compaction);
-    for _ in 0..4 {
+    for _ in 0..6 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     }
     let backend = TestBackend::new(96, 12);
@@ -2184,11 +2184,15 @@ fn docs_compaction_preview_app() -> anyhow::Result<AppState> {
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 41,
+            strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
             preview,
             admission: V2CompactionAdmission::Unavailable {
                 reason: "apply is temporarily frozen while correctness fixes are in progress"
                     .to_owned(),
             },
+            tool_output_shrink_candidates: Vec::new(),
+            continuity: None,
+            native_carrier_requested: false,
         })),
     })?;
     app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);

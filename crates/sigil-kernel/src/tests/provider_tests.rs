@@ -7,8 +7,10 @@ use futures::{Stream, stream};
 use crate::{MessageRole, ModelMessage, ReasoningEffort, ToolCall};
 
 use super::{
-    CompletionRequest, Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport,
-    SessionStats, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+    CacheMode, CacheTokenCountV1, CacheUsageCapabilities, CacheUsageV1, CompletionRequest,
+    ModelPricingSnapshotV1, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContextCapabilities, ReasoningStreamSupport, SessionStats, ToolCallCompletionIdPolicy,
+    ToolCallStreamAccumulator, UsageStats,
 };
 
 #[test]
@@ -23,6 +25,8 @@ fn session_stats_track_latest_prompt_tokens_separately_from_totals() {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     });
     stats.apply_usage(&UsageStats {
         prompt_tokens: 42,
@@ -33,10 +37,185 @@ fn session_stats_track_latest_prompt_tokens_separately_from_totals() {
         output_cost: 0.0,
         cache_savings: 0.0,
         system_fingerprint: None,
+        cache_usage: None,
+        pricing_snapshot: None,
     });
 
     assert_eq!(stats.prompt_tokens, 162);
     assert_eq!(stats.last_prompt_tokens, 42);
+}
+
+#[test]
+fn cache_usage_preserves_unknown_write_and_trusted_pricing_evidence() -> Result<()> {
+    let usage = UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cache_hit_tokens: 80,
+        cache_miss_tokens: 20,
+        cache_usage: Some(CacheUsageV1 {
+            schema_version: CacheUsageV1::SCHEMA_VERSION,
+            read: Some(CacheTokenCountV1::provider_reported(80)),
+            write: None,
+            uncached: Some(CacheTokenCountV1::provider_reported(20)),
+            local_layout_mutation: Some(crate::CacheLayoutMutationKind::ConversationTailAppended),
+            provider_miss_without_local_mutation: false,
+        }),
+        ..UsageStats::default()
+    };
+    let snapshot = ModelPricingSnapshotV1 {
+        schema_version: ModelPricingSnapshotV1::SCHEMA_VERSION,
+        snapshot_id: "test-model-usd-2026-07-28".to_owned(),
+        currency: "USD".to_owned(),
+        unit_tokens: 1_000_000,
+        cache_read_per_unit: 0.1,
+        cache_write_per_unit: None,
+        uncached_input_per_unit: 1.0,
+        output_per_unit: 2.0,
+        source: "https://example.invalid/trusted-pricing".to_owned(),
+        verified_at: "2026-07-28".to_owned(),
+    };
+
+    let priced = snapshot.apply_to_usage(usage)?;
+    let cache = priced.cache_usage.as_ref().expect("cache usage");
+    assert!(cache.write.is_none(), "unknown write must not become zero");
+    assert_eq!(priced.input_cost, 0.000028);
+    assert_eq!(priced.output_cost, 0.00004);
+    assert_eq!(priced.cache_savings, 0.000072);
+    assert_eq!(
+        priced
+            .pricing_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_id.as_str()),
+        Some("test-model-usd-2026-07-28")
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_context_capability_validation_rejects_impossible_shapes() {
+    let mut missing_limit = ProviderContextCapabilities {
+        cache_mode: CacheMode::ExplicitBreakpoints,
+        ..ProviderContextCapabilities::default()
+    };
+    assert!(missing_limit.validate().is_err());
+
+    missing_limit.explicit_breakpoint_limit = Some(4);
+    assert!(missing_limit.validate().is_ok());
+
+    let mut unknown_with_limit = ProviderContextCapabilities::unknown();
+    unknown_with_limit.explicit_breakpoint_limit = Some(1);
+    assert!(unknown_with_limit.validate().is_err());
+}
+
+#[test]
+fn pricing_does_not_treat_reported_write_as_free_when_write_price_is_unknown() -> Result<()> {
+    let usage = UsageStats {
+        prompt_tokens: 100,
+        input_cost: 7.0,
+        cache_usage: Some(CacheUsageV1 {
+            schema_version: CacheUsageV1::SCHEMA_VERSION,
+            read: Some(CacheTokenCountV1::provider_reported(40)),
+            write: Some(CacheTokenCountV1::provider_reported(40)),
+            uncached: Some(CacheTokenCountV1::provider_reported(20)),
+            local_layout_mutation: None,
+            provider_miss_without_local_mutation: false,
+        }),
+        ..UsageStats::default()
+    };
+    let snapshot = ModelPricingSnapshotV1 {
+        schema_version: ModelPricingSnapshotV1::SCHEMA_VERSION,
+        snapshot_id: "test-model-no-write-price".to_owned(),
+        currency: "USD".to_owned(),
+        unit_tokens: 1_000_000,
+        cache_read_per_unit: 0.1,
+        cache_write_per_unit: None,
+        uncached_input_per_unit: 1.0,
+        output_per_unit: 2.0,
+        source: "bundled-test".to_owned(),
+        verified_at: "2026-07-28".to_owned(),
+    };
+
+    let priced = snapshot.apply_to_usage(usage)?;
+    assert_eq!(priced.input_cost, 7.0);
+    assert!(priced.pricing_snapshot.is_some());
+    Ok(())
+}
+
+#[test]
+fn cache_usage_rejects_known_categories_larger_than_provider_prompt_total() {
+    let usage = CacheUsageV1 {
+        schema_version: CacheUsageV1::SCHEMA_VERSION,
+        read: Some(CacheTokenCountV1::provider_reported(40)),
+        write: Some(CacheTokenCountV1::provider_reported(40)),
+        uncached: Some(CacheTokenCountV1::provider_reported(30)),
+        local_layout_mutation: None,
+        provider_miss_without_local_mutation: false,
+    };
+
+    let error = usage
+        .validate_for_prompt_tokens(100)
+        .expect_err("known cache categories must fit the provider prompt total");
+    assert!(error.to_string().contains("exceed provider prompt tokens"));
+}
+
+#[test]
+fn identical_local_layout_with_uncached_input_records_a_narrow_provider_miss_diagnostic() {
+    let mut usage = CacheUsageV1 {
+        schema_version: CacheUsageV1::SCHEMA_VERSION,
+        read: Some(CacheTokenCountV1::provider_reported(0)),
+        write: None,
+        uncached: Some(CacheTokenCountV1::provider_reported(100)),
+        local_layout_mutation: None,
+        provider_miss_without_local_mutation: false,
+    };
+
+    usage.observe_local_layout(crate::CacheLayoutMutationKind::Identical, 100);
+    assert!(usage.provider_miss_without_local_mutation);
+
+    let mut stats = SessionStats::default();
+    stats.apply_usage(&UsageStats {
+        prompt_tokens: 100,
+        cache_miss_tokens: 100,
+        cache_usage: Some(usage),
+        ..UsageStats::default()
+    });
+    assert!(stats.last_provider_miss_without_local_mutation);
+}
+
+#[test]
+fn a_local_history_rewrite_never_blames_an_uncached_request_on_the_provider() {
+    let mut usage = CacheUsageV1 {
+        schema_version: CacheUsageV1::SCHEMA_VERSION,
+        read: Some(CacheTokenCountV1::provider_reported(0)),
+        write: None,
+        uncached: Some(CacheTokenCountV1::provider_reported(100)),
+        local_layout_mutation: None,
+        provider_miss_without_local_mutation: false,
+    };
+
+    usage.observe_local_layout(
+        crate::CacheLayoutMutationKind::ConversationHistoryRewritten,
+        100,
+    );
+    assert!(!usage.provider_miss_without_local_mutation);
+}
+
+#[test]
+fn legacy_usage_json_keeps_new_cache_evidence_unknown() -> Result<()> {
+    let usage: UsageStats = serde_json::from_value(serde_json::json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "cache_hit_tokens": 80,
+        "cache_miss_tokens": 20,
+        "input_cost": 0.1,
+        "output_cost": 0.2,
+        "cache_savings": 0.3,
+        "system_fingerprint": null
+    }))?;
+
+    assert!(usage.cache_usage.is_none());
+    assert!(usage.pricing_snapshot.is_none());
+    Ok(())
 }
 
 #[test]
@@ -317,6 +496,29 @@ impl Provider for BoxedProviderFixture {
         }
     }
 
+    fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
+        ProviderContextCapabilities::observed_implicit_or_none(CacheUsageCapabilities {
+            read_tokens: true,
+            write_tokens: false,
+            miss_tokens: true,
+        })
+    }
+
+    fn usage_pricing_snapshot(&self, _model_name: &str) -> Option<ModelPricingSnapshotV1> {
+        Some(ModelPricingSnapshotV1 {
+            schema_version: ModelPricingSnapshotV1::SCHEMA_VERSION,
+            snapshot_id: "boxed-pricing".to_owned(),
+            currency: "USD".to_owned(),
+            unit_tokens: 1_000_000,
+            cache_read_per_unit: 0.1,
+            cache_write_per_unit: None,
+            uncached_input_per_unit: 1.0,
+            output_per_unit: 2.0,
+            source: "https://example.invalid".to_owned(),
+            verified_at: "2026-07-28".to_owned(),
+        })
+    }
+
     async fn stream(
         &self,
         _request: CompletionRequest,
@@ -334,6 +536,17 @@ async fn boxed_provider_delegates_name_capabilities_and_stream() -> Result<()> {
 
     assert_eq!(provider.name(), "boxed");
     assert_eq!(provider.capabilities().tool_name_max_chars, 32);
+    assert_eq!(
+        provider.context_capabilities("model").cache_mode,
+        CacheMode::ObservedImplicitOrNone
+    );
+    assert_eq!(
+        provider
+            .usage_pricing_snapshot("model")
+            .expect("boxed pricing delegation")
+            .snapshot_id,
+        "boxed-pricing"
+    );
 
     let chunks = futures::StreamExt::collect::<Vec<_>>(
         provider

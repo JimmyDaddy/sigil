@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use sigil_kernel::{
-    AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry,
+    AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionEconomicsV2,
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
     ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
@@ -30,6 +30,12 @@ pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 1;
 /// Local admission state for a reviewed V2 portable compaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum V2CompactionAdmission {
+    /// Local-only prepare completed. No provider request has been sent and no durable projection
+    /// has changed; the user may keep the epoch, apply standalone shrink, or request the billed
+    /// semantic-summary stage.
+    Prepared {
+        standalone_tool_output_shrink_available: bool,
+    },
     Ready {
         before_input_tokens: u64,
         input_tokens: u64,
@@ -40,6 +46,13 @@ pub enum V2CompactionAdmission {
         savings_ratio_ppm: u32,
         minimum_savings_tokens: u64,
         minimum_savings_ratio_ppm: u32,
+        summary_usage_observed: bool,
+        deterministic_emergency_fallback: bool,
+        summary_cache_read_tokens: u64,
+        summary_uncached_input_tokens: u64,
+        summary_output_tokens: u64,
+        summary_cost_nano_usd: Option<u64>,
+        economics_v2: Option<Box<CompactionEconomicsV2>>,
     },
     Unavailable {
         reason: String,
@@ -55,12 +68,53 @@ pub enum V2CompactionApplySource {
     OverflowRecovery,
 }
 
+/// Safe metadata for one next-epoch recoverable tool-output preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutputShrinkPreview {
+    pub(crate) tool_name: String,
+    pub(crate) tool_call_id: String,
+    pub(crate) status: String,
+    pub(crate) original_content_bytes: u64,
+    pub(crate) original_content_token_upper_bound: u64,
+    pub(crate) head_excerpt: String,
+    pub(crate) tail_excerpt: String,
+    pub(crate) content_sha256: String,
+    pub(crate) artifact_ref: String,
+    pub(crate) reason: String,
+    pub(crate) recovery_instruction: String,
+}
+
 /// A read-only fold plan paired with the result of local target-request admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2CompactionReview {
     pub(crate) request_id: u64,
+    pub(crate) strategy: sigil_kernel::CompactionStrategy,
     pub(crate) preview: V2CompactionPreview,
     pub(crate) admission: V2CompactionAdmission,
+    pub(crate) tool_output_shrink_candidates: Vec<ToolOutputShrinkPreview>,
+    pub(crate) continuity: Option<V2ContinuityPreview>,
+    pub(crate) native_carrier_requested: bool,
+}
+
+/// Safe authority/continuity evidence rendered before compaction activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2ContinuityPreview {
+    pub(crate) root_objective: String,
+    pub(crate) active_constraints: Vec<V2ConstraintPreview>,
+    pub(crate) active_constraint_count: usize,
+    pub(crate) authorization_boundary_count: usize,
+    pub(crate) recoverable_attachment_count: usize,
+    pub(crate) pending_work_count: usize,
+    pub(crate) unresolved_question_count: usize,
+    pub(crate) source_ref_count: usize,
+}
+
+/// Bounded exact constraint and durable source rendered in the confirmation modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2ConstraintPreview {
+    pub(crate) text: String,
+    pub(crate) source_event_id: String,
+    pub(crate) source_field_path: String,
 }
 
 /// Read-only outcome of a V2 compaction preview request.
@@ -240,6 +294,9 @@ pub enum WorkerCommand {
     },
     PreviewV2Compaction,
     ApplyV2Compaction {
+        request_id: u64,
+    },
+    ApplyStandaloneToolOutputShrink {
         request_id: u64,
     },
     CancelV2CompactionReview {
@@ -495,6 +552,12 @@ pub enum WorkerMessage {
         source: V2CompactionApplySource,
         compaction_id: String,
         folded_event_count: usize,
+        entries: Vec<SessionLogEntry>,
+    },
+    StandaloneToolOutputShrinkApplied {
+        request_id: u64,
+        context_epoch_id: String,
+        projected_output_count: usize,
         entries: Vec<SessionLogEntry>,
     },
     V2CompactionApplyFailed {

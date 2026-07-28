@@ -90,9 +90,9 @@ pub use dto::{
     HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTaskContinuationRequest,
     HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
-    HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpToolOutputShrinkReceipt,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunCommandReceipt,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

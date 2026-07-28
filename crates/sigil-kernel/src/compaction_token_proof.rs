@@ -285,6 +285,8 @@ pub struct PortableCompactionEconomicsV1 {
     pub minimum_savings_ratio_ppm: u32,
     pub savings_tokens: u64,
     pub savings_ratio_ppm: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v2_economics: Option<crate::CompactionEconomicsV2>,
 }
 
 impl PortableCompactionEconomicsV1 {
@@ -348,7 +350,24 @@ impl PortableCompactionEconomicsV1 {
             savings_tokens,
             savings_ratio_ppm: u32::try_from(savings_ratio_ppm)
                 .context("portable compaction savings ratio exceeds u32")?,
+            v2_economics: None,
         })
+    }
+
+    /// Attaches the RFC-0057 forecast and cache-aware admission extension to this exact proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the extension is invalid or names different before/after savings.
+    pub fn with_v2_economics(mut self, v2_economics: crate::CompactionEconomicsV2) -> Result<Self> {
+        v2_economics.validate()?;
+        if v2_economics.token_savings != self.savings_tokens
+            || v2_economics.token_savings_ratio_ppm != self.savings_ratio_ppm
+        {
+            bail!("compaction economics V2 extension does not bind the portable token proof");
+        }
+        self.v2_economics = Some(v2_economics);
+        Ok(self)
     }
 
     /// Revalidates this persisted economics record against the frozen target proof.
@@ -375,6 +394,14 @@ impl PortableCompactionEconomicsV1 {
             || after_proof.input.material_fingerprint() != after_material_fingerprint
         {
             bail!("portable compaction economics evidence does not match its before/after proof");
+        }
+        if let Some(v2_economics) = &self.v2_economics {
+            v2_economics.validate()?;
+            if v2_economics.token_savings != self.savings_tokens
+                || v2_economics.token_savings_ratio_ppm != self.savings_ratio_ppm
+            {
+                bail!("compaction economics V2 extension drifted from the portable token proof");
+            }
         }
         Ok(())
     }

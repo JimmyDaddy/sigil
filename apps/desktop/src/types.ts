@@ -278,9 +278,14 @@ export interface CompactionEconomics {
   savingsRatioPpm: number;
   minimumSavingsTokens: number;
   minimumSavingsRatioPpm: number;
+  summaryCacheReadTokens: number;
+  summaryUncachedInputTokens: number;
+  summaryOutputTokens: number;
+  summaryCostNanoUsd?: number;
 }
 
 export type CompactionAdmission =
+  | { kind: "prepared"; standaloneToolOutputShrinkAvailable: boolean }
   | { kind: "ready"; economics: CompactionEconomics }
   | {
       kind: "no_foldable_history";
@@ -289,10 +294,60 @@ export type CompactionAdmission =
     }
   | { kind: "unavailable"; reason: string };
 
+export interface CompactionPolicy {
+  strategy: "cache_aware_v3" | "legacy_v2";
+  phase: "below_observe" | "observe" | "prepare" | "admit" | "emergency";
+  forecastConfidence?: "low" | "medium" | "high";
+  admissionReason?: string;
+  nativeCarrierAvailable: boolean;
+  legacyMigrationFields: string[];
+}
+
+export interface CompactionConstraint {
+  text: string;
+  sourceEventId: string;
+  sourceFieldPath: string;
+}
+
+export interface CompactionToolArtifact {
+  sourceEventId: string;
+  contentSha256: string;
+  toolName: string;
+  toolCallId: string;
+  status: string;
+  originalContentBytes: number;
+  originalContentTokenUpperBound: number;
+  headExcerpt: string;
+  tailExcerpt: string;
+  reason: "large_completed_historical_result";
+  recoveryInstruction: string;
+}
+
+export interface CompactionDetails {
+  activeObjective: string;
+  objectiveSourceEventId: string;
+  activeConstraints: CompactionConstraint[];
+  foldedCompleteTurnCount: number;
+  foldedTokenUpperBound: number;
+  retainedCompleteTurnCount: number;
+  retainedTokenUpperBound: number;
+  toolArtifactCount: number;
+  toolArtifacts: CompactionToolArtifact[];
+  pendingWorkCount: number;
+  unresolvedQuestionCount: number;
+  recoverableAttachmentCount: number;
+  protectedControlEventCount: number;
+  protectedActiveToolOrApprovalCount: number;
+  currentCacheReadTokens?: number;
+  breakEvenTurns?: number;
+}
+
 export interface CompactionReview {
   previewId?: string;
   foldedEventCount: number;
   retainedEventCount: number;
+  policy?: CompactionPolicy;
+  details?: CompactionDetails;
   admission: CompactionAdmission;
 }
 
@@ -336,7 +391,9 @@ export interface CheckpointRestoreReview {
 }
 
 export type ConversationRecoveryAction =
+  | { kind: "prepare_compaction"; previewId: string }
   | { kind: "apply_compaction"; previewId: string }
+  | { kind: "apply_standalone_tool_output_shrink"; previewId: string }
   | { kind: "restore_checkpoint"; checkpointId: string; checkpointDigest: string }
   | { kind: "fork_conversation"; sourceTurnDigest: string; modelRef: ProviderModelRef };
 
@@ -358,6 +415,13 @@ export interface CompactionReceipt {
   taskMemoryId: string;
   foldedEventCount: number;
   toolOutputProjectionRecorded: boolean;
+  nativeCarrierMaterialized: boolean;
+  nativeCarrierStatus?: string;
+}
+
+export interface ToolOutputShrinkReceipt {
+  contextEpochId: string;
+  projectedOutputCount: number;
 }
 
 export interface ConversationForkReceipt {
@@ -373,6 +437,8 @@ export interface ConversationRecoveryCommandReceipt {
   sessionId: string;
   action: ConversationRecoveryAction["kind"];
   compaction?: CompactionReceipt;
+  compactionReview?: CompactionReview;
+  toolOutputShrink?: ToolOutputShrinkReceipt;
   restore?: CheckpointRestoreReceipt;
   fork?: ConversationForkReceipt;
   recovery: ConversationRecoveryView;

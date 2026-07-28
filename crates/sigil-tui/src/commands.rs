@@ -148,7 +148,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         keys: &[],
         slash: Some("/compact"),
         label: "Preview compact",
-        help: "Review the V2 fold plan without mutating the session.",
+        help: "Build a local V3 plan; then choose keep, tool-output cleanup, or one billed semantic summary.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {

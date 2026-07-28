@@ -2,8 +2,12 @@ use super::*;
 use crate::ResolvedModelRoute;
 
 pub(super) fn apply_usage_control_entry(stats: &mut SessionStats, control: &ControlEntry) {
-    if let ControlEntry::UsageSnapshot(usage) = control {
-        stats.apply_usage(usage);
+    match control {
+        ControlEntry::UsageSnapshot(usage) => stats.apply_usage(usage),
+        ControlEntry::SemanticCompactionUsageSnapshot(usage) => {
+            stats.apply_semantic_compaction_usage(usage);
+        }
+        _ => {}
     }
 }
 

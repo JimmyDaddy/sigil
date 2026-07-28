@@ -21,6 +21,10 @@ pub struct OpenAiResponsesRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<OpenAiResponsesReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<String>,
 }
 
 impl fmt::Debug for OpenAiResponsesRequest {
@@ -37,6 +41,11 @@ impl fmt::Debug for OpenAiResponsesRequest {
             .field("temperature", &self.temperature)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("reasoning", &self.reasoning)
+            .field(
+                "prompt_cache_key",
+                &self.prompt_cache_key.as_ref().map(|_| "[HMAC]"),
+            )
+            .field("prompt_cache_retention", &self.prompt_cache_retention)
             .finish()
     }
 }

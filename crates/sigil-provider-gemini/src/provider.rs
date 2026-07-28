@@ -10,13 +10,13 @@ use sigil_kernel::{
     HostedCustomToolCompatibility, HostedQueryVisibility, HostedRequestWireState,
     HostedSourceFidelity, HostedToolSupport, HostedWebSearchCapability, ImageInputCapability,
     ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
-    SecretRedactor, provider_status_error, read_provider_error_body, timeout_provider_request,
-    timeout_provider_stream_next,
+    ProviderChunk, ProviderContextCapabilities, ProviderStreamTimeoutState,
+    ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor, provider_status_error,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
-    capabilities::gemini_capabilities,
+    capabilities::{gemini_capabilities, gemini_context_capabilities},
     client::build_http_client,
     config::GeminiProviderConfig,
     errors::{GeminiProviderError, classify_status},
@@ -96,6 +96,13 @@ impl Provider for GeminiProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
+        gemini_context_capabilities(
+            self.config.base_url.trim_end_matches('/')
+                == "https://generativelanguage.googleapis.com/v1beta",
+        )
     }
 
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {

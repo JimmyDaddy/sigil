@@ -1567,6 +1567,59 @@ export function ConversationPanel({
     }
   };
 
+  const prepareCompaction = async () => {
+    const previewId = compactionReview?.previewId;
+    if (
+      conversationRecoveryBusy
+      || compactionReview?.admission.kind !== "prepared"
+      || previewId === undefined
+    ) return;
+    setConversationRecoveryBusy(true);
+    try {
+      const receipt = await bridge.commandConversationRecovery(workspaceId, {
+        sessionId: session.id,
+        action: { kind: "prepare_compaction", previewId },
+      });
+      setConversationRecovery(receipt.recovery);
+      setCompactionReview(receipt.compactionReview);
+      if (receipt.compactionReview === undefined) {
+        setConversationRecoveryError(true);
+      }
+    } catch {
+      setCompactionReview(undefined);
+      setConversationRecoveryError(true);
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  };
+
+  const applyStandaloneToolOutputShrink = async () => {
+    const previewId = compactionReview?.previewId;
+    if (
+      conversationRecoveryBusy
+      || compactionReview?.admission.kind !== "prepared"
+      || !compactionReview.admission.standaloneToolOutputShrinkAvailable
+      || previewId === undefined
+    ) return;
+    setConversationRecoveryBusy(true);
+    try {
+      const receipt = await bridge.commandConversationRecovery(workspaceId, {
+        sessionId: session.id,
+        action: { kind: "apply_standalone_tool_output_shrink", previewId },
+      });
+      setConversationRecovery(receipt.recovery);
+      setCompactionReview(undefined);
+      setDisplayReload((value) => value + 1);
+      setRunContextReload((value) => value + 1);
+      notify({ message: t("toolOutputsCleaned"), tone: "success" });
+    } catch {
+      setCompactionReview(undefined);
+      setConversationRecoveryError(true);
+    } finally {
+      setConversationRecoveryBusy(false);
+    }
+  };
+
   const previewCheckpointRestore = async (checkpoint: CheckpointView) => {
     if (conversationRecoveryBusy) return;
     setConversationRecoveryBusy(true);
@@ -2067,6 +2120,8 @@ export function ConversationPanel({
           error={conversationRecoveryError}
           onRefresh={refreshConversationRecovery}
           onPreviewCompaction={previewCompaction}
+          onPrepareCompaction={prepareCompaction}
+          onApplyStandaloneToolOutputShrink={applyStandaloneToolOutputShrink}
           onApplyCompaction={applyCompaction}
           onPreview={previewCheckpointRestore}
           onRestore={restoreCheckpoint}

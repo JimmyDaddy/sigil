@@ -115,6 +115,7 @@ mod compaction_sidecar;
 mod compaction_v2;
 mod context;
 mod context_projection;
+mod continuity_v2;
 mod conversation_promotion_projection;
 mod conversation_queue_mutation;
 mod conversation_queue_promotion;
@@ -138,12 +139,19 @@ mod tool_output_projection;
 mod writer;
 
 pub use compaction_plan::{
+    ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION, AdaptiveTailPolicyV3, AdaptiveTailSelectionV3,
     COMPACTION_FOLD_PLAN_SCHEMA_VERSION, CompactionEventRef, CompactionFoldPlan,
-    CompactionFoldProtectionReason, ProtectedCompactionEventRef, V2CompactionPreview,
+    CompactionFoldProtectionReason, DEFAULT_TAIL_MAX_USABLE_CONTEXT_RATIO_PPM,
+    DEFAULT_TAIL_MIN_COMPLETE_TURNS, DEFAULT_TAIL_RECENT_TURN_P95_MULTIPLIER_PPM,
+    DEFAULT_TAIL_RECENT_TURN_SAMPLE_LIMIT, DEFAULT_TAIL_TARGET_MAX_TOKENS,
+    DEFAULT_TAIL_TARGET_MIN_TOKENS, ProtectedCompactionEventRef, RetainedTurnGroupV3,
+    TailTurnStateV3, V2CompactionPreview,
 };
 pub use compaction_shrink_sidecar::{
+    TOOL_OUTPUT_CONTEXT_EPOCH_TRANSITION_SCHEMA_VERSION,
     TOOL_OUTPUT_PROJECTION_SIDECAR_PROJECTION_SCHEMA_VERSION,
-    TOOL_OUTPUT_PROJECTION_SIDECAR_SCHEMA_VERSION, ToolOutputProjectionShrinkRecorded,
+    TOOL_OUTPUT_PROJECTION_SIDECAR_SCHEMA_VERSION, ToolOutputContextEpochTransitionReasonV1,
+    ToolOutputContextEpochTransitionV1, ToolOutputProjectionShrinkRecorded,
     ToolOutputProjectionSidecarProjection,
 };
 pub use compaction_sidecar::{
@@ -154,18 +162,28 @@ pub use compaction_sidecar::{
     ContinuationModelOutputV1, ContinuationRedaction, ContinuationSnapshotScope,
     ContinuationSourceCatalog, ContinuationSourceRef, ContinuationTargetRequestFitV1,
     MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES, MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS,
+    MAX_SEMANTIC_COMPACTION_OUTPUT_BYTES, MAX_SEMANTIC_COMPACTION_SOURCE_INDEX_ENTRIES,
     ResolvedCompactionSidecar, TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TaskMemoryInvalidatedEntry,
-    TaskMemoryInvalidationReason, TaskMemoryRecordedV1,
+    TaskMemoryInvalidationReason, TaskMemoryRecordedV1, build_semantic_compaction_instruction,
+    parse_semantic_compaction_output,
 };
 pub use compaction_v2::{
     COMPACTION_LIFECYCLE_PROJECTION_SCHEMA_VERSION, CompactionAppliedV2, CompactionAttemptId,
-    CompactionAttemptState, CompactionAttemptTerminal, CompactionCursor, CompactionFailureEntry,
-    CompactionFailureReason, CompactionFallbackParent, CompactionId, CompactionInitiation,
-    CompactionLifecycleProjection, CompactionStartedEntry,
+    CompactionAttemptState, CompactionAttemptTerminal, CompactionCircuitBreakerDecisionV1,
+    CompactionCircuitBreakerInputV1, CompactionCircuitScopeV1, CompactionCursor,
+    CompactionEmergencyBlockingLayerV1, CompactionFailureEntry, CompactionFailureReason,
+    CompactionFallbackParent, CompactionId, CompactionInitiation, CompactionLifecycleProjection,
+    CompactionStartedEntry,
 };
 pub use context_projection::{
     ContextTrustProjection, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SessionContextProjection,
     SessionProjectionEntry, TaskMemorySnapshotRelation,
+};
+pub use continuity_v2::{
+    ActiveConstraintV1, AnchoredStatementV1, CONVERSATION_CONTINUITY_V2_SCHEMA_VERSION,
+    ConstraintStatusV1, ConversationContinuityV2, DurableArtifactRefV1, GroundedContinuityItemV2,
+    ObjectiveAuthorityRefV1, SESSION_ANCHOR_V1_SCHEMA_VERSION, SessionAnchorRefV1, SessionAnchorV1,
+    SourceSpanRefV1, UntrustedModelNarrativeV2,
 };
 pub use conversation_promotion_projection::conversation_transcript_entry_from_record;
 pub use entry::*;
@@ -177,12 +195,13 @@ pub use portable_compaction::{
 pub(crate) use provider_attempt::ProviderPhysicalAttemptAudit;
 pub use provider_attempt::{
     MAX_PROVIDER_PHYSICAL_ATTEMPT_OUTPUT_REFS, MAX_PROVIDER_PHYSICAL_ATTEMPT_REFERENCE_BYTES,
-    MAX_PROVIDER_PHYSICAL_ATTEMPT_SIDE_EFFECT_REFS,
+    MAX_PROVIDER_PHYSICAL_ATTEMPT_SIDE_EFFECT_REFS, MAX_SEMANTIC_COMPACTION_GENERATION_BYTES,
     PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION, PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION,
     ProviderNonGeneratingAttempt, ProviderNonGeneratingAttemptReceipt, ProviderPhysicalAttemptId,
     ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
     ProviderPhysicalAttemptPurpose, ProviderPhysicalAttemptStartedEntry,
     ProviderPhysicalAttemptState, ProviderPhysicalAttemptTerminalEntry,
+    SemanticCompactionGeneration, generate_semantic_compaction,
 };
 pub use provider_continuation::{
     MAX_PROVIDER_CONTINUATION_RESOLUTION_PROTECTED_REFS,
@@ -190,7 +209,9 @@ pub use provider_continuation::{
     MAX_PROVIDER_CONTINUATION_RESOLUTION_RETAINED_REFS,
     MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_LEASE_MS,
     MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFERENCE_BYTES,
-    MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFS, NativeProviderCompactionMetadata,
+    MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFS, NATIVE_COMPACTION_CARRIER_SCHEMA_VERSION,
+    NativeCarrierInvalidationV1, NativeCarrierPolicyV1, NativeCarrierResumeContextV1,
+    NativeCarrierResumeDecisionV1, NativeCompactionCarrierV1, NativeProviderCompactionMetadata,
     PROVIDER_CONTINUATION_PROJECTION_SCHEMA_VERSION, PROVIDER_CONTINUATION_SCHEMA_VERSION,
     ProviderArtifactComposition, ProviderCompactionArtifactRef, ProviderContinuationActivationGate,
     ProviderContinuationAfterInputTokenCount, ProviderContinuationArtifactId,
@@ -214,7 +235,8 @@ pub use provider_continuation::{
     ProviderContinuationToolClosureRecordedEntry, ProviderContinuationToolClosureState,
     ProviderObservedResolutionPlanId, ProviderObservedResolutionPlanLineage,
     ProviderObservedResolutionPlanRecordedEntry, ProviderObservedResolutionPlanState,
-    ProviderToolCallClosureRef, provider_continuation_candidate_id_from_initiated,
+    ProviderRetentionPolicyV1, ProviderToolCallClosureRef,
+    provider_continuation_candidate_id_from_initiated,
     provider_continuation_candidate_id_from_observation,
     provider_continuation_candidate_invalidated_event_id,
     provider_continuation_candidate_recorded_event_id, provider_continuation_observation_id,
@@ -254,8 +276,10 @@ pub(crate) use store::session_entry_from_domain_event;
 pub use store::{JsonlSessionStore, SessionStreamCompatibilityError};
 pub use tool_output_projection::{
     MAX_TOOL_OUTPUT_PROJECTION_SHRINKS, ProjectedToolOutput,
-    TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION, ToolOutputProjection, ToolOutputProjectionPolicy,
-    ToolOutputProjectionShrink, ToolOutputProjectionSourceRef,
+    RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
+    RecoverableToolOutputShrinkCandidateV1, TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION,
+    ToolOutputArtifactRefV1, ToolOutputProjection, ToolOutputProjectionPolicy,
+    ToolOutputProjectionShrink, ToolOutputProjectionSourceRef, ToolOutputShrinkReasonV1,
 };
 #[cfg(test)]
 pub(crate) use writer::SessionWriterFault;

@@ -47,6 +47,7 @@ impl WorkerLoopState {
                 preparation_rx: compaction_preparation_rx,
                 preparation_tasks: CompactionPreparationTaskManager::new(),
                 next_request_id: 1,
+                local_preview: None,
                 pending: None,
                 idle_auto: IdleAutoCompactionState::default(),
             },
@@ -108,6 +109,7 @@ pub(in crate::runner) struct CompactionWorkerState {
     pub(in crate::runner) preparation_rx: mpsc::Receiver<CompactionPreparationTaskResult>,
     pub(in crate::runner) preparation_tasks: CompactionPreparationTaskManager,
     pub(in crate::runner) next_request_id: u64,
+    pub(in crate::runner) local_preview: Option<PendingLocalV2Compaction>,
     pub(in crate::runner) pending: Option<PendingV2Compaction>,
     pub(in crate::runner) idle_auto: IdleAutoCompactionState,
 }

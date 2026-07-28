@@ -6,6 +6,14 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         config_state,
         ConfigField::CompactionEnabled,
     ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::CompactionNativeCarrierEnabled,
+    ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::CompactionStrategy,
+    ));
     lines.push(render_config_readonly_row(
         "Effective window",
         &render_effective_context_window(config_state),
@@ -15,7 +23,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         ConfigField::CompactionContextWindowTokens,
     ));
     lines.push(String::new());
-    lines.push("[thresholds]".to_owned());
+    lines.push("[legacy migration controls]".to_owned());
     lines.push(render_config_value_row(
         config_state,
         ConfigField::CompactionSoftThresholdRatio,

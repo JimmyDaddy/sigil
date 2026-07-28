@@ -617,6 +617,24 @@ impl Session {
         store.v2_compaction_preview(requested_tail_message_count, None)
     }
 
+    /// Rebuilds a V3 whole-turn/token-tail preview without mutating the durable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no durable store is attached or the adaptive plan cannot be proven
+    /// against the current stream and exact-fit tail budget.
+    pub fn adaptive_compaction_preview(
+        &self,
+        policy: AdaptiveTailPolicyV3,
+        exact_fit_limit_tokens: u64,
+    ) -> Result<Option<V2CompactionPreview>> {
+        let store = self
+            .store
+            .as_ref()
+            .context("adaptive compaction preview requires a durable session store")?;
+        store.adaptive_compaction_preview(policy, exact_fit_limit_tokens, None)
+    }
+
     /// Rebuilds provider physical-attempt evidence from the durable stream without recovery
     /// writes. Queue recovery uses this to distinguish a confirmed no-send from an uncertain
     /// provider outcome after a process restart.

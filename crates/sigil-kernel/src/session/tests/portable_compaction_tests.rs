@@ -29,6 +29,68 @@ fn setup_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
 }
 
 #[test]
+fn adaptive_checkpoint_rebuilds_the_same_whole_turn_plan_during_activation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("adaptive-activation.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    for index in 0..5 {
+        session.append_user_message(ModelMessage::user(format!("adaptive user turn {index}")))?;
+        session.append_assistant_message(ModelMessage::assistant(
+            Some(format!("adaptive assistant turn {index}")),
+            Vec::new(),
+        ))?;
+    }
+    let records = store.read_event_records_writer()?;
+    let policy = AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 64,
+        ..AdaptiveTailPolicyV3::from_legacy_tail_messages(6)
+    };
+    let plan =
+        CompactionFoldPlan::from_records_after_adaptive_tail(&records, policy, 900_000, None)?;
+    let source_event_id = plan
+        .folded_event_ids
+        .first()
+        .cloned()
+        .expect("adaptive fixture has foldable history");
+    let request = PortableSemanticCompactionRequest {
+        attempt_id: "adaptive-activation-attempt".to_owned(),
+        compaction_id: "adaptive-activation-compaction".to_owned(),
+        initiation: CompactionInitiation::Manual,
+        base_projection_revision: "adaptive-whole-turn-r1".to_owned(),
+        branch_id: None,
+        valid_for_snapshot: "snapshot-v1".to_owned(),
+        objective: Some("Activate one adaptive whole-turn checkpoint".to_owned()),
+        language: "en".to_owned(),
+        plan,
+        model_output: ContinuationModelOutputV1 {
+            in_progress: vec![ContinuationModelOutputItemV1 {
+                text: "Adaptive activation is in progress.".to_owned(),
+                source_event_ids: vec![source_event_id],
+                priority: ContinuationItemPriority::Critical,
+            }],
+            pending_actions: Vec::new(),
+            provider_continuity: Vec::new(),
+            model_notes: Vec::new(),
+        },
+        tool_output_projection_policy: ToolOutputProjectionPolicy::default(),
+        started_at_unix_ms: 10,
+        completed_at_unix_ms: 11,
+    };
+    let session_scope_id = session_scope_id(&store)?;
+    execute_with_target(&store, request, |checkpoint, task_memory, candidate| {
+        target_material(&session_scope_id, checkpoint, task_memory, candidate)
+    })?;
+    let records = store.read_event_records_writer()?;
+    let sidecars = CompactionSidecarProjection::from_records(&records)?;
+    let active = sidecars
+        .latest_for_branch(None)
+        .expect("adaptive checkpoint is active");
+    assert!(active.checkpoint.adaptive_tail.is_some());
+    Ok(())
+}
+
+#[test]
 #[ignore = "release-profile long-session performance evidence"]
 fn portable_compaction_long_session_evidence() -> Result<()> {
     const TURN_COUNT: usize = 1_000;
@@ -471,6 +533,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
     )?;
     request.initiation = CompactionInitiation::IdleAutomatic {
         scope_fingerprint: "idle-task-survival-scope".to_owned(),
+        circuit_scope: None,
     };
     let task_control_event_ids = store
         .read_event_records_writer()?
@@ -598,6 +661,7 @@ fn portable_executor_persists_idle_auto_initiation_for_failure_latch_replay() ->
     let mut request = request(&store, "idle-attempt", "idle-compaction", None)?;
     request.initiation = CompactionInitiation::IdleAutomatic {
         scope_fingerprint: "idle-scope-v1".to_owned(),
+        circuit_scope: None,
     };
 
     execute_with_target(&store, request, |checkpoint, task_memory, candidate| {
@@ -615,7 +679,10 @@ fn portable_executor_persists_idle_auto_initiation_for_failure_latch_replay() ->
         .expect("portable executor should persist its started lifecycle")?;
     assert!(matches!(
         started.initiation,
-        CompactionInitiation::IdleAutomatic { ref scope_fingerprint }
+        CompactionInitiation::IdleAutomatic {
+            ref scope_fingerprint,
+            ..
+        }
             if scope_fingerprint == "idle-scope-v1"
     ));
     Ok(())
@@ -916,6 +983,394 @@ fn repeated_portable_compaction_uses_the_active_boundary_as_its_only_prior_prefi
         active.task_memory.supersedes.as_deref(),
         Some(second_memory_id.as_str())
     );
+    let third_continuity = active
+        .checkpoint
+        .continuity_v2
+        .as_ref()
+        .expect("portable compaction records continuity V2");
+    let second = sidecars
+        .resolved_compaction("compaction-2")
+        .expect("second compaction remains auditable");
+    assert_eq!(
+        third_continuity.previous_checkpoint_id.as_deref(),
+        second
+            .checkpoint
+            .continuity_v2
+            .as_ref()
+            .map(|continuity| continuity.checkpoint_id.as_str())
+    );
+    assert_eq!(
+        active
+            .checkpoint
+            .session_anchor
+            .as_ref()
+            .expect("portable compaction records a session anchor")
+            .root_objective
+            .exact_text,
+        "必须保留 CJK 约束：不要删除原始 JSONL，也不要使用旧日志 bridge。"
+    );
+    Ok(())
+}
+
+#[test]
+fn repeated_compaction_preserves_accepted_constraint_and_honors_durable_supersession() -> Result<()>
+{
+    let (temp, store, mut session) = setup_session()?;
+    let session_scope_id = session_scope_id(&store)?;
+    let root_source_turn = session.messages()[0].id.clone();
+    let root = crate::admit_user_declared_root(
+        &crate::IntentAdmissionContextV1::initial(
+            crate::IntentStackId::new("stack-continuity-v2")?,
+            crate::stable_workspace_id(temp.path())?,
+            session.session_scope_id(),
+        )?,
+        crate::UserDeclaredIntentV1 {
+            title: "Implement portable continuity".to_owned(),
+            statement: "Implement portable continuity without losing accepted authority."
+                .to_owned(),
+            acceptance_criteria: vec![crate::IntentProposalCriterionV1 {
+                criterion_alias: "delivery-boundary".to_owned(),
+                statement: "Do not commit or push.".to_owned(),
+                required: true,
+            }],
+        },
+        &crate::IntentAcceptanceAuthorityV1::user_declared_root(
+            root_source_turn,
+            "authority-continuity-v1",
+        )?,
+    )?;
+    crate::append_chat_root_intent_admission(&session, &root)?;
+
+    execute_with_target(
+        &store,
+        request(&store, "anchor-attempt-1", "anchor-compaction-1", None)?,
+        |checkpoint, task_memory, candidate| {
+            target_material(&session_scope_id, checkpoint, task_memory, candidate)
+        },
+    )?;
+
+    let replacement_message =
+        ModelMessage::user("Commits are allowed now, but do not push under any circumstance.");
+    let replacement_turn_id = replacement_message.id.clone();
+    session.append_user_message(replacement_message)?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("I will retain the new accepted delivery boundary.".to_owned()),
+        Vec::new(),
+    ))?;
+
+    let mut successor_plan = root.plan().clone();
+    successor_plan.stack_version = crate::IntentStackVersion::new(2)?;
+    let previous_ref = successor_plan.intents[0].intent_ref.clone();
+    successor_plan.intents[0].intent_ref =
+        crate::IntentVersionRef::new(previous_ref.intent_id.clone(), 2)?;
+    successor_plan.intents[0].statement =
+        "Implement portable continuity without losing accepted authority.".to_owned();
+    successor_plan.intents[0].acceptance_criteria[0].statement =
+        "Commits are allowed, but do not push.".to_owned();
+    successor_plan.intents[0].supersedes = Some(previous_ref);
+    successor_plan.plan_digest = successor_plan.computed_digest()?;
+    let successor = crate::intent_admission::build_successor_admission(
+        successor_plan,
+        crate::IntentAcceptanceKind::ExplicitUserConfirmation,
+        replacement_turn_id,
+        "authority-continuity-v2".to_owned(),
+    )?;
+    crate::append_successor_intent_plan_admission(&mut session, &successor, None)?;
+
+    let first_active =
+        CompactionSidecarProjection::from_records(&store.read_event_records_writer()?)?
+            .latest_for_branch(None)
+            .expect("first compaction is active")
+            .clone();
+    execute_with_target(
+        &store,
+        request(
+            &store,
+            "anchor-attempt-2",
+            "anchor-compaction-2",
+            Some(first_active.folded_through),
+        )?,
+        |checkpoint, task_memory, candidate| {
+            target_material(&session_scope_id, checkpoint, task_memory, candidate)
+        },
+    )?;
+
+    session.append_user_message(ModelMessage::user("Continue after the second compaction."))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("Continuing with the accepted boundary.".to_owned()),
+        Vec::new(),
+    ))?;
+    let second_active =
+        CompactionSidecarProjection::from_records(&store.read_event_records_writer()?)?
+            .latest_for_branch(None)
+            .expect("second compaction is active")
+            .clone();
+    execute_with_target(
+        &store,
+        request(
+            &store,
+            "anchor-attempt-3",
+            "anchor-compaction-3",
+            Some(second_active.folded_through),
+        )?,
+        |checkpoint, task_memory, candidate| {
+            target_material(&session_scope_id, checkpoint, task_memory, candidate)
+        },
+    )?;
+
+    let records = store.read_event_records_writer()?;
+    let sidecars = CompactionSidecarProjection::from_records(&records)?;
+    let active = sidecars
+        .latest_for_branch(None)
+        .expect("third compaction is active");
+    let anchor = active
+        .checkpoint
+        .session_anchor
+        .as_ref()
+        .expect("accepted session has an authority anchor");
+    anchor.validate_against_records(&records)?;
+    assert_eq!(
+        anchor.root_objective.exact_text,
+        "Implement portable continuity without losing accepted authority."
+    );
+    let active_constraints = anchor
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.status == crate::ConstraintStatusV1::Active)
+        .collect::<Vec<_>>();
+    assert_eq!(active_constraints.len(), 1);
+    assert_eq!(
+        active_constraints[0].exact_text,
+        "Commits are allowed, but do not push."
+    );
+    assert_eq!(active_constraints[0].supersedes.len(), 1);
+    assert!(anchor.constraints.iter().any(|constraint| {
+        constraint.exact_text == "Do not commit or push."
+            && constraint.status == crate::ConstraintStatusV1::Superseded
+    }));
+    let rendered = active
+        .checkpoint
+        .render_for_provider(&active.task_memory)?
+        .content
+        .expect("checkpoint content");
+    assert!(rendered.contains("Commits are allowed, but do not push."));
+    assert!(!rendered.contains("Do not commit or push."));
+    assert!(!rendered.contains("Continue after the second compaction."));
+    Ok(())
+}
+
+#[test]
+fn accepted_anchor_keeps_exact_active_spans_without_pinning_a_large_first_turn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("large-first-turn.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let corpus = "large-corpus-line\n".repeat(12_000);
+    let first = ModelMessage::user(format!(
+        "Implement source-bound continuity.\n\nReference corpus:\n{corpus}"
+    ));
+    let source_turn_id = first.id.clone();
+    session.append_user_message(first)?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some(
+            "I will preserve only accepted active spans and a durable corpus reference.".to_owned(),
+        ),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("Continue with the implementation."))?;
+
+    let admission = crate::admit_user_declared_root(
+        &crate::IntentAdmissionContextV1::initial(
+            crate::IntentStackId::new("stack-large-first-turn")?,
+            crate::stable_workspace_id(temp.path())?,
+            session.session_scope_id(),
+        )?,
+        crate::UserDeclaredIntentV1 {
+            title: "Implement source-bound continuity".to_owned(),
+            statement: "Implement source-bound continuity.".to_owned(),
+            acceptance_criteria: vec![crate::IntentProposalCriterionV1 {
+                criterion_alias: "delivery".to_owned(),
+                statement: "Do not push.".to_owned(),
+                required: true,
+            }],
+        },
+        &crate::IntentAcceptanceAuthorityV1::user_declared_root(
+            source_turn_id,
+            "authority-large-first-turn",
+        )?,
+    )?;
+    crate::append_chat_root_intent_admission(&session, &admission)?;
+
+    let session_scope_id = session_scope_id(&store)?;
+    execute_with_target(
+        &store,
+        request(
+            &store,
+            "large-first-attempt",
+            "large-first-compaction",
+            None,
+        )?,
+        |checkpoint, task_memory, candidate| {
+            target_material(&session_scope_id, checkpoint, task_memory, candidate)
+        },
+    )?;
+
+    let records = store.read_event_records_writer()?;
+    let active = CompactionSidecarProjection::from_records(&records)?
+        .latest_for_branch(None)
+        .expect("large first-turn compaction is active")
+        .clone();
+    let anchor = active
+        .checkpoint
+        .session_anchor
+        .as_ref()
+        .expect("accepted Intent produces an anchor");
+    assert_eq!(
+        anchor.root_objective.exact_text,
+        "Implement source-bound continuity."
+    );
+    let rendered = active
+        .checkpoint
+        .render_for_provider(&active.task_memory)?
+        .content
+        .expect("checkpoint content");
+    assert!(rendered.contains("Implement source-bound continuity."));
+    assert!(rendered.contains("Do not push."));
+    assert!(!rendered.contains("large-corpus-line"));
+    assert!(rendered.len() < 16 * 1024);
+    Ok(())
+}
+
+#[test]
+fn legacy_anchor_bounds_a_large_first_turn_and_keeps_a_durable_body_reference() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("legacy-large-first-turn.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let corpus = "legacy-large-corpus-line\n".repeat(12_000);
+    session.append_user_message(ModelMessage::user(format!(
+        "Implement the bounded legacy fallback.\n\nReference corpus:\n{corpus}"
+    )))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("I will retain a durable transcript reference.".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("Continue."))?;
+
+    let session_scope_id = session_scope_id(&store)?;
+    execute_with_target(
+        &store,
+        request(
+            &store,
+            "legacy-large-first-attempt",
+            "legacy-large-first-compaction",
+            None,
+        )?,
+        |checkpoint, task_memory, candidate| {
+            target_material(&session_scope_id, checkpoint, task_memory, candidate)
+        },
+    )?;
+
+    let records = store.read_event_records_writer()?;
+    let sidecars = CompactionSidecarProjection::from_records(&records)?;
+    let active = sidecars
+        .latest_for_branch(None)
+        .expect("legacy large first-turn compaction is active");
+    let anchor = active
+        .checkpoint
+        .session_anchor
+        .as_ref()
+        .expect("legacy session has an anchor");
+    assert_eq!(
+        anchor.root_objective.exact_text,
+        "Implement the bounded legacy fallback."
+    );
+    let body = anchor
+        .attachment_refs
+        .iter()
+        .find(|artifact| artifact.media_type == "text/plain; charset=utf-8")
+        .expect("oversized first turn has a durable transcript reference");
+    assert!(body.byte_size > 200_000);
+    assert!(body.retrieval_ref.contains("session-event:"));
+    let rendered = active
+        .checkpoint
+        .render_for_provider(&active.task_memory)?
+        .content
+        .expect("checkpoint content");
+    assert!(!rendered.contains("legacy-large-corpus-line"));
+    Ok(())
+}
+
+#[test]
+fn continuity_anchor_does_not_reactivate_terminal_task_permissions() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("terminal-permission.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    session.append_user_message(ModelMessage::user("Implement the scoped task."))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("The task will use a scoped permission.".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("Continue."))?;
+    let plan_id = crate::PlanId::new("terminal-permission-plan")?;
+    let task_id = crate::TaskId::new("terminal-permission-task")?;
+    let plan_hash = crate::plan_text_hash("terminal permission plan");
+    session.append_control(crate::ControlEntry::TaskCreatedFromPlan(
+        crate::TaskCreatedFromPlanEntry {
+            plan_id: plan_id.clone(),
+            plan_hash: plan_hash.clone(),
+            task_id: task_id.clone(),
+            task_plan_version: 1,
+            step_mapping: Vec::new(),
+            stale_reason: None,
+            created_at_ms: 5,
+        },
+    ))?;
+    session.append_control(crate::ControlEntry::PlanPermissionGranted(
+        crate::PlanPermissionGrantedEntry {
+            plan_id,
+            plan_hash,
+            task_id: task_id.clone(),
+            workspace_snapshot_id: Some("snapshot-v1".to_owned()),
+            permission: crate::PlanApprovalPermission::WorkspaceEdits,
+            scope: crate::PlanApprovalScope {
+                summary: "edit the scoped file".to_owned(),
+                workspace_paths: vec!["src/lib.rs".to_owned()],
+            },
+            expires: crate::PlanApprovalExpiry::Session,
+            granted_at_ms: 6,
+        },
+    ))?;
+    session.append_control(crate::ControlEntry::TaskRun(crate::TaskRunEntry {
+        task_id,
+        parent_session_ref: crate::SessionRef::new_relative("parent.jsonl")?,
+        objective: "Implement the scoped task".to_owned(),
+        status: crate::TaskRunStatus::Completed,
+        reason: Some("done".to_owned()),
+    }))?;
+
+    let session_scope_id = session_scope_id(&store)?;
+    execute_with_target(
+        &store,
+        request(
+            &store,
+            "terminal-permission-attempt",
+            "terminal-permission-compaction",
+            None,
+        )?,
+        |checkpoint, task_memory, candidate| {
+            target_material(&session_scope_id, checkpoint, task_memory, candidate)
+        },
+    )?;
+    let records = store.read_event_records_writer()?;
+    let sidecars = CompactionSidecarProjection::from_records(&records)?;
+    let active = sidecars
+        .latest_for_branch(None)
+        .expect("terminal permission compaction is active");
+    let anchor = active
+        .checkpoint
+        .session_anchor
+        .as_ref()
+        .expect("continuity anchor exists");
+    assert!(anchor.authorization_boundary.is_empty());
     Ok(())
 }
 

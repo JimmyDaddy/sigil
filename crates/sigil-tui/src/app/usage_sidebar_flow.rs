@@ -72,6 +72,28 @@ impl AppState {
                 "cache: {:.0}% · save {saved}",
                 self.cache_hit_ratio() * 100.0
             ),
+            format!(
+                "cache io: read {} · write {} · miss {} · layout {}",
+                self.runtime.stats.cache_hit_tokens,
+                if self.runtime.stats.cache_write_observed {
+                    self.runtime.stats.cache_write_tokens.to_string()
+                } else {
+                    "-".to_owned()
+                },
+                self.runtime.stats.cache_miss_tokens,
+                self.runtime
+                    .stats
+                    .last_cache_layout_mutation
+                    .map_or("unknown", sigil_kernel::CacheLayoutMutationKind::as_str)
+            ),
+            format!(
+                "cache miss source: {}",
+                if self.runtime.stats.last_provider_miss_without_local_mutation {
+                    "provider miss without local mutation"
+                } else {
+                    "not observed"
+                }
+            ),
             format!("total spent: {session_spent}"),
             format!("spent since opening: {delta_spent}"),
             balance_line,

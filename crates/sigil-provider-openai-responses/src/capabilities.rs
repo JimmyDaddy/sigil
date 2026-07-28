@@ -1,4 +1,8 @@
-use sigil_kernel::{ProviderCapabilities, ReasoningStreamSupport};
+use sigil_kernel::{
+    CacheMode, CacheTtl, CacheUsageCapabilities, NativeCarrierPortability,
+    NativeCompactionCapability, ProviderCapabilities, ProviderContextCapabilities,
+    ReasoningStreamSupport,
+};
 
 pub fn openai_responses_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
@@ -19,6 +23,33 @@ pub fn openai_responses_capabilities() -> ProviderCapabilities {
         supports_infill_completion: false,
         supports_system_fingerprint: true,
         tool_name_max_chars: 64,
+    }
+}
+
+pub fn openai_responses_context_capabilities(
+    trusted_official_route: bool,
+) -> ProviderContextCapabilities {
+    if !trusted_official_route {
+        return ProviderContextCapabilities::unknown();
+    }
+    ProviderContextCapabilities {
+        cache_mode: CacheMode::ImplicitPrefixWithLogicalBreakpoints,
+        explicit_breakpoint_limit: Some(2),
+        cache_ttls: vec![CacheTtl {
+            seconds: 86_400,
+            is_default: false,
+        }],
+        cache_usage_fields: CacheUsageCapabilities {
+            read_tokens: true,
+            write_tokens: false,
+            miss_tokens: true,
+        },
+        stateful_continuation: None,
+        native_compaction: Some(NativeCompactionCapability {
+            requires_exact_route_binding: true,
+            supports_portable_fallback: true,
+        }),
+        native_carrier_portability: NativeCarrierPortability::ConnectionModelProtocolBound,
     }
 }
 

@@ -98,3 +98,19 @@ fn frozen_material_includes_its_schema_version_in_canonical_bytes() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn cache_layout_observation_does_not_mutate_frozen_provider_request_material() -> Result<()> {
+    let frozen = FrozenProviderRequestMaterial::freeze("session-a", request())?;
+    let before = frozen.canonical_bytes_for_in_process_use().to_vec();
+    let proof = frozen.cache_layout_proof(None)?;
+
+    assert_eq!(frozen.canonical_bytes_for_in_process_use(), before);
+    assert_eq!(
+        frozen.request().messages[0].content.as_deref(),
+        Some("summarize the repository")
+    );
+    assert!(!String::from_utf8(before)?.contains("cache_layout_proof"));
+    proof.validate()?;
+    Ok(())
+}

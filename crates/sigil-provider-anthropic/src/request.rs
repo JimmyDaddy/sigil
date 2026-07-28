@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 use sigil_kernel::{
     CompletionRequest, HostedToolRequest, ImageInputCapability, MessageRole, ModelMessage,
-    ToolCall, ToolSpec, validate_image_input_capability, validate_request_image_attachments,
+    ToolCall, ToolSpec, canonicalize_cache_stable_json, validate_image_input_capability,
+    validate_request_image_attachments,
 };
 
 use crate::{
@@ -15,9 +16,19 @@ use crate::{
     models::AnthropicMessagesRequest,
 };
 
+pub(crate) const ANTHROPIC_CACHE_BREAKPOINT_LIMIT: usize = 4;
+#[cfg(test)]
+pub(crate) const ANTHROPIC_CACHE_LOOKBACK_BLOCK_LIMIT: usize = 20;
+
 pub(crate) struct PreparedAnthropicMessagesRequest {
     pub(crate) body: AnthropicMessagesRequest,
     pub(crate) prior_hosted_invocations: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnthropicCachePolicy {
+    Disabled,
+    StablePrefix,
 }
 
 #[cfg(test)]
@@ -29,6 +40,21 @@ pub fn build_messages_request(
         request,
         default_max_tokens,
         &AnthropicHostedContinuationStore::default(),
+        AnthropicCachePolicy::Disabled,
+    )?
+    .body)
+}
+
+#[cfg(test)]
+pub(crate) fn build_messages_request_with_stable_cache(
+    request: &CompletionRequest,
+    default_max_tokens: u32,
+) -> Result<AnthropicMessagesRequest> {
+    Ok(build_messages_request_with_continuations(
+        request,
+        default_max_tokens,
+        &AnthropicHostedContinuationStore::default(),
+        AnthropicCachePolicy::StablePrefix,
     )?
     .body)
 }
@@ -37,6 +63,7 @@ pub(crate) fn build_messages_request_with_continuations(
     request: &CompletionRequest,
     default_max_tokens: u32,
     continuation_store: &AnthropicHostedContinuationStore,
+    cache_policy: AnthropicCachePolicy,
 ) -> Result<PreparedAnthropicMessagesRequest> {
     validate_request_image_attachments(request)?;
     validate_image_input_capability(
@@ -82,22 +109,158 @@ pub(crate) fn build_messages_request_with_continuations(
         }
     }
     flush_tool_results(&mut messages, &mut pending_tool_results);
-    let tools = anthropic_tools(&request.tools, hosted_search);
+    let tools = anthropic_tools(&request.tools, hosted_search)?;
 
+    let mut body = AnthropicMessagesRequest {
+        model: request.model_name.clone(),
+        messages,
+        max_tokens: request.max_tokens.unwrap_or(default_max_tokens),
+        stream: true,
+        system: (!system_parts.is_empty()).then(|| Value::String(system_parts.join("\n\n"))),
+        tool_choice: tools.as_ref().map(|_| json!({"type": "auto"})),
+        tools,
+        temperature: request.temperature,
+        context_management: None,
+    };
+    if cache_policy == AnthropicCachePolicy::StablePrefix {
+        apply_stable_cache_breakpoints(&mut body)?;
+    }
     Ok(PreparedAnthropicMessagesRequest {
-        body: AnthropicMessagesRequest {
-            model: request.model_name.clone(),
-            messages,
-            max_tokens: request.max_tokens.unwrap_or(default_max_tokens),
-            stream: true,
-            system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
-            tool_choice: tools.as_ref().map(|_| json!({"type": "auto"})),
-            tools,
-            temperature: request.temperature,
-            context_management: None,
-        },
+        body,
         prior_hosted_invocations,
     })
+}
+
+fn apply_stable_cache_breakpoints(body: &mut AnthropicMessagesRequest) -> Result<()> {
+    if let Some(system) = body.system.as_mut() {
+        let text = system
+            .as_str()
+            .ok_or_else(|| anyhow!("Anthropic system cache source must be text"))?
+            .to_owned();
+        *system = json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral"}
+        }]);
+    } else if let Some(last_tool) = body.tools.as_mut().and_then(|tools| tools.last_mut()) {
+        insert_ephemeral_cache_control(last_tool)?;
+    }
+
+    if body.messages.len() >= 2
+        && body
+            .messages
+            .last()
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            == Some("user")
+    {
+        let stable_boundary = body.messages.len() - 2;
+        let content = body.messages[stable_boundary]
+            .get_mut("content")
+            .ok_or_else(|| anyhow!("Anthropic stable conversation boundary has no content"))?;
+        if let Some(text) = content.as_str().map(ToOwned::to_owned) {
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"}
+            }]);
+        } else {
+            let blocks = content
+                .as_array_mut()
+                .ok_or_else(|| anyhow!("Anthropic stable conversation content is not cacheable"))?;
+            let last = blocks
+                .last_mut()
+                .ok_or_else(|| anyhow!("Anthropic stable conversation content is empty"))?;
+            insert_ephemeral_cache_control(last)?;
+        }
+    }
+
+    validate_cache_breakpoint_contract(body)
+}
+
+fn insert_ephemeral_cache_control(value: &mut Value) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Anthropic cache breakpoint target must be an object"))?;
+    object.insert("cache_control".to_owned(), json!({"type": "ephemeral"}));
+    Ok(())
+}
+
+fn count_cache_breakpoints(body: &AnthropicMessagesRequest) -> usize {
+    cache_controls_in_prompt_order(body).len()
+}
+
+fn cache_controls_in_prompt_order(body: &AnthropicMessagesRequest) -> Vec<&Value> {
+    fn collect_block_controls<'a>(value: &'a Value, controls: &mut Vec<&'a Value>) {
+        match value {
+            Value::Array(blocks) => {
+                for block in blocks {
+                    if let Some(control) = block.get("cache_control") {
+                        controls.push(control);
+                    }
+                }
+            }
+            Value::Object(object) => {
+                if let Some(control) = object.get("cache_control") {
+                    controls.push(control);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    let mut controls = Vec::new();
+    if let Some(tools) = body.tools.as_ref() {
+        for tool in tools {
+            collect_block_controls(tool, &mut controls);
+        }
+    }
+    if let Some(system) = body.system.as_ref() {
+        collect_block_controls(system, &mut controls);
+    }
+    for message in &body.messages {
+        if let Some(content) = message.get("content") {
+            collect_block_controls(content, &mut controls);
+        }
+    }
+    controls
+}
+
+fn validate_cache_breakpoint_contract(body: &AnthropicMessagesRequest) -> Result<()> {
+    let breakpoint_count = count_cache_breakpoints(body);
+    let controls = cache_controls_in_prompt_order(body);
+    if breakpoint_count > ANTHROPIC_CACHE_BREAKPOINT_LIMIT {
+        return Err(anyhow!(
+            "Anthropic request has {} cache breakpoints; the provider limit is {}",
+            breakpoint_count,
+            ANTHROPIC_CACHE_BREAKPOINT_LIMIT
+        ));
+    }
+
+    let mut saw_short_ttl = false;
+    for control in controls {
+        let control = control
+            .as_object()
+            .ok_or_else(|| anyhow!("Anthropic cache_control must be an object"))?;
+        if control.get("type").and_then(Value::as_str) != Some("ephemeral") {
+            return Err(anyhow!("Anthropic cache_control type must be `ephemeral`"));
+        }
+        match control.get("ttl").and_then(Value::as_str) {
+            None | Some("5m") => saw_short_ttl = true,
+            Some("1h") if saw_short_ttl => {
+                return Err(anyhow!(
+                    "Anthropic 1h cache breakpoints must precede 5m breakpoints"
+                ));
+            }
+            Some("1h") => {}
+            Some(ttl) => {
+                return Err(anyhow!(
+                    "Anthropic cache_control TTL `{ttl}` is unsupported"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn user_message_to_json(message: &ModelMessage) -> Result<Value> {
@@ -208,9 +371,9 @@ fn flush_tool_results(messages: &mut Vec<Value>, pending_tool_results: &mut Vec<
 fn anthropic_tools(
     tools: &[ToolSpec],
     hosted_search: Option<&HostedToolRequest>,
-) -> Option<Vec<Value>> {
+) -> Result<Option<Vec<Value>>> {
     if tools.is_empty() && hosted_search.is_none() {
-        return None;
+        return Ok(None);
     }
     let mut rendered = Vec::with_capacity(tools.len() + usize::from(hosted_search.is_some()));
     if let Some(hosted_search) = hosted_search {
@@ -239,14 +402,19 @@ fn anthropic_tools(
         }
         rendered.push(Value::Object(hosted));
     }
-    rendered.extend(tools.iter().map(|tool| {
-        json!({
-            "name": tool.name,
-            "description": tool.description,
-            "input_schema": tool.input_schema,
-        })
-    }));
-    Some(rendered)
+    rendered.extend(
+        tools
+            .iter()
+            .map(|tool| {
+                Ok(json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": canonicalize_cache_stable_json(&tool.input_schema)?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
+    Ok(Some(rendered))
 }
 
 fn collect_prior_hosted_invocations(

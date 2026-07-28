@@ -92,6 +92,16 @@ impl PortableSemanticCompactionPreflight {
         &self.candidate_messages
     }
 
+    /// Returns recoverable large-tool shrink candidates prepared for the next epoch.
+    ///
+    /// The current durable/session projection remains unchanged until the matching compaction is
+    /// activated. Excerpts are process-local; the persisted sidecar stores hashes and durable
+    /// source references and rebuilds them from the append-only transcript on resume.
+    #[must_use]
+    pub fn tool_output_shrink_candidates(&self) -> &[RecoverableToolOutputShrinkCandidateV1] {
+        &self.prepared.tool_output_candidates
+    }
+
     /// Binds one completed non-generating token measurement that occurred after this preflight.
     ///
     /// The executor permits exactly the bound start/terminal pairs between the planned source and
@@ -280,6 +290,47 @@ impl PortableTargetRequestMaterial {
             PORTABLE_COMPACTION_MINIMUM_SAVINGS_TOKENS,
             PORTABLE_COMPACTION_MINIMUM_SAVINGS_RATIO_PPM,
         )?);
+        Ok(self)
+    }
+
+    /// Builds the exact before/after proof as an RFC-0057 candidate before fit/cost admission.
+    ///
+    /// The one-token positive-savings floor only proves that rotation can reduce the request.
+    /// [`Self::with_compaction_economics_v2`] must immediately attach the authoritative 4K/5%,
+    /// trusted-price, or fit-required decision before activation.
+    pub fn with_portable_economics_v2_candidate(
+        mut self,
+        frozen_before_request: &FrozenProviderRequestMaterial,
+        before_input: InputTokenEvidence,
+    ) -> Result<Self> {
+        if frozen_before_request.session_scope_id() != self.frozen_request.session_scope_id() {
+            bail!("portable compaction before request belongs to a different session scope");
+        }
+        self.portable_economics = Some(PortableCompactionEconomicsV1::from_before_and_after(
+            before_input,
+            frozen_before_request.fingerprint(),
+            &self.proof,
+            &self.binding,
+            1,
+            0,
+        )?);
+        Ok(self)
+    }
+
+    /// Attaches one validated RFC-0057 fit/cost decision to the existing portable proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the base before/after proof is absent or the extension drifts from it.
+    pub fn with_compaction_economics_v2(
+        mut self,
+        economics: crate::CompactionEconomicsV2,
+    ) -> Result<Self> {
+        let portable_economics = self
+            .portable_economics
+            .take()
+            .context("portable economics must be proven before attaching its V2 extension")?;
+        self.portable_economics = Some(portable_economics.with_v2_economics(economics)?);
         Ok(self)
     }
 
@@ -536,6 +587,7 @@ struct PreparedPortableCheckpoint {
     task_memory_record: TaskMemoryRecordedV1,
     applied: CompactionAppliedV2,
     tool_output_sidecar: Option<ToolOutputProjectionShrinkRecorded>,
+    tool_output_candidates: Vec<RecoverableToolOutputShrinkCandidateV1>,
 }
 
 fn validate_request_shape(request: &PortableSemanticCompactionRequest) -> Result<()> {
@@ -610,10 +662,19 @@ fn prepare_portable_checkpoint(
     let catalog = ContinuationSourceCatalog::from_fold_plan(source_records, &request.plan)?;
     let checkpoint = ContinuationCheckpointV1::from_catalog_and_model_output(
         request.language.clone(),
+        source_records,
         &task_memory_record.memory,
         &catalog,
         &request.plan,
         request.model_output.clone(),
+        active.and_then(|sidecar| {
+            sidecar
+                .checkpoint
+                .continuity_v2
+                .as_ref()
+                .map(|continuity| continuity.checkpoint_id.clone())
+        }),
+        request.completed_at_unix_ms,
     )?;
     checkpoint.render_for_provider(&task_memory_record.memory)?;
     let tool_output_projection = ToolOutputProjection::from_fold_plan(
@@ -632,6 +693,11 @@ fn prepare_portable_checkpoint(
             )
         })
         .transpose()?;
+    let tool_output_candidates = tool_output_projection
+        .outputs
+        .iter()
+        .map(|output| output.candidate.clone())
+        .collect();
     Ok(PreparedPortableCheckpoint {
         applied: CompactionAppliedV2 {
             compaction_id: request.compaction_id.clone(),
@@ -647,6 +713,7 @@ fn prepare_portable_checkpoint(
         },
         task_memory_record,
         tool_output_sidecar,
+        tool_output_candidates,
     })
 }
 

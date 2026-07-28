@@ -1585,11 +1585,19 @@ pub struct DesktopCompactionEconomics {
     pub savings_ratio_ppm: u32,
     pub minimum_savings_tokens: u64,
     pub minimum_savings_ratio_ppm: u32,
+    pub summary_cache_read_tokens: u64,
+    pub summary_uncached_input_tokens: u64,
+    pub summary_output_tokens: u64,
+    #[serde(default)]
+    pub summary_cost_nano_usd: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum DesktopCompactionAdmission {
+    Prepared {
+        standalone_tool_output_shrink_available: bool,
+    },
     Ready {
         economics: DesktopCompactionEconomics,
     },
@@ -1604,11 +1612,77 @@ pub enum DesktopCompactionAdmission {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionPolicy {
+    pub strategy: String,
+    pub phase: String,
+    #[serde(default)]
+    pub forecast_confidence: Option<String>,
+    #[serde(default)]
+    pub admission_reason: Option<String>,
+    pub native_carrier_available: bool,
+    #[serde(default)]
+    pub legacy_migration_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionConstraint {
+    pub text: String,
+    pub source_event_id: String,
+    pub source_field_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionToolArtifact {
+    pub source_event_id: String,
+    pub content_sha256: String,
+    pub tool_name: String,
+    pub tool_call_id: String,
+    pub status: String,
+    pub original_content_bytes: u64,
+    pub original_content_token_upper_bound: u64,
+    pub head_excerpt: String,
+    pub tail_excerpt: String,
+    pub reason: String,
+    pub recovery_instruction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopCompactionDetails {
+    pub active_objective: String,
+    pub objective_source_event_id: String,
+    pub active_constraints: Vec<DesktopCompactionConstraint>,
+    pub folded_complete_turn_count: usize,
+    pub folded_token_upper_bound: u64,
+    pub retained_complete_turn_count: usize,
+    pub retained_token_upper_bound: u64,
+    pub tool_artifact_count: usize,
+    #[serde(default)]
+    pub tool_artifacts: Vec<DesktopCompactionToolArtifact>,
+    pub pending_work_count: usize,
+    pub unresolved_question_count: usize,
+    pub recoverable_attachment_count: usize,
+    pub protected_control_event_count: usize,
+    pub protected_active_tool_or_approval_count: usize,
+    #[serde(default)]
+    pub current_cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub break_even_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopCompactionReview {
     #[serde(default)]
     pub preview_id: Option<String>,
     pub folded_event_count: usize,
     pub retained_event_count: usize,
+    #[serde(default)]
+    pub policy: Option<DesktopCompactionPolicy>,
+    #[serde(default)]
+    pub details: Option<DesktopCompactionDetails>,
     pub admission: DesktopCompactionAdmission,
 }
 
@@ -1667,7 +1741,9 @@ pub struct DesktopCheckpointRestoreReview {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopConversationRecoveryCommandActionKind {
+    PrepareCompaction,
     ApplyCompaction,
+    ApplyStandaloneToolOutputShrink,
     RestoreCheckpoint,
     ForkConversation,
 }
@@ -1675,7 +1751,13 @@ pub enum DesktopConversationRecoveryCommandActionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DesktopConversationRecoveryCommandAction {
+    PrepareCompaction {
+        preview_id: String,
+    },
     ApplyCompaction {
+        preview_id: String,
+    },
+    ApplyStandaloneToolOutputShrink {
         preview_id: String,
     },
     RestoreCheckpoint {
@@ -1692,8 +1774,14 @@ impl DesktopConversationRecoveryCommandAction {
     #[must_use]
     pub const fn kind(&self) -> DesktopConversationRecoveryCommandActionKind {
         match self {
+            Self::PrepareCompaction { .. } => {
+                DesktopConversationRecoveryCommandActionKind::PrepareCompaction
+            }
             Self::ApplyCompaction { .. } => {
                 DesktopConversationRecoveryCommandActionKind::ApplyCompaction
+            }
+            Self::ApplyStandaloneToolOutputShrink { .. } => {
+                DesktopConversationRecoveryCommandActionKind::ApplyStandaloneToolOutputShrink
             }
             Self::RestoreCheckpoint { .. } => {
                 DesktopConversationRecoveryCommandActionKind::RestoreCheckpoint
@@ -1713,6 +1801,16 @@ pub struct DesktopCompactionReceipt {
     pub task_memory_id: String,
     pub folded_event_count: usize,
     pub tool_output_projection_recorded: bool,
+    pub native_carrier_materialized: bool,
+    #[serde(default)]
+    pub native_carrier_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopToolOutputShrinkReceipt {
+    pub context_epoch_id: String,
+    pub projected_output_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1742,6 +1840,10 @@ pub struct DesktopConversationRecoveryCommandReceipt {
     pub action: DesktopConversationRecoveryCommandActionKind,
     #[serde(default)]
     pub compaction: Option<DesktopCompactionReceipt>,
+    #[serde(default)]
+    pub compaction_review: Option<DesktopCompactionReview>,
+    #[serde(default)]
+    pub tool_output_shrink: Option<DesktopToolOutputShrinkReceipt>,
     #[serde(default)]
     pub restore: Option<DesktopCheckpointRestoreReceipt>,
     #[serde(default)]
