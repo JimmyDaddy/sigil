@@ -5,9 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[cfg(unix)]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 #[cfg(unix)]
 use sigil_kernel::ExecutionOutputStream;
