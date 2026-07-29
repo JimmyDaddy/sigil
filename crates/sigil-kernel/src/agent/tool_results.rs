@@ -53,9 +53,14 @@ where
     } else {
         ToolArtifactSensitivity::ExternalUntrusted
     };
+    let model_preview_limit = session.reserve_tool_model_view_bytes(&result.tool_name);
     let artifact_store = session.tool_artifact_store();
-    let (recorded, display) =
-        ToolResultRecordedV2::capture(&result, artifact_store.as_ref(), sensitivity)?;
+    let (recorded, display) = ToolResultRecordedV2::capture_with_model_preview_limit(
+        &result,
+        artifact_store.as_ref(),
+        sensitivity,
+        model_preview_limit,
+    )?;
     let message = recorded.model_message()?;
     for registration in registrations.iter_mut() {
         registration.durable_entry_id.clone_from(&message.id);

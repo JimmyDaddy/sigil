@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -38,6 +40,42 @@ fn finalized_session(path: &Path, prompt: &str) -> Result<()> {
             "error": null
         }),
     )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_journal_creates_and_repairs_owner_only_data_and_lease_files() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    let exports = temp.path().join("exports");
+    fs::create_dir(&sessions)?;
+    let journal_path = temp.path().join("session-lifecycle-v1.jsonl");
+    let lease_path = temp.path().join("session-lifecycle-v1.jsonl.writer-lock");
+    fs::write(&journal_path, b"")?;
+    fs::write(&lease_path, b"")?;
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o644))?;
+    fs::set_permissions(&lease_path, fs::Permissions::from_mode(0o664))?;
+    let service = LocalSessionLifecycleService::new("workspace-1", &sessions, exports);
+
+    service.lifecycle_journal().append(
+        "session-pin:permissions",
+        100,
+        LocalSessionLifecycleEvent::PinChanged(LocalSessionPinJournalBinding {
+            source_session_ref: sigil_kernel::SessionRef::new_relative("session-test.jsonl")?,
+            source_session_id: "session-test".to_owned(),
+            pinned: true,
+        }),
+    )?;
+
+    assert_eq!(
+        fs::metadata(&journal_path)?.permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&lease_path)?.permissions().mode() & 0o777,
+        0o600
+    );
     Ok(())
 }
 

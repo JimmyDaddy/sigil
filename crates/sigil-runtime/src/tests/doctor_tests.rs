@@ -90,6 +90,32 @@ fn doctor_reports_missing_config_without_panicking() {
 
 #[cfg(unix)]
 #[test]
+fn session_stream_doctor_warns_for_non_owner_only_data_or_lease_files() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("session-exposed.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({"status": "started"}),
+    )?;
+    fs::set_permissions(&session_path, fs::Permissions::from_mode(0o644))?;
+
+    let mut report = DoctorReport::default();
+    check_session_streams(&mut report, &session_dir);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:permissions"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("session-exposed.jsonl")
+    }));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_warns_when_the_default_sigil_directory_is_too_permissive() -> Result<()> {
     let _env_lock = crate::test_env::lock();
     let temp = tempdir()?;

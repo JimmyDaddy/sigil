@@ -15,6 +15,9 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use super::active_projection::ActiveSessionProjection;
 use super::*;
 
@@ -1496,13 +1499,14 @@ impl LinearSessionWriter {
         }
         let lease_path = writer_lease_path(&self.path);
         let existed = lease_path.exists();
-        let lease = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let lease = options
             .open(&lease_path)
             .with_context(|| format!("failed to open {}", lease_path.display()))?;
+        harden_private_open_file(&lease, &lease_path)?;
         lock_exclusive_with_retry(&lease, &lease_path)?;
         if !existed {
             sync_parent_dir(&lease_path)?;
@@ -1512,13 +1516,14 @@ impl LinearSessionWriter {
     }
 
     fn open_locked_data_file(&mut self) -> Result<File> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
+        harden_private_open_file(&file, &self.path)?;
         lock_exclusive_with_retry(&file, &self.path)?;
         if !self.parent_dir_synced {
             #[cfg(test)]
@@ -2107,6 +2112,25 @@ impl LinearSessionWriter {
     pub(super) fn inject_fault(&mut self, fault: SessionWriterFault) {
         self.next_fault = Some(fault);
     }
+}
+
+fn harden_private_open_file(file: &File, path: &Path) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("session path must be a regular file: {}", path.display());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o7777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to restrict {}", path.display()))?;
+    }
+    #[cfg(windows)]
+    if !crate::private_path_permissions_are_restricted(path)? {
+        crate::secure_private_path_permissions(path)?;
+    }
+    Ok(())
 }
 
 fn validate_pending_session_entry_payload(event: &PendingStoredEvent) -> Result<()> {

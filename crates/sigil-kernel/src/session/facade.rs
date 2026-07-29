@@ -1,3 +1,4 @@
+use super::tool_artifact::{TOOL_MODEL_VIEW_RUN_BUDGET_BYTES, tool_model_view_initial_limit};
 use super::*;
 use crate::{ResolvedModelRoute, TaskGuidancePromotedEntry};
 
@@ -19,6 +20,7 @@ pub struct Session {
 pub(super) struct SessionRuntimeAttachments {
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn crate::ImageAttachmentResolver>>,
+    tool_model_view_run_budget_remaining: Option<usize>,
 }
 
 /// Immutable live-session material proven to correspond to one durable projection frontier.
@@ -133,6 +135,10 @@ impl std::fmt::Debug for SessionRuntimeAttachments {
                     .image_attachment_resolver
                     .as_ref()
                     .map(|_| "configured"),
+            )
+            .field(
+                "tool_model_view_run_budget_remaining",
+                &self.tool_model_view_run_budget_remaining,
             )
             .finish()
     }
@@ -499,6 +505,25 @@ impl Session {
         self.store
             .as_ref()
             .map(ToolArtifactStore::for_session_store)
+    }
+
+    pub(crate) fn begin_tool_model_view_run(&mut self) {
+        self.runtime_attachments
+            .tool_model_view_run_budget_remaining = Some(TOOL_MODEL_VIEW_RUN_BUDGET_BYTES);
+    }
+
+    pub(crate) fn reserve_tool_model_view_bytes(&mut self, tool_name: &str) -> usize {
+        let per_result_limit = tool_model_view_initial_limit(tool_name);
+        let Some(remaining) = self
+            .runtime_attachments
+            .tool_model_view_run_budget_remaining
+            .as_mut()
+        else {
+            return per_result_limit;
+        };
+        let reserved = per_result_limit.min(*remaining);
+        *remaining = remaining.saturating_sub(reserved);
+        reserved
     }
 
     /// Persists one tool result and its body-free receipts/provenance as one crash-safe bundle.

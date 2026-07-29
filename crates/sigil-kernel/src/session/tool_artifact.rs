@@ -31,6 +31,12 @@ pub const TOOL_RESULT_EVENT_TARGET_BYTES: usize = 64 * 1024;
 /// Legacy adapters must migrate to a policy-safe streaming sink before returning larger bodies.
 pub const TOOL_RESULT_LEGACY_INLINE_MAX_BYTES: usize = 256 * 1024;
 pub const TOOL_MODEL_VIEW_MAX_BYTES: usize = 32 * 1024;
+/// Maximum initial provider-visible preview for one ordinary tool result.
+pub const TOOL_MODEL_VIEW_INITIAL_MAX_BYTES: usize = TOOL_MODEL_VIEW_MAX_BYTES / 2;
+/// Smaller initial preview for tools whose results are commonly paged or searched.
+pub const TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES: usize = 8 * 1024;
+/// Aggregate initial-preview budget for one root agent run.
+pub const TOOL_MODEL_VIEW_RUN_BUDGET_BYTES: usize = 64 * 1024;
 pub const TOOL_DISPLAY_VIEW_MAX_BYTES: usize = 32 * 1024;
 pub const TOOL_ARTIFACT_READ_MAX_BYTES: u32 = 16 * 1024;
 pub const TOOL_ARTIFACT_READ_MAX_LINES: u32 = 200;
@@ -619,6 +625,22 @@ impl ToolResultRecordedV2 {
         store: Option<&ToolArtifactStore>,
         sensitivity: ToolArtifactSensitivity,
     ) -> Result<(Self, ToolDisplayViewV1)> {
+        Self::capture_with_model_preview_limit(
+            result,
+            store,
+            sensitivity,
+            tool_model_view_initial_limit(&result.tool_name),
+        )
+    }
+
+    pub(crate) fn capture_with_model_preview_limit(
+        result: &ToolResult,
+        store: Option<&ToolArtifactStore>,
+        sensitivity: ToolArtifactSensitivity,
+        model_preview_limit: usize,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        let model_preview_limit =
+            model_preview_limit.min(tool_model_view_initial_limit(&result.tool_name));
         let capture_path = if result.tool_name == "read_tool_artifact" {
             ToolResultCapturePathV1::TypedRetrievalReceipt
         } else if result.pre_captured_artifact().is_some() {
@@ -636,7 +658,7 @@ impl ToolResultRecordedV2 {
         let inline_projection_truncated =
             result.content.len() > TOOL_RESULT_LEGACY_INLINE_MAX_BYTES;
         let guarded_inline_content = inline_projection_truncated
-            .then(|| bounded_model_preview(&result.content, TOOL_MODEL_VIEW_MAX_BYTES / 2).0);
+            .then(|| bounded_model_preview(&result.content, TOOL_MODEL_VIEW_INITIAL_MAX_BYTES).0);
         let safe_content = safe_persistence_text(
             guarded_inline_content
                 .as_deref()
@@ -734,8 +756,7 @@ impl ToolResultRecordedV2 {
             }
         };
         let facts = ToolResultFactsV1::from_result(result);
-        let (preview, mut preview_kind) =
-            bounded_model_preview(&safe_content, TOOL_MODEL_VIEW_MAX_BYTES / 2);
+        let (preview, mut preview_kind) = bounded_model_preview(&safe_content, model_preview_limit);
         if inline_projection_truncated {
             preview_kind = ToolPreviewKind::HeadTail;
         }
@@ -744,7 +765,10 @@ impl ToolResultRecordedV2 {
             .map(|descriptor| descriptor.artifact_ref.clone());
         let retrieval_hint = artifact_ref
             .as_ref()
-            .map(|_| "use read_tool_artifact with the opaque artifact_ref".to_owned());
+            .map(|_| {
+                "preview may be partial; use read_tool_artifact with the opaque artifact_ref and a line_page or search_literal selector"
+                    .to_owned()
+            });
         let model = ToolModelViewV1 {
             token_upper_bound: preview.len().div_ceil(4) as u64,
             preview,
@@ -925,6 +949,15 @@ impl ToolResultRecordedV2 {
         self.facts.validate()?;
         self.initial_model_view.validate()?;
         self.capture_telemetry.validate()
+    }
+}
+
+pub(super) fn tool_model_view_initial_limit(tool_name: &str) -> usize {
+    let base_name = tool_name.rsplit("__").next().unwrap_or(tool_name);
+    if matches!(base_name, "read_file" | "grep" | "glob" | "ls" | "search") {
+        TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES
+    } else {
+        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES
     }
 }
 
@@ -2873,6 +2906,9 @@ pub(super) fn bounded_model_preview(value: &str, max_bytes: usize) -> (String, T
         return (value.to_owned(), ToolPreviewKind::Complete);
     }
     let marker = "\n[sigil: bounded tool output; use read_tool_artifact for omitted content]\n";
+    if max_bytes <= marker.len() {
+        return (bounded_utf8(value, max_bytes), ToolPreviewKind::HeadTail);
+    }
     let available = max_bytes.saturating_sub(marker.len());
     let head_limit = available.saturating_mul(2) / 3;
     let tail_limit = available.saturating_sub(head_limit);

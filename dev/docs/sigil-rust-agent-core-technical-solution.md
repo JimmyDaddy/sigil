@@ -464,7 +464,9 @@ scheduler state做 cheap preflight；只有 eligible 才从当前 `Session` 捕�
 frontier一致的 immutable snapshot，background 复用同一 coordinator，不再从 path reload一份竞争
 session；projection 不复制 transcript、artifact body 或 checkpoint body，只保留 bounded
 scheduler/tool-pressure facts；最终 activation仍由 writer-side source cursor/CAS拒绝 stale
-candidate。
+candidate。session JSONL、writer lease、lifecycle journal 及其 lease 创建和 writer-open 修复均为
+owner-only；Doctor 对最近 session/lease 与 lifecycle journal 做同一不变量检查，custom
+`session.log_dir` 不依赖父目录权限间接保密。
 
 V2 tool result 的 policy-safe bytes 写入 session JSONL sibling resource tree：
 `<session-stem>/artifacts/{staging,refs,blobs,trash}`。对外 ref 是随机、session-scoped
@@ -479,6 +481,11 @@ excerpt、pair 状态、retention class、token upper bound、active epoch 和 G
 `ToolOutputPressure` changed-family wake；TUI worker coalesce 后做纯内存 preflight，fit-required aging
 先于 semantic compaction，artifact GC 作为最低优先级单飞 blocking task。steady state 不固定轮询，
 不完整重放 JSONL，也不持有 data-file lock 等待 I/O。
+
+首次 model view 同时受 tool-specific 与 root-run 两级预算：`read_file`、list/glob/grep/search 类
+高流量工具最多 8 KiB，普通工具最多 16 KiB，一个 root agent run 的 preview 正文总计最多 64 KiB。
+预算耗尽后 durable result 仍保留 bounded facts、opaque ref、token upper bound 和
+`line_page/search_literal` retrieval hint；后续正文只通过 typed retrieval 进入当前 request。
 
 持久化边界执行统一的 `SafePersist` 投影：user message、running-input queue、plan/task、agent mailbox/result、tool/provider stream 与 external URL 在首次写 session/control/history 前先做 secret/query/signed-carrier redaction、大小/行数限制和安全摘要。Exact prompt 只在当前进程内交给 provider、`Up/Down` history 或 queue dispatch；durable entry 不保存可反推 verifier，恢复后对 exact-only continuation fail closed 为 stale/interrupted。Query-bearing 或 signed URL 只由 session-local `WebUrlCapabilityStore` 持有，并同时绑定 session id、TTL、LRU 与 restart policy，durable projection 只保存不可反推的安全标识。
 
@@ -652,7 +659,7 @@ pub enum ToolResultStatus {
 - `args_json` 在重组完成前应保留原始字符串形态，避免过早解析把截断问题藏起来
 - 错误分类只放在 `ToolResultStatus::Error(ToolError)` 中，不通过 metadata 或文本约定判断
 - 可能产生大输出的工具通过 `ToolContext::create_policy_safe_tool_output_sink()` 边执行边写 session-scoped immutable artifact；publish 成功后才能 append V2 descriptor
-- provider-visible tool message 来自 `ToolModelViewV1` 的 bounded canonical JSON；JSONL 保存 descriptor、facts 和 initial model view，不保存 artifact body；独立 `ToolDisplayViewV1` 只作为 bounded 产品面 DTO 返回
+- provider-visible tool message 来自 `ToolModelViewV1` 的 bounded canonical JSON；JSONL 保存 descriptor、facts 和 initial model view，不保存 artifact body；initial preview 同时受 tool-specific per-result cap 与 root-run 64 KiB aggregate cap；独立 `ToolDisplayViewV1` 只作为 bounded 产品面 DTO 返回
 - `ToolResultMeta` 可承载 `exit_code`、`changed_files`、`truncated`、`bytes` 等非错误分类信息；V2 capture 将其投影为有大小上限的 `ToolResultFactsV1`
 - model/TUI/Desktop/HTTP 只接收 `ta1_*` opaque ref。正文按 byte/line/literal selector 通过 `read_tool_artifact` 或 authenticated typed page endpoint 读取，并受 per-call/per-run budget、session scope 与 full SHA-256 校验约束
 

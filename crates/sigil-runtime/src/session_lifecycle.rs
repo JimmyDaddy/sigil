@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -1424,17 +1424,11 @@ impl LocalSessionLifecycleService {
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true).truncate(false);
         #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         let lease = options
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
-        if !lease
-            .metadata()
-            .with_context(|| format!("failed to inspect {}", path.display()))?
-            .is_file()
-        {
-            bail!("session maintenance lease must be a regular file");
-        }
+        harden_private_open_file(&lease, &path, "session maintenance lease")?;
         lease
             .try_lock()
             .context("another local session maintenance operation is active")?;
@@ -1885,17 +1879,11 @@ fn acquire_session_writer_lease(source_path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true).truncate(false);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     let lease = options
         .open(&lease_path)
         .with_context(|| format!("failed to open {}", lease_path.display()))?;
-    if !lease
-        .metadata()
-        .with_context(|| format!("failed to inspect {}", lease_path.display()))?
-        .is_file()
-    {
-        bail!("session writer lease must be a regular file");
-    }
+    harden_private_open_file(&lease, &lease_path, "session writer lease")?;
     lease.try_lock().with_context(|| {
         format!(
             "session is active or its writer lease is busy: {}",
@@ -2174,11 +2162,14 @@ fn write_atomic_create_new(path: &Path, bytes: &[u8]) -> Result<()> {
         uuid::Uuid::new_v4().simple()
     ));
     let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let mut file = options
             .open(&temporary)
             .with_context(|| format!("failed to create {}", temporary.display()))?;
+        harden_private_open_file(&file, &temporary, "session export temporary file")?;
         file.write_all(bytes)
             .with_context(|| format!("failed to write {}", temporary.display()))?;
         file.sync_all()
@@ -2197,6 +2188,25 @@ fn write_atomic_create_new(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn harden_private_open_file(file: &File, path: &Path, label: &str) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{label} must be a regular file");
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o7777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to restrict {}", path.display()))?;
+    }
+    #[cfg(windows)]
+    if !sigil_kernel::private_path_permissions_are_restricted(path)? {
+        sigil_kernel::secure_private_path_permissions(path)?;
+    }
+    Ok(())
 }
 
 fn canonical_destination_candidate(path: &Path) -> Result<PathBuf> {

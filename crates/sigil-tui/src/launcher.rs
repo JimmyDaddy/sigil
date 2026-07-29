@@ -20,14 +20,16 @@ use anyhow::Result;
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
+        KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
+#[cfg(not(test))]
+use futures::{FutureExt, StreamExt};
 #[cfg(not(test))]
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use ratatui::{
@@ -57,8 +59,7 @@ use crate::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const BACKGROUND_TASK_WAKE_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
 #[cfg(not(test))]
 const EVENT_BATCH_LIMIT: usize = 64;
@@ -67,7 +68,6 @@ const EVENT_BATCH_LIMIT: usize = 64;
 const SCROLLBACK_SEED_CHUNK_LINES: usize = 256;
 #[cfg(not(test))]
 const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
-#[cfg(not(test))]
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[cfg(not(test))]
@@ -151,15 +151,37 @@ fn run_tui_with_initial_session(
         cleanup.mouse_capture_active = true;
     }
     let mut terminal = terminal_with_inline_fallback(stdout, inline_viewport_height)?;
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        run_app(
-            &mut terminal,
-            &mut app,
-            &mut worker,
-            &mut mouse_capture_active,
-            &mut focus_change_active,
-        )
-    }));
+    let result = panic::catch_unwind(AssertUnwindSafe(
+        || match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| {
+                    handle.block_on(run_app(
+                        &mut terminal,
+                        &mut app,
+                        &mut worker,
+                        &mut mouse_capture_active,
+                        &mut focus_change_active,
+                    ))
+                })
+            }
+            Ok(_) => anyhow::bail!(
+                "the synchronous TUI launcher cannot run inside a current-thread Tokio runtime"
+            ),
+            Err(_) => {
+                let event_runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .context("failed to build TUI event runtime")?;
+                event_runtime.block_on(run_app(
+                    &mut terminal,
+                    &mut app,
+                    &mut worker,
+                    &mut mouse_capture_active,
+                    &mut focus_change_active,
+                ))
+            }
+        },
+    ));
     cleanup.mouse_capture_active = mouse_capture_active;
     cleanup.focus_change_active = focus_change_active;
     let cleanup_result = cleanup.restore();
@@ -364,13 +386,14 @@ fn terminal_with_inline_fallback(
 }
 
 #[cfg(not(test))]
-fn run_app(
+async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     mouse_capture_active: &mut bool,
     focus_change_active: &mut bool,
 ) -> Result<()> {
+    let mut terminal_events = EventStream::new();
     let mut scrollback = ScrollbackSyncState::default();
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
@@ -446,29 +469,89 @@ fn run_app(
             break;
         }
 
-        if event::poll(poll_interval(app, &scrollback))? {
-            let mut processed_events = 0;
-            loop {
-                let crossterm_event = event::read()?;
-                let break_batch = process_terminal_event(
-                    terminal,
-                    app,
-                    worker,
-                    &mut needs_render,
-                    latest_frame_area,
-                    size.into(),
-                    crossterm_event,
-                    &mut attention,
-                    spawn_worker,
-                )?;
-                processed_events += 1;
-                if break_batch
-                    || processed_events >= EVENT_BATCH_LIMIT
-                    || !event::poll(Duration::ZERO)?
-                {
-                    break;
+        enum WakeEvent {
+            Terminal(std::io::Result<CrosstermEvent>),
+            Worker(Box<WorkerMessage>),
+            WorkerClosed,
+            Deadline,
+        }
+        let wake = {
+            let terminal_event = terminal_events.next();
+            let worker_message = next_worker_message(worker);
+            match next_wake_deadline(app, &scrollback) {
+                Some(deadline) => tokio::select! {
+                    event = terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "terminal event stream closed",
+                        ))
+                    })),
+                    message = worker_message => message.map_or(
+                        WakeEvent::WorkerClosed,
+                        |message| WakeEvent::Worker(Box::new(message)),
+                    ),
+                    () = tokio::time::sleep(deadline) => WakeEvent::Deadline,
+                },
+                None => tokio::select! {
+                    event = terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "terminal event stream closed",
+                        ))
+                    })),
+                    message = worker_message => message.map_or(
+                        WakeEvent::WorkerClosed,
+                        |message| WakeEvent::Worker(Box::new(message)),
+                    ),
+                },
+            }
+        };
+        match wake {
+            WakeEvent::Terminal(event) => {
+                let mut next_event = Some(event?);
+                for processed_events in 0..EVENT_BATCH_LIMIT {
+                    let Some(crossterm_event) = next_event.take() else {
+                        break;
+                    };
+                    let break_batch = process_terminal_event(
+                        terminal,
+                        app,
+                        worker,
+                        &mut needs_render,
+                        latest_frame_area,
+                        size.into(),
+                        crossterm_event,
+                        &mut attention,
+                        spawn_worker,
+                    )?;
+                    if break_batch || processed_events + 1 >= EVENT_BATCH_LIMIT {
+                        break;
+                    }
+                    next_event = match terminal_events.next().now_or_never() {
+                        Some(Some(event)) => Some(event?),
+                        Some(None) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "terminal event stream closed",
+                            )
+                            .into());
+                        }
+                        None => None,
+                    };
                 }
             }
+            WakeEvent::Worker(message) => {
+                needs_render |=
+                    apply_received_worker_message(app, worker, &mut attention, *message)?;
+            }
+            WakeEvent::WorkerClosed => {
+                *worker = None;
+                app.handle_worker_message(WorkerMessage::RunFailed(
+                    "agent worker disconnected".to_owned(),
+                ))?;
+                needs_render = true;
+            }
+            WakeEvent::Deadline => {}
         }
     }
 
@@ -953,7 +1036,7 @@ fn drain_worker_messages_inner(
     let mut dirty = false;
     let mut startup_failed = false;
     app.begin_timeline_render_batch();
-    while let Ok(message) = runtime.worker_rx.try_recv() {
+    while let Some(message) = try_recv_worker_message(runtime) {
         if matches!(message, WorkerMessage::WorkerReady) {
             runtime.ready = true;
         } else if !runtime.ready && matches!(message, WorkerMessage::RunFailed(_)) {
@@ -970,6 +1053,50 @@ fn drain_worker_messages_inner(
         *worker = None;
     }
     Ok(dirty | app.flush_timeline_render_batch())
+}
+
+fn try_recv_worker_message(runtime: &mut WorkerRuntime) -> Option<WorkerMessage> {
+    #[cfg(test)]
+    {
+        runtime.worker_rx.try_recv().ok()
+    }
+    #[cfg(not(test))]
+    {
+        runtime.worker_rx.try_recv()
+    }
+}
+
+#[cfg(not(test))]
+async fn next_worker_message(worker: &mut Option<WorkerRuntime>) -> Option<WorkerMessage> {
+    match worker.as_mut() {
+        Some(runtime) => runtime.worker_rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(not(test))]
+fn apply_received_worker_message(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    attention: &mut AttentionController,
+    message: WorkerMessage,
+) -> Result<bool> {
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(false);
+    };
+    let startup_failed = !runtime.ready && matches!(message, WorkerMessage::RunFailed(_));
+    if matches!(message, WorkerMessage::WorkerReady) {
+        runtime.ready = true;
+    }
+    attention.observe(&message, Instant::now());
+    app.begin_timeline_render_batch();
+    app.handle_worker_message(message)?;
+    app.flush_timeline_render_batch();
+    if startup_failed {
+        let _ = app.drain_pending_worker_commands();
+        *worker = None;
+    }
+    Ok(true)
 }
 
 fn restart_worker_after_session_transition<F>(
@@ -1202,19 +1329,21 @@ fn should_sync_terminal_scrollback(app: &AppState) -> bool {
     !app.runtime.is_busy && !app.is_setup_mode() && !app.is_config_mode()
 }
 
-fn poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
+fn next_wake_deadline(app: &AppState, scrollback: &ScrollbackSyncState) -> Option<Duration> {
     if app.runtime.is_busy {
-        BUSY_POLL_INTERVAL
+        Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
     } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
-        SCROLLBACK_SEED_POLL_INTERVAL
+        Some(SCROLLBACK_SEED_POLL_INTERVAL)
+    } else if app.has_pending_background_tasks() {
+        Some(BACKGROUND_TASK_WAKE_INTERVAL)
     } else {
-        IDLE_POLL_INTERVAL
+        None
     }
 }
 
 #[cfg(test)]
-fn next_poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
-    poll_interval(app, scrollback)
+fn tested_next_wake_deadline(app: &AppState, scrollback: &ScrollbackSyncState) -> Option<Duration> {
+    next_wake_deadline(app, scrollback)
 }
 
 fn prepare_scrollback_sync(
@@ -1496,8 +1625,44 @@ fn shell_quote(value: &str) -> String {
 
 struct WorkerRuntime {
     worker_tx: runner::WorkerCommandSender,
+    #[cfg(test)]
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
+    #[cfg(not(test))]
+    worker_rx: WorkerMessageInbox,
     ready: bool,
+}
+
+#[cfg(not(test))]
+struct WorkerMessageInbox {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
+}
+
+#[cfg(not(test))]
+impl WorkerMessageInbox {
+    fn forward_from(receiver: std::sync::mpsc::Receiver<WorkerMessage>) -> Result<Self> {
+        let (sender, forwarded) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::Builder::new()
+            .name("sigil-tui-worker-events".to_owned())
+            .spawn(move || {
+                while let Ok(message) = receiver.recv() {
+                    if sender.send(message).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("failed to start TUI worker event forwarder")?;
+        Ok(Self {
+            receiver: forwarded,
+        })
+    }
+
+    fn try_recv(&mut self) -> Option<WorkerMessage> {
+        self.receiver.try_recv().ok()
+    }
+
+    async fn recv(&mut self) -> Option<WorkerMessage> {
+        self.receiver.recv().await
+    }
 }
 
 #[cfg(not(test))]
@@ -1510,7 +1675,7 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
     )?;
     Ok(WorkerRuntime {
         worker_tx,
-        worker_rx,
+        worker_rx: WorkerMessageInbox::forward_from(worker_rx)?,
         ready: false,
     })
 }

@@ -353,9 +353,12 @@ pub struct ToolResultRecordedV2 {
 
 - canonical serialized event target 不超过 64 KiB；
 - hard fail 仍使用全局 `MAX_EVENT_BYTES`，但普通 tool result 不应接近 1 MiB；
-- `initial_model_view` 默认不超过 8K estimated tokens，且同时受 32 KiB byte cap；
-- generic preview 默认 16 KiB head + 8 KiB tail；tool-specific projector 可以在同一总预算内使用更高
-  信息密度的结构化结果；
+- `initial_model_view.preview` 普通工具默认不超过 16 KiB；read/list/glob/grep/search 类高流量工具
+  默认不超过 8 KiB；
+- 一个 root agent run 的所有 initial preview 正文共享 64 KiB aggregate cap；耗尽后继续记录
+  facts、opaque artifact ref 与 typed retrieval hint，不回退为 inline body；
+- 截断 preview 在 byte cap 内使用 UTF-8-safe head/tail；tool-specific projector 可以在同一总预算内
+  使用更高信息密度的结构化结果；
 - event 超过 64 KiB target 时再次 deterministic shrink；仍超过 hard limit 才返回
   `tool_result_descriptor_too_large`，不能回退为 inline raw body。
 
@@ -1382,6 +1385,11 @@ truth。SQLite 不进入 live writer authority。
   cost-only aging 在有 cache hit 时只保留 candidate、不主动 reset epoch。
 - descriptor projection、artifact GC 和 worker scheduler 使用 changed-family wake、coalescing slot 和
   blocking receive；不存在固定 50 ms scan。
+- latest-session 审计后的 hardening 已补齐：high-volume initial preview 为 8 KiB、普通 preview 为
+  16 KiB、root run aggregate preview 为 64 KiB；`read_tool_artifact` hint 明确使用
+  `line_page/search_literal`。这把单次 run 的初始 tool 正文从“结果数 × 单条 cap”收敛为固定上界。
+- session JSONL、writer lease、lifecycle journal/lease 在创建与 writer-open 时统一收紧到 owner-only；
+  Doctor 对最近 stream/lease 和 lifecycle journal 报告权限漂移。
 
 ### 28.2 Scale and resource evidence
 

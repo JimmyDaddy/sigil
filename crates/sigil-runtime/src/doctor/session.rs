@@ -60,6 +60,11 @@ pub(super) fn check_storage_paths(report: &mut DoctorReport, paths: &crate::Sigi
         paths.project_assets_root.display().to_string(),
     );
     check_session_log_dir(report, &paths.session_log_dir);
+    check_private_storage_file(
+        report,
+        "session:lifecycle_permissions",
+        &paths.session_lifecycle_journal,
+    );
 }
 
 pub(super) fn check_session_log_dir(report: &mut DoctorReport, session_dir: &Path) {
@@ -125,6 +130,7 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
         return;
     }
     session_paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
+    check_session_stream_permissions(report, &session_paths, total_streams);
 
     let mut summary = SessionStreamDoctorSummary::default();
     let mut oversized_skipped = 0usize;
@@ -211,6 +217,90 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
         );
     } else {
         report.push(DoctorStatus::Ok, "session:stream", message);
+    }
+}
+
+fn check_session_stream_permissions(
+    report: &mut DoctorReport,
+    session_paths: &[PathBuf],
+    total_streams: usize,
+) {
+    let mut exposed = Vec::new();
+    for path in session_paths {
+        if matches!(
+            private_path_permissions_are_restricted(path),
+            Ok(false) | Err(_)
+        ) {
+            exposed.push(path.clone());
+        }
+        let lease_path = path.with_file_name(format!(
+            "{}.writer-lock",
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("session.jsonl")
+        ));
+        if lease_path.exists()
+            && matches!(
+                private_path_permissions_are_restricted(&lease_path),
+                Ok(false) | Err(_)
+            )
+        {
+            exposed.push(lease_path);
+        }
+    }
+    if let Some(first) = exposed.first() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:permissions",
+            format!(
+                "{} owner-only violation(s) in {} recently scanned stream(s), first={}",
+                exposed.len(),
+                session_paths.len(),
+                first.display()
+            ),
+            Some(
+                "open the session in writer mode to repair data and lease files to owner-only permissions",
+            ),
+        );
+    } else {
+        let skipped = total_streams.saturating_sub(session_paths.len());
+        report.push(
+            DoctorStatus::Ok,
+            "session:permissions",
+            if skipped == 0 {
+                format!("{} stream(s) and writer leases are owner-only", session_paths.len())
+            } else {
+                format!(
+                    "{} recent stream(s) and writer leases are owner-only; skipped {skipped} older streams",
+                    session_paths.len()
+                )
+            },
+        );
+    }
+}
+
+fn check_private_storage_file(report: &mut DoctorReport, name: &str, path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    match private_path_permissions_are_restricted(path) {
+        Ok(true) => report.push(
+            DoctorStatus::Ok,
+            name,
+            format!("{} is owner-only", path.display()),
+        ),
+        Ok(false) => report.push_with_remediation(
+            DoctorStatus::Warn,
+            name,
+            format!("{} allows access beyond the current user", path.display()),
+            Some("run a session lifecycle operation to tighten the journal permissions"),
+        ),
+        Err(error) => report.push_with_remediation(
+            DoctorStatus::Warn,
+            name,
+            format!("failed to inspect {}: {error:#}", path.display()),
+            Some("check that the lifecycle journal is a regular file owned by the current user"),
+        ),
     }
 }
 

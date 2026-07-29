@@ -1490,6 +1490,7 @@ where
         if logical_run_id.trim().is_empty() {
             return Err(anyhow!("agent logical run id is empty"));
         }
+        session.begin_tool_model_view_run();
         let has_initial_frozen_provider_request = initial_frozen_provider_request.is_some();
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;

@@ -33,6 +33,84 @@ fn opaque_ref_and_blob_path_do_not_expose_each_other() -> Result<()> {
 }
 
 #[test]
+fn model_preview_limits_never_exceed_the_requested_bytes() {
+    let value = "abcdef".repeat(100);
+    for limit in [0, 1, 8, 32, 128] {
+        let (preview, kind) = bounded_model_preview(&value, limit);
+        assert!(preview.len() <= limit);
+        assert_eq!(kind, ToolPreviewKind::HeadTail);
+    }
+}
+
+#[test]
+fn high_volume_tools_use_a_smaller_initial_model_view() -> Result<()> {
+    let body = "x".repeat(TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+    for tool_name in [
+        "read_file",
+        "mcp__workspace__read_file",
+        "mcp__docs__search",
+    ] {
+        let (recorded, _) = ToolResultRecordedV2::capture(
+            &ToolResult::ok(
+                format!("call-{tool_name}"),
+                tool_name,
+                &body,
+                crate::ToolResultMeta::default(),
+            ),
+            None,
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        assert_eq!(
+            recorded.initial_model_view.preview.len(),
+            TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES
+        );
+    }
+    let (shell, _) = ToolResultRecordedV2::capture(
+        &ToolResult::ok(
+            "call-shell",
+            "shell",
+            &body,
+            crate::ToolResultMeta::default(),
+        ),
+        None,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+
+    assert_eq!(
+        shell.initial_model_view.preview.len(),
+        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES
+    );
+    Ok(())
+}
+
+#[test]
+fn root_run_budget_bounds_many_initial_tool_previews() -> Result<()> {
+    let mut session = Session::new("test", "model");
+    session.begin_tool_model_view_run();
+    let mut preview_bytes = 0;
+
+    for index in 0..20 {
+        let tool_name = if index % 2 == 0 { "read_file" } else { "shell" };
+        let limit = session.reserve_tool_model_view_bytes(tool_name);
+        let (recorded, _) = ToolResultRecordedV2::capture_with_model_preview_limit(
+            &ToolResult::ok(
+                format!("call-{index}"),
+                tool_name,
+                "x".repeat(32 * 1024),
+                crate::ToolResultMeta::default(),
+            ),
+            None,
+            ToolArtifactSensitivity::Ordinary,
+            limit,
+        )?;
+        preview_bytes += recorded.initial_model_view.preview.len();
+    }
+
+    assert_eq!(preview_bytes, TOOL_MODEL_VIEW_RUN_BUDGET_BYTES);
+    Ok(())
+}
+
+#[test]
 fn streaming_capture_is_bounded_and_records_truthful_head_tail() -> Result<()> {
     let (_temp, store) = store_fixture()?;
     let half = TOOL_ARTIFACT_MAX_BYTES / 2;

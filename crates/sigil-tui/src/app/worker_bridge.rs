@@ -104,6 +104,22 @@ impl AppState {
             | self.reload_active_agent_child_transcript()
     }
 
+    pub fn has_pending_background_tasks(&self) -> bool {
+        self.runtime.setup_model_catalog_rx.is_some()
+            || self.runtime.connection_inventory_rx.is_some()
+            || self.active_agent_child_entry().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pending_model_catalog_for_test(
+        &mut self,
+        receiver: std::sync::mpsc::Receiver<
+            Result<sigil_runtime::provider_connections::ModelCatalogResult, String>,
+        >,
+    ) {
+        self.runtime.setup_model_catalog_rx = Some(receiver);
+    }
+
     pub fn has_pending_worker_commands(&self) -> bool {
         !self.runtime.pending_worker_commands.is_empty()
     }

@@ -22,18 +22,18 @@ use sigil_kernel::{
 };
 
 use super::{
-    AppMouseOutcome, BUSY_POLL_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
-    IDLE_POLL_INTERVAL, InitialSessionTarget, SCROLLBACK_SEED_POLL_INTERVAL,
+    AppMouseOutcome, BACKGROUND_TASK_WAKE_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
+    InitialSessionTarget, SCROLLBACK_SEED_POLL_INTERVAL, SPINNER_FRAME_MILLIS,
     ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
     apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app, drain_worker_messages,
     external_launch_plan, flush_pending_worker_commands, mouse_layout_snapshot,
-    next_mouse_capture_action, next_poll_interval, osc52_clipboard_sequence, plan_scrollback_sync,
-    plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
+    next_mouse_capture_action, next_wake_deadline, osc52_clipboard_sequence, plan_scrollback_sync,
+    plan_scrollback_sync_with_chunk_size, prepare_scrollback_sync,
     prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
     render_scrollback_rows, render_tui_exit_resume_hint, restart_worker_after_session_transition,
     restore_initial_session_from_disk, scrollback_plain_line, scrollback_row_style,
     scrollback_separator, scrollback_wrapped_rows, should_sync_terminal_scrollback,
-    wrap_scrollback_text,
+    tested_next_wake_deadline, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -410,7 +410,7 @@ fn setup_mode_defers_terminal_scrollback_sync() {
 }
 
 #[test]
-fn next_poll_interval_prefers_busy_then_seed_then_idle() {
+fn next_wake_deadline_prefers_busy_then_seed_then_event_driven_idle() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let pending_seed = ScrollbackSyncState {
         pending_seed: Some(ScrollbackSeedProgress {
@@ -422,19 +422,27 @@ fn next_poll_interval_prefers_busy_then_seed_then_idle() {
 
     app.runtime.is_busy = true;
     assert_eq!(
-        next_poll_interval(&app, &ScrollbackSyncState::default()),
-        BUSY_POLL_INTERVAL
+        tested_next_wake_deadline(&app, &ScrollbackSyncState::default()),
+        Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
     );
 
     app.runtime.is_busy = false;
     assert_eq!(
-        next_poll_interval(&app, &pending_seed),
-        SCROLLBACK_SEED_POLL_INTERVAL
+        tested_next_wake_deadline(&app, &pending_seed),
+        Some(SCROLLBACK_SEED_POLL_INTERVAL)
     );
 
     assert_eq!(
-        next_poll_interval(&app, &ScrollbackSyncState::default()),
-        IDLE_POLL_INTERVAL
+        tested_next_wake_deadline(&app, &ScrollbackSyncState::default()),
+        None
+    );
+
+    let (_sender, receiver) =
+        mpsc::channel::<Result<sigil_runtime::provider_connections::ModelCatalogResult, String>>();
+    app.set_pending_model_catalog_for_test(receiver);
+    assert_eq!(
+        tested_next_wake_deadline(&app, &ScrollbackSyncState::default()),
+        Some(BACKGROUND_TASK_WAKE_INTERVAL)
     );
 }
 
@@ -1007,12 +1015,12 @@ fn app_with_scrollback() -> AppState {
 }
 
 #[test]
-fn poll_interval_prefers_busy_then_seed_then_idle() {
+fn wake_deadline_prefers_busy_then_seed_then_event_driven_idle() {
     let mut busy_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     busy_app.runtime.is_busy = true;
     assert_eq!(
-        poll_interval(&busy_app, &ScrollbackSyncState::default()),
-        BUSY_POLL_INTERVAL
+        next_wake_deadline(&busy_app, &ScrollbackSyncState::default()),
+        Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
     );
 
     let seeded_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -1024,8 +1032,8 @@ fn poll_interval_prefers_busy_then_seed_then_idle() {
         ..ScrollbackSyncState::default()
     };
     assert_eq!(
-        poll_interval(&seeded_app, &seeded_state),
-        SCROLLBACK_SEED_POLL_INTERVAL
+        next_wake_deadline(&seeded_app, &seeded_state),
+        Some(SCROLLBACK_SEED_POLL_INTERVAL)
     );
 
     let setup_app = AppState::from_setup(
@@ -1033,7 +1041,7 @@ fn poll_interval_prefers_busy_then_seed_then_idle() {
         PathBuf::from("."),
         Some("broken".to_owned()),
     );
-    assert_eq!(poll_interval(&setup_app, &seeded_state), IDLE_POLL_INTERVAL);
+    assert_eq!(next_wake_deadline(&setup_app, &seeded_state), None);
 }
 
 #[test]

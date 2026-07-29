@@ -10,6 +10,8 @@ use std::{
 
 use anyhow::Result;
 use fs2::FileExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use super::*;
 use crate::{
@@ -134,6 +136,36 @@ fn session_writer_hot_append_scans_existing_stream_once() -> Result<()> {
     assert_eq!(
         JsonlSessionStore::read_event_records(store.path())?.len(),
         64
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn session_writer_creates_and_repairs_owner_only_data_and_lease_files() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("custom-sessions").join("session.jsonl");
+    fs::create_dir_all(session_path.parent().expect("session parent"))?;
+    fs::write(&session_path, b"")?;
+    fs::set_permissions(&session_path, fs::Permissions::from_mode(0o644))?;
+    let lease_path = writer_lease_path(&session_path);
+    fs::write(&lease_path, b"")?;
+    fs::set_permissions(&lease_path, fs::Permissions::from_mode(0o664))?;
+
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({"status": "started"}),
+    )?;
+
+    assert_eq!(
+        fs::metadata(&session_path)?.permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&lease_path)?.permissions().mode() & 0o777,
+        0o600
     );
     Ok(())
 }

@@ -1168,6 +1168,10 @@ R58.0-R58.5 已整体落地：
   sidecar validation；
 - TUI worker改为统一 `WorkerEvent` inbox。ordinary command、urgent control、run/compaction/provider/OAuth
   completion、MCP runtime event与 projection wake均有 typed producer；
+- TUI launcher 后续也移除 `50ms/250ms` general terminal poll：Crossterm `EventStream` 与 forwarded
+  worker message 通过 `tokio::select!` 直接唤醒主循环；只有 spinner frame、scrollback seed、仍在运行
+  的 model catalog/inventory 或 active child transcript 保留显式 nearest deadline。无上述状态时
+  launcher 阻塞等待输入或 worker completion；
 - Cancel/Shutdown使用独立 urgent lane；ordinary work在 projection reconciliation期间 fail closed；
 - MCP progress/list-changed采用 producer-side latest-value coalescing，并以 128 个 pending key为硬上限；
   dirty-server信号被迫淘汰时只对实际发过 list-changed 的 observed server执行保守 resync，不激活
@@ -1262,10 +1266,12 @@ CPU热点不变；而所有 session共用全局 mutex还会扩大 head-of-line b
 静态 reader不加锁可能读到 partial append/tail recovery中间状态，破坏 durable replay。正确做法是 active
 reads走 process coordinator，外部 snapshot继续保留 cross-process lock。
 
-### 17.5 Convert outer loop directly to `tokio::select!`
+### 17.5 Convert worker reactor directly to `tokio::select!`
 
-长期可行，但当前 nested `runtime.block_on`与同步 helper太多。只改 outer loop会把 blocking work放进
-runtime task，并引入 cancellation/fairness风险。V1 unified event/readiness设计未来可无损迁移到 async。
+长期可行，但 worker 内部 nested `runtime.block_on`与同步 helper太多。只改 worker outer loop会把
+blocking work放进 runtime task，并引入 cancellation/fairness风险。V1 unified event/readiness设计
+未来可无损迁移到 async。TUI launcher 自身没有这组 authority/cancellation约束，已在后续实现中使用
+`EventStream + forwarded worker completion + tokio::select!`，不改变同步 worker reactor的所有权。
 
 ### 17.6 Add `crossbeam-channel::select!`
 

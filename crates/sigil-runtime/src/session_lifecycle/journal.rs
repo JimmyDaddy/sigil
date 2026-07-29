@@ -7,7 +7,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{digest_serializable, sync_directory};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+use super::{digest_serializable, harden_private_open_file, sync_directory};
 
 pub const LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION: u16 = 2;
 const MAX_LIFECYCLE_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -190,13 +193,18 @@ impl LocalSessionLifecycleJournal {
         if lease_path.exists() {
             reject_symlink(&lease_path, "lifecycle journal writer lease")?;
         }
-        let lease = OpenOptions::new()
+        let mut lease_options = OpenOptions::new();
+        lease_options
             .create(true)
             .read(true)
             .write(true)
-            .truncate(false)
+            .truncate(false);
+        #[cfg(unix)]
+        lease_options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let lease = lease_options
             .open(&lease_path)
             .with_context(|| format!("failed to open {}", lease_path.display()))?;
+        harden_private_open_file(&lease, &lease_path, "lifecycle journal writer lease")?;
         lease.try_lock().with_context(|| {
             format!(
                 "local session lifecycle journal writer is busy: {}",
@@ -205,12 +213,14 @@ impl LocalSessionLifecycleJournal {
         })?;
 
         let existed = self.path.exists();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
+        let mut file_options = OpenOptions::new();
+        file_options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        file_options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let mut file = file_options
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
+        harden_private_open_file(&file, &self.path, "lifecycle journal")?;
         file.try_lock().with_context(|| {
             format!(
                 "local session lifecycle journal data file is busy: {}",
