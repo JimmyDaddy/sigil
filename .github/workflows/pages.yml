@@ -4,6 +4,28 @@ on:
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/pages.yml"
+      - "README.md"
+      - "README.zh-CN.md"
+      - "assets/demo/**"
+      - "assets/logo/**"
+      - "assets/social/**"
+      - "crates/sigil-runtime/src/application_catalog.rs"
+      - "crates/sigil-tui/src/commands.rs"
+      - "dev/docs/public-documentation-content-policy.json"
+      - "docs/**"
+      - "scripts/build-docs-site.rb"
+      - "scripts/build-pages-site.sh"
+      - "scripts/check-docs*"
+      - "scripts/check-pages-site.sh"
+      - "scripts/check-public-doc*"
+      - "scripts/check-site-*"
+      - "scripts/public-doc-metrics.rb"
+      - "scripts/ruby-compat.rb"
+      - "scripts/test-docs-table-render.rb"
+      - "scripts/test-public-doc-content.rb"
+      - "site/**"
   workflow_dispatch:
 
 permissions:

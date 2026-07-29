@@ -47,6 +47,72 @@ env:
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
+  changes:
+    name: Resolve dependency audit scope
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      npm: ${{ steps.scope.outputs.npm }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed dependency inputs
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          rust_changed=false
+          npm_changed=false
+
+          if [[ "${EVENT_NAME}" == "schedule" || "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            rust_changed=true
+            npm_changed=true
+          else
+            if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+              base="${BASE_SHA}"
+            else
+              base="${BEFORE_SHA}"
+            fi
+
+            if [[ ! "${base}" =~ ^[0-9a-f]{40}$ ]] ||
+              [[ "${base}" =~ ^0+$ ]] ||
+              ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              rust_changed=true
+              npm_changed=true
+            else
+              while IFS= read -r path; do
+                case "${path}" in
+                  .github/workflows/dependency-supply-chain.yml | .github/dependabot.yml)
+                    rust_changed=true
+                    npm_changed=true
+                    ;;
+                  Cargo.lock | Cargo.toml | apps/desktop/src-tauri/Cargo.toml | crates/*/Cargo.toml | deny.toml | dev/governance/dependency-supply-chain.md | scripts/check-supply-chain-policy.py | scripts/test-check-supply-chain-policy.py)
+                    rust_changed=true
+                    ;;
+                  apps/desktop/package.json | apps/desktop/pnpm-lock.yaml)
+                    npm_changed=true
+                    ;;
+                esac
+              done < <(git diff --name-only "${base}" "${GITHUB_SHA}")
+            fi
+          fi
+
+          echo "rust=${rust_changed}" >> "${GITHUB_OUTPUT}"
+          echo "npm=${npm_changed}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Dependency audit scope"
+            echo
+            echo "- Rust: ${rust_changed}"
+            echo "- npm: ${npm_changed}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   policy-consistency:
     name: Advisory exception policy consistency
     runs-on: ubuntu-latest
@@ -63,7 +129,10 @@ jobs:
 
   cargo-deny:
     name: Licenses, sources, bans, and advisories
-    needs: policy-consistency
+    needs:
+      - changes
+      - policy-consistency
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -79,7 +148,10 @@ jobs:
 
   cargo-audit:
     name: Independent RustSec lockfile audit
-    needs: policy-consistency
+    needs:
+      - changes
+      - policy-consistency
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -119,6 +191,8 @@ jobs:
 
   pnpm-audit:
     name: Desktop npm audit
+    needs: changes
+    if: needs.changes.outputs.npm == 'true'
     runs-on: ubuntu-latest
 
     steps:

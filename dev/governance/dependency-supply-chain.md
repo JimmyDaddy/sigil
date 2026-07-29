@@ -204,7 +204,10 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 
 `.github/workflows/dependency-supply-chain.yml` 将上述发布前扫描提升为常规仓库门禁：
 
-- Cargo manifest、lockfile、`deny.toml` 或 workflow 变化时运行，此外每周执行一次；
+- Cargo manifest、lockfile、`deny.toml`、desktop npm manifest/lockfile 或 workflow 变化时运行，此外每周执行一次；
+- push/PR 先从 exact base/head diff 分类 Rust 与 npm 输入：Rust policy/deny/audit 只在 Rust
+  供应链输入变化时运行，desktop `pnpm audit` 只在 npm manifest/lockfile 变化时运行；定时和手动
+  扫描仍同时覆盖两张依赖图，workflow/Dependabot 配置变化也 fail-safe 覆盖两者；
 - `cargo-deny 0.20.2` 的官方 action release 按已提交的 `deny.toml` 检查 advisories、bans、licenses 和 sources；
 - `cargo-audit 0.22.2` 独立复扫 `Cargo.lock`，只携带`deny.toml`与本台账已说明的精确例外；
 - 两个 job 都是阻塞门禁，不使用 `continue-on-error`，且 workflow 权限仅为

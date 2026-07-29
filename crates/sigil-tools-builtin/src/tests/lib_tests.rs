@@ -6658,11 +6658,13 @@ async fn windows_job_object_reaps_one_shot_descendants_on_timeout() -> Result<()
     fs::create_dir(&workspace)?;
     let pid_file = temp.path().join("one-shot-child.pid");
     let command = windows_descendant_command(&pid_file);
+    // A saturated hosted runner can need more than one second to start nested PowerShell. Keep
+    // the execution deadline finite while allowing the descendant to publish its PID first.
     let result = bash_tool(temp.path())
         .execute(
             ToolContext::new(workspace, 10),
             "windows-timeout".to_owned(),
-            json!({ "command": command, "timeout_secs": 1 }),
+            json!({ "command": command, "timeout_secs": 5 }),
         )
         .await?;
     let child_pid = read_windows_pid(&pid_file).await?;
