@@ -819,19 +819,20 @@ fn private_windows_acl_excludes_broad_read_principals_for_files_and_directories(
 
     for path in [&directory, &file] {
         super::secure_private_path_permissions(path).expect("private ACL should apply");
-        let sddl = super::windows_private_dacl_sddl(path).expect("private ACL should render");
-        assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
         assert!(
-            sddl.contains(&format!("O:{current_user_sid}")),
-            "current user must own the path: {sddl}"
+            super::private_path_permissions_are_restricted(path)
+                .expect("private ACL diagnostics should inspect the path"),
+            "private ACL diagnostics should recognize the secured path"
         );
+        let sddl = super::windows_private_dacl_sddl(path).expect("private ACL should render");
+        assert!(
+            super::windows_private_sddl_has_current_user(&sddl, &current_user_sid),
+            "current user must own and retain access to the path: {sddl}"
+        );
+        assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
         assert!(
             sddl.contains(";;;SY)"),
             "Local System must retain access: {sddl}"
-        );
-        assert!(
-            sddl.contains(&format!(";;;{current_user_sid})")),
-            "the current user must retain access: {sddl}"
         );
         for broad_principal in [";;;OW)", ";;;WD)", ";;;BU)", ";;;AU)", ";;;AN)"] {
             assert!(

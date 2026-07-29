@@ -1515,18 +1515,14 @@ pub fn private_path_permissions_are_restricted(path: &Path) -> Result<bool> {
     {
         let current_user_sid = current_windows_user_sid_string()?;
         let sddl = windows_private_dacl_sddl(path)?;
-        let owner_is_current_user = sddl.contains(&format!("O:{current_user_sid}"));
+        let current_user_is_present =
+            windows_private_sddl_has_current_user(&sddl, &current_user_sid);
         let protected = sddl.contains("D:P");
-        let current_user_allowed = sddl.contains(&format!(";;;{current_user_sid})"));
         let system_allowed = sddl.contains(";;;SY)");
         let broad_principal_allowed = [";;;OW)", ";;;WD)", ";;;BU)", ";;;AU)", ";;;AN)"]
             .iter()
             .any(|principal| sddl.contains(principal));
-        Ok(owner_is_current_user
-            && protected
-            && current_user_allowed
-            && system_allowed
-            && !broad_principal_allowed)
+        Ok(current_user_is_present && protected && system_allowed && !broad_principal_allowed)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1710,6 +1706,27 @@ fn current_windows_user_sid_string() -> Result<String> {
         let _ = LocalFree(rendered.cast());
     }
     Ok(value)
+}
+
+#[cfg(windows)]
+fn windows_private_sddl_has_current_user(sddl: &str, current_user_sid: &str) -> bool {
+    let has_principal = |principal: &str| {
+        sddl.contains(&format!("O:{principal}")) && sddl.contains(&format!(";;;{principal})"))
+    };
+    has_principal(current_user_sid)
+        || windows_current_user_sddl_alias(current_user_sid).is_some_and(has_principal)
+}
+
+#[cfg(windows)]
+fn windows_current_user_sddl_alias(current_user_sid: &str) -> Option<&'static str> {
+    match current_user_sid {
+        "S-1-5-18" => Some("SY"),
+        "S-1-5-19" => Some("LS"),
+        "S-1-5-20" => Some("NS"),
+        sid if sid.ends_with("-500") => Some("LA"),
+        sid if sid.ends_with("-501") => Some("LG"),
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -1998,6 +2015,12 @@ fn reject_config_parent_symlink_components(parent: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for component in parent.components() {
         current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(component, std::path::Component::Prefix(_)) {
+            // A Windows drive or verbatim prefix is not inspectable until the following root
+            // component has been appended (for example, `\\?\C:` becomes `\\?\C:\`).
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let is_root_level_alias = current
