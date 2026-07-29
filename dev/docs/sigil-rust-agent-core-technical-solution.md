@@ -275,14 +275,14 @@ sigil/
 - `sigil-provider-openai-responses`：OpenAI Responses provider，独立处理 Responses 的 `input` / output-item / SSE 协议，并将每轮完整、原样的原生 output items 作为 provider continuation state 绑定到对应 assistant message；它不修改 Chat Completions wire contract，也不把 OpenAI 字段泄漏到 kernel。官方 route 的 cache key 使用 tenant partition 下的 HMAC 稳定分片，logical A0/A2 boundary 不触碰 active A4；`/responses/compact` 返回的 opaque window 只有在同 cursor 的 portable checkpoint 已激活后才能写成加密 native carrier，不能把候选明文写入 JSONL。
 - `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result`、incremental tool argument，以及 provider-native `web_search_20250305` server tool / citation / continuation 映射。官方 route 在 A0/A2 使用不超过四个 slot 的 `cache_control`，active A4 不写 breakpoint。公开 beta `compact-2026-01-12` 仅在 official route、精确 version/model 和已有 portable checkpoint 时，以 provider-local paused driver 生成加密 native carrier；route/model/protocol/store/retention/expiry 或 payload validation 失败时机械回退 portable checkpoint。kernel 只看到中立的 message、tool spec、hosted evidence、usage、capability 和受保护 carrier ref，不会看到 Anthropic tool version、server block 或 encrypted carrier。
 - `sigil-provider-gemini`：Gemini GenerateContent provider，负责 `systemInstruction`、`functionDeclarations`、`functionCall` / `functionResponse`、block reason，以及 provider-native `google_search` / grounding metadata 映射；Gemini 的 function-response、hosted model eligibility、streaming grounding index 与 retry 细节保留在 provider crate 内。
-- `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
+- `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。大输出路径使用 kernel policy-safe streaming sink 形成 artifact + bounded view；`read_tool_artifact` 只接受 opaque ref 和 byte/line/literal selector，并返回 transient bounded page + body-free receipt。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
 - `sigil-process`：只承载跨 crate 复用的进程树 lifecycle ownership、整树终止和离线 capability probe。Windows 使用 kill-on-close Job Object，Unix 提供独立process-group配置和整组终止primitive；等待、grace policy与receipt仍由调用crate拥有。它不承载shell选择、sandbox、terminal I/O、MCP framing、desktop bootstrap、receipt或TUI状态。
 - `sigil-desktop`：桌面 Rust 后端的 library-only boundary。它生成并私有持有 per-launch bearer，以独立process tree启动one `sigil serve` per workspace，bounded解析startup metadata，再用no-proxy/no-redirect的鉴权`/server-info`验证同一DTO；关闭时先drop owner pipe等待graceful drain，超时才整树终止。typed client只反序列化server response，包含server-private path的DTO没有IPC serialization surface。它不依赖kernel、runtime、TUI或HTTP server crate，renderer也不能取得token/child/generic HTTP。
 - `apps/desktop`：RFC-0044 的 Tauri 2 + React/TypeScript/Vite companion。Tauri backend通过`sigil-desktop`维持one process per workspace，native recent store私有持有canonical path；renderer只接收workspace id/display/server state、bounded catalog rows与process-local session summary。history pagination/search/filter/new/open/rename/confirmed-delete全部经authenticated typed HTTP client；rename追加bounded lifecycle decision，delete复用exact preview/apply并与活动run/verification互斥，server-private path与durable scope在IPC前丢弃。capability仅允许冻结的desktop业务command，不开放generic shell/process/filesystem/HTTP。wire schema由`sigil-http` OpenAPI导出并在CI检查snapshot和generated TypeScript drift；SSE `ProtocolEvent`/`PublicRunEvent` 也属于该合约，native client以provider-neutral typed DTO消费task/plan/batch/step/integration事件，未知事件只降级且raw payload不进入renderer，renderer不直接持有loopback client或bearer。RFC-0046 进一步把桌面表现层收口到 Material-derived semantic roles 和 Sigil-owned accessible primitives；application-scope `system | light | dark` 由 bounded native store 持久化，不进入 workspace/session/OpenAPI/SQLite/runtime truth，theme/navigation/review 切换不得 remount active conversation。
 - `sigil-code-intel`：隔离 LSP client 生命周期、多语言 Tree-sitter request-local fallback、RepoMapLite source map、符号/诊断缓存、warm LSP context snapshot、代码查询 tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。首批 request-local adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用编译期固定 grammar、ignore-aware bounded walker/read、deterministic caps 和 same-language unique-reference heuristic；它不建立 persistent repo graph，也不把 heuristic edge 宣传为 resolved call graph。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态结果以 bounded Context V1/tool result 进入 provider-visible request，不修改 stable base system prompt。`LanguageServerConfig.trust_required = true` 时，runtime 必须把当前 session 对精确 workspace 的 durable trust projection 传到 code-intel，并在 command resolution 与 process spawn 前 fail-closed；旧调用入口和 fresh headless session 默认 `Unknown`，`trust_required = false` 只显式关闭 LSP 进程启动 gate，不改变写工具权限。外部规划型写入采用 kernel-owned `ToolPreparationDraft -> PreparedToolCall` 一次性 envelope：code-intel 只负责单次 LSP plan、source/version/hash、完整 edit set 与 proposed bytes 的进程内 materialization，kernel 用 exact target subjects 求 permission，并把 args、policy、approval、preview 与 execution 绑定同一 digest；execute 只能按值消费 artifact，不能再次查询 LSP。多文件写入复用 RFC-0002 coordinator，进程内失败采用可审计的补偿回滚，crash 仍按逐文件 reconciliation 处理而不宣称原子事务。
 - `sigil-mcp`：隔离 stdio 与 Streamable HTTP MCP client、OAuth 2.1 凭据生命周期和工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry、run options、Context source provider contract / hard-cap enforcement 和 request resolver，避免 TUI / CLI 各自硬编码装配链。tool surface 保留与 registry 同一个 `CodeIntelligenceService` inner；每次请求先在 35ms 内只读 query-relevant warm LSP cache，有命中时使用 explicit path + LSP rows 并跳过 RepoMap，miss/disabled/timeout 才使用 request-local multilingual RepoMap。它把这些结果转换为带 score breakdown 的 bounded Context V1 items，并把 trusted plugin hook output / caller-supplied MCP resource text 通过同一个 source-provider contract 转成 `ExtensionProvided` / `McpResource` rows；缺失或不可信输入只产生 excluded provenance，不阻塞普通 request。normal、plan、headless、queue 和 compaction preparation 共享该 resolver；已经冻结的 provider request 不在 dispatch 时重算。kernel 只看到 provider-neutral `ContextItem` 和 packer，不知道 runtime 存在。
-- `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。历史session reopen只接受catalog提供的relative ref与expected durable id，并由runtime重新验证lifecycle/JSONL truth；SQLite projection不能授权resume。
+- `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。历史session reopen只接受catalog提供的relative ref与expected durable id，并由runtime重新验证lifecycle/JSONL truth；SQLite projection不能授权resume。artifact page route 必须 authenticated、typed、session/source-bound、hash-verified 且 endpoint cap 固定，response/error 均不包含物理路径。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义。`sigil-desktop`已按workspace监管单独的`serve`进程，通过单行版本化JSON/鉴权`server-info`完成bootstrap，并用stdin owner pipe与process-tree fallback拥有child lifecycle；诊断事实由 `sigil-runtime` 提供，避免 CLI、TUI与desktop各写一套判断。
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs；`scripts/publish-npm-packages.sh` 通过 npm Trusted Publisher 按 platform-first、root-last 顺序发布并支持 partial retry；`.github/workflows/release.yml` 在 tag 发布时构建多平台 archive、生成 provenance attestation、渲染 Homebrew formula asset、准备并发布 npm packages、创建 GitHub release，再由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key 同步 tap。crates.io package name 决策和自更新仍是 release-management 工作。
 - `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 runtime、composer、approval、session browser 以及 timeline presentation、review/checkpoint、agent panel、egress disclosure 等私有领域 bundle，根 `AppState` 只为兼容保留公开 timeline/event/scroll 字段和顶层编排状态；`runner/worker_loop.rs` 只保留 worker façade，私有 `WorkerLoopState` 统一持有 session/run/compaction/refresh/agent 状态，scheduler 通过统一 `WorkerEvent` inbox 阻塞等待 command、typed completion、durable projection 与 supervisor wake，只在存在 MCP/terminal 等真实 deadline 时使用 nearest-deadline timeout；七个 advancement function 与穷尽 public-command 到 domain-typed-command classifier/handler 分别承担确定性 safe-point 推进和路由。session scheduler 的 queue、TaskGuidance、continuation、terminal 与 usage/readiness 热查询读取 kernel active-session 增量 projection，并以 durable frontier/CAS 保持最终写入权威；switch/new-session/local-session fork/checkpoint fork 复用一个 session transition，替换 projection observer generation，并在 foreground 或 detached background run 存在时 fail-closed，同时按目标 session 重建 agent supervisor 与模型可见 agent-tool surface。TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
@@ -462,7 +462,23 @@ plan、bounded compaction summary、pending continuation、active terminal 与 u
 transcript、tool output 或 checkpoint body。Idle automatic compaction 先用纯内存 usage/capability/
 scheduler state做 cheap preflight；只有 eligible 才从当前 `Session` 捕获 entry-count 与 durable
 frontier一致的 immutable snapshot，background 复用同一 coordinator，不再从 path reload一份竞争
-session；最终 activation仍由 writer-side source cursor/CAS拒绝 stale candidate。
+session；projection 不复制 transcript、artifact body 或 checkpoint body，只保留 bounded
+scheduler/tool-pressure facts；最终 activation仍由 writer-side source cursor/CAS拒绝 stale
+candidate。
+
+V2 tool result 的 policy-safe bytes 写入 session JSONL sibling resource tree：
+`<session-stem>/artifacts/{staging,refs,blobs,trash}`。对外 ref 是随机、session-scoped
+`ta1_*` capability，不可反推物理路径；descriptor 记录 observed/policy-projected/persisted bytes、
+SHA-256、completeness、sensitivity、retention 和 retrieval policy。artifact 先 staging + fsync +
+immutable publish，descriptor 后 append；反向顺序禁止。fork 复制 bytes 并重新签发 ref，export 显式
+声明 artifact completeness，delete 与 manifest-only GC 使用 tombstone + grace，active read lease 和
+pin/verification/review hold 均是 mark root。
+
+active projection 增量维护 body-free tool-output pressure item：opaque ref/hash、bounded facts/model
+excerpt、pair 状态、retention class、token upper bound、active epoch 和 GC reachability。append 后只发送
+`ToolOutputPressure` changed-family wake；TUI worker coalesce 后做纯内存 preflight，fit-required aging
+先于 semantic compaction，artifact GC 作为最低优先级单飞 blocking task。steady state 不固定轮询，
+不完整重放 JSONL，也不持有 data-file lock 等待 I/O。
 
 持久化边界执行统一的 `SafePersist` 投影：user message、running-input queue、plan/task、agent mailbox/result、tool/provider stream 与 external URL 在首次写 session/control/history 前先做 secret/query/signed-carrier redaction、大小/行数限制和安全摘要。Exact prompt 只在当前进程内交给 provider、`Up/Down` history 或 queue dispatch；durable entry 不保存可反推 verifier，恢复后对 exact-only continuation fail closed 为 stale/interrupted。Query-bearing 或 signed URL 只由 session-local `WebUrlCapabilityStore` 持有，并同时绑定 session id、TTL、LRU 与 restart policy，durable projection 只保存不可反推的安全标识。
 
@@ -606,9 +622,23 @@ pub struct ToolCall {
 pub struct ToolResult {
     pub call_id: String,
     pub tool_name: String,
+    /// 仅用于进程内 bounded/legacy adapter；不是 durable raw body contract。
     pub content: String,
     pub status: ToolResultStatus,
     pub metadata: ToolResultMeta,
+}
+
+pub struct ToolResultRecordedV2 {
+    pub schema_version: u16,
+    pub message_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub artifact: ToolArtifactBindingV1,
+    pub facts: ToolResultFactsV1,
+    pub initial_model_view: ToolModelViewV1,
+    pub initial_model_view_sha256: String,
+    pub capture_telemetry: ToolResultCaptureTelemetryV1,
+    pub recorded_at_ms: u64,
 }
 
 pub enum ToolResultStatus {
@@ -621,8 +651,10 @@ pub enum ToolResultStatus {
 
 - `args_json` 在重组完成前应保留原始字符串形态，避免过早解析把截断问题藏起来
 - 错误分类只放在 `ToolResultStatus::Error(ToolError)` 中，不通过 metadata 或文本约定判断
-- provider-visible tool message 使用 `ToolResult::to_model_content()` 生成稳定 compact JSON envelope，顶层包含 `status`、`content`、`error`、`meta`
-- `ToolResultMeta` 可承载 `exit_code`、`changed_files`、`truncated`、`bytes` 等非错误分类信息；当前还会在 `meta.details.call` 写入安全的调用上下文摘要，例如 `command`、`path`、`pattern`、`subjects`，供 TUI tool card 在标题行显示“这次到底调用了什么”
+- 可能产生大输出的工具通过 `ToolContext::create_policy_safe_tool_output_sink()` 边执行边写 session-scoped immutable artifact；publish 成功后才能 append V2 descriptor
+- provider-visible tool message 来自 `ToolModelViewV1` 的 bounded canonical JSON；JSONL 保存 descriptor、facts 和 initial model view，不保存 artifact body；独立 `ToolDisplayViewV1` 只作为 bounded 产品面 DTO 返回
+- `ToolResultMeta` 可承载 `exit_code`、`changed_files`、`truncated`、`bytes` 等非错误分类信息；V2 capture 将其投影为有大小上限的 `ToolResultFactsV1`
+- model/TUI/Desktop/HTTP 只接收 `ta1_*` opaque ref。正文按 byte/line/literal selector 通过 `read_tool_artifact` 或 authenticated typed page endpoint 读取，并受 per-call/per-run budget、session scope 与 full SHA-256 校验约束
 
 #### SessionLogEntry
 
@@ -630,14 +662,14 @@ pub enum ToolResultStatus {
 pub enum SessionLogEntry {
     User(ModelMessage),
     Assistant(ModelMessage),
-    ToolResult(ModelMessage),
+    ToolResultV2(ToolResultRecordedV2),
     Control(ControlEntry),
 }
 ```
 
 这里建议把“发给模型的消息”和“只给系统自己的控制记录”区分开：
 
-- `User / Assistant / ToolResult` 是真正可能进入 provider request 的历史
+- `User / Assistant / ToolResultV2.initial_model_view` 是真正可能进入 provider request 的历史
 - `ControlEntry` 只给 agent runtime、resume、审计和 UI 使用，不进入上游 prompt
 
 建议把 `ControlEntry` 做成 append-only 的系统控制记录，而不是临时运行时侧带：
@@ -1162,9 +1194,17 @@ policy 不兼容时追加失效审计并直接从 portable checkpoint 组装请�
 
 除此之外，还应加一条和成本直接相关的策略：
 
-- 大型 tool result 在完成其所在回合的消费后，应允许单独切换 context epoch，只保留带 hash、bounded
-  head/tail 和 durable transcript ref 的可恢复 preview；如果以后还要精读，让模型按引用重新读取，
-  或重新执行只读查询
+- 大型 V2 tool result 在 current/recent/high-signal 保留窗口之外，先由 deterministic batch aging
+  切换下一个 context epoch，只保留 status/facts、hash、bounded preview 和 opaque artifact ref；
+  如果以后还要精读，让模型使用 `read_tool_artifact` 的 bounded typed selector
+- cost-only aging 只在 cache-reset economics admission 通过后激活；fit-required aging 在
+  semantic compaction 前尝试。manual “只整理工具输出”同样使用 active incremental pressure
+  projection 与 exact-frontier CAS，不读取整份 JSONL，也不生成 fake transcript artifact ref
+- repeated artifact page 在同一 run 内返回 `unchanged` receipt，不把相同正文再次永久写入 JSONL 或
+  无限复制到 model context
+- 新 session 只追加 `ToolResultRecordedV2`；pre-V2 `tool_result_recorded` 仅作为 parser sentinel
+  返回 `LegacyUnavailable` compatibility diagnostic，不能进入 provider/TUI projection，也不能
+  生成 `DurableTranscriptEvent` fake artifact ref
 
 ### 10.4 Auto Memory
 

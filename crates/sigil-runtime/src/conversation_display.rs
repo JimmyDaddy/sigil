@@ -15,8 +15,8 @@ use sigil_kernel::{
     ConversationRunLifecycleRecordV1, ConversationRunTerminalStatusV1, DurableEventType,
     JsonlSessionStore, MessageRole, ModelMessage, PublicRunEventKind, PublicTaskEventProjector,
     PublicTaskPhase, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, TypedDomainEvent, conversation_run_lifecycle_record_from_stream,
-    safe_persistence_text,
+    ToolApprovalUserDecision, ToolArtifactRefV1, ToolArtifactStore, TypedDomainEvent,
+    conversation_run_lifecycle_record_from_stream, safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -220,6 +220,16 @@ pub enum ConversationDisplayContentV1 {
         output: Option<String>,
         truncated: bool,
         original_content_bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_availability: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persisted_bytes: Option<u64>,
+        #[serde(default)]
+        has_more: bool,
     },
     Approval {
         call_id: String,
@@ -669,7 +679,38 @@ pub fn conversation_display_page(
             session_path.display()
         )
     })?;
-    conversation_display_page_from_records(&records, expected_scope, cursor, limit)
+    let mut page = conversation_display_page_from_records(&records, expected_scope, cursor, limit)?;
+    reconcile_physical_artifact_availability(
+        &mut page,
+        &ToolArtifactStore::for_session_path(session_path),
+    );
+    Ok(page)
+}
+
+fn reconcile_physical_artifact_availability(
+    page: &mut ConversationDisplayPageV1,
+    store: &ToolArtifactStore,
+) {
+    for item in &mut page.items {
+        let ConversationDisplayContentV1::Tool {
+            artifact_ref: Some(artifact_id),
+            artifact_availability,
+            ..
+        } = &mut item.content
+        else {
+            continue;
+        };
+        let reference = ToolArtifactRefV1 {
+            artifact_id: artifact_id.clone(),
+        };
+        *artifact_availability = Some(
+            match store.resolve(&reference) {
+                Ok(descriptor) => tool_artifact_availability_label(store.availability(&descriptor)),
+                Err(_) => "missing",
+            }
+            .to_owned(),
+        );
+    }
 }
 
 /// Projects one page from already-loaded durable stream records.
@@ -1204,6 +1245,11 @@ fn project_session_entry(
                         output: None,
                         truncated: false,
                         original_content_bytes: 0,
+                        artifact_ref: None,
+                        artifact_availability: None,
+                        observed_bytes: None,
+                        persisted_bytes: None,
+                        has_more: false,
                     },
                 );
                 if let Some(run_id) = run_id.as_deref() {
@@ -1255,6 +1301,11 @@ fn project_session_entry(
                     output: output.as_ref().map(|output| output.text.clone()),
                     truncated: output.as_ref().is_some_and(|output| output.truncated),
                     original_content_bytes: output.map_or(0, |output| output.original_bytes),
+                    artifact_ref: None,
+                    artifact_availability: Some("legacy_unavailable".to_owned()),
+                    observed_bytes: None,
+                    persisted_bytes: None,
+                    has_more: false,
                 },
             );
             let mut reconciles = tool
@@ -1277,6 +1328,69 @@ fn project_session_entry(
             }
             Ok(vec![item])
         }
+        SessionLogEntry::ToolResultV2(result) => {
+            let tool = tools.get(&result.call_id).cloned();
+            let display = result.display_view();
+            let (artifact_ref, artifact_availability) = match &result.artifact {
+                sigil_kernel::ToolArtifactBindingV1::Published { descriptor } => (
+                    Some(descriptor.artifact_ref.artifact_id.clone()),
+                    Some(
+                        if descriptor.retrieval_available() {
+                            "available"
+                        } else {
+                            "policy_revoked"
+                        }
+                        .to_owned(),
+                    ),
+                ),
+                sigil_kernel::ToolArtifactBindingV1::Unavailable { unavailable } => (
+                    None,
+                    Some(tool_artifact_availability_label(unavailable.availability).to_owned()),
+                ),
+            };
+            let run_id = active_run_id(active_run);
+            let mut item = new_item(
+                expected_scope,
+                record,
+                0,
+                ConversationDisplayItemKindV1::Tool,
+                ConversationDisplaySourceV1::DurableTranscript,
+                run_id.clone(),
+                ConversationDisplayStatusV1::Completed,
+                ConversationDisplayContentV1::Tool {
+                    call_id: Some(bound_identity(&result.call_id)),
+                    tool_name: Some(tool.as_ref().map_or_else(
+                        || bound_identity(&result.tool_name),
+                        |tool| tool.name.clone(),
+                    )),
+                    output: Some(display.preview),
+                    truncated: display.has_more,
+                    original_content_bytes: display.observed_bytes as usize,
+                    artifact_ref,
+                    artifact_availability,
+                    observed_bytes: Some(display.observed_bytes),
+                    persisted_bytes: Some(display.persisted_bytes),
+                    has_more: display.has_more,
+                },
+            );
+            let mut reconciles = tool
+                .as_ref()
+                .map(|tool| vec![tool.requested_display_id.clone()])
+                .unwrap_or_default();
+            if let Some(run_id) = run_id.as_deref() {
+                reconciles.push(conversation_live_provisional_id(
+                    expected_scope,
+                    run_id,
+                    &ConversationLiveProvisionalSlotV1::Tool {
+                        call_id: result.call_id,
+                    },
+                )?);
+            }
+            if !reconciles.is_empty() {
+                item.reconciles = Some(reconciles);
+            }
+            Ok(vec![item])
+        }
         SessionLogEntry::Control(control) => project_control(
             record,
             expected_scope,
@@ -1285,6 +1399,19 @@ fn project_session_entry(
             approval_items,
             run_skills,
         ),
+    }
+}
+
+fn tool_artifact_availability_label(
+    availability: sigil_kernel::ToolArtifactAvailability,
+) -> &'static str {
+    match availability {
+        sigil_kernel::ToolArtifactAvailability::Available => "available",
+        sigil_kernel::ToolArtifactAvailability::Expired => "expired",
+        sigil_kernel::ToolArtifactAvailability::Missing => "missing",
+        sigil_kernel::ToolArtifactAvailability::HashMismatch => "hash_mismatch",
+        sigil_kernel::ToolArtifactAvailability::PolicyRevoked => "policy_revoked",
+        sigil_kernel::ToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
     }
 }
 

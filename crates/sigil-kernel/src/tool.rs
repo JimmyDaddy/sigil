@@ -17,7 +17,11 @@ use crate::{
     mutation::{ExecutionMutationProfile, MutationEventRecorder, WorkspaceMutationScan},
     permission::{ApprovalMode, NetworkPolicy, ToolOperation, infer_tool_operation},
     provider::ModelMessage,
-    session::ControlEntry,
+    session::{
+        ControlEntry, ToolArtifactAvailability, ToolArtifactCaptureSink, ToolArtifactDescriptorV1,
+        ToolArtifactEncoding, ToolArtifactReadBudgetV1, ToolArtifactRefV1, ToolArtifactSensitivity,
+        ToolArtifactStore, ToolOutputArchivedArtifactBindingV1,
+    },
     verification::{DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ToolEffect, VerificationScope},
 };
 
@@ -383,6 +387,16 @@ impl ToolSubjectScope {
 }
 
 /// Execution context shared with tools at runtime.
+#[derive(Debug, Clone)]
+struct ToolArtifactSourceAuthorization {
+    source_event_id: String,
+    artifact_sha256: String,
+    persisted_bytes: u64,
+    call_id: String,
+    tool_name: String,
+    availability: ToolArtifactAvailability,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace_root: PathBuf,
@@ -391,6 +405,11 @@ pub struct ToolContext {
     egress_audit_recorder: Option<crate::EgressAuditRecorder>,
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     session_scope_id: Option<String>,
+    tool_artifact_store: Option<ToolArtifactStore>,
+    tool_artifact_read_budget: Option<ToolArtifactReadBudgetV1>,
+    tool_artifact_source_authorizations:
+        Arc<BTreeMap<ToolArtifactRefV1, ToolArtifactSourceAuthorization>>,
+    active_context_epoch_id: Option<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
     network_policy: NetworkPolicy,
     explicit_network_approval: bool,
@@ -416,6 +435,16 @@ impl std::fmt::Debug for ToolContext {
                 &self.user_url_capability_registrar.is_some(),
             )
             .field("session_scope_id", &self.session_scope_id)
+            .field("tool_artifact_store", &self.tool_artifact_store.is_some())
+            .field(
+                "tool_artifact_read_budget",
+                &self.tool_artifact_read_budget.is_some(),
+            )
+            .field(
+                "tool_artifact_source_authorizations",
+                &self.tool_artifact_source_authorizations.len(),
+            )
+            .field("active_context_epoch_id", &self.active_context_epoch_id)
             .field("web_task_tree_budget", &self.web_task_tree_budget.is_some())
             .field("network_policy", &self.network_policy)
             .field("explicit_network_approval", &self.explicit_network_approval)
@@ -447,6 +476,10 @@ impl ToolContext {
             egress_audit_recorder: None,
             user_url_capability_registrar: None,
             session_scope_id: None,
+            tool_artifact_store: None,
+            tool_artifact_read_budget: None,
+            tool_artifact_source_authorizations: Arc::new(BTreeMap::new()),
+            active_context_epoch_id: None,
             web_task_tree_budget: None,
             network_policy: NetworkPolicy::Allow,
             explicit_network_approval: false,
@@ -529,6 +562,134 @@ impl ToolContext {
     #[must_use]
     pub fn session_scope_id(&self) -> Option<&str> {
         self.session_scope_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_tool_artifact_reader(
+        mut self,
+        store: ToolArtifactStore,
+        budget: ToolArtifactReadBudgetV1,
+        active_context_epoch_id: impl Into<String>,
+    ) -> Self {
+        self.tool_artifact_store = Some(store);
+        self.tool_artifact_read_budget = Some(budget);
+        self.active_context_epoch_id = Some(active_context_epoch_id.into());
+        self
+    }
+
+    /// Installs one host-proven descriptor binding for typed retrieval.
+    ///
+    /// This is intended for constrained adapters and tests. Production agent runs install the
+    /// complete active durable projection through `with_tool_artifact_source_bindings`.
+    #[must_use]
+    pub fn with_tool_artifact_source_binding(
+        mut self,
+        descriptor: &ToolArtifactDescriptorV1,
+        source_event_id: impl Into<String>,
+    ) -> Self {
+        let source_event_id = source_event_id.into();
+        if descriptor.validate().is_err()
+            || source_event_id.trim().is_empty()
+            || source_event_id.len() > 256
+        {
+            return self;
+        }
+        let mut bindings = self.tool_artifact_source_authorizations.as_ref().clone();
+        bindings.insert(
+            descriptor.artifact_ref.clone(),
+            ToolArtifactSourceAuthorization {
+                source_event_id,
+                artifact_sha256: descriptor.content_sha256.clone(),
+                persisted_bytes: descriptor.persisted_bytes,
+                call_id: descriptor.tool_call_id.clone(),
+                tool_name: descriptor.tool_name.clone(),
+                availability: ToolArtifactAvailability::Available,
+            },
+        );
+        self.tool_artifact_source_authorizations = Arc::new(bindings);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_tool_artifact_source_bindings(
+        mut self,
+        bindings: impl IntoIterator<Item = ToolOutputArchivedArtifactBindingV1>,
+    ) -> Self {
+        self.tool_artifact_source_authorizations = Arc::new(
+            bindings
+                .into_iter()
+                .map(|binding| {
+                    (
+                        binding.artifact_ref,
+                        ToolArtifactSourceAuthorization {
+                            source_event_id: binding.source_event_id,
+                            artifact_sha256: binding.artifact_sha256,
+                            persisted_bytes: binding.persisted_bytes,
+                            call_id: binding.call_id,
+                            tool_name: binding.tool_name,
+                            availability: binding.artifact_availability,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        self
+    }
+
+    #[must_use]
+    pub fn authorized_tool_artifact_source_event(
+        &self,
+        descriptor: &ToolArtifactDescriptorV1,
+    ) -> Option<&str> {
+        self.tool_artifact_source_authorizations
+            .get(&descriptor.artifact_ref)
+            .filter(|binding| {
+                binding.artifact_sha256 == descriptor.content_sha256
+                    && binding.persisted_bytes == descriptor.persisted_bytes
+                    && binding.call_id == descriptor.tool_call_id
+                    && binding.tool_name == descriptor.tool_name
+                    && binding.availability == ToolArtifactAvailability::Available
+            })
+            .map(|binding| binding.source_event_id.as_str())
+    }
+
+    #[must_use]
+    pub fn tool_artifact_store(&self) -> Option<&ToolArtifactStore> {
+        self.tool_artifact_store.as_ref()
+    }
+
+    /// Starts a session-owned capture for bytes that already passed persistence policy.
+    ///
+    /// Tools must not pass raw credentials, unprojected URLs, or other sensitive source bytes to
+    /// this boundary. The returned sink is absent when execution is not attached to a session.
+    #[must_use]
+    pub fn create_policy_safe_tool_output_sink(
+        &self,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        media_type: impl Into<String>,
+        encoding: ToolArtifactEncoding,
+        sensitivity: ToolArtifactSensitivity,
+    ) -> Option<ToolArtifactCaptureSink> {
+        self.tool_artifact_store.as_ref().map(|store| {
+            store.begin_policy_safe_capture(
+                tool_call_id,
+                tool_name,
+                media_type,
+                encoding,
+                sensitivity,
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn tool_artifact_read_budget(&self) -> Option<&ToolArtifactReadBudgetV1> {
+        self.tool_artifact_read_budget.as_ref()
+    }
+
+    #[must_use]
+    pub fn active_context_epoch_id(&self) -> Option<&str> {
+        self.active_context_epoch_id.as_deref()
     }
 
     /// Installs the root-owned Web budget inherited from the active run.
@@ -768,6 +929,14 @@ pub struct ToolResult {
     pub url_capability_registrations: Box<Vec<crate::UserUrlCapabilityRegistration>>,
     #[serde(skip)]
     pub external_sources: Box<Vec<crate::ExternalSourceRecord>>,
+    #[serde(skip)]
+    pre_captured_artifact: Option<Box<PreCapturedToolArtifact>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PreCapturedToolArtifact {
+    Published(Box<ToolArtifactDescriptorV1>),
+    Unavailable { observed_bytes: u64 },
 }
 
 impl ToolResult {
@@ -787,6 +956,7 @@ impl ToolResult {
             control_entries: Vec::new(),
             url_capability_registrations: Box::default(),
             external_sources: Box::default(),
+            pre_captured_artifact: None,
         }
     }
 
@@ -812,6 +982,7 @@ impl ToolResult {
             control_entries: Vec::new(),
             url_capability_registrations: Box::default(),
             external_sources: Box::default(),
+            pre_captured_artifact: None,
         }
     }
 
@@ -849,6 +1020,32 @@ impl ToolResult {
     pub fn with_external_sources(mut self, sources: Vec<crate::ExternalSourceRecord>) -> Self {
         self.external_sources = Box::new(sources);
         self
+    }
+
+    /// Attaches a session-scoped artifact already published by the tool's streaming output path.
+    ///
+    /// The agent boundary revalidates session scope, content hash, and result identity before
+    /// using this descriptor. A failed validation is fail-closed and never falls back to
+    /// recapturing the tool's inline preview.
+    #[must_use]
+    pub fn with_captured_artifact(mut self, artifact: ToolArtifactDescriptorV1) -> Self {
+        self.pre_captured_artifact = Some(Box::new(PreCapturedToolArtifact::Published(Box::new(
+            artifact,
+        ))));
+        self
+    }
+
+    /// Marks a streaming capture attempt as unavailable without recapturing its inline preview.
+    #[must_use]
+    pub fn with_unavailable_artifact_capture(mut self, observed_bytes: u64) -> Self {
+        self.pre_captured_artifact = Some(Box::new(PreCapturedToolArtifact::Unavailable {
+            observed_bytes,
+        }));
+        self
+    }
+
+    pub(crate) fn pre_captured_artifact(&self) -> Option<&PreCapturedToolArtifact> {
+        self.pre_captured_artifact.as_deref()
     }
 
     pub fn is_error(&self) -> bool {
@@ -1013,7 +1210,7 @@ fn next_char_boundary(value: &str, min_index: usize) -> usize {
 }
 
 /// Structured success/error status for one tool result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultStatus {
     Ok,
@@ -1021,7 +1218,7 @@ pub enum ToolResultStatus {
 }
 
 /// Stable structured tool error returned to provider-visible history and UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolError {
     pub kind: ToolErrorKind,

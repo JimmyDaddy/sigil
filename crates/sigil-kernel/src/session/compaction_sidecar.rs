@@ -452,6 +452,7 @@ impl ContinuationSourceCatalog {
                 SessionLogEntry::User(message)
                 | SessionLogEntry::Assistant(message)
                 | SessionLogEntry::ToolResult(message) => message,
+                SessionLogEntry::ToolResultV2(result) => result.model_message()?,
                 SessionLogEntry::Control(_) => {
                     bail!("folded checkpoint source cannot be a control entry");
                 }

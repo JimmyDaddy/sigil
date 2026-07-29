@@ -29,15 +29,16 @@ use crate::{
     TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection,
     TaskStepEntry, TaskStepId, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
     TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
-    ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit, ToolSubjectKind,
-    ToolSubjectScope, TypedDomainEvent, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
-    VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
-    VerificationReceiptLinkRecorded, VerificationRecordedEntry, VerificationScope,
-    VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
-    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, plan_draft_created_entry, provider::ModelMessage, stable_event_hash,
+    ToolArtifactSensitivity, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
+    ToolResultRecordedV2, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent,
+    UsageStats, VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationReceiptLinkRecorded,
+    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, plan_draft_created_entry,
+    provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -45,6 +46,15 @@ use super::{
     SessionIoBusyError, SessionIoBusyKind, SessionLogEntry, SessionStreamCompatibilityError,
     session_stats_from_entries,
 };
+
+fn test_tool_result_v2(call_id: &str, tool_name: &str, content: &str) -> Result<SessionLogEntry> {
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &ToolResult::ok(call_id, tool_name, content, ToolResultMeta::default()),
+        None,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    Ok(SessionLogEntry::ToolResultV2(recorded))
+}
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     format!(
@@ -713,12 +723,13 @@ fn session_entry_projection_applies_and_ignores_idempotent_cursor() -> Result<()
 }
 
 #[test]
-fn append_session_entry_event_maps_tool_result_and_context_classes() -> Result<()> {
+fn append_session_entry_event_rejects_legacy_and_maps_v2_tool_result() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
 
-    let tool_entry = SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "ok"));
+    let legacy_tool_entry = SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "ok"));
+    let tool_entry = test_tool_result_v2("call-1", "read_file", "ok")?;
     let context_entry =
         SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
             materialization: test_prefix_materialization("prefix".len()),
@@ -729,12 +740,20 @@ fn append_session_entry_event_maps_tool_result_and_context_classes() -> Result<(
             tool_schema_fingerprint: "tools".to_owned(),
             skill_index_fingerprint: "skills".to_owned(),
         }));
+    let legacy_error = store
+        .append_session_entry_event(&legacy_tool_entry)
+        .expect_err("legacy inline result must fail closed");
+    assert!(
+        legacy_error
+            .to_string()
+            .contains("legacy inline tool results")
+    );
     let tool_event = store.append_session_entry_event(&tool_entry)?;
     let context_event = store.append_session_entry_event(&context_entry)?;
 
     assert_eq!(
         tool_event.event_type,
-        DurableEventType::ToolResultRecorded.as_str()
+        DurableEventType::ToolResultRecordedV2.as_str()
     );
     assert_eq!(tool_event.event_class, EventClass::Critical);
     assert_eq!(
@@ -759,7 +778,7 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
         Some("answer".to_owned()),
         Vec::new(),
     ));
-    let tool = SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "ok"));
+    let tool = test_tool_result_v2("call-1", "read_file", "ok")?;
 
     assert!(super::is_session_identity_entry(&identity));
     assert!(!super::is_session_identity_entry(&non_identity_control));
@@ -782,7 +801,7 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
     );
     assert_eq!(
         super::session_entry_event_type(&tool),
-        DurableEventType::ToolResultRecorded
+        DurableEventType::ToolResultRecordedV2
     );
     assert_eq!(
         super::session_entry_event_type(&test_tool_approval(ToolApprovalAuditAction::Resolved)),
@@ -1062,8 +1081,8 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
             DurableEventType::AssistantMessageRecorded,
         ),
         (
-            SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "ok")),
-            DurableEventType::ToolResultRecorded,
+            test_tool_result_v2("call-1", "read_file", "ok")?,
+            DurableEventType::ToolResultRecordedV2,
         ),
         (
             test_tool_approval(ToolApprovalAuditAction::Requested),
@@ -1670,6 +1689,41 @@ fn append_event_reconciles_pending_tail_recovery_intent_before_append() -> Resul
         Some(3)
     );
     assert!(!super::tail_recovery_intent_path(&path).exists());
+    Ok(())
+}
+
+#[test]
+fn legacy_inline_tool_result_event_is_legacy_unavailable_and_left_untouched() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy_event = StoredEvent::new(
+        DurableEventType::ToolResultRecorded,
+        EventClass::Critical,
+        "event-legacy-tool-result".to_owned(),
+        "session-test".to_owned(),
+        1,
+        serde_json::json!({
+            "session_log_entry": SessionLogEntry::ToolResult(ModelMessage::tool(
+                "call-1",
+                "legacy inline body",
+            )),
+        }),
+    )?;
+    let content = legacy_event.to_json_line()?;
+    fs::write(&path, &content)?;
+
+    let error = JsonlSessionStore::read_event_records(&path)
+        .expect_err("legacy inline tool result must fail closed");
+    let compatibility = error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .expect("legacy tool result must return a structured compatibility error");
+    assert_eq!(compatibility.path, path);
+    assert_eq!(compatibility.physical_line, 1);
+    assert_eq!(
+        compatibility.format_name,
+        "legacy inline tool_result_recorded (LegacyUnavailable)"
+    );
+    assert_eq!(fs::read_to_string(&path)?, content);
     Ok(())
 }
 

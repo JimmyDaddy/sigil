@@ -1,7 +1,42 @@
 use super::*;
+use crate::{
+    app::modal_flow::{ModalOutcome, TextInputTarget},
+    runner::ToolArtifactDisplayReadFailure,
+};
 
 fn full_plain_timeline(app: &AppState) -> String {
     app.timeline_plain_lines().join("\n")
+}
+
+fn tool_artifact_ref() -> sigil_kernel::ToolArtifactRefV1 {
+    sigil_kernel::ToolArtifactRefV1 {
+        artifact_id: format!("ta1_{}", "a".repeat(32)),
+    }
+}
+
+fn tool_artifact_card(availability: &str, has_more: bool) -> String {
+    serde_json::json!({
+        "call_id": "call-artifact",
+        "tool_name": "bash",
+        "status": "ok",
+        "summary": "saved tool output",
+        "preview_kind": "text",
+        "preview_lines": ["bounded preview"],
+        "hidden_lines": 1,
+        "artifact": {
+            "artifact_ref": tool_artifact_ref(),
+            "availability": availability,
+            "observed_bytes": 131_072,
+            "persisted_bytes": 65_536,
+            "has_more": has_more,
+            "next_selector": has_more.then(|| serde_json::json!({
+                "kind": "line_page",
+                "start_line": 0,
+                "line_count": 200
+            }))
+        }
+    })
+    .to_string()
 }
 
 #[test]
@@ -108,6 +143,191 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.timeline_state.selected_tool_activity_key, None);
     assert_eq!(app.last_notice(), Some("activity focus cleared"));
+    Ok(())
+}
+
+#[test]
+fn live_tool_artifact_card_shows_truncation_and_bounded_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut result = ToolResult::ok(
+        "call-artifact",
+        "bash",
+        "bounded preview",
+        ToolResultMeta::default(),
+    );
+    result.metadata.details = serde_json::json!({
+        "artifact_ref": tool_artifact_ref(),
+        "observed_bytes": 131_072,
+        "persisted_bytes": 65_536,
+        "has_more": true,
+        "display_capabilities": ["read_next_page", "search_literal"]
+    });
+
+    app.handle(RunEvent::ToolResult(result))?;
+
+    let rendered = full_plain_timeline(&app);
+    assert!(rendered.contains("Saved output truncated"));
+    assert!(rendered.contains("64.0 KiB of 128.0 KiB"));
+    assert!(rendered.contains("Alt-N next"));
+    assert!(rendered.contains("Alt-F search"));
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_next_page_and_literal_search_emit_typed_worker_commands() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.drain_pending_worker_commands();
+
+    assert!(app.request_selected_tool_artifact_next_page());
+    let commands = app.drain_pending_worker_commands();
+    assert!(matches!(
+        commands.as_slice(),
+        [WorkerCommand::ReadToolArtifactPage {
+            artifact_ref,
+            selector: sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line: 0,
+                line_count: 200,
+            },
+            ..
+        }] if artifact_ref == &tool_artifact_ref()
+    ));
+
+    assert!(app.open_selected_tool_artifact_search());
+    assert_eq!(app.modal_title(), Some("Search Full Tool Output"));
+    app.apply_modal_outcome(ModalOutcome::TextSubmitted {
+        target: TextInputTarget::ToolArtifactSearch,
+        value: "literal needle".to_owned(),
+    });
+    let commands = app.drain_pending_worker_commands();
+    assert!(matches!(
+        commands.as_slice(),
+        [WorkerCommand::ReadToolArtifactPage {
+            artifact_ref,
+            selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral {
+                query,
+                start_offset: 0,
+                max_matches: 20,
+                context_lines: 2,
+            },
+            ..
+        }] if artifact_ref == &tool_artifact_ref() && query == "literal needle"
+    ));
+    Ok(())
+}
+
+#[test]
+fn tool_artifact_page_response_advances_selector_and_replaces_preview() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+
+    app.handle_worker_message(WorkerMessage::ToolArtifactPageRead {
+        request_id: 7,
+        page: sigil_kernel::ToolArtifactPageV1 {
+            artifact_ref: tool_artifact_ref(),
+            selector: sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line: 0,
+                line_count: 200,
+            },
+            body: "page line one\npage line two".to_owned(),
+            body_encoding: sigil_kernel::ToolArtifactPageEncoding::Utf8,
+            returned_bytes: 27,
+            page_sha256: format!("sha256:{}", "b".repeat(64)),
+            artifact_sha256: format!("sha256:{}", "c".repeat(64)),
+            eof: false,
+            match_count: 0,
+            next_selector: Some(sigil_kernel::ToolArtifactSelectorV1::LinePage {
+                start_line: 200,
+                line_count: 200,
+            }),
+        },
+        entries: Vec::new(),
+    })?;
+
+    let payload: serde_json::Value = serde_json::from_str(
+        &app.timeline
+            .iter()
+            .find(|entry| entry.role == TimelineRole::Tool)
+            .expect("tool card")
+            .text,
+    )?;
+    assert_eq!(payload["preview_lines"][0], "page line one");
+    assert_eq!(payload["preview_lines"][1], "page line two");
+    assert_eq!(payload["artifact"]["next_selector"]["start_line"], 200);
+    assert_eq!(payload["artifact"]["has_more"], true);
+    assert!(full_plain_timeline(&app).contains("Alt-N next"));
+    Ok(())
+}
+
+#[test]
+fn unavailable_tool_artifact_keeps_auditable_summary_and_blocks_reads() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Tool, tool_artifact_card("available", true));
+    let _ = app.drain_pending_worker_commands();
+
+    app.handle_worker_message(WorkerMessage::ToolArtifactPageReadFailed {
+        request_id: 9,
+        artifact_ref: tool_artifact_ref(),
+        failure: ToolArtifactDisplayReadFailure::Unavailable(
+            sigil_kernel::ToolArtifactAvailability::Missing,
+        ),
+        entries: Vec::new(),
+    })?;
+
+    let rendered = full_plain_timeline(&app);
+    assert!(rendered.contains("Full output unavailable (missing)"));
+    assert!(rendered.contains("saved summary remains auditable"));
+    assert!(!app.request_selected_tool_artifact_next_page());
+    assert!(app.drain_pending_worker_commands().is_empty());
+    assert_eq!(
+        app.last_notice(),
+        Some("full tool output is unavailable (missing); the saved summary remains auditable")
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session-artifact.jsonl");
+    let durable_store = sigil_kernel::JsonlSessionStore::new(&session_path)?;
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&durable_store);
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+        &ToolResult::ok(
+            "call-restored-artifact",
+            "bash",
+            "durable full output",
+            ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let mut session =
+        sigil_kernel::Session::new("deepseek", "deepseek-v4-flash").with_store(durable_store);
+    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    let entries = session.entries().to_vec();
+
+    let mut available_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    available_app.restore_session_view(
+        session_path.clone(),
+        "deepseek".to_owned(),
+        "deepseek-v4-flash".to_owned(),
+        entries.clone(),
+        "restored artifact",
+    );
+    assert!(full_plain_timeline(&available_app).contains("Saved full output"));
+    assert!(full_plain_timeline(&available_app).contains("Alt-F search"));
+
+    std::fs::remove_dir_all(artifact_store.root().join("blobs"))?;
+    let mut missing_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    missing_app.restore_session_view(
+        session_path,
+        "deepseek".to_owned(),
+        "deepseek-v4-flash".to_owned(),
+        entries,
+        "restored missing artifact",
+    );
+    assert!(full_plain_timeline(&missing_app).contains("Full output unavailable (missing)"));
     Ok(())
 }
 

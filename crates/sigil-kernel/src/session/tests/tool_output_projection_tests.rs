@@ -78,7 +78,7 @@ fn old_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata()
     );
     assert!(matches!(
         output.candidate.raw_durable_result,
-        ToolOutputArtifactRefV1::DurableTranscriptEvent { .. }
+        ToolOutputArtifactRefV1::PublishedArtifact { .. }
     ));
     let envelope: Value = serde_json::from_str(
         output
@@ -87,21 +87,14 @@ fn old_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata()
             .as_deref()
             .expect("projected tool output remains structured"),
     )?;
-    assert_eq!(envelope["status"], "ok");
-    assert_eq!(
-        envelope["compaction_projection"]["source_ref"]["model_retrieval_available"],
-        false
-    );
-    assert_eq!(
-        envelope["compaction_projection"]["source_ref"]["event_id"],
-        output.shrink.source_event.event_id
-    );
-    let projected_content = envelope["content"]
+    assert_eq!(envelope["facts"]["status"], "ok");
+    let projected_content = envelope["projection"]["preview"]
         .as_str()
         .expect("projected tool content is text");
     assert!(projected_content.len() <= 512);
-    assert!(projected_content.contains("next-epoch recoverable tool output"));
-    assert!(projected_content.contains("re_read_when_needed=true"));
+    assert!(projected_content.contains("next-epoch artifact-backed tool output"));
+    assert!(projected_content.contains("use_read_tool_artifact=true"));
+    assert!(projected_content.contains("model_retrieval_available=true"));
     assert!(projected_content.contains(&format!(
         "retained_head_bytes={}",
         output.shrink.retained_head_bytes
@@ -134,7 +127,7 @@ fn old_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata()
         current_tool
             .content
             .as_deref()
-            .is_some_and(|content| !content.contains("next-epoch recoverable tool output"))
+            .is_some_and(|content| !content.contains("next-epoch artifact-backed tool output"))
     );
     Ok(())
 }

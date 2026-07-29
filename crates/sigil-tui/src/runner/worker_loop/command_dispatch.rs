@@ -41,6 +41,8 @@ mod verification_checkpoint;
 
 #[cfg(test)]
 pub(in crate::runner) use run_plan::validate_task_pause_request;
+#[cfg(test)]
+pub(in crate::runner) use session::read_tool_artifact_page_for_display;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +131,11 @@ pub(in crate::runner) enum SessionCommand {
     InspectLocalSession {
         request_id: u64,
         source_path: PathBuf,
+    },
+    ReadToolArtifactPage {
+        request_id: u64,
+        artifact_ref: sigil_kernel::ToolArtifactRefV1,
+        selector: sigil_kernel::ToolArtifactSelectorV1,
     },
     ForkLocalSession {
         request_id: u64,
@@ -421,6 +428,15 @@ pub(in crate::runner) fn classify_worker_command(
         } => ClassifiedWorkerCommand::Session(SessionCommand::InspectLocalSession {
             request_id,
             source_path,
+        }),
+        WorkerCommand::ReadToolArtifactPage {
+            request_id,
+            artifact_ref,
+            selector,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::ReadToolArtifactPage {
+            request_id,
+            artifact_ref,
+            selector,
         }),
         WorkerCommand::ForkLocalSession {
             request_id,

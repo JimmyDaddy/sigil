@@ -1615,6 +1615,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/tool-artifacts/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read one bounded typed tool artifact page
+         * @description Resolves an opaque artifact reference only in the addressed logical session, validates the immutable content hash, and returns a fixed-size byte, line, or literal-search page. Physical paths are never exposed.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ToolArtifactReadRequest"];
+                };
+            };
+            responses: {
+                /** @description Bounded integrity-checked artifact page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ToolArtifactPage"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/transcript": {
         parameters: {
             query?: never;
@@ -2455,10 +2505,18 @@ export interface components {
             /** @constant */
             type: "reasoning";
         } | {
+            /** @enum {string|null} */
+            artifact_availability?: "available" | "expired" | "missing" | "hash_mismatch" | "policy_revoked" | "legacy_unavailable" | null;
+            artifact_ref?: string | null;
             call_id?: string | null;
+            has_more: boolean;
+            /** Format: uint64 */
+            observed_bytes?: number | null;
             /** Format: uint64 */
             original_content_bytes: number;
             output?: string | null;
+            /** Format: uint64 */
+            persisted_bytes?: number | null;
             tool_name?: string | null;
             truncated: boolean;
             /** @constant */
@@ -3283,6 +3341,7 @@ export interface components {
             support_diagnostics: boolean;
             task_integration: boolean;
             task_pause: boolean;
+            typed_tool_artifact_retrieval: boolean;
             verification: boolean;
         };
         ServerInfo: {
@@ -3293,7 +3352,7 @@ export interface components {
             /** @constant */
             protocol_version: 2;
             /** @constant */
-            schema_version: 12;
+            schema_version: 13;
             server_version: string;
             shutdown_on_stdin_close: boolean;
             workspace_id: string;
@@ -3678,6 +3737,54 @@ export interface components {
             text: string;
             /** @constant */
             type: "text_delta";
+        };
+        ToolArtifactPage: {
+            artifact_ref: string;
+            artifact_sha256: string;
+            body: string;
+            body_encoding: components["schemas"]["ToolArtifactPageEncoding"];
+            eof: boolean;
+            /** Format: uint16 */
+            match_count: number;
+            next_selector?: components["schemas"]["ToolArtifactSelector"] | null;
+            page_sha256: string;
+            request_scope: string;
+            /** Format: uint32 */
+            returned_bytes: number;
+            /** @constant */
+            schema_version: 1;
+            selector: components["schemas"]["ToolArtifactSelector"];
+        };
+        /** @enum {string} */
+        ToolArtifactPageEncoding: "utf8" | "base64";
+        ToolArtifactReadRequest: {
+            artifact_ref: string;
+            selector: components["schemas"]["ToolArtifactSelector"];
+        };
+        ToolArtifactSelector: {
+            /** @constant */
+            kind: "byte_slice";
+            /** Format: uint32 */
+            limit: number;
+            /** Format: uint64 */
+            offset: number;
+        } | {
+            /** @constant */
+            kind: "line_page";
+            /** Format: uint32 */
+            line_count: number;
+            /** Format: uint64 */
+            start_line: number;
+        } | {
+            /** Format: uint16 */
+            context_lines: number;
+            /** @constant */
+            kind: "search_literal";
+            /** Format: uint16 */
+            max_matches: number;
+            query: string;
+            /** Format: uint64 */
+            start_offset: number;
         };
         ToolCallArgsDeltaEvent: {
             delta: string;

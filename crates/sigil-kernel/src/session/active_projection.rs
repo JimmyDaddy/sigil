@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Schema version for the bounded scheduler-facing session projection.
-pub const ACTIVE_SESSION_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const ACTIVE_SESSION_PROJECTION_SCHEMA_VERSION: u16 = 2;
 const MAX_ACTIVE_TASK_GUIDANCE_STATES: usize = 1_024;
 const MAX_RECENT_TERMINAL_TASK_IDS: usize = 256;
 const MAX_OPEN_COMPACTION_ATTEMPTS: usize = 16;
@@ -411,6 +411,7 @@ pub struct ActiveSessionProjection {
     active_terminal_tasks_overflowed: bool,
     usage: SessionStats,
     latest_readiness: Option<ReadinessEvaluatedEntry>,
+    tool_output_pressure: ToolOutputPressureProjectionV1,
     durable_session_entry_count: u64,
     last_session_entry_cursor: Option<ProjectionCursor>,
     cursor: Option<ProjectionCursor>,
@@ -420,6 +421,10 @@ pub struct ActiveSessionProjection {
 impl ActiveSessionProjection {
     pub(super) fn compaction_summary(&self) -> &ActiveCompactionSummary {
         &self.compaction
+    }
+
+    pub(super) fn tool_output_pressure_snapshot(&self) -> ToolOutputPressureSnapshotV1 {
+        self.tool_output_pressure.snapshot()
     }
 
     pub(super) fn from_records(
@@ -441,6 +446,7 @@ impl ActiveSessionProjection {
             active_terminal_tasks_overflowed: false,
             usage: SessionStats::default(),
             latest_readiness: None,
+            tool_output_pressure: ToolOutputPressureProjectionV1::default(),
             durable_session_entry_count: 0,
             last_session_entry_cursor: None,
             cursor: None,
@@ -514,6 +520,8 @@ impl ActiveSessionProjection {
         self.queue.apply_record(record)?;
         self.queue.retain_active_queue_ids();
         self.compaction.apply_record(record)?;
+        self.tool_output_pressure
+            .apply_records(std::slice::from_ref(record))?;
         if let Some(entry) = record.session_log_entry()? {
             self.durable_session_entry_count = self
                 .durable_session_entry_count
@@ -785,6 +793,12 @@ impl ActiveSessionProjectionSnapshot {
         self.projection.latest_readiness.as_ref()
     }
 
+    /// Returns body-free tool-output pressure at the exact active durable frontier.
+    #[must_use]
+    pub fn tool_output_pressure(&self) -> ToolOutputPressureSnapshotV1 {
+        self.projection.tool_output_pressure.snapshot()
+    }
+
     /// Returns the exact number of durable records projecting to a [`SessionLogEntry`].
     #[must_use]
     pub fn durable_session_entry_count(&self) -> u64 {
@@ -867,6 +881,7 @@ pub enum ActiveProjectionFamily {
     TerminalTask,
     Usage,
     Readiness,
+    ToolOutputPressure,
 }
 
 impl ActiveProjectionFamily {
@@ -879,6 +894,7 @@ impl ActiveProjectionFamily {
             Self::TerminalTask,
             Self::Usage,
             Self::Readiness,
+            Self::ToolOutputPressure,
         ]
         .into_iter()
         .collect()

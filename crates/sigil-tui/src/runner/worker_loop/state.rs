@@ -7,6 +7,7 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) session: SessionWorkerState,
     pub(in crate::runner) run: RunWorkerState,
     pub(in crate::runner) compaction: CompactionWorkerState,
+    pub(in crate::runner) artifact_gc: ArtifactGcWorkerState,
     pub(in crate::runner) refresh: RefreshWorkerState,
     pub(in crate::runner) agent: AgentWorkerState,
     pub(in crate::runner) mcp_oauth: McpOAuthWorkerState,
@@ -52,6 +53,8 @@ impl WorkerLoopState {
                 projection_reconciliation_latched: false,
                 task_guidance_dirty: true,
                 conversation_queue_dirty: true,
+                tool_output_pressure_dirty: true,
+                artifact_gc_dirty: true,
                 task_guidance_retry_at: None,
                 conversation_queue_retry_at: None,
                 task_guidance_retry_attempts: 0,
@@ -63,6 +66,8 @@ impl WorkerLoopState {
                 last_queued_pre_turn_block: None,
                 last_task_guidance_block: None,
                 pending_queued_pre_turn_preparation: None,
+                pending_cost_only_tool_output_aging: None,
+                tool_artifact_read_budget: ToolArtifactReadBudgetV1::default(),
             },
             run: RunWorkerState {
                 result_tx: WorkerEventPayloadSender::run(event_tx.clone()),
@@ -78,6 +83,11 @@ impl WorkerLoopState {
                 local_preview: None,
                 pending: None,
                 idle_auto: IdleAutoCompactionState::default(),
+            },
+            artifact_gc: ArtifactGcWorkerState {
+                result_tx: WorkerEventPayloadSender::artifact_gc(event_tx.clone()),
+                tasks: ArtifactGcTaskManager::new(),
+                next_request_id: 1,
             },
             refresh: RefreshWorkerState {
                 provider_status_tasks: ProviderStatusTaskManager::new(),
@@ -164,6 +174,8 @@ pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) projection_reconciliation_latched: bool,
     pub(in crate::runner) task_guidance_dirty: bool,
     pub(in crate::runner) conversation_queue_dirty: bool,
+    pub(in crate::runner) tool_output_pressure_dirty: bool,
+    pub(in crate::runner) artifact_gc_dirty: bool,
     pub(in crate::runner) task_guidance_retry_at: Option<Instant>,
     pub(in crate::runner) conversation_queue_retry_at: Option<Instant>,
     pub(in crate::runner) task_guidance_retry_attempts: u8,
@@ -176,6 +188,20 @@ pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) last_task_guidance_block: Option<(ConversationInputQueueId, String)>,
     pub(in crate::runner) pending_queued_pre_turn_preparation:
         Option<PreTurnV2CompactionPreparation>,
+    pub(in crate::runner) pending_cost_only_tool_output_aging:
+        Option<sigil_kernel::ToolOutputAgingActivatedV1>,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
+}
+
+impl SessionWorkerState {
+    /// Starts one foreground root turn and keeps the same owner available to post-run TUI reads.
+    pub(in crate::runner) fn begin_root_tool_artifact_read_budget(
+        &mut self,
+    ) -> ToolArtifactReadBudgetV1 {
+        let budget = ToolArtifactReadBudgetV1::default();
+        self.tool_artifact_read_budget = budget.clone();
+        budget
+    }
 }
 
 pub(in crate::runner) struct RunWorkerState {
@@ -193,6 +219,12 @@ pub(in crate::runner) struct CompactionWorkerState {
     pub(in crate::runner) local_preview: Option<PendingLocalV2Compaction>,
     pub(in crate::runner) pending: Option<PendingV2Compaction>,
     pub(in crate::runner) idle_auto: IdleAutoCompactionState,
+}
+
+pub(in crate::runner) struct ArtifactGcWorkerState {
+    pub(in crate::runner) result_tx: WorkerEventPayloadSender<ArtifactGcTaskResult>,
+    pub(in crate::runner) tasks: ArtifactGcTaskManager,
+    pub(in crate::runner) next_request_id: u64,
 }
 
 pub(in crate::runner) struct RefreshWorkerState {

@@ -74,16 +74,15 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     };
     assert_eq!(result.final_text, "approved run finished");
     assert_eq!(result.tool_calls, 1);
-    let tool_result_message = entries
+    let tool_result = entries
         .iter()
         .find_map(|entry| match entry {
-            SessionLogEntry::ToolResult(message) => message.content.as_deref(),
+            SessionLogEntry::ToolResultV2(result) => Some(result),
             _ => None,
         })
         .expect("expected tool result session message");
-    let envelope: serde_json::Value = serde_json::from_str(tool_result_message)?;
-    assert_eq!(envelope["status"], "ok");
-    assert_eq!(envelope["content"], "wrote file");
+    assert_eq!(tool_result.facts.status, "ok");
+    assert_eq!(tool_result.initial_model_view.preview, "wrote file");
 
     worker.shutdown()?;
     Ok(())
@@ -229,11 +228,11 @@ allowed_tools = ["grep"]
     assert!(entries.iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::ToolResult(message)
-                if message.tool_call_id.as_deref() == Some("call-spawn-agent")
-                    && message.content.as_deref().is_some_and(|content| {
-                        content.contains("approval_denied")
-                            || content.contains("tool execution denied by user")
+            SessionLogEntry::ToolResultV2(result)
+                if result.call_id == "call-spawn-agent"
+                    && result.facts.error.as_ref().is_some_and(|error| {
+                        error.kind == sigil_kernel::ToolErrorKind::ApprovalDenied
+                            || error.message.contains("tool execution denied by user")
                     })
         )
     }));

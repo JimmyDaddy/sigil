@@ -4,7 +4,16 @@ use std::{
     path::{Component, Path},
 };
 
-use super::{AppState, PaneFocus, TimelineEntry, TimelineRole, ToolActivityCacheEntry};
+use sigil_kernel::{
+    ToolArtifactAvailability, ToolArtifactPageEncoding, ToolArtifactPageV1, ToolArtifactRefV1,
+    ToolArtifactSelectorV1,
+};
+
+use super::{
+    AppState, PaneFocus, TimelineEntry, TimelineRole, ToolActivityCacheEntry,
+    modal_flow::TextInputTarget,
+};
+use crate::runner::{ToolArtifactDisplayReadFailure, WorkerCommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolCardFocusSource {
@@ -35,6 +44,14 @@ enum ToolCardRevealPolicy {
 const TOOL_CARD_VISIBLE_ROWS_STEP: usize = 64;
 const TERMINAL_TASK_LOG_LABEL_ROOT: &str = "state/artifacts/tasks";
 const TERMINAL_TASK_LOG_PREVIEW_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone)]
+struct ToolCardArtifactTarget {
+    artifact_ref: ToolArtifactRefV1,
+    availability: String,
+    next_selector: Option<ToolArtifactSelectorV1>,
+    has_more: bool,
+}
 
 impl AppState {
     pub(crate) fn has_tool_cards(&self) -> bool {
@@ -113,6 +130,270 @@ impl AppState {
 
     pub(super) fn toggle_selected_tool_card(&mut self) -> bool {
         self.toggle_selected_tool_card_with_policy(ToolCardRevealPolicy::PreserveTail)
+    }
+
+    pub(super) fn request_selected_tool_artifact_next_page(&mut self) -> bool {
+        let Some((_, target)) = self.selected_tool_artifact_target() else {
+            self.last_notice = Some("focused activity has no saved full output".to_owned());
+            return false;
+        };
+        if !tool_artifact_availability_allows_read(&target.availability) {
+            self.last_notice = Some(tool_artifact_unavailable_notice(&target.availability));
+            return false;
+        }
+        if !target.has_more && target.next_selector.is_none() {
+            self.last_notice = Some("the focused tool output has no next page".to_owned());
+            return false;
+        }
+        let selector = target
+            .next_selector
+            .unwrap_or(ToolArtifactSelectorV1::LinePage {
+                start_line: 0,
+                line_count: 200,
+            });
+        self.enqueue_tool_artifact_page_read(target.artifact_ref, selector)
+    }
+
+    pub(super) fn open_selected_tool_artifact_search(&mut self) -> bool {
+        let Some((_, target)) = self.selected_tool_artifact_target() else {
+            self.last_notice = Some("focused activity has no searchable full output".to_owned());
+            return false;
+        };
+        if !tool_artifact_availability_allows_read(&target.availability) {
+            self.last_notice = Some(tool_artifact_unavailable_notice(&target.availability));
+            return false;
+        }
+        if self.runtime.is_busy {
+            self.last_notice =
+                Some("wait for the active run before inspecting saved tool output".to_owned());
+            return false;
+        }
+        self.open_text_input(TextInputTarget::ToolArtifactSearch, "");
+        self.last_notice = Some("enter an exact literal to search the full output".to_owned());
+        true
+    }
+
+    pub(super) fn request_selected_tool_artifact_search(&mut self, query: &str) -> bool {
+        let query = query.trim();
+        if query.is_empty() || query.len() > 512 {
+            self.last_notice =
+                Some("artifact search literal must contain 1 to 512 bytes".to_owned());
+            return false;
+        }
+        let Some((_, target)) = self.selected_tool_artifact_target() else {
+            self.last_notice = Some("focused activity has no searchable full output".to_owned());
+            return false;
+        };
+        if !tool_artifact_availability_allows_read(&target.availability) {
+            self.last_notice = Some(tool_artifact_unavailable_notice(&target.availability));
+            return false;
+        }
+        self.enqueue_tool_artifact_page_read(
+            target.artifact_ref,
+            ToolArtifactSelectorV1::SearchLiteral {
+                query: query.to_owned(),
+                start_offset: 0,
+                max_matches: 20,
+                context_lines: 2,
+            },
+        )
+    }
+
+    fn enqueue_tool_artifact_page_read(
+        &mut self,
+        artifact_ref: ToolArtifactRefV1,
+        selector: ToolArtifactSelectorV1,
+    ) -> bool {
+        if self.runtime.is_busy {
+            self.last_notice =
+                Some("wait for the active run before inspecting saved tool output".to_owned());
+            return false;
+        }
+        let request_id = self.next_background_request_id();
+        self.enqueue_worker_command(WorkerCommand::ReadToolArtifactPage {
+            request_id,
+            artifact_ref,
+            selector,
+        });
+        self.last_notice = Some("reading a bounded page from saved tool output".to_owned());
+        true
+    }
+
+    pub(super) fn apply_tool_artifact_page(&mut self, page: &ToolArtifactPageV1) -> bool {
+        let Some(entry_index) = self.timeline.iter().position(|entry| {
+            tool_card_artifact_target(&entry.text)
+                .is_some_and(|target| target.artifact_ref == page.artifact_ref)
+        }) else {
+            self.last_notice = Some("artifact page belongs to a hidden activity".to_owned());
+            return false;
+        };
+        let Some(entry) = self.timeline.get_mut(entry_index) else {
+            return false;
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&entry.text) else {
+            return false;
+        };
+        let Some(object) = value.as_object_mut() else {
+            return false;
+        };
+        let preview_lines = match page.body_encoding {
+            ToolArtifactPageEncoding::Utf8 if page.body.is_empty() => {
+                vec!["(empty page)".to_owned()]
+            }
+            ToolArtifactPageEncoding::Utf8 => page.body.lines().map(str::to_owned).collect(),
+            ToolArtifactPageEncoding::Base64 => vec![format!("base64:{}", page.body)],
+        };
+        object.insert(
+            "preview_lines".to_owned(),
+            serde_json::Value::Array(
+                preview_lines
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        object.remove("preview_value");
+        object.insert(
+            "preview_kind".to_owned(),
+            serde_json::Value::String("text".to_owned()),
+        );
+        object.insert(
+            "hidden_lines".to_owned(),
+            serde_json::Value::Number(u64::from(page.next_selector.is_some()).into()),
+        );
+        let base_summary = object
+            .get("artifact_summary_base")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                object
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "tool output".to_owned());
+        object.insert(
+            "artifact_summary_base".to_owned(),
+            serde_json::Value::String(base_summary.clone()),
+        );
+        object.insert(
+            "summary".to_owned(),
+            serde_json::Value::String(format!(
+                "{base_summary} · saved output page {} B{}",
+                page.returned_bytes,
+                if page.match_count > 0 {
+                    format!(" · {} matches", page.match_count)
+                } else {
+                    String::new()
+                }
+            )),
+        );
+        if let Some(artifact) = object
+            .get_mut("artifact")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            artifact.insert(
+                "availability".to_owned(),
+                serde_json::Value::String("available".to_owned()),
+            );
+            artifact.insert(
+                "has_more".to_owned(),
+                serde_json::Value::Bool(page.next_selector.is_some()),
+            );
+            artifact.insert(
+                "next_selector".to_owned(),
+                page.next_selector
+                    .as_ref()
+                    .and_then(|selector| serde_json::to_value(selector).ok())
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            artifact.insert(
+                "page_sha256".to_owned(),
+                serde_json::Value::String(page.page_sha256.clone()),
+            );
+        }
+        let Ok(text) = serde_json::to_string(&value) else {
+            return false;
+        };
+        entry.text = text;
+        let updated_entry = entry.clone();
+        let activity_key = self
+            .tool_activity_cache_entry(entry_index, &updated_entry)
+            .map(|activity| activity.key);
+        if let Some(activity_key) = activity_key {
+            self.timeline_state
+                .expanded_tool_activity_keys
+                .insert(activity_key.clone());
+            self.timeline_state
+                .collapsed_tool_activity_keys
+                .remove(&activity_key);
+            self.timeline_state
+                .tool_activity_visible_rows
+                .insert(activity_key, TOOL_CARD_VISIBLE_ROWS_STEP);
+        }
+        self.refresh_replaced_tool_timeline_entry(entry_index);
+        self.reveal_timeline_entry(entry_index);
+        self.last_notice = Some(if page.eof {
+            format!("saved output page loaded · {} B · end", page.returned_bytes)
+        } else {
+            format!(
+                "saved output page loaded · {} B · Alt-N next",
+                page.returned_bytes
+            )
+        });
+        true
+    }
+
+    pub(super) fn apply_tool_artifact_read_failure(
+        &mut self,
+        artifact_ref: &ToolArtifactRefV1,
+        failure: ToolArtifactDisplayReadFailure,
+    ) {
+        let availability = match failure {
+            ToolArtifactDisplayReadFailure::Unavailable(availability) => {
+                Some(tool_artifact_availability_label(availability))
+            }
+            ToolArtifactDisplayReadFailure::Rejected => Some("policy_revoked"),
+            ToolArtifactDisplayReadFailure::BudgetExhausted
+            | ToolArtifactDisplayReadFailure::AuditUnavailable => None,
+        };
+        if let Some(availability) = availability
+            && let Some(entry_index) = self.timeline.iter().position(|entry| {
+                tool_card_artifact_target(&entry.text)
+                    .is_some_and(|target| target.artifact_ref == *artifact_ref)
+            })
+            && let Some(entry) = self.timeline.get_mut(entry_index)
+            && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&entry.text)
+            && let Some(artifact) = value
+                .get_mut("artifact")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            artifact.insert(
+                "availability".to_owned(),
+                serde_json::Value::String(availability.to_owned()),
+            );
+            artifact.insert("has_more".to_owned(), serde_json::Value::Bool(false));
+            artifact.insert("next_selector".to_owned(), serde_json::Value::Null);
+            if let Ok(text) = serde_json::to_string(&value) {
+                entry.text = text;
+                self.refresh_replaced_tool_timeline_entry(entry_index);
+            }
+        }
+        self.last_notice = Some(match failure {
+            ToolArtifactDisplayReadFailure::BudgetExhausted => {
+                "saved output read budget exhausted (8 reads / 64 KiB)".to_owned()
+            }
+            ToolArtifactDisplayReadFailure::Unavailable(availability) => {
+                tool_artifact_unavailable_notice(tool_artifact_availability_label(availability))
+            }
+            ToolArtifactDisplayReadFailure::Rejected => {
+                "saved output read was rejected by the session policy".to_owned()
+            }
+            ToolArtifactDisplayReadFailure::AuditUnavailable => {
+                "saved output was not shown because its audit receipt could not be committed"
+                    .to_owned()
+            }
+        });
     }
 
     pub(super) fn begin_tool_card_body_click(&mut self, entry_index: usize) {
@@ -595,6 +876,13 @@ impl AppState {
         serde_json::from_str::<serde_json::Value>(&entry.text).ok()
     }
 
+    fn selected_tool_artifact_target(&self) -> Option<(usize, ToolCardArtifactTarget)> {
+        let selected_key = self.timeline_state.selected_tool_activity_key.as_deref()?;
+        let entry_index = self.timeline_entry_index_for_activity_key(selected_key)?;
+        let entry = self.timeline.get(entry_index)?;
+        tool_card_artifact_target(&entry.text).map(|target| (entry_index, target))
+    }
+
     fn tool_entry_defaults_to_expanded(&self, entry_index: usize) -> bool {
         self.timeline_state
             .tool_activity_cache
@@ -602,6 +890,56 @@ impl AppState {
             .find(|activity| activity.index == entry_index)
             .map(|activity| activity.defaults_expanded)
             .unwrap_or(false)
+    }
+}
+
+fn tool_card_artifact_target(text: &str) -> Option<ToolCardArtifactTarget> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let artifact = value.get("artifact")?.as_object()?;
+    let artifact_ref = artifact.get("artifact_ref").and_then(|value| {
+        value
+            .as_str()
+            .map(|artifact_id| ToolArtifactRefV1 {
+                artifact_id: artifact_id.to_owned(),
+            })
+            .or_else(|| serde_json::from_value(value.clone()).ok())
+    })?;
+    artifact_ref.validate().ok()?;
+    let next_selector = artifact
+        .get("next_selector")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    Some(ToolCardArtifactTarget {
+        artifact_ref,
+        availability: artifact
+            .get("availability")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unavailable")
+            .to_owned(),
+        next_selector,
+        has_more: artifact
+            .get("has_more")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn tool_artifact_availability_allows_read(availability: &str) -> bool {
+    availability == "available"
+}
+
+fn tool_artifact_unavailable_notice(availability: &str) -> String {
+    format!("full tool output is unavailable ({availability}); the saved summary remains auditable")
+}
+
+fn tool_artifact_availability_label(availability: ToolArtifactAvailability) -> &'static str {
+    match availability {
+        ToolArtifactAvailability::Available => "available",
+        ToolArtifactAvailability::Expired => "expired",
+        ToolArtifactAvailability::Missing => "missing",
+        ToolArtifactAvailability::HashMismatch => "hash_mismatch",
+        ToolArtifactAvailability::PolicyRevoked => "policy_revoked",
+        ToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
     }
 }
 

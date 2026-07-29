@@ -23,6 +23,8 @@ import type {
   SessionSummary,
   TaskIntegrationReview,
   TimelineEvent,
+  ToolArtifactPage,
+  ToolArtifactSelector,
   WorkspaceSummary,
 } from "./types";
 import { Icon } from "./ui/icons";
@@ -293,6 +295,19 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       items: [],
       hasMore: false,
       gapFacts: [],
+    }),
+    readToolArtifact: async (_workspaceId, sessionId, input) => ({
+      schemaVersion: 1,
+      requestScope: sessionId,
+      artifactRef: input.artifactRef,
+      selector: input.selector,
+      body: "",
+      bodyEncoding: "utf8",
+      returnedBytes: 0,
+      pageSha256: `sha256:${"0".repeat(64)}`,
+      artifactSha256: `sha256:${"0".repeat(64)}`,
+      eof: true,
+      matchCount: 0,
     }),
     continuity: continuity ?? (async () => ({
       durableFrontier: { throughStreamSequence: 0 },
@@ -617,6 +632,63 @@ describe("desktop coding-agent components", () => {
     expect(screen.getByLabelText("shell output content").textContent).toContain("line 240");
     expect(screen.queryByText("duration not recorded")).toBeNull();
     expect(screen.queryByText("risk not classified")).toBeNull();
+  });
+
+  it("retrieves saved tool output through bounded typed selectors", async () => {
+    const user = userEvent.setup();
+    const nextSelector = { kind: "byte_slice" as const, offset: 16, limit: 16 };
+    const readArtifact = vi.fn(async (selector: ToolArtifactSelector): Promise<ToolArtifactPage> => ({
+      schemaVersion: 1 as const,
+      requestScope: "session-1",
+      artifactRef: `ta1_${"a".repeat(32)}`,
+      selector,
+      body: selector.kind === "search_literal" ? "matching context" : "saved page",
+      bodyEncoding: "utf8" as const,
+      returnedBytes: selector.kind === "search_literal" ? 16 : 10,
+      pageSha256: `sha256:${"b".repeat(64)}`,
+      artifactSha256: `sha256:${"c".repeat(64)}`,
+      eof: selector.kind === "search_literal",
+      matchCount: selector.kind === "search_literal" ? 1 : 0,
+      nextSelector: selector.kind === "search_literal" ? undefined : nextSelector,
+    }));
+    render(
+      <ToolCard
+        tool={{
+          key: "saved-tool",
+          toolName: "shell",
+          text: "bounded preview",
+          status: "succeeded",
+          artifactRef: `ta1_${"a".repeat(32)}`,
+          artifactAvailability: "available",
+          artifactHasMore: true,
+          artifactPersistedBytes: 32,
+        }}
+        onReadArtifact={readArtifact}
+      />,
+    );
+
+    expect(screen.getByText("32 saved bytes are available in bounded pages.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "View saved output" }));
+    expect((await screen.findByLabelText("shell saved output page")).textContent).toContain("saved page");
+    expect(readArtifact).toHaveBeenNthCalledWith(1, {
+      kind: "byte_slice",
+      offset: 0,
+      limit: 16_384,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(readArtifact).toHaveBeenNthCalledWith(2, nextSelector);
+
+    await user.type(screen.getByRole("textbox", { name: "Search saved tool output" }), "needle");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText("matching context")).toBeTruthy();
+    expect(readArtifact).toHaveBeenNthCalledWith(3, {
+      kind: "search_literal",
+      query: "needle",
+      startOffset: 0,
+      maxMatches: 20,
+      contextLines: 2,
+    });
   });
 
   it("fully shows short streaming tool output", () => {

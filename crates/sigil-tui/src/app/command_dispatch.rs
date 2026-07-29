@@ -170,6 +170,8 @@ impl AppState {
                     self.toggle_latest_diagram_entry()
                 }
             }
+            UiCommand::ReadNextToolArtifactPage => self.request_selected_tool_artifact_next_page(),
+            UiCommand::SearchToolArtifact => self.open_selected_tool_artifact_search(),
             UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
             UiCommand::CancelFocusedTerminalTask => false,
             UiCommand::SubmitPrompt

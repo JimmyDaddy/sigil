@@ -43,6 +43,8 @@ fn delete_preview(path: &Path) -> SessionDeletePreview {
         source_session_id: "session-target".to_owned(),
         source_content_sha256: "sha256:content".to_owned(),
         source_bytes: 128,
+        resource_bytes: 0,
+        resource_tree_sha256: "sha256:empty-resource-tree".to_owned(),
         source_modified_at_unix_ms: 42,
         preview_digest: "sha256:delete-preview".to_owned(),
     }

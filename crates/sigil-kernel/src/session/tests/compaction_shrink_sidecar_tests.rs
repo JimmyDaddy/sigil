@@ -113,8 +113,8 @@ fn shrink_sidecar_binds_to_applied_compaction_and_rebuilds_from_raw_history() ->
             .content
             .as_deref()
             .is_some_and(|content| {
-                content.contains("model_retrieval_available=false")
-                    && content.contains("re_read_when_needed=true")
+                content.contains("model_retrieval_available=true")
+                    && content.contains("use_read_tool_artifact=true")
             })
     );
     let typed = stream
@@ -138,7 +138,7 @@ fn shrink_sidecar_binds_to_applied_compaction_and_rebuilds_from_raw_history() ->
         projected_tool
             .content
             .as_deref()
-            .is_some_and(|content| content.contains("next-epoch recoverable tool output"))
+            .is_some_and(|content| content.contains("next-epoch artifact-backed tool output"))
     );
     Ok(())
 }
@@ -205,8 +205,8 @@ fn standalone_tool_output_shrink_rotates_projection_without_semantic_checkpoint(
         .expect("standalone projection retains the tool result");
     assert_ne!(projected.content.as_deref(), Some(raw_content.as_str()));
     assert!(projected.content.as_deref().is_some_and(|content| {
-        content.contains("next-epoch recoverable tool output")
-            && content.contains("re_read_when_needed=true")
+        content.contains("next-epoch artifact-backed tool output")
+            && content.contains("use_read_tool_artifact=true")
     }));
 
     let durable_json = std::fs::read_to_string(store.path())?;
@@ -343,7 +343,7 @@ fn shrink_sidecar_rejects_tampered_descriptor_before_persistence() -> Result<()>
 }
 
 #[test]
-fn legacy_v1_shrink_sidecar_replays_from_raw_history_with_v2_recoverability() -> Result<()> {
+fn pre_cutover_shrink_sidecar_is_rejected_instead_of_faking_recoverability() -> Result<()> {
     let (_temp, store, mut session) = store_backed_session()?;
     session.append_user_message(ModelMessage::user("old request"))?;
     session.append_assistant_message(ModelMessage::assistant(
@@ -383,17 +383,16 @@ fn legacy_v1_shrink_sidecar_replays_from_raw_history_with_v2_recoverability() ->
         shrink.artifact_ref = None;
         shrink.reason = None;
     }
-    store.append_tool_output_projection_shrink_recorded(entry)?;
-
-    let rebuilt = ToolOutputProjectionSidecarProjection::from_records(&records(&store)?)?;
-    let output = &rebuilt
-        .outputs_for_compaction("compaction-shrink")
-        .expect("legacy sidecar replays")[0];
-    assert_eq!(
-        output.shrink.schema_version,
-        TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION
+    let error = store
+        .append_tool_output_projection_shrink_recorded(entry)
+        .expect_err("pre-cutover fake transcript refs must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("missing its context epoch transition")
+            || error
+                .to_string()
+                .contains("tool-output projection shrink metadata is invalid")
     );
-    assert!(output.shrink.artifact_ref.is_some());
-    assert!(output.candidate.recovery_instruction.contains("Re-read"));
     Ok(())
 }

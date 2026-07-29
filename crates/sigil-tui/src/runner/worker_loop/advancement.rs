@@ -150,7 +150,8 @@ where
 
     // Safe-point priority after terminal settlement:
     // compaction result -> blocking child continuation -> task guidance -> recovered handoff
-    // -> queued user work -> opportunistic idle compaction.
+    // -> queued user work -> deterministic tool aging -> opportunistic idle compaction
+    // -> artifact maintenance.
     if matches!(
         advance_compaction_results(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
@@ -170,7 +171,16 @@ where
         advance_conversation_queue(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
     ) || matches!(
+        advance_tool_output_pressure(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
         advance_idle_compaction(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_artifact_gc_results(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_artifact_gc_start(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
     ) || run_advanced
         || refresh_advanced
@@ -229,6 +239,8 @@ fn advance_projection_reconciliation(
             state.session.projection_reconciliation_latched = false;
             state.session.task_guidance_dirty = true;
             state.session.conversation_queue_dirty = true;
+            state.session.tool_output_pressure_dirty = true;
+            state.session.artifact_gc_dirty = true;
             state.session.pending_agent_result_continuations = pending_agent_continuations;
             state.session.active_terminal_task_ids = active_terminal_task_ids;
             let _ = message_tx.send(WorkerMessage::Notice(
@@ -540,6 +552,7 @@ where
             elicitation_audit_buffer: Arc::clone(&elicitation_audit_buffer),
             cancellation_handle,
             cancellation_task_guard,
+            tool_artifact_read_budget: state.session.tool_artifact_read_budget.clone(),
         },
     );
     state.run.active = Some(ActiveRun {
@@ -780,6 +793,7 @@ where
                 cancellation_handle,
                 cancellation_task_guard,
             ) = cancellation;
+            let tool_artifact_read_budget = state.session.begin_root_tool_artifact_read_budget();
             let handle = spawn_task_continue(
                 runtime,
                 TaskContinueSpawn {
@@ -802,6 +816,7 @@ where
                     elicitation_audit_buffer: Arc::clone(&elicitation_audit_buffer),
                     cancellation_handle,
                     cancellation_task_guard,
+                    tool_artifact_read_budget,
                 },
             );
             state.run.active = Some(ActiveRun {
@@ -880,6 +895,11 @@ where
             &mut state.session.conversation_queue_retry_attempts,
             &mut state.session.conversation_queue_retry_latched,
         );
+    }
+    if wake_readiness.tool_output_pressure_dirty() {
+        state.session.tool_output_pressure_dirty = true;
+        state.session.artifact_gc_dirty = true;
+        state.session.pending_cost_only_tool_output_aging = None;
     }
     if wake_readiness
         .projection_families
@@ -999,6 +1019,244 @@ where
         &mut state.refresh.provider_status_tasks,
         message_tx,
     );
+    if advanced {
+        WorkerAdvancementControl::SkipCommandPoll
+    } else {
+        WorkerAdvancementControl::PollCommand
+    }
+}
+
+fn advance_tool_output_pressure<P>(
+    context: WorkerAdvancementContext<'_, P>,
+) -> WorkerAdvancementControl
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let WorkerAdvancementContext {
+        message_tx, state, ..
+    } = context;
+    if state.run.active.is_some() || !state.session.tool_output_pressure_dirty {
+        return WorkerAdvancementControl::PollCommand;
+    }
+    let Some(session) = state.session.current.as_ref() else {
+        state.session.tool_output_pressure_dirty = false;
+        state.session.artifact_gc_dirty = false;
+        state.session.pending_cost_only_tool_output_aging = None;
+        return WorkerAdvancementControl::PollCommand;
+    };
+    let snapshot = match session.active_projection_snapshot() {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            state.session.tool_output_pressure_dirty = false;
+            state.session.pending_cost_only_tool_output_aging = None;
+            return WorkerAdvancementControl::PollCommand;
+        }
+        Err(error) => {
+            enter_projection_reconciliation(message_tx, state, error);
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    let pressure = snapshot.tool_output_pressure();
+    let candidate = sigil_kernel::ToolOutputAgingBatchV1::select(
+        &pressure,
+        sigil_kernel::ToolOutputAgingReasonV1::CostOnly,
+    )
+    .and_then(|batch| {
+        batch
+            .as_ref()
+            .map(|batch| sigil_kernel::ToolOutputAgingActivatedV1::prepare(&pressure, batch))
+            .transpose()
+    });
+    match candidate {
+        Ok(candidate) => {
+            state.session.tool_output_pressure_dirty = false;
+            state.session.artifact_gc_dirty = true;
+            if let Some(activation) = candidate {
+                if cost_only_tool_output_aging_admitted(session) {
+                    match session.append_tool_output_aging_activation(
+                        snapshot.frontier(),
+                        activation.clone(),
+                    ) {
+                        Ok(Some(_)) => {
+                            state.session.pending_cost_only_tool_output_aging = None;
+                            return WorkerAdvancementControl::SkipCommandPoll;
+                        }
+                        Ok(None) => {
+                            state.session.tool_output_pressure_dirty = true;
+                            state.session.pending_cost_only_tool_output_aging = None;
+                            return WorkerAdvancementControl::SkipCommandPoll;
+                        }
+                        Err(error) => {
+                            enter_projection_reconciliation(message_tx, state, error);
+                            return WorkerAdvancementControl::SkipCommandPoll;
+                        }
+                    }
+                }
+                state.session.pending_cost_only_tool_output_aging = Some(activation);
+            } else {
+                state.session.pending_cost_only_tool_output_aging = None;
+            }
+            WorkerAdvancementControl::SkipCommandPoll
+        }
+        Err(error) => {
+            enter_projection_reconciliation(message_tx, state, error);
+            WorkerAdvancementControl::SkipCommandPoll
+        }
+    }
+}
+
+fn cost_only_tool_output_aging_admitted(session: &sigil_kernel::Session) -> bool {
+    session.entries().iter().rev().find_map(|entry| {
+        let sigil_kernel::SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) = entry
+        else {
+            return None;
+        };
+        Some(observed_cache_read_tokens(usage))
+    }) == Some(Some(0))
+}
+
+fn observed_cache_read_tokens(usage: &sigil_kernel::UsageStats) -> Option<u64> {
+    if let Some(cache_usage) = usage.cache_usage.as_ref() {
+        return cache_usage.read.as_ref().map(|count| count.tokens);
+    }
+    (usage.prompt_tokens > 0
+        && usage
+            .cache_hit_tokens
+            .saturating_add(usage.cache_miss_tokens)
+            == usage.prompt_tokens)
+        .then_some(usage.cache_hit_tokens)
+}
+
+fn advance_artifact_gc_start<P>(
+    context: WorkerAdvancementContext<'_, P>,
+) -> WorkerAdvancementControl
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let WorkerAdvancementContext {
+        runtime,
+        root_config,
+        workspace_root,
+        message_tx,
+        state,
+        ..
+    } = context;
+    if state.run.active.is_some()
+        || state.artifact_gc.tasks.has_active()
+        || !state.session.artifact_gc_dirty
+    {
+        return WorkerAdvancementControl::PollCommand;
+    }
+    let Some(session) = state.session.current.as_ref() else {
+        state.session.artifact_gc_dirty = false;
+        return WorkerAdvancementControl::PollCommand;
+    };
+    let snapshot = match session.active_projection_snapshot() {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            state.session.artifact_gc_dirty = false;
+            return WorkerAdvancementControl::PollCommand;
+        }
+        Err(error) => {
+            enter_projection_reconciliation(message_tx, state, error);
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    let pressure = snapshot.tool_output_pressure();
+    let roots = pressure.artifact_gc_roots();
+    if let Err(error) = roots.validate() {
+        enter_projection_reconciliation(message_tx, state, error);
+        return WorkerAdvancementControl::SkipCommandPoll;
+    }
+    let session_scope_id = session.session_scope_id().to_owned();
+    let session_ref = match session_ref_for_log_path(&state.session.log_path) {
+        Ok(session_ref) => session_ref,
+        Err(error) => {
+            state.session.artifact_gc_dirty = false;
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "artifact maintenance deferred: {error}"
+            )));
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    let Some(lifecycle) = local_session_lifecycle_service_for_source(
+        root_config,
+        workspace_root,
+        &state.session.log_path,
+    ) else {
+        state.session.artifact_gc_dirty = false;
+        return WorkerAdvancementControl::PollCommand;
+    };
+    let request_id = state.artifact_gc.next_request_id;
+    state.artifact_gc.next_request_id = state.artifact_gc.next_request_id.saturating_add(1);
+    state.session.artifact_gc_dirty = false;
+    state.artifact_gc.tasks.start(
+        runtime,
+        request_id,
+        session_scope_id,
+        pressure.cursor,
+        state.artifact_gc.result_tx.clone(),
+        lifecycle,
+        session_ref,
+        roots,
+    );
+    WorkerAdvancementControl::SkipCommandPoll
+}
+
+fn advance_artifact_gc_results<P>(
+    context: WorkerAdvancementContext<'_, P>,
+) -> WorkerAdvancementControl
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let WorkerAdvancementContext {
+        message_tx, state, ..
+    } = context;
+    let mut advanced = false;
+    while let Some(result) = state.readiness.artifact_gc_results.pop_front() {
+        if !state
+            .artifact_gc
+            .tasks
+            .accept_result(result.request_id, &result.session_scope_id)
+        {
+            continue;
+        }
+        advanced = true;
+        if state
+            .session
+            .current
+            .as_ref()
+            .is_none_or(|session| session.session_scope_id() != result.session_scope_id)
+        {
+            continue;
+        }
+        match result.result {
+            Ok(_) => {
+                let current_cursor = match state
+                    .session
+                    .current
+                    .as_ref()
+                    .expect("current artifact GC result scope was checked")
+                    .active_projection_snapshot()
+                {
+                    Ok(Some(snapshot)) => snapshot.tool_output_pressure().cursor,
+                    Ok(None) => None,
+                    Err(error) => {
+                        enter_projection_reconciliation(message_tx, state, error);
+                        continue;
+                    }
+                };
+                if current_cursor != result.projection_cursor {
+                    state.session.artifact_gc_dirty = true;
+                }
+            }
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "artifact maintenance deferred until the next session change: {error}"
+                )));
+            }
+        }
+    }
     if advanced {
         WorkerAdvancementControl::SkipCommandPoll
     } else {
@@ -1370,6 +1628,7 @@ where
                     &mut state.run.next_id,
                     frozen_request,
                     format!("overflow-recovery-{}", prepared.source_physical_attempt_id),
+                    state.session.tool_artifact_read_budget.clone(),
                 ) {
                     Ok(recovery_run) => state.run.active = Some(recovery_run),
                     Err(start_error) => {
@@ -2052,6 +2311,7 @@ where
                 message_tx,
                 Arc::clone(elicitation_handler),
                 &mut state.run.next_id,
+                state.session.tool_artifact_read_budget.clone(),
                 continuation_threads,
             );
             if state.run.active.is_some() {
@@ -2110,6 +2370,7 @@ where
                 message_tx,
                 Arc::clone(elicitation_handler),
                 &mut state.run.next_id,
+                state.session.tool_artifact_read_budget.clone(),
                 continuation_threads,
             );
             if state.run.active.is_some() {
@@ -2398,6 +2659,8 @@ where
                     state.session.exact_prompts.remove(&queue_id);
                     state.session.task_guidance_dirty = true;
                     state.session.conversation_queue_dirty = true;
+                    let tool_artifact_read_budget =
+                        state.session.begin_root_tool_artifact_read_budget();
                     if let Some(session) = state.session.current.as_ref() {
                         send_conversation_queue_update(message_tx, session.entries());
                     }
@@ -2416,6 +2679,7 @@ where
                         Arc::clone(role_provider_builder),
                         &state.session.log_path,
                         &mut state.run.next_id,
+                        tool_artifact_read_budget,
                         candidate,
                     );
                 }
@@ -2613,5 +2877,34 @@ mod projection_reconciliation_tests {
             ProjectionReconciliationFailureDisposition::Latched
         );
         assert_eq!(attempts, PROJECTION_RECONCILIATION_MAX_ATTEMPTS);
+    }
+}
+
+#[cfg(test)]
+mod tool_output_aging_admission_tests {
+    use super::*;
+
+    #[test]
+    fn cost_only_aging_requires_observed_cache_miss_evidence() {
+        let unknown = sigil_kernel::UsageStats {
+            prompt_tokens: 240_000,
+            ..sigil_kernel::UsageStats::default()
+        };
+        assert_eq!(observed_cache_read_tokens(&unknown), None);
+
+        let cache_hit = sigil_kernel::UsageStats {
+            prompt_tokens: 240_000,
+            cache_hit_tokens: 226_000,
+            cache_miss_tokens: 14_000,
+            ..sigil_kernel::UsageStats::default()
+        };
+        assert_eq!(observed_cache_read_tokens(&cache_hit), Some(226_000));
+
+        let cache_miss = sigil_kernel::UsageStats {
+            prompt_tokens: 240_000,
+            cache_miss_tokens: 240_000,
+            ..sigil_kernel::UsageStats::default()
+        };
+        assert_eq!(observed_cache_read_tokens(&cache_miss), Some(0));
     }
 }

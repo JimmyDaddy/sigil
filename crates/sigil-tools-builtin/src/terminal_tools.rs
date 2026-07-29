@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
@@ -10,9 +11,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
     ExecutionCleanupStatus, TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool,
-    ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation,
-    ToolPreviewCapability, ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectKind,
+    ToolAccess, ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext,
+    ToolErrorKind, ToolExecutionId, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, safe_persistence_text,
 };
 use tokio::time::sleep;
 
@@ -314,7 +315,7 @@ impl Tool for TerminalReadTool {
             &self.artifact_label_root,
         )?;
         let read = manager.read(&task_id, offset, limit_bytes).await?;
-        Ok(ToolResult::ok(
+        let result = ToolResult::ok(
             call_id,
             self.spec().name,
             terminal_read_content(&read, include_content),
@@ -333,7 +334,38 @@ impl Tool for TerminalReadTool {
                 details: terminal_read_details(&read, limit_bytes, include_content),
                 ..ToolResultMeta::default()
             },
-        ))
+        );
+        Ok(attach_terminal_read_artifact(&ctx, result, &read))
+    }
+}
+
+pub(crate) fn attach_terminal_read_artifact(
+    ctx: &ToolContext,
+    result: ToolResult,
+    read: &TerminalReadResult,
+) -> ToolResult {
+    if read.content.is_empty() {
+        return result;
+    }
+    let Some(mut sink) = ctx.create_policy_safe_tool_output_sink(
+        &result.call_id,
+        &result.tool_name,
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::SensitiveLocal,
+    ) else {
+        return result;
+    };
+    let safe_content = safe_persistence_text(&read.content);
+    let redaction_count =
+        u32::from(safe_content != read.content || safe_content.len() as u64 != read.returned_bytes);
+    let publication = sink
+        .write_all(safe_content.as_bytes())
+        .map_err(anyhow::Error::from)
+        .and_then(|()| sink.finish_with_source_evidence(read.returned_bytes, redaction_count));
+    match publication {
+        Ok(descriptor) => result.with_captured_artifact(descriptor),
+        Err(_) => result.with_unavailable_artifact_capture(read.returned_bytes),
     }
 }
 

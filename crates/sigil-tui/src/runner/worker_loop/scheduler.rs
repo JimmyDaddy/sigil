@@ -346,6 +346,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
 
     state.refresh.provider_status_tasks.abort_all();
     state.compaction.preparation_tasks.abort_all();
+    state.artifact_gc.tasks.abort_all();
 }
 
 fn pop_next_urgent_command(
@@ -668,6 +669,7 @@ mod reactor_tests {
     #[test]
     fn idle_inbox_without_deadline_blocks_until_an_event_arrives() {
         let (event_tx, event_rx) = mpsc::channel();
+        let artifact_gc_tasks = ArtifactGcTaskManager::new();
         let entered = Arc::new(std::sync::Barrier::new(2));
         let receiver_entered = Arc::clone(&entered);
         let receiver = std::thread::spawn(move || {
@@ -680,6 +682,10 @@ mod reactor_tests {
         assert!(
             !receiver.is_finished(),
             "idle receiver returned without an event or deadline"
+        );
+        assert!(
+            !artifact_gc_tasks.has_active(),
+            "idle receive must not poll or launch artifact maintenance"
         );
 
         event_tx
@@ -978,6 +984,38 @@ mod reactor_tests {
         readiness.ingest(event_rx.recv().expect("projection wake should arrive"));
         assert!(readiness.has_priority_ready_work());
         assert!(readiness.take_wake_readiness(&coalescer).any);
+    }
+
+    #[test]
+    fn artifact_source_wakes_coalesce_and_remain_below_ordinary_commands() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let coalescer = WorkerWakeCoalescer::new(event_tx, Some("session-a".to_owned()));
+        let binding = coalescer
+            .current_projection_binding()
+            .expect("projection binding should exist");
+        let changed = [sigil_kernel::session::ActiveProjectionFamily::ToolOutputPressure]
+            .into_iter()
+            .collect();
+        coalescer.notify_session_projection(&binding, false, &changed);
+        coalescer.notify_session_projection(&binding, false, &changed);
+
+        let mut readiness = WorkerReadiness::new();
+        readiness.ingest(WorkerEvent::Command(WorkerCommand::SubmitTask {
+            prompt: "ordinary".to_owned(),
+        }));
+        readiness.ingest(event_rx.recv().expect("coalesced artifact wake"));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "coalesced source changes must publish one wake token"
+        );
+        assert!(!readiness.has_priority_ready_work());
+        assert!(matches!(
+            readiness.pop_ordinary_command(),
+            Some(WorkerCommand::SubmitTask { prompt }) if prompt == "ordinary"
+        ));
+        let wake = readiness.take_wake_readiness(&coalescer);
+        assert!(wake.any);
+        assert!(wake.tool_output_pressure_dirty());
     }
 
     #[test]

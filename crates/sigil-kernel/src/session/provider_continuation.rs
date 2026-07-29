@@ -2065,6 +2065,15 @@ impl ProviderContinuationProjection {
                     bail!("provider continuation stream repeats a tool-result event id")
                 }
             }
+            SessionLogEntry::ToolResultV2(result) => {
+                if self
+                    .tool_result_events
+                    .insert(event.event_id.clone(), result.call_id)
+                    .is_some()
+                {
+                    bail!("provider continuation stream repeats a tool-result V2 event id")
+                }
+            }
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
             | SessionLogEntry::ToolResult(_)

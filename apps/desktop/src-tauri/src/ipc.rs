@@ -46,7 +46,11 @@ use sigil_desktop::{
     DesktopSupportCheck, DesktopSupportDoctorReport, DesktopSupportEnvironment,
     DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
     DesktopTaskIntegrationAcceptanceView, DesktopTaskIntegrationReviewRequest,
-    DesktopTaskIntegrationReviewView, DesktopTimelineEvent, DesktopTranscriptAssistantKind,
+    DesktopTaskIntegrationReviewView, DesktopTimelineEvent,
+    DesktopToolArtifactAvailability as NativeToolArtifactAvailability,
+    DesktopToolArtifactPage as NativeToolArtifactPage,
+    DesktopToolArtifactPageEncoding as NativeToolArtifactPageEncoding,
+    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptAssistantKind,
     DesktopTranscriptRole, DesktopVerificationAction, DesktopVerificationCheckStatus,
     DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
     DesktopVerificationView, DesktopWorkspaceSummary,
@@ -1341,6 +1345,55 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) task_control: Option<DesktopConversationTaskControl>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    deny_unknown_fields
+)]
+pub(crate) enum DesktopToolArtifactSelector {
+    ByteSlice {
+        offset: u64,
+        limit: u32,
+    },
+    LinePage {
+        start_line: u64,
+        line_count: u32,
+    },
+    SearchLiteral {
+        query: String,
+        start_offset: u64,
+        max_matches: u16,
+        context_lines: u16,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopToolArtifactReadInput {
+    pub(crate) artifact_ref: String,
+    pub(crate) selector: DesktopToolArtifactSelector,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopToolArtifactPage {
+    pub(crate) schema_version: u16,
+    pub(crate) request_scope: String,
+    pub(crate) artifact_ref: String,
+    pub(crate) selector: DesktopToolArtifactSelector,
+    pub(crate) body: String,
+    pub(crate) body_encoding: &'static str,
+    pub(crate) returned_bytes: u32,
+    pub(crate) page_sha256: String,
+    pub(crate) artifact_sha256: String,
+    pub(crate) eof: bool,
+    pub(crate) match_count: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_selector: Option<DesktopToolArtifactSelector>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopConversationTaskControl {
@@ -1452,6 +1505,15 @@ pub(crate) enum DesktopConversationDisplayContent {
         output: Option<String>,
         truncated: bool,
         original_content_bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_availability: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        observed_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        persisted_bytes: Option<u64>,
+        has_more: bool,
     },
     Approval {
         call_id: String,
@@ -2528,6 +2590,56 @@ impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
     }
 }
 
+impl From<NativeToolArtifactPage> for DesktopToolArtifactPage {
+    fn from(value: NativeToolArtifactPage) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            request_scope: value.request_scope,
+            artifact_ref: value.artifact_ref,
+            selector: value.selector.into(),
+            body: value.body,
+            body_encoding: match value.body_encoding {
+                NativeToolArtifactPageEncoding::Utf8 => "utf8",
+                NativeToolArtifactPageEncoding::Base64 => "base64",
+            },
+            returned_bytes: value.returned_bytes,
+            page_sha256: value.page_sha256,
+            artifact_sha256: value.artifact_sha256,
+            eof: value.eof,
+            match_count: value.match_count,
+            next_selector: value.next_selector.map(Into::into),
+        }
+    }
+}
+
+impl From<NativeToolArtifactSelector> for DesktopToolArtifactSelector {
+    fn from(value: NativeToolArtifactSelector) -> Self {
+        match value {
+            NativeToolArtifactSelector::ByteSlice { offset, limit } => {
+                Self::ByteSlice { offset, limit }
+            }
+            NativeToolArtifactSelector::LinePage {
+                start_line,
+                line_count,
+            } => Self::LinePage {
+                start_line,
+                line_count,
+            },
+            NativeToolArtifactSelector::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            } => Self::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            },
+        }
+    }
+}
+
 impl From<NativeConversationTaskControl> for DesktopConversationTaskControl {
     fn from(value: NativeConversationTaskControl) -> Self {
         Self {
@@ -2660,12 +2772,32 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 output,
                 truncated,
                 original_content_bytes,
+                artifact_ref,
+                artifact_availability,
+                observed_bytes,
+                persisted_bytes,
+                has_more,
             } => Self::Tool {
                 call_id,
                 tool_name,
                 output,
                 truncated,
                 original_content_bytes,
+                artifact_ref,
+                artifact_availability: artifact_availability.map(|availability| {
+                    match availability {
+                        NativeToolArtifactAvailability::Available => "available",
+                        NativeToolArtifactAvailability::Expired => "expired",
+                        NativeToolArtifactAvailability::Missing => "missing",
+                        NativeToolArtifactAvailability::HashMismatch => "hash_mismatch",
+                        NativeToolArtifactAvailability::PolicyRevoked => "policy_revoked",
+                        NativeToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
+                    }
+                    .to_owned()
+                }),
+                observed_bytes,
+                persisted_bytes,
+                has_more,
             },
             NativeConversationDisplayContent::Approval {
                 call_id,

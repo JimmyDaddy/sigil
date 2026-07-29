@@ -29,7 +29,8 @@ use tokio::{
 
 use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
-    HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
+    HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION,
+    HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
     HttpAuthValidator, HttpCheckpointRestoreConflictReason, HttpCommandEnvelope,
@@ -65,8 +66,10 @@ use super::{
     HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
     HttpSupportContext, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView, HttpToolArtifactPage,
+    HttpToolArtifactPageEncoding, HttpToolArtifactReadDriverError, HttpToolArtifactReadRequest,
+    HttpToolArtifactSelector, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
     public_run_event_to_sse,
 };
 
@@ -1111,6 +1114,7 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(server_info.bind_addr, address.to_string());
     assert!(server_info.capabilities.durable_session_reopen);
     assert!(server_info.capabilities.bounded_transcript_replay);
+    assert!(server_info.capabilities.typed_tool_artifact_retrieval);
     assert!(server_info.capabilities.verification);
     assert!(server_info.capabilities.intent_stack);
     assert!(server_info.capabilities.run_context);
@@ -2022,6 +2026,112 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
             (Some("eyJzY2hlbWFfdmVyc2lvbiI6MX0".to_owned()), 50),
         ]
     );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_reads_only_bounded_typed_tool_artifact_pages() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "artifact display"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let artifact_ref = format!("ta1_{}", "a".repeat(32));
+    let selector = HttpToolArtifactSelector::LinePage {
+        start_line: 120,
+        line_count: 80,
+    };
+    driver.set_tool_artifact_page(HttpToolArtifactPage {
+        schema_version: HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION,
+        request_scope: session_id.to_owned(),
+        artifact_ref: artifact_ref.clone(),
+        selector: selector.clone(),
+        body: "bounded artifact page\n".to_owned(),
+        body_encoding: HttpToolArtifactPageEncoding::Utf8,
+        returned_bytes: 22,
+        page_sha256: sigil_kernel::stable_event_hash(b"bounded artifact page\n"),
+        artifact_sha256: format!("sha256:{}", "c".repeat(64)),
+        eof: false,
+        match_count: 0,
+        next_selector: Some(HttpToolArtifactSelector::LinePage {
+            start_line: 200,
+            line_count: 80,
+        }),
+    });
+    let path = format!("/sessions/{session_id}/tool-artifacts/read");
+    let request = json!({
+        "artifact_ref": artifact_ref,
+        "selector": {
+            "kind": "line_page",
+            "start_line": 120,
+            "line_count": 80
+        }
+    })
+    .to_string();
+
+    let (status, body) = http_raw_request(address, http_post(&path, None, &request)).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+
+    let (status, body) =
+        http_raw_request(address, http_post(&path, Some("secret-token"), &request)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["request_scope"], session_id);
+    assert_eq!(body["artifact_ref"], format!("ta1_{}", "a".repeat(32)));
+    assert_eq!(body["body"], "bounded artifact page\n");
+    assert_eq!(body["returned_bytes"], 22);
+    assert!(body.get("session_log_path").is_none());
+    assert!(body.get("artifact_path").is_none());
+    assert_eq!(
+        driver.tool_artifact_requests(),
+        vec![HttpToolArtifactReadRequest {
+            artifact_ref: format!("ta1_{}", "a".repeat(32)),
+            selector: selector.clone(),
+        }]
+    );
+
+    let oversized_body =
+        "x".repeat(sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES as usize + 1);
+    driver.set_tool_artifact_page(HttpToolArtifactPage {
+        schema_version: HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION,
+        request_scope: session_id.to_owned(),
+        artifact_ref: format!("ta1_{}", "a".repeat(32)),
+        selector: selector.clone(),
+        body: oversized_body.clone(),
+        body_encoding: HttpToolArtifactPageEncoding::Utf8,
+        returned_bytes: sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES + 1,
+        page_sha256: sigil_kernel::stable_event_hash(oversized_body.as_bytes()),
+        artifact_sha256: format!("sha256:{}", "c".repeat(64)),
+        eof: false,
+        match_count: 0,
+        next_selector: None,
+    });
+    let (status, body) =
+        http_raw_request(address, http_post(&path, Some("secret-token"), &request)).await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["code"], "tool_artifact_unavailable");
+
+    let oversized = json!({
+        "artifact_ref": format!("ta1_{}", "a".repeat(32)),
+        "selector": {
+            "kind": "byte_slice",
+            "offset": 0,
+            "limit": sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES + 1
+        }
+    })
+    .to_string();
+    let (status, body) =
+        http_raw_request(address, http_post(&path, Some("secret-token"), &oversized)).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_tool_artifact_request");
+    assert_eq!(driver.tool_artifact_requests().len(), 2);
     let _ = shutdown.send(());
 }
 
@@ -3224,6 +3334,29 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["paths"]["/sessions/{session_id}/display"]["get"]["responses"]["409"].is_object()
     );
     assert!(
+        document["paths"]["/sessions/{session_id}/tool-artifacts/read"]["post"]["responses"]["200"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ToolArtifactSelector"]["oneOf"][0]["properties"]["limit"]
+            ["maximum"],
+        16_384
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ToolArtifactSelector"]["oneOf"][2]["properties"]["max_matches"]
+            ["maximum"],
+        20
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ToolArtifactPage"]["properties"]["returned_bytes"]["maximum"],
+        16_384
+    );
+    assert!(
+        document["components"]["schemas"]["ToolArtifactPage"]["properties"]
+            .get("artifact_path")
+            .is_none()
+    );
+    assert!(
         document["paths"]["/sessions/{session_id}/queue"]["get"]["responses"]["200"].is_object()
     );
     assert!(
@@ -3306,6 +3439,11 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert_eq!(
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["canonical_conversation_display"]
+            ["type"],
+        "boolean"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ServerCapabilities"]["properties"]["typed_tool_artifact_retrieval"]
             ["type"],
         "boolean"
     );
@@ -7294,6 +7432,9 @@ struct RecordingRunDriver {
     conversation_display_page: Mutex<Option<HttpConversationDisplayPage>>,
     conversation_display_error: Mutex<Option<HttpConversationDisplayDriverError>>,
     conversation_display_queries: Mutex<Vec<(Option<String>, usize)>>,
+    tool_artifact_page: Mutex<Option<HttpToolArtifactPage>>,
+    tool_artifact_error: Mutex<Option<HttpToolArtifactReadDriverError>>,
+    tool_artifact_requests: Mutex<Vec<HttpToolArtifactReadRequest>>,
     run_context_view: Mutex<Option<HttpRunContextView>>,
     session_frontier: Mutex<Option<HttpDurableSessionFrontier>>,
     compaction_review: Mutex<Option<HttpCompactionReview>>,
@@ -7427,6 +7568,14 @@ impl RecordingRunDriver {
 
     fn conversation_display_queries(&self) -> Vec<(Option<String>, usize)> {
         lock(&self.conversation_display_queries).clone()
+    }
+
+    fn set_tool_artifact_page(&self, page: HttpToolArtifactPage) {
+        *lock(&self.tool_artifact_page) = Some(page);
+    }
+
+    fn tool_artifact_requests(&self) -> Vec<HttpToolArtifactReadRequest> {
+        lock(&self.tool_artifact_requests).clone()
     }
 
     fn set_run_context_view(&self, view: HttpRunContextView) {
@@ -7563,6 +7712,20 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.conversation_display_page)
             .clone()
             .ok_or(HttpConversationDisplayDriverError::Unavailable)
+    }
+
+    fn tool_artifact_page(
+        &self,
+        _session: &super::HttpSessionSnapshot,
+        request: &HttpToolArtifactReadRequest,
+    ) -> Result<HttpToolArtifactPage, HttpToolArtifactReadDriverError> {
+        lock(&self.tool_artifact_requests).push(request.clone());
+        if let Some(error) = lock(&self.tool_artifact_error).take() {
+            return Err(error);
+        }
+        lock(&self.tool_artifact_page)
+            .clone()
+            .ok_or(HttpToolArtifactReadDriverError::Unavailable)
     }
 
     fn session_frontier(

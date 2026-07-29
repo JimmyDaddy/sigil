@@ -184,13 +184,20 @@ hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业�
 - 文件类工具必须拒绝绝对路径、`..` 和指向 workspace 外的 symlink；新增路径要校验最近存在父目录仍在 workspace root 内
 - 写工具要考虑 preview、审批、失败回灌、恢复一致性
 - shell 工具要特别注意工作目录、超时和错误输出结构化
+- 大输出工具的验证必须同时覆盖 observed/persisted bytes、artifact completeness、model/display cap 和 stored-event cap；只验证最终字符串被截断不算通过
+- artifact publish 必须发生在 descriptor append 之前；append 失败只允许留下可由 grace GC 清理的 orphan，缺失或损坏时不得静默重跑原工具
+- typed artifact retrieval 必须覆盖 session scope、selector/output budget、full hash validation、repeated-read dedupe 和 body-free durable receipt
 
 ## 9. 会话与持久化规范
 
 - session log 采用 append-only JSONL
+- tool result 正文使用 session sibling immutable artifact store；JSONL 只保存 V2 descriptor、facts 和 bounded view
+- artifact ref 必须 opaque、session-scoped；fork 重新签发 ref，export 明确 completeness，delete/GC 复用 tombstone + grace lifecycle
 - control state 不能只存在运行内存
 - 入口层追加普通 control state 时优先复用 runtime session-control helper，避免 TUI / CLI / HTTP adapter 各自实现不同的 append/reload 行为
 - response handle、continuation state、prefix snapshot、compaction record 等 durable control state 要有显式查询/恢复路径
+- tool-output pressure、aging eligibility 和 artifact reachability 必须由 active incremental projection 随 append 前进；steady-state worker 通过 source-change wake/coalescing 调度，不得固定 cadence 轮询、全量重放 JSONL 或长期持有 data-file lock
+- deterministic tool-output aging 必须先于 semantic compaction，并通过 exact frontier + context epoch compare-and-publish 激活；当前 epoch 的 cached prefix 不原地改写
 - 任何恢复相关设计，都要优先考虑“进程重启后是否还能正确继续”
 
 ## 10. 评审标准

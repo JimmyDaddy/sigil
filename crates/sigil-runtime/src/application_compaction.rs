@@ -1,6 +1,5 @@
 //! Shared application-facing preview and apply contract for portable context compaction.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -211,49 +210,19 @@ impl PendingApplicationCompactionPreview {
         {
             bail!("local application compaction preview binding is stale");
         }
-        let records = JsonlSessionStore::read_event_records(session_path)?;
-        let sidecars = sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(&records)?;
-        let active_sources = sidecars.active_standalone_source_event_ids();
-        let projection = sigil_kernel::ToolOutputProjection::from_fold_plan(
-            &records,
-            &self.preview.plan,
-            &ToolOutputProjectionPolicy::default(),
-        )?;
-        let projected_output_count = projection
-            .outputs
-            .iter()
-            .filter(|output| !active_sources.contains(&output.shrink.source_event.event_id))
-            .count();
-        if projected_output_count == 0 {
-            bail!("no new large historical tool outputs are eligible");
-        }
-        let source_epoch_id = sidecars.latest_context_epoch_id().map_or_else(
-            || {
-                self.preview.active_compaction_id.as_ref().map_or_else(
-                    || "context-epoch:root".to_owned(),
-                    |compaction_id| format!("context-epoch:{compaction_id}"),
-                )
-            },
-            str::to_owned,
-        );
-        let context_epoch_id = format!(
-            "context-epoch:standalone-{}",
-            stable_event_uuid(
-                "sigil-application-standalone-tool-output-shrink",
-                &format!(
-                    "{}:{}",
-                    self.session_scope_id,
-                    self.preview.plan.base_stream_cursor.last_applied_event_id
-                ),
-            )
-        );
-        JsonlSessionStore::new(session_path)?
-            .append_standalone_tool_output_projection(
-                source_epoch_id,
-                context_epoch_id.clone(),
-                self.preview.plan,
-                ToolOutputProjectionPolicy::default(),
-            )?
+        let store = JsonlSessionStore::new(session_path)?;
+        let active = store.active_projection_snapshot()?;
+        let pressure = active.tool_output_pressure();
+        let batch = sigil_kernel::ToolOutputAgingBatchV1::select(
+            &pressure,
+            sigil_kernel::ToolOutputAgingReasonV1::Manual,
+        )?
+        .context("no new large historical tool outputs are eligible")?;
+        let activation = sigil_kernel::ToolOutputAgingActivatedV1::prepare(&pressure, &batch)?;
+        let projected_output_count = activation.replacements.len();
+        let context_epoch_id = activation.target_epoch_id.clone();
+        store
+            .append_tool_output_aging_activation(active.frontier(), activation)?
             .context("no standalone tool-output projection was appended")?;
         Ok(ApplicationToolOutputShrinkReceipt {
             context_epoch_id,
@@ -485,15 +454,11 @@ pub fn preview_application_compaction(
             started_at_unix_ms: now,
             completed_at_unix_ms: now,
         })?;
-    let records = JsonlSessionStore::read_event_records(session_path)?;
-    let active_sources =
-        sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(&records)?
-            .active_standalone_source_event_ids();
+    let pressure = store.active_projection_snapshot()?.tool_output_pressure();
     let tool_artifacts = compaction_tool_artifact_views(
-        local_preflight.tool_output_shrink_candidates(),
-        &active_sources,
+        &pressure,
         &crate::secret_redactor_for_root_config(&root_config),
-    );
+    )?;
     let tool_artifact_count = tool_artifacts.len();
     let review = ApplicationCompactionReview {
         preview_id: Some(preview_id.clone()),
@@ -763,15 +728,14 @@ async fn prepare_application_compaction_for_preview(
             ));
         }
     };
-    let records = JsonlSessionStore::read_event_records(session_path)?;
-    let active_sources =
-        sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(&records)?
-            .active_standalone_source_event_ids();
+    let pressure = session
+        .active_projection_snapshot()?
+        .context("active tool-output pressure projection is unavailable")?
+        .tool_output_pressure();
     let tool_artifacts = compaction_tool_artifact_views(
-        preflight.tool_output_shrink_candidates(),
-        &active_sources,
+        &pressure,
         &crate::secret_redactor_for_root_config(&root_config),
-    );
+    )?;
     let review = ApplicationCompactionReview {
         preview_id: Some(preview_id.clone()),
         folded_event_count,
@@ -1048,12 +1012,10 @@ async fn prepare_exact_application_compaction(
     let summary_output_tokens = summary_usage
         .as_ref()
         .map_or(0, |usage| usage.completion_tokens);
-    let bulky_shrink_candidate_tokens = preflight
-        .tool_output_shrink_candidates()
-        .iter()
-        .fold(0_u64, |total, candidate| {
-            total.saturating_add(candidate.original_content_token_upper_bound)
-        });
+    let bulky_shrink_candidate_tokens = session
+        .active_projection_snapshot()?
+        .map(|snapshot| snapshot.tool_output_pressure().reclaimable_tool_tokens)
+        .unwrap_or(0);
     let target_material = crate::attach_portable_compaction_economics_v2(
         target_material,
         crate::PortableCompactionEconomicsV2Input {
@@ -1156,6 +1118,7 @@ fn durable_message_count(entries: &[SessionLogEntry]) -> usize {
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
                     | SessionLogEntry::ToolResult(_)
+                    | SessionLogEntry::ToolResultV2(_)
             )
         })
         .count()
@@ -1252,39 +1215,52 @@ const MAX_APPLICATION_COMPACTION_TOOL_ARTIFACTS: usize = 16;
 const MAX_APPLICATION_COMPACTION_EXCERPT_BYTES: usize = 512;
 
 fn compaction_tool_artifact_views(
-    candidates: &[sigil_kernel::RecoverableToolOutputShrinkCandidateV1],
-    active_sources: &BTreeSet<String>,
+    pressure: &sigil_kernel::ToolOutputPressureSnapshotV1,
     redactor: &SecretRedactor,
-) -> Vec<ApplicationCompactionToolArtifactView> {
-    candidates
+) -> Result<Vec<ApplicationCompactionToolArtifactView>> {
+    let Some(batch) = sigil_kernel::ToolOutputAgingBatchV1::select(
+        pressure,
+        sigil_kernel::ToolOutputAgingReasonV1::Manual,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let selected = batch
+        .source_event_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(pressure
+        .items
         .iter()
-        .filter_map(|candidate| {
-            let sigil_kernel::ToolOutputArtifactRefV1::DurableTranscriptEvent {
-                event_id,
-                content_sha256,
-            } = &candidate.raw_durable_result;
-            (!active_sources.contains(event_id)).then(|| ApplicationCompactionToolArtifactView {
-                source_event_id: event_id.clone(),
-                content_sha256: content_sha256.clone(),
-                tool_name: candidate.tool_name.clone(),
-                tool_call_id: candidate.tool_call_id.clone(),
-                status: candidate.status.clone(),
-                original_content_bytes: candidate.original_content_bytes,
-                original_content_token_upper_bound: candidate.original_content_token_upper_bound,
-                head_excerpt: bounded_compaction_excerpt(
-                    &redactor.redact_text(&candidate.head_excerpt),
+        .filter(|item| selected.contains(&item.source_event_id))
+        .map(|item| ApplicationCompactionToolArtifactView {
+            source_event_id: item.source_event_id.clone(),
+            content_sha256: item.artifact_sha256.clone().unwrap_or_default(),
+            tool_name: item.tool_name.clone(),
+            tool_call_id: item.call_id.clone(),
+            status: item.facts.status.clone(),
+            original_content_bytes: item.observed_bytes,
+            original_content_token_upper_bound: item.initial_model_tokens,
+            head_excerpt: bounded_compaction_excerpt(&redactor.redact_text(&item.preview_excerpt)),
+            tail_excerpt: String::new(),
+            reason: sigil_kernel::ToolOutputShrinkReasonV1::LargeCompletedHistoricalResult,
+            recovery_instruction: bounded_compaction_excerpt(
+                &item.artifact_ref.as_ref().map_or_else(
+                    || {
+                        "raw artifact is unavailable; use the preserved facts and preview"
+                            .to_owned()
+                    },
+                    |artifact_ref| {
+                        format!(
+                            "use read_tool_artifact with opaque ref {} for bounded retrieval",
+                            artifact_ref.artifact_id
+                        )
+                    },
                 ),
-                tail_excerpt: bounded_compaction_excerpt(
-                    &redactor.redact_text(&candidate.tail_excerpt),
-                ),
-                reason: candidate.reason,
-                recovery_instruction: bounded_compaction_excerpt(
-                    &redactor.redact_text(&candidate.recovery_instruction),
-                ),
-            })
+            ),
         })
         .take(MAX_APPLICATION_COMPACTION_TOOL_ARTIFACTS)
-        .collect()
+        .collect())
 }
 
 fn bounded_compaction_excerpt(value: &str) -> String {

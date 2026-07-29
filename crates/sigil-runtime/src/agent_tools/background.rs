@@ -443,6 +443,7 @@ pub(super) async fn run_background_chat_agent(
 ) -> Result<BackgroundChatAgentResult> {
     let thread_id = thread.thread_id.clone();
     let web_task_tree_budget = initial_input.web_task_tree_budget();
+    let tool_artifact_read_budget = initial_input.tool_artifact_read_budget();
     let mut handler = BackgroundChatChildEventHandler {
         thread_id: thread_id.clone(),
         sink: event_sink.clone(),
@@ -487,6 +488,9 @@ pub(super) async fn run_background_chat_agent(
         let mut followup_input = sigil_kernel::AgentRunInput::user(followup_prompt);
         if let Some(budget) = web_task_tree_budget.as_ref() {
             followup_input = followup_input.with_web_task_tree_budget(Arc::clone(budget));
+        }
+        if let Some(budget) = tool_artifact_read_budget.as_ref() {
+            followup_input = followup_input.with_tool_artifact_read_budget(budget.clone());
         }
         latest_output = match child_agent
             .run_with_approval_input(

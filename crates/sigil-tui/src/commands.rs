@@ -28,6 +28,8 @@ pub(crate) enum UiCommand {
     SelectNextToolCard,
     SelectPreviousToolCard,
     ToggleSelectedToolCard,
+    ReadNextToolArtifactPage,
+    SearchToolArtifact,
     ClearToolCardFocus,
     CancelFocusedTerminalTask,
 }
@@ -266,6 +268,22 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
+        command: UiCommand::ReadNextToolArtifactPage,
+        keys: &[KeyBinding { label: "Alt-N" }],
+        slash: None,
+        label: "Next output page",
+        help: "Read the next bounded page from the focused tool output artifact.",
+        surface: CommandSurface::ToolCard,
+    },
+    UiCommandSpec {
+        command: UiCommand::SearchToolArtifact,
+        keys: &[KeyBinding { label: "Alt-F" }],
+        slash: None,
+        label: "Search full output",
+        help: "Search a bounded literal in the focused tool output artifact.",
+        surface: CommandSurface::ToolCard,
+    },
+    UiCommandSpec {
         command: UiCommand::ClearToolCardFocus,
         keys: &[KeyBinding { label: "Esc" }],
         slash: None,
@@ -304,6 +322,12 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         }
         KeyCode::Char('k') | KeyCode::Char('K') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::SelectPreviousToolCard)
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::ReadNextToolArtifactPage)
+        }
+        KeyCode::Char('f') | KeyCode::Char('F') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::SearchToolArtifact)
         }
         KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CheckChangedFilesDiagnostics)
@@ -422,6 +446,8 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
             UiCommand::SelectNextToolCard,
             UiCommand::SelectPreviousToolCard,
             UiCommand::ToggleSelectedToolCard,
+            UiCommand::ReadNextToolArtifactPage,
+            UiCommand::SearchToolArtifact,
             UiCommand::ClearToolCardFocus,
             UiCommand::CancelFocusedTerminalTask,
         ]));

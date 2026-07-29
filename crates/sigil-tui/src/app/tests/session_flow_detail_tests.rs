@@ -2600,9 +2600,12 @@ fn render_session_control_entries_cover_remaining_labels() {
 }
 
 #[test]
-fn restore_session_view_skips_empty_assistant_and_tool_result_content() {
+fn restore_session_view_skips_empty_assistant_and_marks_legacy_tool_result_unavailable() {
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
-    let mut empty_tool = ModelMessage::new(sigil_kernel::MessageRole::Tool, None);
+    let mut empty_tool = ModelMessage::new(
+        sigil_kernel::MessageRole::Tool,
+        Some("legacy-inline-secret-sentinel".to_owned()),
+    );
     empty_tool.tool_call_id = Some("call-empty".to_owned());
 
     app.restore_session_view(
@@ -2622,11 +2625,13 @@ fn restore_session_view_skips_empty_assistant_and_tool_result_content() {
             .iter()
             .any(|entry| entry.role == TimelineRole::Assistant)
     );
-    assert!(
-        !app.timeline
-            .iter()
-            .any(|entry| entry.role == TimelineRole::Tool)
-    );
+    let legacy = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("legacy tool result should remain visibly unavailable");
+    assert!(legacy.text.contains("legacy_unavailable"));
+    assert!(!legacy.text.contains("legacy-inline-secret-sentinel"));
 }
 
 #[test]

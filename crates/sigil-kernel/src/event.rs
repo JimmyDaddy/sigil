@@ -21,10 +21,10 @@ use crate::{
     QueryEgressStarted, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
     TaskGuidancePromotedEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
     TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry, ToolCall, ToolOperation,
-    ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent, ToolResult, ToolSpec,
-    ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
-    VerificationReceiptLinkRecorded, VerificationRecordedEntry, WebFetchTransportAuthorization,
-    WorkspaceMutationDetected,
+    ToolOutputAgingActivatedV1, ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent,
+    ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
+    VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
+    WebFetchTransportAuthorization, WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -165,11 +165,13 @@ durable_event_types! {
     UserMessageRecorded => ("user_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
     AssistantMessageRecorded => ("assistant_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecorded => ("tool_result_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
     RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
     RunFinalized => ("run_finalized", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
     ToolExecutionStarted => ("tool_execution_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolExecutionFinished => ("tool_execution_finished", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ToolArtifactReadRecorded => ("tool_artifact_read_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ApprovalResolved => ("approval_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanDraftCreated => ("plan_draft_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanDecisionRecorded => ("plan_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -271,6 +273,7 @@ durable_event_types! {
     TaskMemoryRecordedV1 => ("task_memory_recorded_v1", RecoveryCritical, Critical, DirectJson, "task_memory_recorded_v1"),
     TaskMemoryInvalidated => ("task_memory_invalidated", RecoveryCritical, Critical, DirectJson, "task_memory_invalidated"),
     ToolOutputProjectionShrinkRecorded => ("tool_output_projection_shrink_recorded", RecoveryCritical, Critical, DirectJson, "tool_output_projection_shrink_recorded"),
+    ToolOutputAgingActivated => ("tool_output_aging_activated", RecoveryCritical, Critical, DirectJson, "tool_output_aging_activated"),
     ConversationInputPromoted => ("conversation_input_promoted", RecoveryCritical, Critical, DirectJson, "conversation_input_promoted"),
     TaskGuidancePromoted => ("task_guidance_promoted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SandboxDecisionRecorded => ("sandbox_decision_recorded", RecoveryCritical, Critical, DirectJson, "sandbox_decision_recorded"),
@@ -495,6 +498,7 @@ pub enum TypedDomainEvent {
     TaskMemoryRecordedV1(TaskMemoryRecordedV1),
     TaskMemoryInvalidated(TaskMemoryInvalidatedEntry),
     ToolOutputProjectionShrinkRecorded(ToolOutputProjectionShrinkRecorded),
+    ToolOutputAgingActivated(ToolOutputAgingActivatedV1),
     MutationPrepared(MutationPrepared),
     MutationCommitted(MutationCommitted),
     CheckpointRestoreConflict(crate::CheckpointRestoreConflict),
@@ -644,6 +648,16 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             let entry: ToolOutputProjectionShrinkRecorded = decode_event_payload(&event)?;
             entry.validate_shape()?;
             TypedDomainEvent::ToolOutputProjectionShrinkRecorded(entry)
+        }
+        DurableEventType::ToolOutputAgingActivated => {
+            let entry: ToolOutputAgingActivatedV1 = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            if event.correlation_id.as_deref() != Some(event.event_id.as_str())
+                || event.causation_id.is_some()
+            {
+                bail!("tool-output aging activation has invalid durable lineage");
+            }
+            TypedDomainEvent::ToolOutputAgingActivated(entry)
         }
         DurableEventType::MutationPrepared => {
             TypedDomainEvent::MutationPrepared(decode_event_payload(&event)?)
@@ -1027,7 +1041,8 @@ fn maybe_decode_control_entry(event: &StoredEvent) -> Result<Option<ControlEntry
         SessionLogEntry::Control(control) => Ok(Some(control)),
         SessionLogEntry::User(_)
         | SessionLogEntry::Assistant(_)
-        | SessionLogEntry::ToolResult(_) => Ok(None),
+        | SessionLogEntry::ToolResult(_)
+        | SessionLogEntry::ToolResultV2(_) => Ok(None),
     }
 }
 
@@ -1538,6 +1553,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolApproval(_) => "tool_approval",
         ControlEntry::ToolApprovalSessionGrant(_) => "tool_approval_session_grant",
         ControlEntry::ToolExecution(_) => "tool_execution",
+        ControlEntry::ToolArtifactRead(_) => "tool_artifact_read",
         ControlEntry::ToolEgress(_) => "tool_egress",
         ControlEntry::McpElicitation(_) => "mcp_elicitation",
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",

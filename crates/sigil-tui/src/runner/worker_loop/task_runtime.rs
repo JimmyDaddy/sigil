@@ -18,6 +18,7 @@ pub(in crate::runner) struct TaskRunSpawn {
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
     pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) struct TaskContinueSpawn {
@@ -40,6 +41,7 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
     pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) struct SkillChildRunSpawn {
@@ -63,6 +65,7 @@ pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
     pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) fn spawn_task_run(
@@ -88,6 +91,7 @@ pub(in crate::runner) fn spawn_task_run(
             elicitation_audit_buffer,
             cancellation_handle,
             cancellation_task_guard,
+            tool_artifact_read_budget,
         } = spawn;
         let _cancellation_task_guard = cancellation_task_guard;
         let terminal_cancellation = cancellation_handle.clone();
@@ -108,6 +112,7 @@ pub(in crate::runner) fn spawn_task_run(
                 approval_rx,
                 handler: &mut handler,
                 cancellation_handle,
+                tool_artifact_read_budget,
             },
         )
         .await;
@@ -152,6 +157,7 @@ pub(in crate::runner) fn spawn_task_continue(
             elicitation_audit_buffer,
             cancellation_handle,
             cancellation_task_guard,
+            tool_artifact_read_budget,
         } = spawn;
         let _cancellation_task_guard = cancellation_task_guard;
         let terminal_cancellation = cancellation_handle.clone();
@@ -172,6 +178,7 @@ pub(in crate::runner) fn spawn_task_continue(
                 approval_rx,
                 handler: &mut handler,
                 cancellation_handle,
+                tool_artifact_read_budget,
             },
         )
         .await;
@@ -217,6 +224,7 @@ pub(in crate::runner) fn spawn_skill_child_run(
             elicitation_audit_buffer,
             cancellation_handle,
             cancellation_task_guard,
+            tool_artifact_read_budget,
         } = spawn;
         let _cancellation_task_guard = cancellation_task_guard;
         let terminal_cancellation = cancellation_handle.clone();
@@ -237,6 +245,7 @@ pub(in crate::runner) fn spawn_skill_child_run(
                 approval_rx,
                 handler: &mut handler,
                 cancellation_handle,
+                tool_artifact_read_budget,
             },
         )
         .await;
@@ -267,6 +276,7 @@ pub(in crate::runner) struct TaskRunOrchestration<'a> {
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) struct AdmittedTaskRunOrchestration<'a> {
@@ -280,6 +290,7 @@ pub(in crate::runner) struct AdmittedTaskRunOrchestration<'a> {
     pub(in crate::runner) role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     pub(in crate::runner) handler: &'a mut ChannelEventHandler,
     pub(in crate::runner) cancellation_handle: RunCancellationHandle,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
@@ -297,6 +308,7 @@ pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) struct TaskContinueOrchestration<'a> {
@@ -311,6 +323,7 @@ pub(in crate::runner) struct TaskContinueOrchestration<'a> {
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
     cancellation_handle: RunCancellationHandle,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
 pub(in crate::runner) async fn run_task_orchestration(
@@ -329,6 +342,7 @@ pub(in crate::runner) async fn run_task_orchestration(
         approval_rx,
         handler,
         cancellation_handle,
+        tool_artifact_read_budget,
     } = request;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     run_admitted_task_orchestration(
@@ -344,6 +358,7 @@ pub(in crate::runner) async fn run_task_orchestration(
             role_provider_builder,
             handler,
             cancellation_handle,
+            tool_artifact_read_budget,
         },
         &mut approval_handler,
     )
@@ -369,6 +384,7 @@ where
         role_provider_builder,
         handler,
         cancellation_handle,
+        tool_artifact_read_budget,
     } = request;
     sigil_runtime::agent_supervisor::task_execution::run_admitted_task_execution(
         session,
@@ -383,6 +399,7 @@ where
             role_provider_builder,
             handler,
             cancellation_handle,
+            tool_artifact_read_budget: Some(tool_artifact_read_budget),
         },
         approval_handler,
     )
@@ -453,6 +470,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         approval_rx,
         handler,
         cancellation_handle,
+        tool_artifact_read_budget,
     } = request;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
@@ -468,6 +486,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
             role_provider_builder,
             handler,
             cancellation_handle,
+            tool_artifact_read_budget: Some(tool_artifact_read_budget),
         },
         &mut approval_handler,
     )
@@ -494,6 +513,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         approval_rx,
         handler,
         cancellation_handle,
+        tool_artifact_read_budget,
     } = request;
     materialize_task_verification_config(
         session,
@@ -518,14 +538,17 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         role_provider_builder,
     )
     .await?;
-    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
+    let orchestrator = orchestrator
+        .with_cancellation(cancellation_handle)
+        .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
     session
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
         .map_err(|error| format!("{error:#}"))?;
     let child_input = AgentRunInput::without_persisted_user_message(vec![
         loaded.transient_context,
         ModelMessage::user(skill_invocation_prompt(&skill_id, &arguments)),
-    ]);
+    ])
+    .with_tool_artifact_read_budget(tool_artifact_read_budget);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .run_direct_child_session(

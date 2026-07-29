@@ -357,6 +357,11 @@ pub enum WorkerCommand {
         request_id: u64,
         source_path: PathBuf,
     },
+    ReadToolArtifactPage {
+        request_id: u64,
+        artifact_ref: sigil_kernel::ToolArtifactRefV1,
+        selector: sigil_kernel::ToolArtifactSelectorV1,
+    },
     ForkLocalSession {
         request_id: u64,
         source_path: PathBuf,
@@ -758,6 +763,17 @@ pub enum WorkerMessage {
         request_id: u64,
         entry: LocalSessionCatalogEntry,
     },
+    ToolArtifactPageRead {
+        request_id: u64,
+        page: sigil_kernel::ToolArtifactPageV1,
+        entries: Vec<SessionLogEntry>,
+    },
+    ToolArtifactPageReadFailed {
+        request_id: u64,
+        artifact_ref: sigil_kernel::ToolArtifactRefV1,
+        failure: ToolArtifactDisplayReadFailure,
+        entries: Vec<SessionLogEntry>,
+    },
     LocalSessionForked {
         request_id: u64,
         session_log_path: PathBuf,
@@ -833,6 +849,15 @@ pub enum WorkerMessage {
         receipt_tx: EgressDisclosureReceiptTx,
     },
     RunFailed(String),
+}
+
+/// Bounded, path-free failure surface for user-initiated artifact inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolArtifactDisplayReadFailure {
+    BudgetExhausted,
+    Unavailable(sigil_kernel::ToolArtifactAvailability),
+    Rejected,
+    AuditUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

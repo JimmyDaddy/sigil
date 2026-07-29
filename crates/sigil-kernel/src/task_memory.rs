@@ -545,7 +545,9 @@ impl TaskMemoryExtractionBuilder {
                     self.latest_user_objective = Some((content.to_owned(), event_id.to_owned()));
                 }
             }
-            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResult(_) => {}
+            SessionLogEntry::Assistant(_)
+            | SessionLogEntry::ToolResult(_)
+            | SessionLogEntry::ToolResultV2(_) => {}
             SessionLogEntry::Control(control) => match control {
                 ControlEntry::TaskRun(task) => {
                     self.push_source(event_id);

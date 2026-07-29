@@ -16,6 +16,7 @@ use fs2::FileExt;
 use futures::{Stream, stream};
 use serde_json::{Value, json};
 
+use crate::session::SessionWriterFault;
 use crate::{
     AgentRole, AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode,
     AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
@@ -31,17 +32,19 @@ use crate::{
     ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
     ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session,
     SessionLogEntry, SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskGuidanceApplyReason,
-    TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskParticipantAttemptId,
-    TaskParticipantContext, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry,
-    TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
-    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
-    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TOOL_ARTIFACT_READ_SCHEMA_VERSION,
+    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskHandoffId, TaskId,
+    TaskParticipantAttemptId, TaskParticipantContext, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding,
+    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus,
+    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
+    ToolArtifactRefV1, ToolArtifactSelectorV1, ToolCall, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
+    ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
+    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
+    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
     direct_conversation_continuation_prompt_contract_material, plan_text_hash,
     task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
@@ -2512,7 +2515,8 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
         matches!(message.role, MessageRole::Tool)
             && message.tool_call_id.as_deref() == Some("call-1")
             && message.content.as_deref().is_some_and(|content| {
-                content.contains(r#""status":"ok""#) && content.contains(r#""content":"hello""#)
+                content.contains(r#""preview":"hello""#)
+                    && content.contains(r#""preview_kind":"complete""#)
             })
     }));
     assert!(session.entries().iter().any(|entry| {
@@ -4493,7 +4497,7 @@ fn tool_result_bundle_is_durable_before_control_handlers_can_lock_the_session_fi
 
     let entries = JsonlSessionStore::read_entries(&session_path)?;
     assert_eq!(entries.len(), 4);
-    assert!(matches!(entries[0], SessionLogEntry::ToolResult(_)));
+    assert!(matches!(entries[0], SessionLogEntry::ToolResultV2(_)));
     assert!(matches!(
         entries[1],
         SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(_))
@@ -4507,6 +4511,101 @@ fn tool_result_bundle_is_durable_before_control_handlers_can_lock_the_session_fi
         SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance))
             if provenance.sources.len() == 2
     ));
+    Ok(())
+}
+
+#[test]
+fn typed_retrieval_receipt_and_result_recover_as_one_provider_consumable_bundle() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let artifact_ref = ToolArtifactRefV1 {
+        artifact_id: "ta1_0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    let receipt = ToolArtifactReadRecordedV1 {
+        schema_version: TOOL_ARTIFACT_READ_SCHEMA_VERSION,
+        call_id: "read-call-crash".to_owned(),
+        artifact_ref: artifact_ref.clone(),
+        source_descriptor_event_id: "source-descriptor-event".to_owned(),
+        active_epoch_id: "context-epoch:test".to_owned(),
+        selector: ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: 32,
+        },
+        returned_bytes: 32,
+        page_sha256: "sha256:page-digest".to_owned(),
+        artifact_sha256: "sha256:artifact-digest".to_owned(),
+        outcome: ToolArtifactReadOutcome::Returned,
+        deduplicated_from_call_id: None,
+    };
+    let mut result = ToolResult::ok(
+        "read-call-crash",
+        "read_tool_artifact",
+        json!({
+            "status": "returned",
+            "artifact_ref": artifact_ref,
+            "returned_bytes": 32,
+            "page_sha256": "sha256:page-digest",
+            "artifact_sha256": "sha256:artifact-digest",
+            "note": "page body is transient"
+        })
+        .to_string(),
+        ToolResultMeta::default(),
+    )
+    .with_control_entry(ControlEntry::ToolArtifactRead(receipt.clone()));
+    let mut handler = RecordingEventHandler::default();
+
+    super::tool_audit::append_tool_control_entries_from_result(
+        &mut session,
+        &mut handler,
+        &mut result,
+    )?;
+    assert!(matches!(
+        result.control_entries.as_slice(),
+        [ControlEntry::ToolArtifactRead(value)] if value == &receipt
+    ));
+    assert!(handler.events.is_empty());
+
+    store.inject_writer_fault(SessionWriterFault::PartialSecondRecord)?;
+    assert!(emit_tool_result(&mut session, &mut handler, result).is_err());
+    assert!(handler.events.is_empty());
+
+    // Loading invokes the writer-owned redo recovery. It completes the exact checksum-covered
+    // result+receipt bytes from the fsynced bundle intent; no tool or artifact read is rerun.
+    let recovered =
+        Session::load_from_store("test", "model", JsonlSessionStore::new(&session_path)?)?;
+    let recovered_entries = recovered.entries();
+    let result_index = recovered_entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::ToolResultV2(result)
+                    if result.call_id == "read-call-crash"
+            )
+        })
+        .expect("recovered session should retain the typed retrieval result");
+    assert!(matches!(
+        recovered_entries.get(result_index + 1),
+        Some(SessionLogEntry::Control(ControlEntry::ToolArtifactRead(value)))
+            if value == &receipt
+    ));
+    assert!(recovered.messages().iter().any(|message| {
+        message.role == MessageRole::Tool
+            && message.tool_call_id.as_deref() == Some("read-call-crash")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("\"status\":\"ok\""))
+    }));
+    let jsonl = std::fs::read_to_string(&session_path)?;
+    assert!(!jsonl.contains("secret-page-body"));
+    assert!(
+        !session_path
+            .with_extension("jsonl.append-bundle-intent")
+            .exists()
+    );
     Ok(())
 }
 
@@ -5428,11 +5527,12 @@ async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() 
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::ToolResult(result)
-                if result.tool_call_id.as_deref() == Some("call-late-handoff")
-                    && result.content.as_deref().is_some_and(|content| {
-                        content.contains("not available after the routing microturn")
-                    })
+            SessionLogEntry::ToolResultV2(result)
+                if result.call_id == "call-late-handoff"
+                    && result
+                        .initial_model_view
+                        .preview
+                        .contains("not available after the routing microturn")
         )
     }));
     Ok(())

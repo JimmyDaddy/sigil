@@ -101,6 +101,9 @@
 - prepared mutation 的 source/target hash、workspace revision、args、policy 与 approval 任一漂移都必须在首个写入前 fail closed；多文件补偿回滚仍须走 RFC-0002 CAS/审计，不能宣称为 crash-atomic transaction
 - `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
+- 所有工具结果必须通过 `ToolResultRecordedV2` 拆成 immutable policy-safe artifact、bounded model view 和 bounded display view；artifact body 不得进入 JSONL、control entry、run event 或 Desktop IPC
+- 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；legacy inline adapter 只允许 bounded fallback，超过 hard guard 必须显式 `LegacyUnavailable`，不得通过提高 stored-event 上限兜底
+- model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
 - 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context
 - `read_file` / `ls` / `glob` / `grep` 必须支持 limit 类参数并写回 returned/total/truncated metadata
 - 所有路径操作必须限制在 workspace root 内
@@ -108,7 +111,7 @@
 - workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`
 - Sigil 自身和模型可见 shell 工具需要临时 scratch 文件时，优先使用运行时注入的 `$SIGIL_SCRATCH_DIR`；它位于用户态 cache root，对模型显示为 `cache/tmp`。不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
 - 工具失败必须结构化返回，不能 panic
-- provider-visible tool result 必须使用 `ToolResult::to_model_content()` 的 JSON envelope，不要在 session 历史里写裸文本结果
+- provider-visible tool result 必须使用 V2 bounded model view；durable history 写 descriptor、facts 和 initial model view，不写裸文本或完整工具正文
 
 ### 3.4 `sigil-mcp`
 

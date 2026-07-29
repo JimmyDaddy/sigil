@@ -3229,7 +3229,7 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
         .expect("planner should receive discovery results");
     let result_envelope: Value = serde_json::from_str(&results)?;
     let results: Value = serde_json::from_str(
-        result_envelope["content"]
+        result_envelope["projection"]["preview"]
             .as_str()
             .expect("planner discovery result content should be a string"),
     )?;

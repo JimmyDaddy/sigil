@@ -14,6 +14,22 @@ pub(super) struct TailRecoveryIntent {
     pub(super) session_id: String,
 }
 
+/// Sidecar transaction intent for a multi-record append that must recover as all-or-none.
+///
+/// The event records remain ordinary append-only JSONL. The sidecar is fsynced before the first
+/// byte is appended and removed only after the complete byte range is fsynced. It carries the
+/// bounded serialized records as a redo log, so recovery can complete an interrupted append
+/// without rerunning the tool or losing the provider-visible terminal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct AppendBundleIntent {
+    pub(super) start_offset: u64,
+    pub(super) end_offset: u64,
+    pub(super) event_count: u32,
+    pub(super) bundle_sha256: String,
+    pub(super) bundle_jsonl: String,
+}
+
 pub(super) struct RecoveredSessionStream {
     pub(super) records: Vec<SessionStreamRecord>,
     pub(super) content: Vec<u8>,
@@ -23,6 +39,7 @@ pub(super) fn recover_tail_if_needed_locked(
     file: &mut File,
     path: &Path,
 ) -> Result<RecoveredSessionStream> {
+    recover_append_bundle_if_needed_locked(file, path)?;
     if let Some(intent) = read_tail_recovery_intent(path)? {
         match read_stream_records_from_file(file, path) {
             Ok(records) => {
@@ -98,6 +115,90 @@ pub(super) fn recover_tail_if_needed_locked(
     append_tail_recovery_event_locked(file, path, &intent)?;
     clear_tail_recovery_intent(path)?;
     read_recovered_stream_from_file(file, path)
+}
+
+fn recover_append_bundle_if_needed_locked(file: &mut File, path: &Path) -> Result<()> {
+    let Some(intent) = read_append_bundle_intent(path)? else {
+        return Ok(());
+    };
+    if intent.event_count < 2
+        || intent.end_offset <= intent.start_offset
+        || !intent.bundle_sha256.starts_with("sha256:")
+    {
+        bail!("append bundle intent is malformed");
+    }
+    let bundle_bytes = intent.bundle_jsonl.as_bytes();
+    if stable_event_hash(bundle_bytes) != intent.bundle_sha256
+        || intent.end_offset.saturating_sub(intent.start_offset) != bundle_bytes.len() as u64
+    {
+        bail!("append bundle intent payload does not match its durable range");
+    }
+    let bundle_records = read_stream_records_from_str(path, &intent.bundle_jsonl)
+        .context("append bundle intent does not contain valid session records")?;
+    if bundle_records.len() != intent.event_count as usize {
+        bail!("append bundle intent event count does not match its payload");
+    }
+
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let current_size = content.len() as u64;
+    if current_size < intent.start_offset || current_size > intent.end_offset {
+        bail!(
+            "append bundle recovery found an unexpected stream size: expected {}..={}, got {}",
+            intent.start_offset,
+            intent.end_offset,
+            current_size
+        );
+    }
+
+    if current_size == intent.end_offset {
+        let start = usize::try_from(intent.start_offset)
+            .context("append bundle start offset does not fit usize")?;
+        let end = usize::try_from(intent.end_offset)
+            .context("append bundle end offset does not fit usize")?;
+        if &content[start..end] != bundle_bytes {
+            bail!("append bundle recovery hash does not match the complete durable range");
+        }
+        read_stream_records_from_str(
+            path,
+            std::str::from_utf8(&content).context("session stream is not valid UTF-8")?,
+        )
+        .context("complete append bundle does not decode as a valid session stream")?;
+        clear_append_bundle_intent(path)?;
+        return Ok(());
+    }
+
+    let start = usize::try_from(intent.start_offset)
+        .context("append bundle start offset does not fit usize")?;
+    let observed_bundle_prefix = &content[start..];
+    if !bundle_bytes.starts_with(observed_bundle_prefix) {
+        bail!("append bundle recovery found bytes outside the prepared durable range");
+    }
+
+    // Rewrite from the original boundary rather than appending only the suffix. This handles an
+    // interrupted physical record and preserves the exact checksum-covered JSONL bytes.
+    file.set_len(intent.start_offset)
+        .with_context(|| format!("failed to truncate {}", path.display()))?;
+    file.seek(SeekFrom::End(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    file.write_all(bundle_bytes)
+        .with_context(|| format!("failed to recover append bundle in {}", path.display()))?;
+    file.flush().with_context(|| {
+        format!(
+            "failed to flush recovered append bundle in {}",
+            path.display()
+        )
+    })?;
+    file.sync_all().with_context(|| {
+        format!(
+            "failed to sync recovered append bundle in {}",
+            path.display()
+        )
+    })?;
+    clear_append_bundle_intent(path)
 }
 
 fn read_recovered_stream_from_file(file: &mut File, path: &Path) -> Result<RecoveredSessionStream> {
@@ -332,6 +433,48 @@ pub(super) fn write_tail_recovery_intent(path: &Path, intent: &TailRecoveryInten
 
 pub(super) fn clear_tail_recovery_intent(path: &Path) -> Result<()> {
     let intent_path = tail_recovery_intent_path(path);
+    if intent_path.exists() {
+        fs::remove_file(&intent_path)
+            .with_context(|| format!("failed to remove {}", intent_path.display()))?;
+        sync_parent_dir(&intent_path)?;
+    }
+    Ok(())
+}
+
+pub(super) fn append_bundle_intent_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.jsonl");
+    path.with_file_name(format!("{file_name}.append-bundle-intent"))
+}
+
+pub(super) fn read_append_bundle_intent(path: &Path) -> Result<Option<AppendBundleIntent>> {
+    let intent_path = append_bundle_intent_path(path);
+    if !intent_path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&intent_path)
+        .with_context(|| format!("failed to read {}", intent_path.display()))?;
+    let intent = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", intent_path.display()))?;
+    Ok(Some(intent))
+}
+
+pub(super) fn write_append_bundle_intent(path: &Path, intent: &AppendBundleIntent) -> Result<()> {
+    let intent_path = append_bundle_intent_path(path);
+    let content = serde_json::to_vec(intent).context("failed to serialize append bundle intent")?;
+    let mut file = File::create(&intent_path)
+        .with_context(|| format!("failed to create {}", intent_path.display()))?;
+    file.write_all(&content)
+        .with_context(|| format!("failed to write {}", intent_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", intent_path.display()))?;
+    sync_parent_dir(&intent_path)
+}
+
+pub(super) fn clear_append_bundle_intent(path: &Path) -> Result<()> {
+    let intent_path = append_bundle_intent_path(path);
     if intent_path.exists() {
         fs::remove_file(&intent_path)
             .with_context(|| format!("failed to remove {}", intent_path.display()))?;

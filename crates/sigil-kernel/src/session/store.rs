@@ -104,6 +104,18 @@ pub(super) fn unsupported_legacy_compaction_record(
     .into()
 }
 
+pub(super) fn unsupported_legacy_tool_result_record(
+    path: &Path,
+    physical_line: usize,
+) -> anyhow::Error {
+    SessionStreamCompatibilityError {
+        path: path.to_path_buf(),
+        physical_line,
+        format_name: "legacy inline tool_result_recorded (LegacyUnavailable)",
+    }
+    .into()
+}
+
 pub(super) fn is_unsupported_legacy_session_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<SessionStreamCompatibilityError>()
@@ -167,6 +179,15 @@ fn reject_legacy_compaction_record_payload(
     path: &Path,
     physical_line: usize,
 ) -> Result<()> {
+    if event.event_type == DurableEventType::ToolResultRecorded.as_str()
+        || event
+            .payload
+            .get("session_log_entry")
+            .and_then(|entry| entry.get("tool_result"))
+            .is_some()
+    {
+        return Err(unsupported_legacy_tool_result_record(path, physical_line));
+    }
     let Some(event_type) = event.event_kind() else {
         return Ok(());
     };
@@ -239,6 +260,11 @@ impl JsonlSessionStore {
         event_class: EventClass,
         payload: serde_json::Value,
     ) -> Result<StoredEvent> {
+        if event_type == DurableEventType::ToolResultRecorded {
+            bail!(
+                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
+            );
+        }
         let mut events = self.writer.append_events(
             vec![PendingStoredEvent {
                 event_type,
@@ -262,6 +288,22 @@ impl JsonlSessionStore {
     ) -> Result<Vec<StoredEvent>> {
         if durable_events.is_empty() && entries.is_empty() {
             bail!("durable event append batch must not be empty");
+        }
+        if durable_events
+            .iter()
+            .any(|(event_type, _, _)| *event_type == DurableEventType::ToolResultRecorded)
+        {
+            bail!(
+                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
+            );
+        }
+        if entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
+        {
+            bail!(
+                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
+            );
         }
         if entries.iter().any(|entry| {
             matches!(
@@ -312,6 +354,22 @@ impl JsonlSessionStore {
     {
         if durable_events.is_empty() && entries.is_empty() {
             bail!("conditional mixed event append batch must not be empty");
+        }
+        if durable_events
+            .iter()
+            .any(|(event_type, _, _)| *event_type == DurableEventType::ToolResultRecorded)
+        {
+            bail!(
+                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
+            );
+        }
+        if entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
+        {
+            bail!(
+                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
+            );
         }
         if entries.iter().any(|entry| {
             matches!(
@@ -539,12 +597,25 @@ impl JsonlSessionStore {
         if pending.is_empty() {
             bail!("conditional durable append batch must not be empty");
         }
+        if pending
+            .iter()
+            .any(|event| event.event_type == DurableEventType::ToolResultRecorded)
+        {
+            bail!(
+                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
+            );
+        }
         self.writer
             .append_events_if_records(pending, true, should_append)
     }
 
     /// Appends a provider-visible or control session entry as a v2 stored event.
     pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
+        if matches!(entry, SessionLogEntry::ToolResult(_)) {
+            bail!(
+                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
+            );
+        }
         if matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
@@ -565,6 +636,14 @@ impl JsonlSessionStore {
     ) -> Result<Vec<StoredEvent>> {
         if entries.is_empty() {
             bail!("session entry append batch must not be empty");
+        }
+        if entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
+        {
+            bail!(
+                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
+            );
         }
         if entries.iter().any(|entry| {
             matches!(
@@ -587,8 +666,12 @@ impl JsonlSessionStore {
                     causation_id: None,
                 }
             })
-            .collect();
-        self.writer.append_events(pending, false)
+            .collect::<Vec<_>>();
+        if pending.len() > 1 {
+            self.writer.append_crash_safe_bundle(pending)
+        } else {
+            self.writer.append_events(pending, false)
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -1069,6 +1152,7 @@ pub(super) fn session_entry_event_type(entry: &SessionLogEntry) -> DurableEventT
         SessionLogEntry::User(_) => DurableEventType::UserMessageRecorded,
         SessionLogEntry::Assistant(_) => DurableEventType::AssistantMessageRecorded,
         SessionLogEntry::ToolResult(_) => DurableEventType::ToolResultRecorded,
+        SessionLogEntry::ToolResultV2(_) => DurableEventType::ToolResultRecordedV2,
         SessionLogEntry::Control(control) => control_entry_event_type(control),
     }
 }
@@ -1092,6 +1176,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         }
         ControlEntry::ToolApproval(_) => DurableEventType::SessionEntryRecorded,
         ControlEntry::ToolExecution(execution) => tool_execution_event_type(execution.status),
+        ControlEntry::ToolArtifactRead(_) => DurableEventType::ToolArtifactReadRecorded,
         ControlEntry::ToolEgress(_) => DurableEventType::EgressDecisionRecorded,
         ControlEntry::PluginTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
         ControlEntry::PluginHookExecutionStarted(_) => DurableEventType::PluginHookExecutionStarted,
@@ -1191,6 +1276,11 @@ pub(super) fn tool_execution_event_type(status: ToolExecutionStatus) -> DurableE
 pub(super) fn session_entry_from_stored_event(
     event: &StoredEvent,
 ) -> Result<Option<SessionLogEntry>> {
+    if event.event_type == DurableEventType::ToolResultRecorded.as_str() {
+        bail!(
+            "unsupported legacy inline tool_result_recorded: raw body is LegacyUnavailable and cannot be recovered as an artifact"
+        );
+    }
     if event.event_kind().is_none() {
         return Ok(None);
     }
@@ -1206,14 +1296,36 @@ pub(super) fn session_entry_from_stored_event(
     let Some(value) = event.payload.get("session_log_entry") else {
         return Ok(None);
     };
-    let entry = serde_json::from_value(value.clone())
+    let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from stored event payload")?;
+    if matches!(entry, SessionLogEntry::ToolResult(_)) {
+        bail!(
+            "unsupported legacy inline tool result: raw body is LegacyUnavailable and cannot be recovered as an artifact"
+        );
+    }
+    if let SessionLogEntry::ToolResultV2(result) = &entry {
+        if event.event_kind() != Some(DurableEventType::ToolResultRecordedV2) {
+            bail!("tool result V2 payload used the wrong durable event type");
+        }
+        result.validate()?;
+    }
+    if let SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) = &entry {
+        if event.event_kind() != Some(DurableEventType::ToolArtifactReadRecorded) {
+            bail!("tool artifact read receipt used the wrong durable event type");
+        }
+        receipt.validate()?;
+    }
     Ok(Some(entry))
 }
 
 pub(crate) fn session_entry_from_domain_event(
     event: &DomainEvent,
 ) -> Result<Option<SessionLogEntry>> {
+    if event.event_type() == DurableEventType::ToolResultRecorded {
+        bail!(
+            "unsupported legacy inline tool_result_recorded: raw body is LegacyUnavailable and cannot be recovered as an artifact"
+        );
+    }
     if let DomainEvent::ConversationInputPromoted(payload) = event {
         let entry: ConversationInputPromotedEntry = serde_json::from_value(payload.payload.clone())
             .context("failed to decode conversation input promoted domain payload")?;
@@ -1228,8 +1340,25 @@ pub(crate) fn session_entry_from_domain_event(
     let Some(value) = payload.payload.get("session_log_entry") else {
         return Ok(None);
     };
-    let entry = serde_json::from_value(value.clone())
+    let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from domain event payload")?;
+    if matches!(entry, SessionLogEntry::ToolResult(_)) {
+        bail!(
+            "unsupported legacy inline tool result: raw body is LegacyUnavailable and cannot be recovered as an artifact"
+        );
+    }
+    if let SessionLogEntry::ToolResultV2(result) = &entry {
+        if event.event_type() != DurableEventType::ToolResultRecordedV2 {
+            bail!("tool result V2 payload used the wrong durable event type");
+        }
+        result.validate()?;
+    }
+    if let SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) = &entry {
+        if event.event_type() != DurableEventType::ToolArtifactReadRecorded {
+            bail!("tool artifact read receipt used the wrong durable event type");
+        }
+        receipt.validate()?;
+    }
     Ok(Some(entry))
 }
 

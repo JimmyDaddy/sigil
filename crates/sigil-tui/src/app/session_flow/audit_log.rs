@@ -5,7 +5,8 @@ use std::{
 
 use sigil_kernel::{
     ControlEntry, ExternalEvidenceLevel, ExternalProvenanceEntry, ModelMessage, SessionLogEntry,
-    ToolCall, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
+    ToolArtifactAvailability, ToolArtifactBindingV1, ToolArtifactStore, ToolCall, ToolEgressEntry,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResultRecordedV2,
 };
 
 use super::super::formatting::truncate_session_view_text;
@@ -52,11 +53,38 @@ pub(super) fn unix_time_ms() -> u64 {
 
 pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
     match entry {
-        SessionLogEntry::User(message)
-        | SessionLogEntry::Assistant(message)
-        | SessionLogEntry::ToolResult(message) => render_model_message_line(message),
+        SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
+            render_model_message_line(message)
+        }
+        SessionLogEntry::ToolResult(message) => format!(
+            "[tool] {}",
+            render_legacy_tool_result_unavailable_content(message)
+        ),
+        SessionLogEntry::ToolResultV2(result) => {
+            format!("[tool] {}", render_tool_result_v2_content(result))
+        }
         SessionLogEntry::Control(control) => render_control_entry_line(control),
     }
+}
+
+pub(super) fn render_legacy_tool_result_unavailable_content(message: &ModelMessage) -> String {
+    let observed_bytes = message
+        .content
+        .as_deref()
+        .map_or(0, |content| content.len() as u64);
+    serde_json::json!({
+        "status": "error",
+        "content": "Legacy inline tool output is unavailable after the V2 artifact cutover.",
+        "artifact": {
+            "artifact_ref": null,
+            "availability": "legacy_unavailable",
+            "observed_bytes": observed_bytes,
+            "persisted_bytes": 0,
+            "has_more": false,
+            "next_selector": null
+        }
+    })
+    .to_string()
 }
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
@@ -163,6 +191,10 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             grant.subjects.len()
         ),
         ControlEntry::ToolExecution(execution) => render_tool_execution_line(execution),
+        ControlEntry::ToolArtifactRead(receipt) => format!(
+            "[ctl] artifact read {} bytes={} outcome={:?}",
+            receipt.artifact_ref.artifact_id, receipt.returned_bytes, receipt.outcome
+        ),
         ControlEntry::ToolEgress(egress) => render_tool_egress_line(egress),
         ControlEntry::McpElicitation(elicitation) => format!(
             "[ctl] mcp elicitation {} action={} fields={}",
@@ -950,9 +982,70 @@ pub(super) fn restored_tool_result_call_ids(entries: &[SessionLogEntry]) -> Hash
         .iter()
         .filter_map(|entry| match entry {
             SessionLogEntry::ToolResult(message) => message.tool_call_id.clone(),
+            SessionLogEntry::ToolResultV2(result) => Some(result.call_id.clone()),
             _ => None,
         })
         .collect()
+}
+
+pub(super) fn render_tool_result_v2_content(result: &ToolResultRecordedV2) -> String {
+    render_tool_result_v2_content_with_store(result, None)
+}
+
+pub(super) fn render_tool_result_v2_content_with_store(
+    result: &ToolResultRecordedV2,
+    store: Option<&ToolArtifactStore>,
+) -> String {
+    let display = result.display_view();
+    let (artifact_ref, availability) = match &result.artifact {
+        ToolArtifactBindingV1::Published { descriptor } => {
+            let availability = store.map_or_else(
+                || {
+                    if descriptor.retrieval_available() {
+                        ToolArtifactAvailability::Available
+                    } else {
+                        ToolArtifactAvailability::PolicyRevoked
+                    }
+                },
+                |store| match store.resolve(&descriptor.artifact_ref) {
+                    Ok(resolved) if resolved == *descriptor => store.availability(descriptor),
+                    Ok(_) => ToolArtifactAvailability::HashMismatch,
+                    Err(_) => ToolArtifactAvailability::Missing,
+                },
+            );
+            (Some(descriptor.artifact_ref.clone()), availability)
+        }
+        ToolArtifactBindingV1::Unavailable { unavailable } => (None, unavailable.availability),
+    };
+    serde_json::json!({
+        "status": result.facts.status,
+        "content": display.preview,
+        "artifact": {
+            "artifact_ref": artifact_ref,
+            "availability": tool_artifact_availability_label(availability),
+            "observed_bytes": display.observed_bytes,
+            "persisted_bytes": display.persisted_bytes,
+            "has_more": display.has_more && availability == ToolArtifactAvailability::Available,
+            "next_selector": (display.has_more
+                && availability == ToolArtifactAvailability::Available).then(|| serde_json::json!({
+                    "kind": "line_page",
+                    "start_line": 0,
+                    "line_count": 200
+                }))
+        }
+    })
+    .to_string()
+}
+
+fn tool_artifact_availability_label(availability: ToolArtifactAvailability) -> &'static str {
+    match availability {
+        ToolArtifactAvailability::Available => "available",
+        ToolArtifactAvailability::Expired => "expired",
+        ToolArtifactAvailability::Missing => "missing",
+        ToolArtifactAvailability::HashMismatch => "hash_mismatch",
+        ToolArtifactAvailability::PolicyRevoked => "policy_revoked",
+        ToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
+    }
 }
 
 pub(super) fn should_render_restored_tool_execution(

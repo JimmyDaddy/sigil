@@ -1,6 +1,6 @@
 use std::fs;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, ConversationInputKind, ConversationInputPromotedEntry,
@@ -39,6 +39,38 @@ fn finalized_session(path: &Path, prompt: &str) -> Result<()> {
         }),
     )?;
     Ok(())
+}
+
+fn append_v2_tool_artifact(
+    path: &Path,
+    call_id: &str,
+    body: &str,
+) -> Result<sigil_kernel::session::ToolArtifactDescriptorV1> {
+    let store = JsonlSessionStore::new(path)?;
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&store);
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+        &sigil_kernel::ToolResult::ok(
+            call_id,
+            "shell",
+            body,
+            sigil_kernel::ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let descriptor = recorded
+        .artifact
+        .descriptor()
+        .context("published tool artifact")?
+        .clone();
+    store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+    let source_event_id = JsonlSessionStore::read_event_records(path)?
+        .last()
+        .context("tool result event")?
+        .event_id()
+        .to_owned();
+    artifact_store.bind_source_event(&descriptor.artifact_ref, &source_event_id)?;
+    Ok(descriptor)
 }
 
 #[test]
@@ -427,6 +459,71 @@ fn safe_session_export_redacts_text_omits_tool_calls_and_is_content_bound() -> R
 }
 
 #[test]
+fn session_export_requires_explicit_artifact_completeness_policy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-artifact.jsonl");
+    finalized_session(&source, "artifact export")?;
+    let descriptor = append_v2_tool_artifact(&source, "call-export", "artifact body")?;
+    let exports = temp.path().join("exports");
+    let service = LocalSessionLifecycleService::new("workspace-1", &sessions, &exports);
+
+    let bounded = service.export_session(&source, None, 1_234)?;
+    let bounded_artifact: SessionExportV1 = serde_json::from_slice(&fs::read(&bounded.path)?)?;
+    assert_eq!(
+        bounded_artifact.payload.tool_artifacts.mode,
+        SessionArtifactExportModeV1::BoundedTranscript
+    );
+    assert_eq!(
+        bounded.artifact_completeness,
+        SessionArtifactExportCompletenessV1::Incomplete
+    );
+    assert_eq!(
+        bounded_artifact
+            .payload
+            .tool_artifacts
+            .omitted_artifact_count,
+        1
+    );
+    assert!(bounded_artifact.payload.tool_artifacts.artifacts.is_empty());
+
+    let included = service.export_session_with_artifacts(
+        &source,
+        None,
+        1_235,
+        SessionArtifactExportModeV1::IncludeArtifacts,
+    )?;
+    let included_artifact: SessionExportV1 = serde_json::from_slice(&fs::read(&included.path)?)?;
+    assert_eq!(
+        included.artifact_completeness,
+        SessionArtifactExportCompletenessV1::Complete
+    );
+    assert_eq!(included.included_artifact_count, 1);
+    assert_eq!(
+        included_artifact.payload.tool_artifacts.artifacts[0]
+            .descriptor
+            .artifact_ref,
+        descriptor.artifact_ref
+    );
+    assert_eq!(
+        included_artifact.payload.tool_artifacts.artifacts[0].body_base64,
+        "YXJ0aWZhY3QgYm9keQ=="
+    );
+
+    let rejected = service
+        .export_session_with_artifacts(
+            &source,
+            None,
+            1_236,
+            SessionArtifactExportModeV1::RejectIfIncomplete,
+        )
+        .expect_err("reject mode must not silently omit tool artifacts");
+    assert!(rejected.to_string().contains("would be incomplete"));
+    Ok(())
+}
+
+#[test]
 fn safe_session_export_keeps_image_metadata_without_process_local_bytes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let sessions = temp.path().join("sessions");
@@ -567,6 +664,55 @@ fn session_delete_preview_protects_current_and_apply_is_exact_and_audited() -> R
 }
 
 #[test]
+fn session_delete_tombstones_artifacts_before_grace_prune() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-artifact.jsonl");
+    finalized_session(&source, "delete artifact session")?;
+    let descriptor = append_v2_tool_artifact(&source, "call-delete", "retained evidence")?;
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_path(&source);
+    assert_eq!(artifact_store.read_all(&descriptor)?, b"retained evidence");
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let preview = service.preview_delete(&source, &[])?;
+    assert!(preview.resource_bytes > 0);
+    let active_read = std::fs::OpenOptions::new().read(true).write(true).open(
+        artifact_store
+            .root()
+            .join("locks")
+            .join(format!("{}.lock", descriptor.artifact_ref.artifact_id)),
+    )?;
+    active_read.try_lock_shared()?;
+
+    let output = service.apply_delete(&preview, &[], 5_678)?;
+
+    let tombstone = sessions.join(".session-trash").join(&output.tombstone_id);
+    assert!(!source.exists());
+    assert!(tombstone.join("session.jsonl").is_file());
+    assert!(
+        tombstone
+            .join("resources")
+            .join("artifacts")
+            .join("refs")
+            .join(format!("{}.json", descriptor.artifact_ref.artifact_id))
+            .is_file()
+    );
+    assert_eq!(output.tombstoned_resource_bytes, preview.resource_bytes);
+    let early = service.prune_delete_tombstones(5_678)?;
+    assert_eq!(early.removed_tombstones, 0);
+    assert!(tombstone.exists());
+    let active = service.prune_delete_tombstones(u64::MAX)?;
+    assert_eq!(active.removed_tombstones, 0);
+    assert!(tombstone.exists());
+    drop(active_read);
+    let pruned = service.prune_delete_tombstones(u64::MAX)?;
+    assert_eq!(pruned.removed_tombstones, 1);
+    assert!(!tombstone.exists());
+    Ok(())
+}
+
+#[test]
 fn session_delete_rejects_preview_tamper_and_source_drift_before_journal_or_remove() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let sessions = temp.path().join("sessions");
@@ -646,6 +792,9 @@ fn lifecycle_recovery_distinguishes_not_applied_from_uncertain_delete() -> Resul
         source_content_sha256: preview.source_content_sha256.clone(),
         source_bytes: preview.source_bytes,
         source_modified_at_unix_ms: preview.source_modified_at_unix_ms,
+        resource_tree_sha256: preview.resource_tree_sha256.clone(),
+        resource_bytes: preview.resource_bytes,
+        tombstone_id: "session-delete-incomplete".to_owned(),
         preview_digest: preview.preview_digest.clone(),
     };
     service.lifecycle_journal().append(
@@ -727,6 +876,54 @@ fn session_pin_is_identity_bound_and_blocks_direct_delete_until_unpinned() -> Re
     service.set_session_pin(&source, false, 101)?;
     assert!(!service.catalog()?.entries[0].pinned);
     service.preview_delete(&source, &[])?;
+    Ok(())
+}
+
+#[test]
+fn session_pin_becomes_whole_store_hold_for_manifest_only_artifact_gc() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "pin artifact")?;
+    let source_ref = sigil_kernel::SessionRef::new_relative("session-source.jsonl")?;
+    let source_session_id = JsonlSessionStore::read_event_records(&source)?
+        .first()
+        .context("session identity")?
+        .session_id()
+        .to_owned();
+    let store = sigil_kernel::ToolArtifactStore::for_session_path(&source);
+    let orphan = store.capture_text(
+        "call-orphan",
+        "shell",
+        "orphan until pinned session is released",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    service.set_session_pin(&source, true, 100)?;
+
+    let pinned_report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+
+    assert_eq!(pinned_report.tombstoned_manifests, 0);
+    assert_eq!(
+        store.read_all(&orphan)?,
+        b"orphan until pinned session is released"
+    );
+    service.set_session_pin(&source, false, 101)?;
+    let released_report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(released_report.tombstoned_manifests, 1);
+    assert!(store.resolve(&orphan.artifact_ref).is_err());
     Ok(())
 }
 

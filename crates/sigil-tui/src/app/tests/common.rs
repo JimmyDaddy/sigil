@@ -96,12 +96,33 @@ pub(crate) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<Ses
             resolved_model_route: None,
         }),
         SessionLogEntry::User(ModelMessage::user("restored user prompt")),
-        SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "restored tool output")),
+        v2_tool_result_entry(
+            "call-1",
+            "test_tool",
+            "restored tool output",
+            ToolResultMeta::default(),
+        ),
         SessionLogEntry::Assistant(ModelMessage::assistant(
             Some("restored assistant answer".to_owned()),
             Vec::new(),
         )),
     ]
+}
+
+pub(crate) fn v2_tool_result_entry(
+    call_id: &str,
+    tool_name: &str,
+    content: impl Into<String>,
+    metadata: ToolResultMeta,
+) -> SessionLogEntry {
+    let result = ToolResult::ok(call_id, tool_name, content, metadata);
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+        &result,
+        None,
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )
+    .expect("bounded TUI test tool result must project to V2");
+    SessionLogEntry::ToolResultV2(recorded)
 }
 
 pub(crate) fn integration_review_entries(
@@ -383,7 +404,33 @@ pub(crate) fn select_root_slash_command(app: &mut AppState, command: &str) -> Re
 pub(crate) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
     for entry in entries {
-        store.append(entry)?;
+        if let SessionLogEntry::ToolResult(message) = entry {
+            let envelope = message
+                .content
+                .as_deref()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
+            let content = envelope
+                .as_ref()
+                .and_then(|value| value.get("content"))
+                .and_then(serde_json::Value::as_str)
+                .or(message.content.as_deref())
+                .unwrap_or_default();
+            let metadata = envelope
+                .as_ref()
+                .and_then(|value| value.get("meta"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            let migrated = v2_tool_result_entry(
+                message.tool_call_id.as_deref().unwrap_or("test-call"),
+                "test_tool",
+                content,
+                metadata,
+            );
+            store.append(&migrated)?;
+        } else {
+            store.append(entry)?;
+        }
     }
     Ok(())
 }

@@ -27,7 +27,7 @@ use crate::{
         HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
         HttpConversationRecoveryDriverError, HttpIntentStackDriverError, HttpQueuedRunDriverStart,
         HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
-        HttpRunDriverTaskPause, HttpSessionOpenBindingError,
+        HttpRunDriverTaskPause, HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
@@ -46,7 +46,8 @@ use crate::{
         HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
         HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationReviewRequest,
         HttpTaskIntegrationReviewView, HttpTaskPauseCommandReceipt, HttpTaskPauseRequest,
-        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
+        HttpToolArtifactPage, HttpToolArtifactReadRequest, HttpVerificationRerunCommandReceipt,
+        HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -162,6 +163,21 @@ pub enum HttpRegistryError {
     /// The canonical durable display projection could not be proven safely.
     #[error("conversation display projection is unavailable")]
     ConversationDisplayUnavailable,
+    /// The opaque tool artifact reference is malformed.
+    #[error("tool artifact reference is invalid")]
+    ToolArtifactReferenceInvalid,
+    /// The tool artifact selector exceeds a fixed retrieval bound.
+    #[error("tool artifact selector is invalid")]
+    ToolArtifactSelectorInvalid,
+    /// The tool artifact is absent, expired, or outside this logical session scope.
+    #[error("tool artifact is unavailable")]
+    ToolArtifactUnavailable,
+    /// The tool artifact bytes do not match the durable descriptor.
+    #[error("tool artifact failed integrity validation")]
+    ToolArtifactCorrupt,
+    /// The artifact retrieval policy does not authorize this display surface.
+    #[error("tool artifact retrieval is not authorized")]
+    ToolArtifactPolicyRevoked,
     /// The caller's queue generation no longer matches durable queue truth.
     #[error("conversation queue generation is stale")]
     ConversationQueueGenerationStale,
@@ -725,6 +741,45 @@ impl HttpSessionRunRegistry {
         {
             page.live_provisional_anchor = None;
         }
+        Ok(page)
+    }
+
+    /// Reads one typed artifact page after resolving the opaque reference in the addressed session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded typed rejection when the request, session scope, policy, or integrity
+    /// proof cannot be validated.
+    pub fn tool_artifact_page(
+        &self,
+        session_id: &str,
+        request: &HttpToolArtifactReadRequest,
+    ) -> Result<HttpToolArtifactPage, HttpRegistryError> {
+        let session = self.get_session(session_id)?;
+        let page = catch_unwind(AssertUnwindSafe(|| {
+            self.driver.tool_artifact_page(&session, request)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "tool artifact read",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(|error| match error {
+            HttpToolArtifactReadDriverError::InvalidReference => {
+                HttpRegistryError::ToolArtifactReferenceInvalid
+            }
+            HttpToolArtifactReadDriverError::InvalidSelector => {
+                HttpRegistryError::ToolArtifactSelectorInvalid
+            }
+            HttpToolArtifactReadDriverError::Unavailable => {
+                HttpRegistryError::ToolArtifactUnavailable
+            }
+            HttpToolArtifactReadDriverError::Corrupt => HttpRegistryError::ToolArtifactCorrupt,
+            HttpToolArtifactReadDriverError::PolicyRevoked => {
+                HttpRegistryError::ToolArtifactPolicyRevoked
+            }
+        })?;
+        page.validate(session_id, request)
+            .map_err(|_| HttpRegistryError::ToolArtifactUnavailable)?;
         Ok(page)
     }
 

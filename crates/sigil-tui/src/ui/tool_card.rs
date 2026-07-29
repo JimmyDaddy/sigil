@@ -101,6 +101,9 @@ pub(crate) fn render_tool_entry_lines(
             )],
         ));
     }
+    if let Some(artifact_line) = tool_artifact_status_line(&summary, palette) {
+        lines.push(artifact_line);
+    }
     if tool_has_preview(&summary) {
         if expanded {
             let body = render_tool_preview_body_with_palette(
@@ -177,6 +180,69 @@ struct ToolCardRender {
     hidden_lines: usize,
     preview_value: Option<Value>,
     diff: Option<ToolCardDiff>,
+    artifact: Option<ToolCardArtifact>,
+}
+
+#[derive(Clone)]
+struct ToolCardArtifact {
+    availability: String,
+    observed_bytes: u64,
+    persisted_bytes: u64,
+    has_more: bool,
+}
+
+fn tool_artifact_status_line(
+    summary: &ToolCardRender,
+    palette: &ThemePalette,
+) -> Option<Line<'static>> {
+    let artifact = summary.artifact.as_ref()?;
+    let (label, color) = if artifact.availability == "available" {
+        let size = format_tool_artifact_bytes(artifact.persisted_bytes);
+        let action = if artifact.has_more {
+            " · Alt-N next · Alt-F search"
+        } else {
+            " · Alt-F search"
+        };
+        if artifact.persisted_bytes < artifact.observed_bytes {
+            (
+                format!(
+                    "Saved output truncated · {} of {}{action}",
+                    size,
+                    format_tool_artifact_bytes(artifact.observed_bytes)
+                ),
+                palette.accent_warning,
+            )
+        } else {
+            (
+                format!("Saved full output · {size}{action}"),
+                palette.accent_info,
+            )
+        }
+    } else {
+        (
+            format!(
+                "Full output unavailable ({}) · saved summary remains auditable",
+                artifact.availability.replace('_', " ")
+            ),
+            palette.accent_warning,
+        )
+    };
+    Some(timeline_content_line(
+        palette.accent_danger,
+        vec![Span::styled(label, Style::default().fg(color))],
+    ))
+}
+
+fn format_tool_artifact_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    if bytes < 1024 * 1024 {
+        return format!("{:.1} KiB", bytes as f64 / KIB);
+    }
+    format!("{:.1} MiB", bytes as f64 / MIB)
 }
 
 #[derive(Clone, Default)]

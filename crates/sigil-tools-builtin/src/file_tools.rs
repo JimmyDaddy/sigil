@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs::{self, File},
+    io::{BufRead, BufReader, Write},
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -7,9 +11,11 @@ use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolOperation, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectScope, delete_file_with_mutation, write_file_with_mutation,
+    Tool, ToolAccess, ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity,
+    ToolCategory, ToolContext, ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
+    delete_file_with_mutation, safe_persistence_json_value, safe_persistence_text,
+    write_file_with_mutation,
 };
 
 use crate::{
@@ -25,8 +31,8 @@ use crate::{
         validate_delete_file_target,
     },
     support::{
-        limit_text_head, optional_string, optional_usize, render_unified_diff, required_string,
-        run_blocking_io, truncate_line_for_model,
+        append_truncation_notice, optional_string, optional_usize, render_unified_diff,
+        required_string, run_blocking_io, truncate_line_for_model,
     },
 };
 
@@ -40,10 +46,29 @@ pub(crate) struct GlobTool;
 pub(crate) struct GrepTool;
 
 enum ReadFileLoad {
-    File { content: String, bytes: u64 },
+    File {
+        content: String,
+        bytes: u64,
+        returned_bytes: u64,
+        returned_lines: u64,
+        selected_bytes: u64,
+        total_lines: u64,
+        truncated: bool,
+        next_offset: Option<usize>,
+        artifact: StreamingArtifactCapture,
+        oversized_lines: u64,
+    },
     Missing,
     NotAFile,
 }
+
+enum StreamingArtifactCapture {
+    NotAttached,
+    Published(Box<ToolArtifactDescriptorV1>),
+    Unavailable { observed_bytes: u64 },
+}
+
+const MAX_STREAMED_TEXT_LINE_BYTES: usize = 1024 * 1024;
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -80,6 +105,8 @@ impl Tool for ReadFileTool {
             .unwrap_or(DEFAULT_READ_LIMIT_LINES)
             .min(HARD_READ_LIMIT_LINES);
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
+        let artifact_store = ctx.tool_artifact_store().cloned();
+        let artifact_call_id = call_id.clone();
         let loaded = run_blocking_io("read_file", move || {
             let metadata = match fs::metadata(&resolved) {
                 Ok(metadata) => metadata,
@@ -94,16 +121,146 @@ impl Tool for ReadFileTool {
             if !metadata.is_file() {
                 return Ok(ReadFileLoad::NotAFile);
             }
-            let content = fs::read_to_string(&resolved)
-                .with_context(|| format!("failed to read {}", resolved.display()))?;
+            let file = File::open(&resolved)
+                .with_context(|| format!("failed to open {}", resolved.display()))?;
+            let mut reader = BufReader::new(file);
+            let mut sink = artifact_store.as_ref().map(|store| {
+                store.begin_policy_safe_capture(
+                    artifact_call_id,
+                    "read_file",
+                    "text/plain; charset=utf-8",
+                    ToolArtifactEncoding::Utf8,
+                    ToolArtifactSensitivity::Ordinary,
+                )
+            });
+            let mut model_content = String::new();
+            let mut returned_bytes = 0u64;
+            let mut returned_lines = 0u64;
+            let mut selected_source_bytes = 0u64;
+            let mut selected_policy_bytes = 0u64;
+            let mut selected_lines = 0usize;
+            let mut total_lines = 0usize;
+            let mut model_truncated = false;
+            let mut model_accepting = true;
+            let mut redaction_count = 0u32;
+            let mut oversized_lines = 0u64;
+            let model_limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
+
+            while let Some(line) = read_bounded_logical_line(&mut reader)? {
+                let line_index = total_lines;
+                total_lines = total_lines.saturating_add(1);
+                if line_index < offset || selected_lines >= limit {
+                    continue;
+                }
+                let source_separator = u64::from(selected_lines > 0);
+                selected_source_bytes = selected_source_bytes
+                    .saturating_add(source_separator)
+                    .saturating_add(line.observed_body_bytes);
+                oversized_lines = oversized_lines.saturating_add(u64::from(line.oversized));
+                let (policy_safe_line, redacted) =
+                    project_policy_safe_line(line, total_lines, &resolved)?;
+                redaction_count = redaction_count.saturating_add(u32::from(redacted));
+                let policy_separator = usize::from(selected_lines > 0);
+                selected_policy_bytes = selected_policy_bytes
+                    .saturating_add(policy_separator as u64)
+                    .saturating_add(policy_safe_line.len() as u64);
+                if let Some(sink) = sink.as_mut() {
+                    if policy_separator > 0 {
+                        sink.write_all(b"\n")?;
+                    }
+                    sink.write_all(policy_safe_line.as_bytes())?;
+                }
+                selected_lines = selected_lines.saturating_add(1);
+
+                let model_line = truncate_line_for_model(&policy_safe_line);
+                let line_projection_truncated = model_line != policy_safe_line;
+                let separator = usize::from(!model_content.is_empty());
+                if model_accepting
+                    && model_content
+                        .len()
+                        .saturating_add(separator)
+                        .saturating_add(model_line.len())
+                        <= model_limit_bytes
+                {
+                    if separator > 0 {
+                        model_content.push('\n');
+                        returned_bytes = returned_bytes.saturating_add(1);
+                    }
+                    model_content.push_str(&model_line);
+                    returned_bytes = returned_bytes.saturating_add(model_line.len() as u64);
+                    returned_lines = returned_lines.saturating_add(1);
+                    model_truncated |= line_projection_truncated;
+                } else {
+                    model_truncated = true;
+                    model_accepting = false;
+                }
+            }
+            let next_offset = (offset.saturating_add(selected_lines) < total_lines)
+                .then_some(offset.saturating_add(selected_lines));
+            let truncated = model_truncated || next_offset.is_some();
+            if truncated {
+                append_truncation_notice(&mut model_content);
+            }
+            let artifact = match sink {
+                Some(sink) => {
+                    match sink.finish_with_source_evidence(selected_source_bytes, redaction_count) {
+                        Ok(descriptor) => StreamingArtifactCapture::Published(Box::new(descriptor)),
+                        Err(_) => StreamingArtifactCapture::Unavailable {
+                            observed_bytes: selected_source_bytes,
+                        },
+                    }
+                }
+                None => StreamingArtifactCapture::NotAttached,
+            };
             Ok(ReadFileLoad::File {
-                content,
+                content: model_content,
                 bytes: metadata.len(),
+                returned_bytes,
+                returned_lines,
+                selected_bytes: selected_policy_bytes,
+                total_lines: total_lines as u64,
+                truncated,
+                next_offset,
+                artifact,
+                oversized_lines,
             })
         })
         .await?;
-        let (content, bytes) = match loaded {
-            ReadFileLoad::File { content, bytes } => (content, bytes),
+        let (
+            content,
+            bytes,
+            returned_bytes,
+            returned_lines,
+            selected_bytes,
+            total_lines,
+            truncated,
+            next_offset,
+            artifact,
+            oversized_lines,
+        ) = match loaded {
+            ReadFileLoad::File {
+                content,
+                bytes,
+                returned_bytes,
+                returned_lines,
+                selected_bytes,
+                total_lines,
+                truncated,
+                next_offset,
+                artifact,
+                oversized_lines,
+            } => (
+                content,
+                bytes,
+                returned_bytes,
+                returned_lines,
+                selected_bytes,
+                total_lines,
+                truncated,
+                next_offset,
+                artifact,
+                oversized_lines,
+            ),
             ReadFileLoad::Missing => {
                 return Ok(ToolResult::error(
                     call_id,
@@ -125,38 +282,125 @@ impl Tool for ReadFileTool {
                 ));
             }
         };
-        let total_lines = content.lines().count();
-        let selected = content.lines().skip(offset).collect::<Vec<_>>().join("\n");
         let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
-        let limited = limit_text_head(&selected, limit_bytes, limit);
-        let next_offset = offset + limited.returned_lines as usize;
         let mut details = serde_json::Map::new();
         details.insert("path".to_owned(), json!(path.as_str()));
         if let Some(language) = read_file_language(&path) {
             details.insert("language".to_owned(), json!(language));
         }
         details.insert("offset".to_owned(), json!(offset));
-        if next_offset < total_lines {
+        if let Some(next_offset) = next_offset {
             details.insert("next_offset".to_owned(), json!(next_offset));
         }
-        Ok(ToolResult::ok(
+        if oversized_lines > 0 {
+            details.insert(
+                "policy_omitted_oversized_lines".to_owned(),
+                json!(oversized_lines),
+            );
+        }
+        let result = ToolResult::ok(
             call_id,
             self.spec().name,
-            limited.content,
+            content,
             ToolResultMeta {
                 bytes: Some(bytes),
-                truncated: limited.truncated || next_offset < total_lines,
-                omitted_bytes: Some(limited.omitted_bytes),
+                truncated,
+                omitted_bytes: Some(selected_bytes.saturating_sub(returned_bytes)),
                 limit_bytes: Some(limit_bytes as u64),
                 limit_lines: Some(limit as u64),
-                returned_bytes: Some(limited.returned_bytes),
-                returned_lines: Some(limited.returned_lines),
-                total_bytes: Some(limited.total_bytes),
-                total_lines: Some(total_lines as u64),
+                returned_bytes: Some(returned_bytes),
+                returned_lines: Some(returned_lines),
+                total_bytes: Some(selected_bytes),
+                total_lines: Some(total_lines),
                 details: Value::Object(details),
                 ..ToolResultMeta::default()
             },
-        ))
+        );
+        Ok(attach_streaming_artifact(result, artifact))
+    }
+}
+
+struct BoundedLogicalLine {
+    bytes: Vec<u8>,
+    observed_body_bytes: u64,
+    oversized: bool,
+}
+
+fn read_bounded_logical_line(
+    reader: &mut impl BufRead,
+) -> std::io::Result<Option<BoundedLogicalLine>> {
+    let mut bytes = Vec::new();
+    let mut observed_bytes = 0u64;
+    let mut oversized = false;
+    let mut saw_data = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        saw_data = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let body_len = newline.unwrap_or(available.len());
+        observed_bytes = observed_bytes.saturating_add(body_len as u64);
+        if !oversized {
+            let remaining = MAX_STREAMED_TEXT_LINE_BYTES.saturating_sub(bytes.len());
+            if body_len <= remaining {
+                bytes.extend_from_slice(&available[..body_len]);
+            } else {
+                bytes.clear();
+                oversized = true;
+            }
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if !saw_data {
+        return Ok(None);
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+        observed_bytes = observed_bytes.saturating_sub(1);
+    }
+    Ok(Some(BoundedLogicalLine {
+        bytes,
+        observed_body_bytes: observed_bytes,
+        oversized,
+    }))
+}
+
+fn project_policy_safe_line(
+    line: BoundedLogicalLine,
+    line_number: usize,
+    path: &Path,
+) -> Result<(String, bool)> {
+    if line.oversized {
+        return Ok((
+            format!(
+                "[sigil: policy omitted oversized line {line_number} ({} bytes)]",
+                line.observed_body_bytes
+            ),
+            true,
+        ));
+    }
+    let raw = std::str::from_utf8(&line.bytes)
+        .with_context(|| format!("failed to decode UTF-8 text from {}", path.display()))?;
+    let safe = safe_persistence_text(raw);
+    let redacted = safe != raw;
+    Ok((safe, redacted))
+}
+
+fn attach_streaming_artifact(result: ToolResult, artifact: StreamingArtifactCapture) -> ToolResult {
+    match artifact {
+        StreamingArtifactCapture::NotAttached => result,
+        StreamingArtifactCapture::Published(descriptor) => {
+            result.with_captured_artifact(*descriptor)
+        }
+        StreamingArtifactCapture::Unavailable { observed_bytes } => {
+            result.with_unavailable_artifact_capture(observed_bytes)
+        }
     }
 }
 
@@ -711,9 +955,40 @@ impl Tool for GrepTool {
         let resolved = resolve_workspace_path(&ctx.workspace_root, &root)?;
         let regex = Regex::new(&pattern)?;
         let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
-        let (mut matches, binary_files_skipped) = run_blocking_io("grep", move || {
-            let mut matches = Vec::new();
+        let artifact_store = ctx.tool_artifact_store().cloned();
+        let artifact_call_id = call_id.clone();
+        let (
+            content,
+            returned_matches,
+            total_matches,
+            binary_files_skipped,
+            oversized_lines_skipped,
+            artifact,
+            model_output_truncated,
+        ) = run_blocking_io("grep", move || {
+            let model_limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
+            let mut model = Vec::with_capacity(model_limit_bytes);
+            model.push(b'[');
+            let mut model_items = 0usize;
+            let mut model_output_truncated = false;
+            let mut artifact_items = 0usize;
+            let mut artifact_sink = artifact_store.as_ref().map(|store| {
+                store.begin_policy_safe_capture(
+                    artifact_call_id,
+                    "grep",
+                    "application/json",
+                    ToolArtifactEncoding::Utf8,
+                    ToolArtifactSensitivity::Ordinary,
+                )
+            });
+            if let Some(sink) = artifact_sink.as_mut() {
+                sink.write_all(b"[")?;
+            }
+            let mut total_matches = 0usize;
             let mut binary_files_skipped = 0usize;
+            let mut oversized_lines_skipped = 0usize;
+            let mut redaction_count = 0u32;
+            let mut source_observed_bytes = 1u64;
             for entry in WalkBuilder::new(&resolved).build() {
                 let entry = entry?;
                 if !entry
@@ -723,43 +998,126 @@ impl Tool for GrepTool {
                 {
                     continue;
                 }
-                let content = match fs::read_to_string(entry.path()) {
-                    Ok(content) => content,
+                let file = match File::open(entry.path()) {
+                    Ok(file) => file,
                     Err(_) => {
                         binary_files_skipped += 1;
                         continue;
                     }
                 };
-                for (index, line) in content.lines().enumerate() {
-                    if regex.is_match(line) {
-                        matches.push(json!({
-                            "path": relativize(&workspace_root, entry.path())?,
-                            "line": index + 1,
-                            "text": truncate_line_for_model(line),
-                        }));
+                let mut reader = BufReader::new(file);
+                let mut line_number = 0usize;
+                loop {
+                    let line = match read_bounded_logical_line(&mut reader) {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        Err(_) => {
+                            binary_files_skipped = binary_files_skipped.saturating_add(1);
+                            break;
+                        }
+                    };
+                    line_number = line_number.saturating_add(1);
+                    if line.oversized {
+                        oversized_lines_skipped = oversized_lines_skipped.saturating_add(1);
+                        continue;
+                    }
+                    let Ok(text) = std::str::from_utf8(&line.bytes) else {
+                        binary_files_skipped = binary_files_skipped.saturating_add(1);
+                        break;
+                    };
+                    if !regex.is_match(text) {
+                        continue;
+                    }
+                    total_matches = total_matches.saturating_add(1);
+                    let raw_match = json!({
+                        "path": relativize(&workspace_root, entry.path())?,
+                        "line": line_number,
+                        "text": truncate_line_for_model(text),
+                    });
+                    let safe_match = safe_persistence_json_value(raw_match.clone());
+                    redaction_count =
+                        redaction_count.saturating_add(u32::from(safe_match != raw_match));
+                    let raw_encoded = serde_json::to_vec(&raw_match)?;
+                    source_observed_bytes = source_observed_bytes
+                        .saturating_add(u64::from(artifact_items > 0))
+                        .saturating_add(raw_encoded.len() as u64);
+                    let safe_encoded = serde_json::to_vec(&safe_match)?;
+                    if let Some(sink) = artifact_sink.as_mut() {
+                        if artifact_items > 0 {
+                            sink.write_all(b",")?;
+                        }
+                        sink.write_all(&safe_encoded)?;
+                    }
+                    artifact_items = artifact_items.saturating_add(1);
+                    if model_items < limit && !model_output_truncated {
+                        let separator = usize::from(model_items > 0);
+                        let required = model
+                            .len()
+                            .saturating_add(separator)
+                            .saturating_add(safe_encoded.len())
+                            .saturating_add(1);
+                        if required > model_limit_bytes {
+                            model_output_truncated = true;
+                            continue;
+                        }
+                        if separator > 0 {
+                            model.push(b',');
+                        }
+                        model.extend_from_slice(&safe_encoded);
+                        model_items = model_items.saturating_add(1);
                     }
                 }
             }
-            Ok((matches, binary_files_skipped))
+            model.push(b']');
+            let content =
+                String::from_utf8(model).context("grep model projection was not UTF-8")?;
+            let artifact = match artifact_sink {
+                Some(mut sink) => {
+                    sink.write_all(b"]")?;
+                    match sink.finish_with_source_evidence(
+                        source_observed_bytes.saturating_add(1),
+                        redaction_count,
+                    ) {
+                        Ok(descriptor) => StreamingArtifactCapture::Published(Box::new(descriptor)),
+                        Err(_) => StreamingArtifactCapture::Unavailable {
+                            observed_bytes: source_observed_bytes.saturating_add(1),
+                        },
+                    }
+                }
+                None => StreamingArtifactCapture::NotAttached,
+            };
+            Ok((
+                content,
+                model_items,
+                total_matches,
+                binary_files_skipped,
+                oversized_lines_skipped,
+                artifact,
+                model_output_truncated,
+            ))
         })
         .await?;
-        let total_matches = matches.len();
-        let truncated = total_matches > limit;
-        matches.truncate(limit);
-        Ok(ToolResult::ok(
+        let truncated = total_matches > limit || model_output_truncated;
+        let content_bytes = content.len() as u64;
+        let mut result = ToolResult::ok(
             call_id,
             self.spec().name,
-            serde_json::to_string_pretty(&matches)?,
+            content,
             ToolResultMeta {
                 truncated,
+                limit_bytes: Some(DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES) as u64),
                 limit_lines: Some(limit as u64),
-                returned_matches: Some(matches.len() as u64),
+                returned_bytes: Some(content_bytes),
+                returned_matches: Some(returned_matches as u64),
                 total_matches: Some(total_matches as u64),
                 details: json!({
-                    "binary_files_skipped": binary_files_skipped
+                    "binary_files_skipped": binary_files_skipped,
+                    "oversized_lines_skipped": oversized_lines_skipped,
                 }),
                 ..ToolResultMeta::default()
             },
-        ))
+        );
+        result = attach_streaming_artifact(result, artifact);
+        Ok(result)
     }
 }

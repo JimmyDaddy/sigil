@@ -2,8 +2,13 @@ import { useLayoutEffect, useState } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
+import type {
+  ToolArtifactAvailability,
+  ToolArtifactPage,
+  ToolArtifactSelector,
+} from "./types";
 import { Icon, type IconName } from "./ui/icons";
-import { Button } from "./ui/primitives";
+import { Button, TextField } from "./ui/primitives";
 
 const MAX_VISIBLE_OUTPUT_LINES = 240;
 const OUTPUT_PREVIEW_LINES = 3;
@@ -18,6 +23,10 @@ export interface ToolView {
   status?: string;
   risk?: string;
   duration?: string;
+  artifactRef?: string;
+  artifactAvailability?: ToolArtifactAvailability;
+  artifactHasMore?: boolean;
+  artifactPersistedBytes?: number;
 }
 
 type ToolTone = "neutral" | "info" | "success" | "warning" | "danger";
@@ -58,13 +67,41 @@ interface OutputPreview {
 export function ToolCard({
   tool,
   displayId,
+  onReadArtifact,
 }: {
   readonly tool: ToolView;
   readonly displayId?: string;
+  readonly onReadArtifact?: (selector: ToolArtifactSelector) => Promise<ToolArtifactPage>;
 }) {
   const presentation = presentTool(tool);
   const boundedDetail = boundedOutput(presentation.detailText ?? "");
   const inputLanguage = toolInputLanguage(tool.toolName);
+  const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
+  const [artifactBusy, setArtifactBusy] = useState(false);
+  const [artifactError, setArtifactError] = useState(false);
+  const [artifactQuery, setArtifactQuery] = useState("");
+  useLayoutEffect(() => {
+    setArtifactPage(undefined);
+    setArtifactBusy(false);
+    setArtifactError(false);
+    setArtifactQuery("");
+  }, [tool.key, tool.artifactRef]);
+  const canReadArtifact =
+    tool.artifactRef !== undefined
+    && tool.artifactAvailability === "available"
+    && onReadArtifact !== undefined;
+  const readArtifact = async (selector: ToolArtifactSelector) => {
+    if (!canReadArtifact || artifactBusy) return;
+    setArtifactBusy(true);
+    setArtifactError(false);
+    try {
+      setArtifactPage(await onReadArtifact(selector));
+    } catch {
+      setArtifactError(true);
+    } finally {
+      setArtifactBusy(false);
+    }
+  };
   return (
     <article
       className={`tool-card tool-tone-${presentation.tone}${presentation.detailKind === undefined ? " tool-card-compact" : ""}`}
@@ -133,6 +170,75 @@ export function ToolCard({
           </div>
         </details>
       )}
+      {canReadArtifact ? (
+        <section className="tool-artifact-retrieval" aria-label={`${presentation.displayName} saved output`}>
+          <div className="tool-artifact-actions">
+            <Button
+              type="button"
+              variant="quiet"
+              busy={artifactBusy && artifactPage === undefined}
+              onClick={() => void readArtifact({ kind: "byte_slice", offset: 0, limit: 16_384 })}
+            >
+              {artifactPage === undefined ? "View saved output" : "Restart saved output"}
+            </Button>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                const query = artifactQuery.trim();
+                if (query === "") return;
+                void readArtifact({
+                  kind: "search_literal",
+                  query,
+                  startOffset: 0,
+                  maxMatches: 20,
+                  contextLines: 2,
+                });
+              }}
+            >
+              <TextField
+                label="Search saved tool output"
+                labelHidden
+                containerClassName="tool-artifact-search-field"
+                maxLength={512}
+                value={artifactQuery}
+                onChange={(event) => setArtifactQuery(event.target.value)}
+              />
+              <Button type="submit" variant="quiet" disabled={artifactQuery.trim() === ""} busy={artifactBusy}>
+                Search
+              </Button>
+            </form>
+          </div>
+          {artifactPage === undefined ? (
+            <small>
+              {tool.artifactPersistedBytes === undefined
+                ? "The complete saved output is available in bounded pages."
+                : `${tool.artifactPersistedBytes} saved bytes are available in bounded pages.`}
+            </small>
+          ) : artifactPage.bodyEncoding === "utf8" ? (
+            <HighlightedCode
+              text={artifactPage.body}
+              ariaLabel={`${tool.toolName} saved output page`}
+            />
+          ) : (
+            <small>Binary output is available, but is not rendered as text.</small>
+          )}
+          {artifactPage?.nextSelector === undefined ? null : (
+            <Button
+              type="button"
+              variant="quiet"
+              busy={artifactBusy}
+              onClick={() => void readArtifact(artifactPage.nextSelector!)}
+            >
+              Next page
+            </Button>
+          )}
+          {artifactError ? <small role="alert">Saved output is unavailable or failed its integrity check.</small> : null}
+        </section>
+      ) : tool.artifactAvailability !== undefined && tool.artifactHasMore ? (
+        <small className="tool-artifact-unavailable">
+          The complete saved output is no longer available.
+        </small>
+      ) : null}
     </article>
   );
 }

@@ -14,12 +14,129 @@ use sigil_kernel::{
 use tempfile::tempdir;
 
 use super::{
-    super::{WorkerCommand, WorkerMessage},
+    super::{
+        ToolArtifactDisplayReadFailure, WorkerCommand, WorkerMessage,
+        worker_loop::read_tool_artifact_page_for_display,
+    },
     common::{
         PlannedProvider, StreamPlan, routed_session_identity, routed_test_root_config,
         spawn_test_worker, test_root_config, wait_for_session_entry,
     },
 };
+
+#[test]
+fn tui_tool_artifact_reads_share_budget_and_fail_closed_on_descriptor_drift() -> Result<()> {
+    let temp = tempdir()?;
+    let session_path = temp.path().join("artifact-session.jsonl");
+    let durable_store = JsonlSessionStore::new(&session_path)?;
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&durable_store);
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+        &sigil_kernel::ToolResult::ok(
+            "call-artifact",
+            "shell",
+            "alpha\nneedle one\nbeta\nneedle two\nomega",
+            sigil_kernel::ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let artifact_ref = recorded
+        .artifact
+        .descriptor()
+        .expect("published artifact")
+        .artifact_ref
+        .clone();
+    let mut session = sigil_kernel::Session::new("deepseek", "model").with_store(durable_store);
+    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+
+    let shared_budget = sigil_kernel::ToolArtifactReadBudgetV1::default();
+    let first_page = read_tool_artifact_page_for_display(
+        &mut session,
+        &shared_budget,
+        &artifact_ref,
+        sigil_kernel::ToolArtifactSelectorV1::LinePage {
+            start_line: 0,
+            line_count: 2,
+        },
+    )
+    .expect("line page");
+    assert!(first_page.body.contains("alpha"));
+    assert!(first_page.next_selector.is_some());
+    let search_page = read_tool_artifact_page_for_display(
+        &mut session,
+        &shared_budget,
+        &artifact_ref,
+        sigil_kernel::ToolArtifactSelectorV1::SearchLiteral {
+            query: "needle".to_owned(),
+            start_offset: 0,
+            max_matches: 20,
+            context_lines: 2,
+        },
+    )
+    .expect("literal search");
+    assert_eq!(search_page.match_count, 2);
+    let receipt = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) => Some(receipt),
+            _ => None,
+        })
+        .expect("body-free read receipt");
+    let encoded_receipt = serde_json::to_string(receipt)?;
+    assert!(!encoded_receipt.contains("needle one"));
+
+    let cap_budget = sigil_kernel::ToolArtifactReadBudgetV1::default();
+    for offset in 0..sigil_kernel::TOOL_ARTIFACT_READS_PER_TURN {
+        read_tool_artifact_page_for_display(
+            &mut session,
+            &cap_budget,
+            &artifact_ref,
+            sigil_kernel::ToolArtifactSelectorV1::ByteSlice {
+                offset: u64::from(offset),
+                limit: 1,
+            },
+        )
+        .expect("read within shared cap");
+    }
+    assert_eq!(
+        read_tool_artifact_page_for_display(
+            &mut session,
+            &cap_budget,
+            &artifact_ref,
+            sigil_kernel::ToolArtifactSelectorV1::ByteSlice {
+                offset: 9,
+                limit: 1,
+            },
+        ),
+        Err(ToolArtifactDisplayReadFailure::BudgetExhausted)
+    );
+
+    let manifest_path = artifact_store
+        .root()
+        .join("refs")
+        .join(format!("{}.json", artifact_ref.artifact_id));
+    let mut drifted: sigil_kernel::ToolArtifactDescriptorV1 =
+        serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    drifted.tool_name = "different-tool".to_owned();
+    fs::write(&manifest_path, serde_json::to_vec(&drifted)?)?;
+    assert_eq!(
+        read_tool_artifact_page_for_display(
+            &mut session,
+            &sigil_kernel::ToolArtifactReadBudgetV1::default(),
+            &artifact_ref,
+            sigil_kernel::ToolArtifactSelectorV1::ByteSlice {
+                offset: 0,
+                limit: 1,
+            },
+        ),
+        Err(ToolArtifactDisplayReadFailure::Unavailable(
+            sigil_kernel::ToolArtifactAvailability::HashMismatch
+        ))
+    );
+    Ok(())
+}
 
 struct ImageCapturingProvider {
     request_tx: mpsc::Sender<CompletionRequest>,

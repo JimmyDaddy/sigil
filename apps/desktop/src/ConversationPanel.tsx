@@ -1974,7 +1974,29 @@ export function ConversationPanel({
           </div>
         ) : rows.length > 0 ? (
           rows.map((row) => row.kind === "tool"
-            ? <ToolCard key={row.key} displayId={row.key} tool={{ key: row.key, toolName: row.label, text: row.text, input: row.input, status: row.status }} />
+            ? (
+              <ToolCard
+                key={row.key}
+                displayId={row.key}
+                tool={{
+                  key: row.key,
+                  toolName: row.label,
+                  text: row.text,
+                  input: row.input,
+                  status: row.status,
+                  artifactRef: row.artifactRef,
+                  artifactAvailability: row.artifactAvailability,
+                  artifactHasMore: row.artifactHasMore,
+                  artifactPersistedBytes: row.artifactPersistedBytes,
+                }}
+                onReadArtifact={row.artifactRef === undefined
+                  ? undefined
+                  : (selector) => bridge.readToolArtifact(workspaceId, session.id, {
+                    artifactRef: row.artifactRef!,
+                    selector,
+                  })}
+              />
+            )
             : <Message key={row.key} displayId={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
         ) : null}
       </div>

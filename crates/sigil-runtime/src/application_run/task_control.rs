@@ -391,6 +391,7 @@ impl ApplicationTaskContinuationExecution {
                 role_provider_builder: role_provider_builder.as_ref(),
                 handler: &mut bridge,
                 cancellation_handle: self.cancellation_handle.clone(),
+                tool_artifact_read_budget: None,
             },
             approval_handler,
         )

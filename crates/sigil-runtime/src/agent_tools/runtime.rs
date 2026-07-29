@@ -35,6 +35,7 @@ pub struct AgentToolRuntime {
     pub(super) delegation_run_context: Option<AgentDelegationRunContext>,
     pub(super) agent_tool_authorization: Option<AgentToolAuthorization>,
     pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
+    pub(super) tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
     #[cfg(test)]
     pub(super) delegation_authority_override: Option<DelegationAuthority>,
 }
@@ -69,6 +70,7 @@ impl AgentToolRuntime {
             delegation_run_context: None,
             agent_tool_authorization: None,
             web_task_tree_budget: None,
+            tool_artifact_read_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
         }
@@ -97,6 +99,7 @@ impl AgentToolRuntime {
             delegation_run_context: None,
             agent_tool_authorization: None,
             web_task_tree_budget: None,
+            tool_artifact_read_budget: None,
             #[cfg(test)]
             delegation_authority_override: None,
         }
@@ -247,15 +250,18 @@ impl AgentToolRuntime {
         Ok(resolved.clone())
     }
 
-    pub(super) fn inherit_web_task_tree_budget(
+    pub(super) fn inherit_root_budgets(
         &self,
         input: sigil_kernel::AgentRunInput,
     ) -> sigil_kernel::AgentRunInput {
-        self.web_task_tree_budget
-            .as_ref()
-            .map_or(input.clone(), |budget| {
-                input.with_web_task_tree_budget(Arc::clone(budget))
-            })
+        let input = match self.web_task_tree_budget.as_ref() {
+            Some(budget) => input.with_web_task_tree_budget(Arc::clone(budget)),
+            None => input,
+        };
+        match self.tool_artifact_read_budget.as_ref() {
+            Some(budget) => input.with_tool_artifact_read_budget(budget.clone()),
+            None => input,
+        }
     }
 
     fn resolve_manual_profile(&self, profile_id: &AgentProfileId) -> Result<ResolvedAgentProfile> {
@@ -460,6 +466,13 @@ impl AgentToolDelegate for AgentToolRuntime {
 
     fn set_web_task_tree_budget(&mut self, budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>) {
         self.web_task_tree_budget = budget;
+    }
+
+    fn set_tool_artifact_read_budget(
+        &mut self,
+        budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
+    ) {
+        self.tool_artifact_read_budget = budget;
     }
 
     fn set_join_batch_eligibility(&mut self, calls: &[ToolCall]) {

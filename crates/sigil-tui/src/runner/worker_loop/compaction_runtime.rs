@@ -923,15 +923,10 @@ pub(in crate::runner) fn prepare_v2_compaction_review(
             started_at_unix_ms: now,
             completed_at_unix_ms: now,
         })?;
-    let records = session.read_durable_event_records()?;
-    let active_standalone_sources =
-        sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(&records)?
-            .active_standalone_source_event_ids();
-    let tool_output_shrink_candidates = tool_output_shrink_previews(
-        &preflight,
-        &active_standalone_sources,
+    let tool_output_shrink_candidates = tool_output_aging_previews(
+        session,
         &sigil_runtime::secret_redactor_for_root_config(root_config),
-    );
+    )?;
     let standalone_tool_output_shrink_available = !tool_output_shrink_candidates.is_empty();
     let review = V2CompactionReview {
         request_id,
@@ -1180,11 +1175,10 @@ async fn prepare_v2_compaction(
     {
         Ok(pending) => {
             let continuity = Some(continuity_preview(&pending.preflight));
-            let tool_output_shrink_candidates = tool_output_shrink_previews(
-                &pending.preflight,
-                &std::collections::BTreeSet::new(),
+            let tool_output_shrink_candidates = tool_output_aging_previews(
+                session,
                 &sigil_runtime::secret_redactor_for_root_config(root_config),
-            );
+            )?;
             let budget = &pending.target_material.proof().budget;
             let economics = pending
                 .target_material
@@ -1254,37 +1248,54 @@ async fn prepare_v2_compaction(
     }
 }
 
-fn tool_output_shrink_previews(
-    preflight: &PortableSemanticCompactionPreflight,
-    excluded_source_event_ids: &std::collections::BTreeSet<String>,
+fn tool_output_aging_previews(
+    session: &Session,
     redactor: &sigil_kernel::SecretRedactor,
-) -> Vec<ToolOutputShrinkPreview> {
-    preflight
-        .tool_output_shrink_candidates()
+) -> Result<Vec<ToolOutputShrinkPreview>> {
+    let Some(active) = session.active_projection_snapshot()? else {
+        return Ok(Vec::new());
+    };
+    let pressure = active.tool_output_pressure();
+    let Some(batch) = sigil_kernel::ToolOutputAgingBatchV1::select(
+        &pressure,
+        sigil_kernel::ToolOutputAgingReasonV1::Manual,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let selected = batch
+        .source_event_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(pressure
+        .items
         .iter()
-        .filter(|candidate| match &candidate.raw_durable_result {
-            sigil_kernel::ToolOutputArtifactRefV1::DurableTranscriptEvent { event_id, .. } => {
-                !excluded_source_event_ids.contains(event_id)
-            }
-        })
-        .map(|candidate| ToolOutputShrinkPreview {
-            tool_name: candidate.tool_name.clone(),
-            tool_call_id: candidate.tool_call_id.clone(),
-            status: candidate.status.clone(),
-            original_content_bytes: candidate.original_content_bytes,
-            original_content_token_upper_bound: candidate.original_content_token_upper_bound,
-            head_excerpt: redactor.redact_text(&candidate.head_excerpt),
-            tail_excerpt: redactor.redact_text(&candidate.tail_excerpt),
-            content_sha256: candidate.content_sha256.clone(),
-            artifact_ref: match &candidate.raw_durable_result {
-                sigil_kernel::ToolOutputArtifactRefV1::DurableTranscriptEvent {
-                    event_id, ..
-                } => format!("durable transcript event {event_id}"),
-            },
+        .filter(|item| selected.contains(&item.source_event_id))
+        .map(|item| ToolOutputShrinkPreview {
+            tool_name: item.tool_name.clone(),
+            tool_call_id: item.call_id.clone(),
+            status: item.facts.status.clone(),
+            original_content_bytes: item.observed_bytes,
+            original_content_token_upper_bound: item.initial_model_tokens,
+            head_excerpt: redactor.redact_text(&item.preview_excerpt),
+            tail_excerpt: String::new(),
+            content_sha256: item.artifact_sha256.clone().unwrap_or_default(),
+            artifact_ref: item.artifact_ref.as_ref().map_or_else(
+                || "artifact unavailable".to_owned(),
+                |artifact_ref| artifact_ref.artifact_id.clone(),
+            ),
             reason: "large completed historical result".to_owned(),
-            recovery_instruction: redactor.redact_text(&candidate.recovery_instruction),
+            recovery_instruction: item.artifact_ref.as_ref().map_or_else(
+                || "raw artifact is unavailable; use the preserved facts and preview".to_owned(),
+                |artifact_ref| {
+                    format!(
+                        "use read_tool_artifact with opaque ref {} for bounded retrieval",
+                        artifact_ref.artifact_id
+                    )
+                },
+            ),
         })
-        .collect()
+        .collect())
 }
 
 fn continuity_preview(preflight: &PortableSemanticCompactionPreflight) -> V2ContinuityPreview {
@@ -1763,75 +1774,107 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
         &root_config.session,
         workspace_root,
     );
-    match super::prepare_next_queued_conversation_pressure_admission_with_resolver(
-        session,
-        exact_prompts,
-        workspace_root,
-        memory_config,
-        tools,
-        default_reasoning_effort,
-        traffic_partition_key,
-        &paths.cache_root,
-        context_resolver,
-        runtime_handle,
-    )
-    .map_err(anyhow::Error::msg)?
-    {
-        QueuedConversationPressureAdmission::NoQueuedInput => {
-            Ok(QueuedConversationPreTurnAdmission::NoQueuedInput)
-        }
-        QueuedConversationPressureAdmission::ExactFit(candidate) => {
-            Ok(QueuedConversationPreTurnAdmission::ExactFit(candidate))
-        }
-        QueuedConversationPressureAdmission::Blocked {
-            queue_id,
-            reason,
-            candidate,
-        } => Ok(QueuedConversationPreTurnAdmission::Blocked {
-            queue_id,
-            reason,
-            candidate,
-        }),
-        QueuedConversationPressureAdmission::PortablePreflightRequired { candidate, .. } => {
-            let queue_id = candidate.promotion.queue_id.clone();
-            let effective_config = sigil_runtime::effective_compaction_config(
-                session.provider_name(),
-                session.model_name(),
-                &root_config.compaction,
-            );
-            if !effective_config.enabled {
+    let mut fit_required_aging_attempted = false;
+    loop {
+        match super::prepare_next_queued_conversation_pressure_admission_with_resolver(
+            session,
+            exact_prompts,
+            workspace_root,
+            memory_config,
+            tools.clone(),
+            default_reasoning_effort.clone(),
+            traffic_partition_key.clone(),
+            &paths.cache_root,
+            context_resolver,
+            runtime_handle,
+        )
+        .map_err(anyhow::Error::msg)?
+        {
+            QueuedConversationPressureAdmission::NoQueuedInput => {
+                return Ok(QueuedConversationPreTurnAdmission::NoQueuedInput);
+            }
+            QueuedConversationPressureAdmission::ExactFit(candidate) => {
+                return Ok(QueuedConversationPreTurnAdmission::ExactFit(candidate));
+            }
+            QueuedConversationPressureAdmission::Blocked {
+                queue_id,
+                reason,
+                candidate,
+            } => {
                 return Ok(QueuedConversationPreTurnAdmission::Blocked {
                     queue_id,
-                    reason: "queued pre-turn portable compaction is disabled".to_owned(),
-                    candidate: Some(candidate),
+                    reason,
+                    candidate,
                 });
             }
-            let fallback_candidate = candidate.clone();
-            match runtime_handle.block_on(prepare_queued_portable_preflight(
-                root_config,
-                workspace_root,
-                session_log_path,
-                provider,
-                session,
-                memory_config,
-                *candidate,
-            )) {
-                Ok(Some(pending)) => Ok(
-                    QueuedConversationPreTurnAdmission::PortablePreflightReady(Box::new(pending)),
-                ),
-                Ok(None) => Ok(QueuedConversationPreTurnAdmission::Blocked {
-                    queue_id,
-                    reason: "queued pre-turn portable compaction has no foldable prior history"
-                        .to_owned(),
-                    candidate: Some(fallback_candidate),
-                }),
-                Err(_) => Ok(QueuedConversationPreTurnAdmission::Blocked {
-                    queue_id,
-                    reason:
-                        "queued pre-turn portable compaction is unavailable from the local target profile"
+            QueuedConversationPressureAdmission::PortablePreflightRequired {
+                candidate, ..
+            } => {
+                if !fit_required_aging_attempted {
+                    fit_required_aging_attempted = true;
+                    if let Some(active) = session.active_projection_snapshot()? {
+                        let pressure = active.tool_output_pressure();
+                        if let Some(batch) = sigil_kernel::ToolOutputAgingBatchV1::select(
+                            &pressure,
+                            sigil_kernel::ToolOutputAgingReasonV1::FitRequired,
+                        )? {
+                            let activation = sigil_kernel::ToolOutputAgingActivatedV1::prepare(
+                                &pressure, &batch,
+                            )?;
+                            if session
+                                .append_tool_output_aging_activation(active.frontier(), activation)?
+                                .is_some()
+                            {
+                                // Re-freeze the queued request from the newly activated epoch before
+                                // considering semantic compaction. No raw JSONL replay is needed by
+                                // the event-driven pressure selector or activation CAS.
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let queue_id = candidate.promotion.queue_id.clone();
+                let effective_config = sigil_runtime::effective_compaction_config(
+                    session.provider_name(),
+                    session.model_name(),
+                    &root_config.compaction,
+                );
+                if !effective_config.enabled {
+                    return Ok(QueuedConversationPreTurnAdmission::Blocked {
+                        queue_id,
+                        reason: "queued pre-turn portable compaction is disabled".to_owned(),
+                        candidate: Some(candidate),
+                    });
+                }
+                let fallback_candidate = candidate.clone();
+                return match runtime_handle.block_on(prepare_queued_portable_preflight(
+                    root_config,
+                    workspace_root,
+                    session_log_path,
+                    provider,
+                    session,
+                    memory_config,
+                    *candidate,
+                )) {
+                    Ok(Some(pending)) => Ok(
+                        QueuedConversationPreTurnAdmission::PortablePreflightReady(Box::new(
+                            pending,
+                        )),
+                    ),
+                    Ok(None) => Ok(QueuedConversationPreTurnAdmission::Blocked {
+                        queue_id,
+                        reason: "queued pre-turn portable compaction has no foldable prior history"
                             .to_owned(),
-                    candidate: Some(fallback_candidate),
-                }),
+                        candidate: Some(fallback_candidate),
+                    }),
+                    Err(_) => Ok(QueuedConversationPreTurnAdmission::Blocked {
+                        queue_id,
+                        reason:
+                            "queued pre-turn portable compaction is unavailable from the local target profile"
+                                .to_owned(),
+                        candidate: Some(fallback_candidate),
+                    }),
+                };
             }
         }
     }

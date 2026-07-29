@@ -18,8 +18,9 @@ use sigil_desktop::{
     DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
     DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
     DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
-    DesktopTaskContinuationRequest, DesktopTranscriptQuery, DesktopWorkspaceManagerError,
-    DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopTaskContinuationRequest, DesktopToolArtifactReadRequest,
+    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptQuery,
+    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -54,7 +55,8 @@ use crate::{
         DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
         DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskIntegrationAcceptInput,
         DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
-        DesktopTaskPauseInput, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopTaskPauseInput, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
+        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
         DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
@@ -1673,6 +1675,94 @@ fn validate_conversation_display_request(
     Ok(())
 }
 
+#[tauri::command]
+pub(crate) async fn desktop_read_tool_artifact(
+    workspace_id: String,
+    session_id: String,
+    input: DesktopToolArtifactReadInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopToolArtifactPage, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    validate_tool_artifact_read_input(&input)?;
+    let request = DesktopToolArtifactReadRequest {
+        artifact_ref: input.artifact_ref,
+        selector: match input.selector {
+            DesktopToolArtifactSelector::ByteSlice { offset, limit } => {
+                NativeToolArtifactSelector::ByteSlice { offset, limit }
+            }
+            DesktopToolArtifactSelector::LinePage {
+                start_line,
+                line_count,
+            } => NativeToolArtifactSelector::LinePage {
+                start_line,
+                line_count,
+            },
+            DesktopToolArtifactSelector::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            } => NativeToolArtifactSelector::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            },
+        },
+    };
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .tool_artifact_page(&session_id, &request)
+        .await
+        .map(Into::into)
+        .map_err(project_tool_artifact_client_error)
+}
+
+fn validate_tool_artifact_read_input(
+    input: &DesktopToolArtifactReadInput,
+) -> Result<(), DesktopCommandError> {
+    let valid_ref = input
+        .artifact_ref
+        .strip_prefix("ta1_")
+        .is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+    let valid_selector = match &input.selector {
+        DesktopToolArtifactSelector::ByteSlice { offset, limit } => {
+            *offset <= 16_777_216 && (1..=16_384).contains(limit)
+        }
+        DesktopToolArtifactSelector::LinePage {
+            start_line,
+            line_count,
+        } => *start_line <= 16_777_216 && (1..=200).contains(line_count),
+        DesktopToolArtifactSelector::SearchLiteral {
+            query,
+            start_offset,
+            max_matches,
+            context_lines,
+        } => {
+            !query.is_empty()
+                && query.len() <= 512
+                && *start_offset <= 16_777_216
+                && (1..=20).contains(max_matches)
+                && *context_lines <= 3
+        }
+    };
+    if !valid_ref || !valid_selector {
+        return Err(DesktopCommandError::new(
+            "tool_artifact_request_invalid",
+            "The tool artifact reference or selector is invalid.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_catalog_request(
     request: DesktopCatalogRequest,
 ) -> Result<DesktopCatalogQuery, DesktopCommandError> {
@@ -2460,6 +2550,45 @@ fn project_conversation_display_client_error(error: DesktopClientError) -> Deskt
             DesktopRecoveryAction::OpenDiagnostics,
             DesktopRecoveryAction::ShowDetails,
         ]),
+        other => project_client_error(other),
+    }
+}
+
+fn project_tool_artifact_client_error(error: DesktopClientError) -> DesktopCommandError {
+    match error {
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if matches!(
+            code.as_str(),
+            "invalid_tool_artifact_ref"
+                | "invalid_tool_artifact_selector"
+                | "invalid_tool_artifact_request"
+        ) =>
+        {
+            DesktopCommandError::new(
+                "tool_artifact_request_invalid",
+                "The tool artifact reference or selector is invalid.",
+            )
+        }
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "tool_artifact_unavailable" => DesktopCommandError::new(
+            "tool_artifact_unavailable",
+            "The complete tool output is no longer available.",
+        ),
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "tool_artifact_corrupt" => DesktopCommandError::new(
+            "tool_artifact_corrupt",
+            "The saved tool output failed its integrity check.",
+        )
+        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
+        DesktopClientError::Rejected {
+            code: Some(code), ..
+        } if code == "tool_artifact_policy_revoked" => DesktopCommandError::new(
+            "tool_artifact_policy_revoked",
+            "Current policy does not allow this saved tool output to be displayed.",
+        ),
         other => project_client_error(other),
     }
 }

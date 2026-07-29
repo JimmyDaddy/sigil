@@ -746,6 +746,16 @@ pub enum DesktopConversationDisplayContent {
         output: Option<String>,
         truncated: bool,
         original_content_bytes: u64,
+        #[serde(default)]
+        artifact_ref: Option<String>,
+        #[serde(default)]
+        artifact_availability: Option<DesktopToolArtifactAvailability>,
+        #[serde(default)]
+        observed_bytes: Option<u64>,
+        #[serde(default)]
+        persisted_bytes: Option<u64>,
+        #[serde(default)]
+        has_more: bool,
     },
     Approval {
         call_id: String,
@@ -910,6 +920,73 @@ pub struct DesktopConversationDisplayPage {
 pub struct DesktopConversationDisplayQuery {
     pub cursor: Option<String>,
     pub limit: Option<u16>,
+}
+
+/// Typed display availability for one durable tool artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopToolArtifactAvailability {
+    Available,
+    Expired,
+    Missing,
+    HashMismatch,
+    PolicyRevoked,
+    LegacyUnavailable,
+}
+
+/// Typed, bounded selector accepted by the display artifact endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum DesktopToolArtifactSelector {
+    ByteSlice {
+        offset: u64,
+        limit: u32,
+    },
+    LinePage {
+        start_line: u64,
+        line_count: u32,
+    },
+    SearchLiteral {
+        query: String,
+        start_offset: u64,
+        max_matches: u16,
+        context_lines: u16,
+    },
+}
+
+/// Narrow request for one session-scoped artifact page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopToolArtifactReadRequest {
+    pub artifact_ref: String,
+    pub selector: DesktopToolArtifactSelector,
+}
+
+/// Encoding of one bounded artifact body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopToolArtifactPageEncoding {
+    Utf8,
+    Base64,
+}
+
+/// One typed, bounded artifact page from the authenticated workspace server.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopToolArtifactPage {
+    pub schema_version: u16,
+    pub request_scope: String,
+    pub artifact_ref: String,
+    pub selector: DesktopToolArtifactSelector,
+    pub body: String,
+    pub body_encoding: DesktopToolArtifactPageEncoding,
+    pub returned_bytes: u32,
+    pub page_sha256: String,
+    pub artifact_sha256: String,
+    pub eof: bool,
+    pub match_count: u16,
+    #[serde(default)]
+    pub next_selector: Option<DesktopToolArtifactSelector>,
 }
 
 fn deserialize_decimal_u64<'de, D>(deserializer: D) -> Result<String, D::Error>

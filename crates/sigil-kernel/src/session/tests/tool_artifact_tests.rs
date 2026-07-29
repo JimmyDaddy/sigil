@@ -1,0 +1,876 @@
+use std::{io::Write, time::Instant};
+
+use anyhow::{Context, Result};
+
+use super::*;
+use crate::{ControlEntry, Session, SessionLogEntry};
+
+fn store_fixture() -> Result<(tempfile::TempDir, ToolArtifactStore)> {
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    Ok((temp, ToolArtifactStore::for_session_store(&session_store)))
+}
+
+#[test]
+fn opaque_ref_and_blob_path_do_not_expose_each_other() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-1",
+        "shell",
+        "hello",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+
+    assert!(descriptor.artifact_ref.artifact_id.starts_with("ta1_"));
+    assert!(
+        !store
+            .root()
+            .to_string_lossy()
+            .contains(&descriptor.artifact_ref.artifact_id)
+    );
+    assert_eq!(store.read_all(&descriptor)?, b"hello");
+    Ok(())
+}
+
+#[test]
+fn streaming_capture_is_bounded_and_records_truthful_head_tail() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let half = TOOL_ARTIFACT_MAX_BYTES / 2;
+    let mut sink = store.begin_policy_safe_capture(
+        "call-large",
+        "shell",
+        "application/octet-stream",
+        ToolArtifactEncoding::Binary,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    sink.write_all(&vec![b'h'; half + 13])?;
+    sink.write_all(&vec![b't'; half + 29])?;
+    let descriptor = sink.finish()?;
+
+    assert_eq!(
+        descriptor.observed_bytes,
+        (TOOL_ARTIFACT_MAX_BYTES + 42) as u64
+    );
+    assert_eq!(descriptor.policy_projected_bytes, descriptor.observed_bytes);
+    assert_eq!(descriptor.persisted_bytes, TOOL_ARTIFACT_MAX_BYTES as u64);
+    let ToolArtifactCompleteness::StorageTruncated(truncation) = &descriptor.completeness else {
+        panic!("large streaming artifact must be storage-truncated");
+    };
+    assert_eq!(truncation.omitted_bytes, 42);
+    assert_eq!(truncation.retained_head_bytes, half as u64);
+    assert_eq!(truncation.retained_tail_bytes, half as u64);
+    let body = store.read_all(&descriptor)?;
+    assert!(body[..half].iter().all(|byte| *byte == b'h'));
+    assert!(body[half..].iter().all(|byte| *byte == b't'));
+    Ok(())
+}
+
+#[test]
+fn hundred_megabyte_stream_keeps_only_the_bounded_head_and_tail() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let half = TOOL_ARTIFACT_MAX_BYTES / 2;
+    let mut sink = store.begin_policy_safe_capture(
+        "call-100m",
+        "shell",
+        "application/octet-stream",
+        ToolArtifactEncoding::Binary,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    sink.write_all(&vec![b'h'; half])?;
+    let middle_chunk = vec![b'm'; 64 * 1024];
+    let middle_bytes = 100 * 1024 * 1024 - TOOL_ARTIFACT_MAX_BYTES;
+    for _ in 0..middle_bytes / middle_chunk.len() {
+        sink.write_all(&middle_chunk)?;
+    }
+    sink.write_all(&vec![b't'; half])?;
+    let descriptor = sink.finish()?;
+
+    assert_eq!(descriptor.observed_bytes, 100 * 1024 * 1024);
+    assert_eq!(descriptor.persisted_bytes, TOOL_ARTIFACT_MAX_BYTES as u64);
+    let ToolArtifactCompleteness::StorageTruncated(truncation) = &descriptor.completeness else {
+        panic!("100 MiB stream must be storage-truncated");
+    };
+    assert_eq!(
+        truncation.omitted_bytes,
+        (100 * 1024 * 1024 - TOOL_ARTIFACT_MAX_BYTES) as u64
+    );
+    let body = store.read_all(&descriptor)?;
+    assert!(body[..half].iter().all(|byte| *byte == b'h'));
+    assert!(body[half..].iter().all(|byte| *byte == b't'));
+    Ok(())
+}
+
+#[test]
+#[ignore = "scale acceptance: streams 1 GiB and persists up to the 256 MiB session budget"]
+fn hundred_ten_megabyte_outputs_keep_events_bounded_and_enforce_session_budget() -> Result<()> {
+    const OUTPUT_COUNT: usize = 100;
+    const OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+    const CHUNK_BYTES: usize = 64 * 1024;
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session-scale.jsonl");
+    let durable_store = JsonlSessionStore::new(&session_path)?;
+    let artifact_store = ToolArtifactStore::for_session_store(&durable_store);
+    let mut accepted = 0_usize;
+    let mut rejected = 0_usize;
+    let chunk = vec![b'x'; CHUNK_BYTES];
+
+    for index in 0..OUTPUT_COUNT {
+        let call_id = format!("call-scale-{index}");
+        let mut sink = artifact_store.begin_policy_safe_capture(
+            &call_id,
+            "shell",
+            "application/octet-stream",
+            ToolArtifactEncoding::Binary,
+            ToolArtifactSensitivity::Ordinary,
+        );
+        sink.write_all(&[index as u8])?;
+        let remaining = OUTPUT_BYTES - 1;
+        for _ in 0..remaining / chunk.len() {
+            sink.write_all(&chunk)?;
+        }
+        sink.write_all(&chunk[..remaining % chunk.len()])?;
+
+        match sink.finish() {
+            Ok(descriptor) => {
+                accepted += 1;
+                assert_eq!(descriptor.observed_bytes, OUTPUT_BYTES as u64);
+                assert_eq!(descriptor.persisted_bytes, OUTPUT_BYTES as u64);
+                let (recorded, _) = ToolResultRecordedV2::capture(
+                    &ToolResult::ok(
+                        &call_id,
+                        "shell",
+                        "bounded scale projection",
+                        crate::ToolResultMeta::default(),
+                    )
+                    .with_captured_artifact(descriptor),
+                    Some(&artifact_store),
+                    ToolArtifactSensitivity::Ordinary,
+                )?;
+                let encoded = serde_json::to_vec(&recorded)?;
+                assert!(encoded.len() <= TOOL_RESULT_EVENT_TARGET_BYTES);
+                durable_store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+            }
+            Err(error) => {
+                rejected += 1;
+                assert!(
+                    format!("{error:#}").contains("session budget exceeded"),
+                    "unexpected scale rejection: {error:#}"
+                );
+            }
+        }
+    }
+
+    assert_eq!(accepted, 25);
+    assert_eq!(rejected, 75);
+    assert!(std::fs::metadata(&session_path)?.len() < 2 * 1024 * 1024);
+    Ok(())
+}
+
+#[test]
+#[ignore = "scale acceptance: fsyncs 1000 immutable artifact/result pairs"]
+fn thousand_small_results_keep_incremental_artifact_overhead_bounded() -> Result<()> {
+    const OUTPUT_COUNT: usize = 1_000;
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session-small-scale.jsonl");
+    let durable_store = JsonlSessionStore::new(&session_path)?;
+    let artifact_store = ToolArtifactStore::for_session_store(&durable_store);
+    let started = Instant::now();
+    let mut artifact_bytes = 0_u64;
+
+    for index in 0..OUTPUT_COUNT {
+        let call_id = format!("call-small-{index}");
+        let body = format!("small-result-{index}");
+        artifact_bytes = artifact_bytes.saturating_add(body.len() as u64);
+        let (recorded, _) = ToolResultRecordedV2::capture(
+            &ToolResult::ok(&call_id, "shell", body, crate::ToolResultMeta::default()),
+            Some(&artifact_store),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        assert!(serde_json::to_vec(&recorded)?.len() <= TOOL_RESULT_EVENT_TARGET_BYTES);
+        durable_store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+    }
+
+    let elapsed = started.elapsed();
+    let ledger: ToolArtifactBlobUsageLedgerV1 =
+        serde_json::from_slice(&std::fs::read(artifact_store.root().join("usage.json"))?)?;
+    assert_eq!(ledger.bytes, artifact_bytes);
+    assert!(!ledger.dirty);
+    assert!(std::fs::metadata(&session_path)?.len() < 64 * 1024 * 1024);
+    eprintln!(
+        "RFC-0059 small-result scale: {OUTPUT_COUNT} results in {elapsed:?} ({:.3} ms/result), jsonl={} bytes",
+        elapsed.as_secs_f64() * 1_000.0 / OUTPUT_COUNT as f64,
+        std::fs::metadata(&session_path)?.len(),
+    );
+    Ok(())
+}
+
+#[test]
+fn redaction_and_storage_truncation_are_both_preserved() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let policy_bytes = vec![b'x'; TOOL_ARTIFACT_MAX_BYTES + 1];
+    let descriptor = store.capture_policy_safe_bytes(
+        "call-redacted",
+        "shell",
+        &policy_bytes,
+        policy_bytes.len() as u64 + 20,
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::SensitiveLocal,
+        2,
+    )?;
+
+    let ToolArtifactCompleteness::PolicyRedacted {
+        redaction_count,
+        storage_truncation: Some(truncation),
+    } = descriptor.completeness
+    else {
+        panic!("redacted large output must preserve both loss causes");
+    };
+    assert_eq!(redaction_count, 2);
+    assert_eq!(truncation.omitted_bytes, 1);
+    assert_eq!(
+        descriptor.policy_projected_bytes,
+        (TOOL_ARTIFACT_MAX_BYTES + 1) as u64
+    );
+    assert_eq!(
+        descriptor.observed_bytes,
+        (TOOL_ARTIFACT_MAX_BYTES + 21) as u64
+    );
+    Ok(())
+}
+
+#[test]
+fn cross_session_descriptor_fails_closed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let first = JsonlSessionStore::new(temp.path().join("first.jsonl"))?;
+    let second = JsonlSessionStore::new(temp.path().join("second.jsonl"))?;
+    let first_store = ToolArtifactStore::for_session_store(&first);
+    let second_store = ToolArtifactStore::for_session_store(&second);
+    let descriptor = first_store.capture_text(
+        "call-1",
+        "shell",
+        "private",
+        ToolArtifactSensitivity::SensitiveLocal,
+    )?;
+
+    assert!(second_store.read_all(&descriptor).is_err());
+    assert_eq!(
+        second_store.availability(&descriptor),
+        ToolArtifactAvailability::PolicyRevoked
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_pre_captured_descriptor_fails_closed_without_recapturing_inline_preview() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_store = ToolArtifactStore::for_session_path(&temp.path().join("source.jsonl"));
+    let target_store = ToolArtifactStore::for_session_path(&temp.path().join("target.jsonl"));
+    let descriptor = source_store.capture_text(
+        "call-1",
+        "shell",
+        "source artifact body",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let result = ToolResult::ok(
+        "call-1",
+        "shell",
+        "inline preview must not be recaptured",
+        crate::ToolResultMeta::default(),
+    )
+    .with_captured_artifact(descriptor);
+
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&target_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+
+    let ToolArtifactBindingV1::Unavailable { unavailable } = recorded.artifact else {
+        panic!("cross-session pre-capture must fail closed");
+    };
+    assert_eq!(
+        unavailable.availability,
+        ToolArtifactAvailability::PolicyRevoked
+    );
+    assert_eq!(
+        recorded.capture_telemetry.capture_path,
+        ToolResultCapturePathV1::PreCapturedArtifact
+    );
+    assert!(target_store.manifest_inventory()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn oversized_legacy_inline_capture_hits_hard_guard_without_publishing_raw_body() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let body = format!(
+        "head:{}:guarded-secret-sentinel:{}:tail",
+        "h".repeat(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES),
+        "t".repeat(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES)
+    );
+    let result = ToolResult::ok(
+        "legacy-large",
+        "legacy_tool",
+        body,
+        crate::ToolResultMeta::default(),
+    );
+
+    let (recorded, display) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&store),
+        ToolArtifactSensitivity::SensitiveLocal,
+    )?;
+
+    let ToolArtifactBindingV1::Unavailable { unavailable } = &recorded.artifact else {
+        panic!("oversized legacy inline body must not be published");
+    };
+    assert_eq!(
+        unavailable.availability,
+        ToolArtifactAvailability::LegacyUnavailable
+    );
+    assert_eq!(
+        recorded.capture_telemetry,
+        ToolResultCaptureTelemetryV1 {
+            capture_path: ToolResultCapturePathV1::LegacyInlineCapture,
+            observed_inline_bytes: result.content.len() as u64,
+            hard_guard_bytes: Some(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64),
+            hard_guard_exceeded: true,
+            inline_projection_truncated: true,
+        }
+    );
+    assert_eq!(
+        recorded.initial_model_view.preview_kind,
+        ToolPreviewKind::HeadTail
+    );
+    assert!(
+        !recorded
+            .model_content()?
+            .contains("guarded-secret-sentinel")
+    );
+    assert!(!display.preview.contains("guarded-secret-sentinel"));
+    assert!(store.manifest_inventory()?.is_empty());
+    assert!(serde_json::to_vec(&recorded)?.len() < TOOL_RESULT_EVENT_TARGET_BYTES);
+    Ok(())
+}
+
+#[test]
+fn bounded_legacy_inline_capture_remains_available_and_reports_telemetry() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let result = ToolResult::ok(
+        "legacy-small",
+        "legacy_tool",
+        "small legacy body",
+        crate::ToolResultMeta::default(),
+    );
+
+    let (recorded, _) =
+        ToolResultRecordedV2::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
+
+    assert!(matches!(
+        recorded.artifact,
+        ToolArtifactBindingV1::Published { .. }
+    ));
+    assert_eq!(
+        recorded.capture_telemetry,
+        ToolResultCaptureTelemetryV1 {
+            capture_path: ToolResultCapturePathV1::LegacyInlineCapture,
+            observed_inline_bytes: result.content.len() as u64,
+            hard_guard_bytes: Some(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64),
+            hard_guard_exceeded: false,
+            inline_projection_truncated: false,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn forked_descriptor_gets_independent_ref_and_destination_scope() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_store = ToolArtifactStore::for_session_path(&temp.path().join("source.jsonl"));
+    let destination_store =
+        ToolArtifactStore::for_session_path(&temp.path().join("destination.jsonl"));
+    let source = source_store.capture_text(
+        "call-fork",
+        "shell",
+        "fork evidence",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+
+    let destination = destination_store.fork_descriptor_from(&source_store, &source)?;
+
+    assert_ne!(destination.artifact_ref, source.artifact_ref);
+    assert_ne!(
+        destination.session_scope_id_hash,
+        source.session_scope_id_hash
+    );
+    assert_eq!(destination.content_sha256, source.content_sha256);
+    assert_eq!(destination.completeness, source.completeness);
+    assert_eq!(destination_store.read_all(&destination)?, b"fork evidence");
+    assert!(destination_store.resolve(&source.artifact_ref).is_err());
+    assert!(source_store.resolve(&destination.artifact_ref).is_err());
+    Ok(())
+}
+
+#[test]
+fn manifest_gc_retains_active_hold_and_tombstones_only_grace_expired_orphan() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let active = store.capture_text(
+        "call-active",
+        "shell",
+        "active",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let held = store.capture_text(
+        "call-held",
+        "shell",
+        "held",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let orphan = store.capture_text(
+        "call-orphan",
+        "shell",
+        "orphan",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let newest_manifest_ms = store
+        .manifest_inventory()?
+        .iter()
+        .map(|entry| entry.manifest_modified_at_unix_ms)
+        .max()
+        .unwrap_or(0);
+    let roots = ToolArtifactGcRootsV1 {
+        active_result_refs: BTreeSet::from([active.artifact_ref.clone()]),
+        explicit_holds: BTreeSet::from([held.artifact_ref.clone()]),
+        ..ToolArtifactGcRootsV1::default()
+    };
+
+    let report = store.garbage_collect(
+        &roots,
+        newest_manifest_ms.saturating_add(TOOL_ARTIFACT_ORPHAN_GRACE_MS),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+
+    assert_eq!(report.scanned_manifests, 3);
+    assert_eq!(report.retained_manifests, 2);
+    assert_eq!(report.tombstoned_manifests, 1);
+    assert_eq!(report.tombstoned_blobs, 1);
+    assert_eq!(store.read_all(&active)?, b"active");
+    assert_eq!(store.read_all(&held)?, b"held");
+    assert!(store.resolve(&orphan.artifact_ref).is_err());
+    assert!(
+        store
+            .root()
+            .join("trash")
+            .join(report.tombstone_id)
+            .join("refs")
+            .join(format!("{}.json", orphan.artifact_ref.artifact_id))
+            .is_file()
+    );
+    let early = store.prune_garbage_trash(current_unix_ms(), TOOL_ARTIFACT_ORPHAN_GRACE_MS)?;
+    assert_eq!(early.removed_tombstones, 0);
+    let pruned = store.prune_garbage_trash(u64::MAX, TOOL_ARTIFACT_ORPHAN_GRACE_MS)?;
+    assert_eq!(pruned.removed_tombstones, 1);
+    assert!(pruned.removed_bytes > 0);
+    Ok(())
+}
+
+#[test]
+fn manifest_gc_skips_artifact_with_concurrent_read_lease() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let artifact = store.capture_text(
+        "call-read-race",
+        "shell",
+        "concurrent read",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let modified = store.manifest_inventory()?[0].manifest_modified_at_unix_ms;
+    let read_lock = store.open_ref_lock(&artifact.artifact_ref)?;
+    read_lock.try_lock_shared()?;
+
+    let skipped = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        modified.saturating_add(TOOL_ARTIFACT_ORPHAN_GRACE_MS),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+
+    assert_eq!(skipped.skipped_active_reads, 1);
+    assert_eq!(skipped.tombstoned_manifests, 0);
+    assert_eq!(store.resolve(&artifact.artifact_ref)?, artifact);
+    drop(read_lock);
+    let collected = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        modified.saturating_add(TOOL_ARTIFACT_ORPHAN_GRACE_MS),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+    assert_eq!(collected.tombstoned_manifests, 1);
+    Ok(())
+}
+
+#[test]
+fn manifest_gc_recovers_grace_expired_staging_and_published_blob_orphans() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let staging = store.root().join("staging");
+    std::fs::create_dir_all(&staging)?;
+    std::fs::write(staging.join("crash.part"), b"staging orphan")?;
+
+    let orphan_bytes = b"published before descriptor append";
+    let orphan_hash = stable_event_hash(orphan_bytes);
+    let digest = orphan_hash.strip_prefix("sha256:").context("hash prefix")?;
+    let blob_dir = store.root().join("blobs").join(&digest[..2]);
+    std::fs::create_dir_all(&blob_dir)?;
+    std::fs::write(blob_dir.join(format!("{digest}.blob")), orphan_bytes)?;
+
+    let report = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+
+    assert_eq!(report.scanned_manifests, 0);
+    assert_eq!(report.tombstoned_manifests, 0);
+    assert_eq!(report.tombstoned_blobs, 1);
+    assert_eq!(report.tombstoned_orphan_blobs, 1);
+    assert_eq!(report.tombstoned_staging_files, 1);
+    assert!(report.tombstoned_bytes >= orphan_bytes.len() as u64);
+    assert!(std::fs::read_dir(staging)?.next().is_none());
+    assert!(std::fs::read_dir(blob_dir)?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn dirty_blob_usage_ledger_is_reconciled_before_the_next_publish() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    store.capture_text(
+        "call-ledger-a",
+        "shell",
+        "alpha",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    store.persist_blob_usage_ledger(ToolArtifactBlobUsageLedgerV1 {
+        schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
+        bytes: 0,
+        dirty: true,
+    })?;
+
+    store.capture_text(
+        "call-ledger-b",
+        "shell",
+        "beta",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+
+    let ledger: ToolArtifactBlobUsageLedgerV1 =
+        serde_json::from_slice(&std::fs::read(store.root().join("usage.json"))?)?;
+    assert_eq!(
+        ledger,
+        ToolArtifactBlobUsageLedgerV1 {
+            schema_version: TOOL_ARTIFACT_BLOB_USAGE_LEDGER_SCHEMA_VERSION,
+            bytes: 9,
+            dirty: false,
+        }
+    );
+    assert_eq!(directory_file_bytes(&store.root().join("blobs"))?, 9);
+    Ok(())
+}
+
+#[test]
+fn corrupt_blob_is_detected_without_returning_body() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-1",
+        "shell",
+        "evidence",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let digest = descriptor
+        .content_sha256
+        .strip_prefix("sha256:")
+        .expect("hash prefix");
+    let blob = store
+        .root()
+        .join("blobs")
+        .join(&digest[..2])
+        .join(format!("{digest}.blob"));
+    std::fs::write(blob, b"tampered")?;
+
+    assert_eq!(
+        store.availability(&descriptor),
+        ToolArtifactAvailability::HashMismatch
+    );
+    assert!(store.read_all(&descriptor).is_err());
+    Ok(())
+}
+
+#[test]
+fn durable_v2_event_is_bounded_while_artifact_keeps_the_complete_body() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    let body = format!(
+        "head:{}:middle-sentinel:{}:tail",
+        "0123456789".repeat(100_000),
+        "abcdefghij".repeat(100_000)
+    );
+    let artifact_store = session.tool_artifact_store().expect("durable store");
+    let pre_captured = artifact_store.capture_text(
+        "call-large",
+        "shell",
+        &body,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let result = ToolResult::ok(
+        "call-large",
+        "shell",
+        "bounded shell projection",
+        crate::ToolResultMeta::default(),
+    )
+    .with_captured_artifact(pre_captured);
+    let (recorded, display) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let descriptor = recorded
+        .artifact
+        .descriptor()
+        .expect("artifact must be published")
+        .clone();
+    assert_eq!(
+        recorded.capture_telemetry.capture_path,
+        ToolResultCapturePathV1::PreCapturedArtifact
+    );
+
+    session.append_tool_result_bundle(recorded, Vec::new())?;
+
+    let jsonl = std::fs::read(&session_path)?;
+    assert!(jsonl.len() < TOOL_RESULT_EVENT_TARGET_BYTES);
+    assert!(
+        !jsonl
+            .windows(b"middle-sentinel".len())
+            .any(|window| window == b"middle-sentinel")
+    );
+    assert_eq!(artifact_store.read_all(&descriptor)?, body.as_bytes());
+    assert!(display.preview.len() <= TOOL_DISPLAY_VIEW_MAX_BYTES);
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    assert_eq!(
+        records[0].stored_event().event_kind(),
+        Some(crate::DurableEventType::ToolResultRecordedV2)
+    );
+    assert!(matches!(
+        records[0].session_log_entry()?,
+        Some(SessionLogEntry::ToolResultV2(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn typed_retrieval_resolves_opaque_ref_without_jsonl_scan() -> Result<()> {
+    let (temp, store) = store_fixture()?;
+    let content = "zero\nalpha target\nbeta\nalpha target again\nomega\n";
+    let descriptor = store.capture_text(
+        "call-read",
+        "shell",
+        content,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let session_path = temp.path().join("session.jsonl");
+    if session_path.exists() {
+        std::fs::remove_file(session_path)?;
+    }
+
+    let byte_page = store.read_page(
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::ByteSlice {
+            offset: 5,
+            limit: 7,
+        },
+    )?;
+    assert_eq!(byte_page.body_encoding, ToolArtifactPageEncoding::Utf8);
+    assert_eq!(byte_page.body, "alpha t");
+    assert_eq!(byte_page.returned_bytes, 7);
+
+    let line_page = store.read_page(
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::LinePage {
+            start_line: 1,
+            line_count: 2,
+        },
+    )?;
+    assert_eq!(line_page.body, "alpha target\nbeta\n");
+    assert!(!line_page.eof);
+
+    let search_page = store.read_page(
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::SearchLiteral {
+            query: "target".to_owned(),
+            start_offset: 0,
+            max_matches: 2,
+            context_lines: 1,
+        },
+    )?;
+    assert_eq!(search_page.match_count, 2);
+    assert!(search_page.body.contains("alpha target"));
+    assert!(search_page.body.contains("alpha target again"));
+    assert!(search_page.returned_bytes <= TOOL_ARTIFACT_READ_MAX_BYTES);
+
+    let overlapping = store.capture_text(
+        "call-overlapping-search",
+        "shell",
+        "aaa\n",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let overlapping_page = store.read_page(
+        &overlapping.artifact_ref,
+        ToolArtifactSelectorV1::SearchLiteral {
+            query: "aa".to_owned(),
+            start_offset: 0,
+            max_matches: 2,
+            context_lines: 0,
+        },
+    )?;
+    assert_eq!(overlapping_page.match_count, 2);
+    Ok(())
+}
+
+#[test]
+fn literal_search_is_linear_on_repetitive_max_artifact() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let content = vec![b'a'; TOOL_ARTIFACT_MAX_BYTES];
+    let descriptor = store.capture_policy_safe_bytes(
+        "call-adversarial-search",
+        "shell",
+        &content,
+        content.len() as u64,
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+        0,
+    )?;
+    // Every candidate shares a 511-byte prefix with the query. A windows-based matcher performs
+    // O(artifact_bytes * query_bytes) comparisons; the compiled matcher stays linear.
+    let query = format!("{}b", "a".repeat(511));
+    let page = store.read_page(
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::SearchLiteral {
+            query,
+            start_offset: 0,
+            max_matches: 1,
+            context_lines: 0,
+        },
+    )?;
+
+    assert_eq!(page.match_count, 0);
+    assert!(page.body.is_empty());
+    assert!(page.eof);
+    Ok(())
+}
+
+#[test]
+fn selectors_reject_unbounded_requests() {
+    assert!(
+        ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: TOOL_ARTIFACT_READ_MAX_BYTES + 1,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        ToolArtifactSelectorV1::LinePage {
+            start_line: 0,
+            line_count: TOOL_ARTIFACT_READ_MAX_LINES + 1,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        ToolArtifactSelectorV1::SearchLiteral {
+            query: "x".to_owned(),
+            start_offset: 0,
+            max_matches: TOOL_ARTIFACT_SEARCH_MAX_MATCHES + 1,
+            context_lines: 0,
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn per_turn_budget_is_shared_and_counts_attempts() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-budget",
+        "shell",
+        "0123456789",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let budget = ToolArtifactReadBudgetV1::default();
+    let sibling = budget.clone();
+    for offset in 0..TOOL_ARTIFACT_READS_PER_TURN {
+        sibling.read_page(
+            &store,
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::ByteSlice {
+                offset: offset as u64,
+                limit: 1,
+            },
+        )?;
+    }
+    assert!(
+        budget
+            .read_page(
+                &store,
+                &descriptor.artifact_ref,
+                ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: 1,
+                },
+            )
+            .is_err()
+    );
+    assert_eq!(budget.usage(), (TOOL_ARTIFACT_READS_PER_TURN, 8));
+    Ok(())
+}
+
+#[test]
+fn read_receipt_event_is_body_free_and_recovery_critical() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    let receipt = ToolArtifactReadRecordedV1 {
+        schema_version: TOOL_ARTIFACT_READ_SCHEMA_VERSION,
+        call_id: "read-call".to_owned(),
+        artifact_ref: ToolArtifactRefV1::random(),
+        source_descriptor_event_id: "source-event".to_owned(),
+        active_epoch_id: "context-epoch:test".to_owned(),
+        selector: ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: 10,
+        },
+        returned_bytes: 10,
+        page_sha256: stable_event_hash(b"page bytes"),
+        artifact_sha256: stable_event_hash(b"artifact bytes"),
+        outcome: ToolArtifactReadOutcome::Returned,
+        deduplicated_from_call_id: None,
+    };
+    session.append_control(ControlEntry::ToolArtifactRead(receipt.clone()))?;
+
+    let jsonl = std::fs::read_to_string(&session_path)?;
+    assert!(!jsonl.contains("page bytes"));
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    assert_eq!(
+        records[0].stored_event().event_kind(),
+        Some(crate::DurableEventType::ToolArtifactReadRecorded)
+    );
+    assert!(matches!(
+        records[0].session_log_entry()?,
+        Some(SessionLogEntry::Control(ControlEntry::ToolArtifactRead(value)))
+            if value == receipt
+    ));
+    Ok(())
+}

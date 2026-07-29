@@ -268,6 +268,7 @@ pub(super) fn format_tool_result_block_redacted(
 ) -> String {
     let preview = if result.is_error() { None } else { preview };
     let error_kind = tool_result_error_kind(result);
+    let artifact = tool_artifact_display_value_from_metadata(&result.metadata);
     format_tool_preview_payload(
         Some(result.call_id.as_str()),
         result.tool_name.as_str(),
@@ -277,6 +278,7 @@ pub(super) fn format_tool_result_block_redacted(
         preview,
         error_kind,
         redactor,
+        artifact,
     )
 }
 
@@ -371,6 +373,10 @@ pub(super) fn format_tool_content_block_redacted_for_restore(
         .unwrap_or("tool");
     let metadata = restored_tool_metadata(envelope.as_ref(), execution, tool_call);
     let error_kind = restored_tool_error_kind(envelope.as_ref(), execution);
+    let artifact = envelope
+        .as_ref()
+        .and_then(|value| value.get("artifact"))
+        .cloned();
     format_tool_preview_payload(
         call_id,
         tool_name,
@@ -380,6 +386,7 @@ pub(super) fn format_tool_content_block_redacted_for_restore(
         preview,
         error_kind.as_deref(),
         redactor,
+        artifact,
     )
 }
 
@@ -404,6 +411,7 @@ fn format_tool_preview_payload(
     preview: Option<&ToolPreviewSnapshot>,
     error_kind: Option<&str>,
     redactor: &SecretRedactor,
+    artifact: Option<serde_json::Value>,
 ) -> String {
     let original_bytes = content.len() as u64;
     let (display_content, display_truncated) = bounded_tool_display_content(content);
@@ -501,6 +509,9 @@ fn format_tool_preview_payload(
                 .redact_value(&serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null)),
         );
     }
+    if let Some(artifact) = artifact {
+        object.insert("artifact".to_owned(), redactor.redact_value(&artifact));
+    }
     if let Some(preview_value) = preview_value {
         object.insert("preview_value".to_owned(), preview_value);
     }
@@ -508,6 +519,45 @@ fn format_tool_preview_payload(
         object.insert("diff".to_owned(), diff);
     }
     serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or(content)
+}
+
+fn tool_artifact_display_value_from_metadata(
+    metadata: &ToolResultMeta,
+) -> Option<serde_json::Value> {
+    let details = metadata.details.as_object()?;
+    let artifact_ref = details.get("artifact_ref")?.clone();
+    let has_more = details
+        .get("has_more")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let retrieval_available = details
+        .get("display_capabilities")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability
+                    .as_str()
+                    .is_some_and(|capability| capability == "read_next_page")
+            })
+        });
+    Some(serde_json::json!({
+        "artifact_ref": artifact_ref,
+        "availability": if retrieval_available { "available" } else { "unavailable" },
+        "observed_bytes": details
+            .get("observed_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        "persisted_bytes": details
+            .get("persisted_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        "has_more": has_more,
+        "next_selector": has_more.then(|| serde_json::json!({
+            "kind": "line_page",
+            "start_line": 0,
+            "line_count": 200
+        }))
+    }))
 }
 
 fn tool_result_error_kind(result: &ToolResult) -> Option<&str> {

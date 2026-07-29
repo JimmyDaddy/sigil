@@ -19,6 +19,7 @@ use crate::{
         TerminalCancelTool, TerminalInputTool, TerminalProcessManagers, TerminalReadTool,
         TerminalResizeTool, TerminalStartTool,
     },
+    tool_artifact_tool::ReadToolArtifactTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +108,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     registry.register(Arc::new(ReadFileTool));
+    registry.register(Arc::new(ReadToolArtifactTool));
     registry.register(Arc::new(WriteFileTool));
     registry.register(Arc::new(EditFileTool));
     registry.register(Arc::new(DeleteFileTool));

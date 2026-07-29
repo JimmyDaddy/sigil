@@ -1,6 +1,6 @@
 use std::fs;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::*;
@@ -14,9 +14,11 @@ use crate::{
     FrozenProviderRequestMaterial, InputTokenEvidence, ModelMessage, ModelRef,
     MutationEventRecorder, PortableSemanticCompactionRequest, PortableTargetRequestMaterial,
     RequestFitProof, SourceCacheStatus, SourceFreshness, TaskMemoryV1, TokenMeasurementBinding,
-    TokenMeasurementScope, ToolOutputProjectionPolicy, ToolRestartPolicy, UsageStats,
-    VersionedProfileIdentity, conversation_promotion_capability_digest,
-    project_conversation_prompt_for_persistence, write_file_with_mutation,
+    TokenMeasurementScope, ToolArtifactBindingV1, ToolArtifactSensitivity, ToolArtifactStore,
+    ToolCall, ToolOutputProjectionPolicy, ToolRestartPolicy, ToolResult, ToolResultMeta,
+    ToolResultRecordedV2, UsageStats, VersionedProfileIdentity,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
+    write_file_with_mutation,
 };
 
 fn portable_target_profile(profile_id: &str) -> VersionedProfileIdentity {
@@ -268,6 +270,124 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
             .sources
             .iter()
             .all(|source| source.session_scope_id == output.destination_session_id)
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_fork_remaps_v2_artifact_ref_and_preserves_retrieval() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_path = temp.path().join("source.jsonl");
+    let source_store = JsonlSessionStore::new(&source_path)?;
+    let mut source = Session::new("deepseek", "chat").with_store(source_store.clone());
+    source.append_user_message(ModelMessage::user("inspect output"))?;
+    source.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "call-fork-artifact".to_owned(),
+            name: "shell".to_owned(),
+            args_json: r#"{"command":"build"}"#.to_owned(),
+        }],
+    ))?;
+    let artifact_store = source.tool_artifact_store().context("artifact store")?;
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &ToolResult::ok(
+            "call-fork-artifact",
+            "shell",
+            "durable fork evidence",
+            ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let source_descriptor = recorded
+        .artifact
+        .descriptor()
+        .context("source descriptor")?
+        .clone();
+    source.append_tool_result_bundle(recorded, Vec::new())?;
+    let final_message = ModelMessage::assistant_with_kind(
+        Some("finished".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    source.append_assistant_message(final_message.clone())?;
+    source.append_durable_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({
+            "run_status": "completed",
+            "terminal_reason": "final_answer",
+            "final_message_id": final_message.id,
+            "tool_calls": 1,
+            "error": null
+        }),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&source_path)?;
+    let point = ConversationForkProjection::from_records(&records)?
+        .latest()
+        .context("fork point")?
+        .clone();
+    let destination_path = temp.path().join("fork.jsonl");
+
+    fork_conversation_at_turn(
+        &source_store,
+        &records,
+        &ConversationTurnForkRequest {
+            source_turn_digest: point.source_turn_digest,
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: destination_path.clone(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "chat".to_owned(),
+            resolved_model_route: None,
+        },
+    )?;
+
+    let destination_records = JsonlSessionStore::read_event_records(&destination_path)?;
+    let mut destination_result = None;
+    let mut destination_result_event_id = None;
+    for record in &destination_records {
+        if let Some(SessionLogEntry::ToolResultV2(result)) = record.session_log_entry()? {
+            destination_result = Some(result);
+            destination_result_event_id = Some(record.event_id().to_owned());
+            break;
+        }
+    }
+    let destination_result = destination_result.context("forked V2 tool result")?;
+    let destination_result_event_id =
+        destination_result_event_id.context("forked V2 tool result event id")?;
+    let ToolArtifactBindingV1::Published {
+        descriptor: destination_descriptor,
+    } = destination_result.artifact
+    else {
+        panic!("forked V2 result must retain a published artifact");
+    };
+    let destination_store = ToolArtifactStore::for_session_path(&destination_path);
+    assert_ne!(
+        destination_descriptor.artifact_ref,
+        source_descriptor.artifact_ref
+    );
+    assert_eq!(
+        destination_descriptor.content_sha256,
+        source_descriptor.content_sha256
+    );
+    assert_eq!(
+        destination_store.read_all(&destination_descriptor)?,
+        b"durable fork evidence"
+    );
+    assert_eq!(
+        destination_store.source_event_id(&destination_descriptor.artifact_ref)?,
+        destination_result_event_id
+    );
+    assert!(
+        destination_store
+            .resolve(&source_descriptor.artifact_ref)
+            .is_err()
+    );
+    assert!(
+        artifact_store
+            .resolve(&destination_descriptor.artifact_ref)
+            .is_err()
     );
     Ok(())
 }

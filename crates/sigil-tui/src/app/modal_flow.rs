@@ -205,6 +205,7 @@ pub(super) enum TextInputTarget {
     ConfigManualModel,
     ConfigField(ConfigField),
     SkillArguments,
+    ToolArtifactSearch,
 }
 
 impl TextInputTarget {
@@ -215,6 +216,7 @@ impl TextInputTarget {
             Self::ConfigManualModel => "Model ID",
             Self::ConfigField(field) => field.display_label(),
             Self::SkillArguments => "Use Skill",
+            Self::ToolArtifactSearch => "Search Full Tool Output",
         }
     }
 
@@ -229,6 +231,9 @@ impl TextInputTarget {
             }
             Self::ConfigField(field) => field.help_text(),
             Self::SkillArguments => "Optional instructions for how to use the selected skill.",
+            Self::ToolArtifactSearch => {
+                "Enter one exact literal. Regex, glob, shell expressions and paths are not accepted."
+            }
         }
     }
 
@@ -238,6 +243,7 @@ impl TextInputTarget {
             Self::SetupEndpoint => "endpoint",
             Self::ConfigField(_) => "value",
             Self::SkillArguments => "instructions",
+            Self::ToolArtifactSearch => "literal",
         }
     }
 
@@ -246,7 +252,7 @@ impl TextInputTarget {
             Self::SetupModel | Self::SetupEndpoint => None,
             Self::ConfigManualModel => Some(ConfigField::ProviderModel.label()),
             Self::ConfigField(field) => Some(field.label()),
-            Self::SkillArguments => None,
+            Self::SkillArguments | Self::ToolArtifactSearch => None,
         }
     }
 }
@@ -1844,6 +1850,9 @@ impl AppState {
                 TextInputTarget::SkillArguments => {
                     self.last_notice = Some("skill arguments submitted".to_owned());
                 }
+                TextInputTarget::ToolArtifactSearch => {
+                    let _ = self.request_selected_tool_artifact_search(&value);
+                }
             },
             ModalOutcome::V2CompactionConfirmed { .. } => {
                 self.last_notice = Some("applying V2 compaction".to_owned());
@@ -2066,7 +2075,9 @@ fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> b
         | TextInputTarget::SetupEndpoint
         | TextInputTarget::ConfigManualModel => !character.is_control(),
         TextInputTarget::ConfigField(field) => config_field_accepts_char(field, character),
-        TextInputTarget::SkillArguments => !character.is_control(),
+        TextInputTarget::SkillArguments | TextInputTarget::ToolArtifactSearch => {
+            !character.is_control()
+        }
     }
 }
 

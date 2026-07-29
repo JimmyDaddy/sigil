@@ -31,6 +31,7 @@ pub struct AdmittedTaskExecution<'a, H> {
     pub role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     pub handler: &'a mut H,
     pub cancellation_handle: RunCancellationHandle,
+    pub tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
 }
 
 /// Host-owned durable Task selected for an explicit continuation.
@@ -54,6 +55,7 @@ pub struct ContinuedTaskExecution<'a, H> {
     pub role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     pub handler: &'a mut H,
     pub cancellation_handle: RunCancellationHandle,
+    pub tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
 }
 
 /// Root cancellation authority and durable recorder for one Task execution.
@@ -448,6 +450,7 @@ where
         role_provider_builder,
         handler,
         cancellation_handle,
+        tool_artifact_read_budget,
     } = request;
     materialize_task_verification_config(
         session,
@@ -470,8 +473,12 @@ where
         role_provider_builder,
     )
     .await?;
+    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
+    let orchestrator = match tool_artifact_read_budget {
+        Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
+        None => orchestrator,
+    };
     orchestrator
-        .with_cancellation(cancellation_handle)
         .run(
             session,
             SequentialTaskRequest {
@@ -517,6 +524,7 @@ where
         role_provider_builder,
         handler,
         cancellation_handle,
+        tool_artifact_read_budget,
     } = request;
     let task = resolve_task_continuation(session, requested_task_id.as_ref().map(TaskId::as_str))?;
     if task.needs_planning && guidance.is_some() {
@@ -551,6 +559,10 @@ where
         objective: task.objective,
     };
     let orchestrator = orchestrator.with_cancellation(cancellation_handle);
+    let orchestrator = match tool_artifact_read_budget {
+        Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
+        None => orchestrator,
+    };
     let output = if task.needs_planning {
         if guidance_promotion.is_some() {
             return Err(anyhow!(

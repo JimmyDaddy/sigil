@@ -1812,10 +1812,42 @@
           {
             "additionalProperties": false,
             "properties": {
+              "artifact_availability": {
+                "enum": [
+                  "available",
+                  "expired",
+                  "missing",
+                  "hash_mismatch",
+                  "policy_revoked",
+                  "legacy_unavailable",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "artifact_ref": {
+                "pattern": "^ta1_[0-9a-fA-F]{32}$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "call_id": {
                 "maxLength": 512,
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "has_more": {
+                "type": "boolean"
+              },
+              "observed_bytes": {
+                "format": "uint64",
+                "type": [
+                  "integer",
                   "null"
                 ]
               },
@@ -1827,6 +1859,14 @@
                 "maxLength": 65536,
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "persisted_bytes": {
+                "format": "uint64",
+                "maximum": 16777216,
+                "type": [
+                  "integer",
                   "null"
                 ]
               },
@@ -1847,7 +1887,8 @@
             "required": [
               "type",
               "truncated",
-              "original_content_bytes"
+              "original_content_bytes",
+              "has_more"
             ],
             "type": "object"
           },
@@ -5636,6 +5677,9 @@
           "task_pause": {
             "type": "boolean"
           },
+          "typed_tool_artifact_retrieval": {
+            "type": "boolean"
+          },
           "verification": {
             "type": "boolean"
           }
@@ -5645,6 +5689,7 @@
           "durable_session_reopen",
           "bounded_transcript_replay",
           "canonical_conversation_display",
+          "typed_tool_artifact_retrieval",
           "conversation_recovery",
           "durable_event_replay",
           "live_events",
@@ -5683,7 +5728,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "const": 12,
+            "const": 13,
             "type": "integer"
           },
           "server_version": {
@@ -7256,6 +7301,203 @@
           "text"
         ],
         "type": "object"
+      },
+      "ToolArtifactPage": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_ref": {
+            "pattern": "^ta1_[0-9a-fA-F]{32}$",
+            "type": "string"
+          },
+          "artifact_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "body": {
+            "maxLength": 21848,
+            "type": "string"
+          },
+          "body_encoding": {
+            "$ref": "#/components/schemas/ToolArtifactPageEncoding"
+          },
+          "eof": {
+            "type": "boolean"
+          },
+          "match_count": {
+            "format": "uint16",
+            "maximum": 20,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_selector": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ToolArtifactSelector"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "page_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "request_scope": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "returned_bytes": {
+            "format": "uint32",
+            "maximum": 16384,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/ToolArtifactSelector"
+          }
+        },
+        "required": [
+          "schema_version",
+          "request_scope",
+          "artifact_ref",
+          "selector",
+          "body",
+          "body_encoding",
+          "returned_bytes",
+          "page_sha256",
+          "artifact_sha256",
+          "eof",
+          "match_count"
+        ],
+        "type": "object"
+      },
+      "ToolArtifactPageEncoding": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      },
+      "ToolArtifactReadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_ref": {
+            "pattern": "^ta1_[0-9a-fA-F]{32}$",
+            "type": "string"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/ToolArtifactSelector"
+          }
+        },
+        "required": [
+          "artifact_ref",
+          "selector"
+        ],
+        "type": "object"
+      },
+      "ToolArtifactSelector": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "byte_slice",
+                "type": "string"
+              },
+              "limit": {
+                "format": "uint32",
+                "maximum": 16384,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "offset": {
+                "format": "uint64",
+                "maximum": 16777216,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "offset",
+              "limit"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "line_page",
+                "type": "string"
+              },
+              "line_count": {
+                "format": "uint32",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "start_line": {
+                "format": "uint64",
+                "maximum": 16777216,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "start_line",
+              "line_count"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "context_lines": {
+                "format": "uint16",
+                "maximum": 3,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "search_literal",
+                "type": "string"
+              },
+              "max_matches": {
+                "format": "uint16",
+                "maximum": 20,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "query": {
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              "start_offset": {
+                "format": "uint64",
+                "maximum": 16777216,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "query",
+              "start_offset",
+              "max_matches",
+              "context_lines"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "ToolCallArgsDeltaEvent": {
         "additionalProperties": false,
@@ -9184,6 +9426,54 @@
           }
         },
         "summary": "Read one exact current Task integration review"
+      }
+    },
+    "/sessions/{session_id}/tool-artifacts/read": {
+      "post": {
+        "description": "Resolves an opaque artifact reference only in the addressed logical session, validates the immutable content hash, and returns a fixed-size byte, line, or literal-search page. Physical paths are never exposed.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolArtifactReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolArtifactPage"
+                }
+              }
+            },
+            "description": "Bounded integrity-checked artifact page"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Read one bounded typed tool artifact page"
       }
     },
     "/sessions/{session_id}/transcript": {

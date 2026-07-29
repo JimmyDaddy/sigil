@@ -13,7 +13,8 @@ use sigil_kernel::{
     SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
     TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
     TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolOperation,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolArtifactSensitivity, ToolArtifactStore,
+    ToolCall, ToolOperation, ToolResult, ToolResultMeta, ToolResultRecordedV2,
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 
@@ -85,7 +86,20 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
     );
     let final_message_id = final_message.id.clone();
     session.append_assistant_message(final_message)?;
-    session.append_tool_message(ModelMessage::tool("call-1", "file output"))?;
+    let artifact_store = session
+        .tool_artifact_store()
+        .expect("durable session exposes its artifact store");
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &ToolResult::ok(
+            "call-1",
+            "read_file",
+            "file output",
+            ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    session.append(SessionLogEntry::ToolResultV2(recorded))?;
     recorder.append_finalized(&ConversationRunFinalizedEntryV1::new(
         "run-1",
         ConversationRunTerminalStatusV1::Succeeded,
@@ -525,6 +539,56 @@ fn conversation_fork_receipt_projects_as_a_safe_timeline_notice() -> Result<()> 
         &page.items[0].content,
         ConversationDisplayContentV1::Notice { text, .. }
             if text.contains("turn 3") && text.contains("workspace files were not changed")
+    ));
+    Ok(())
+}
+
+#[test]
+fn production_display_reconciles_declared_artifact_state_with_physical_availability() -> Result<()>
+{
+    let (_temp, store, session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &ToolResult::ok(
+            "call-artifact-display",
+            "shell",
+            "complete artifact body",
+            ToolResultMeta::default(),
+        ),
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let artifact_ref = recorded
+        .artifact
+        .descriptor()
+        .expect("published artifact")
+        .artifact_ref
+        .clone();
+    store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+
+    let available = conversation_display_page(store.path(), &scope, None, 10)?;
+    assert!(matches!(
+        &available.items[0].content,
+        ConversationDisplayContentV1::Tool {
+            artifact_availability: Some(value),
+            ..
+        } if value == "available"
+    ));
+
+    std::fs::remove_file(
+        artifact_store
+            .root()
+            .join("refs")
+            .join(format!("{}.json", artifact_ref.artifact_id)),
+    )?;
+    let missing = conversation_display_page(store.path(), &scope, None, 10)?;
+    assert!(matches!(
+        &missing.items[0].content,
+        ConversationDisplayContentV1::Tool {
+            artifact_availability: Some(value),
+            ..
+        } if value == "missing"
     ));
     Ok(())
 }

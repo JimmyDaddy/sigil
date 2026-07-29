@@ -1,0 +1,142 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
+
+use sigil_kernel::{ProjectionCursor, SessionRef, ToolArtifactGcReportV1, ToolArtifactGcRootsV1};
+use sigil_runtime::{LocalSessionLifecycleService, current_unix_time_ms};
+use tokio::{runtime::Runtime, task::JoinHandle};
+
+use crate::runner::worker_event::WorkerEventPayloadSender;
+
+static ARTIFACT_GC_TASK_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_GC_TASK_COMPLETED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArtifactGcTaskMetricsSnapshot {
+    pub started_total: u64,
+    pub completed_total: u64,
+}
+
+impl ArtifactGcTaskMetricsSnapshot {
+    #[must_use]
+    pub fn saturating_delta(self, earlier: Self) -> Self {
+        Self {
+            started_total: self.started_total.saturating_sub(earlier.started_total),
+            completed_total: self.completed_total.saturating_sub(earlier.completed_total),
+        }
+    }
+}
+
+#[must_use]
+pub fn artifact_gc_task_metrics() -> ArtifactGcTaskMetricsSnapshot {
+    ArtifactGcTaskMetricsSnapshot {
+        started_total: ARTIFACT_GC_TASK_STARTED_TOTAL.load(Ordering::Relaxed),
+        completed_total: ARTIFACT_GC_TASK_COMPLETED_TOTAL.load(Ordering::Relaxed),
+    }
+}
+
+pub(in crate::runner) struct ArtifactGcTaskResult {
+    pub(in crate::runner) request_id: u64,
+    pub(in crate::runner) session_scope_id: String,
+    pub(in crate::runner) projection_cursor: Option<ProjectionCursor>,
+    pub(in crate::runner) result: Result<ToolArtifactGcReportV1, String>,
+}
+
+#[derive(Default)]
+pub(in crate::runner) struct ArtifactGcTaskManager {
+    active: Option<ActiveArtifactGcTask>,
+}
+
+struct ActiveArtifactGcTask {
+    request_id: u64,
+    session_scope_id: String,
+    cancelled: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+impl ArtifactGcTaskManager {
+    pub(in crate::runner) fn new() -> Self {
+        Self::default()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::runner) fn start(
+        &mut self,
+        runtime: &Runtime,
+        request_id: u64,
+        session_scope_id: String,
+        projection_cursor: Option<ProjectionCursor>,
+        result_tx: WorkerEventPayloadSender<ArtifactGcTaskResult>,
+        lifecycle: LocalSessionLifecycleService,
+        session_ref: SessionRef,
+        roots: ToolArtifactGcRootsV1,
+    ) {
+        debug_assert!(self.active.is_none());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&cancelled);
+        let result_session_scope_id = session_scope_id.clone();
+        ARTIFACT_GC_TASK_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let handle = runtime.spawn_blocking(move || {
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let result = lifecycle
+                .garbage_collect_session_artifacts(
+                    &session_ref,
+                    &result_session_scope_id,
+                    roots,
+                    current_unix_time_ms(),
+                )
+                .map_err(|error| format!("{error:#}"));
+            ARTIFACT_GC_TASK_COMPLETED_TOTAL.fetch_add(1, Ordering::Relaxed);
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = result_tx.send(ArtifactGcTaskResult {
+                request_id,
+                session_scope_id: result_session_scope_id,
+                projection_cursor,
+                result,
+            });
+        });
+        self.active = Some(ActiveArtifactGcTask {
+            request_id,
+            session_scope_id,
+            cancelled,
+            handle,
+        });
+    }
+
+    pub(in crate::runner) fn has_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub(in crate::runner) fn accept_result(
+        &mut self,
+        request_id: u64,
+        session_scope_id: &str,
+    ) -> bool {
+        if self.active.as_ref().is_some_and(|task| {
+            task.request_id == request_id && task.session_scope_id == session_scope_id
+        }) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(in crate::runner) fn abort_all(&mut self) {
+        if let Some(task) = self.active.take() {
+            task.cancelled.store(true, Ordering::Release);
+            task.handle.abort();
+        }
+    }
+}
+
+impl Drop for ArtifactGcTaskManager {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}

@@ -282,6 +282,7 @@ fn active_terminal_mutation_evidence(
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
             | SessionLogEntry::ToolResult(_)
+            | SessionLogEntry::ToolResultV2(_)
             | SessionLogEntry::Control(_) => {}
         }
     }

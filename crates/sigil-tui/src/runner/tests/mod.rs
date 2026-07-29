@@ -1,4 +1,5 @@
 mod approval_tests;
+mod artifact_gc_tasks_tests;
 mod basic_tests;
 mod common;
 mod compaction_tests;

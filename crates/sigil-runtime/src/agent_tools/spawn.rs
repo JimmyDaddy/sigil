@@ -270,9 +270,9 @@ impl AgentToolRuntime {
         }
         child_messages.push(ModelMessage::user(parsed.prompt.clone()));
         let child_input = self
-            .inherit_web_task_tree_budget(
-                sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
-            )
+            .inherit_root_budgets(sigil_kernel::AgentRunInput::without_persisted_user_message(
+                child_messages,
+            ))
             .with_agent_invocation_grant(grant.clone());
         let mut child_options = build_role_run_options(
             &self.root_config,
@@ -977,9 +977,9 @@ impl AgentToolRuntime {
         }
         child_messages.push(ModelMessage::user(request.prompt.clone()));
         let child_input = self
-            .inherit_web_task_tree_budget(
-                sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages),
-            )
+            .inherit_root_budgets(sigil_kernel::AgentRunInput::without_persisted_user_message(
+                child_messages,
+            ))
             .with_agent_invocation_grant(grant.clone());
         let mut child_options = build_role_run_options(
             &self.root_config,

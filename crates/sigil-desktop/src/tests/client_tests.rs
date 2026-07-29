@@ -486,6 +486,33 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
     validate_conversation_display_page(&page, "http-session-1")
         .expect("bounded durable task control should validate");
 
+    let mut typed_tool_page = page.clone();
+    typed_tool_page.items[0].content = crate::DesktopConversationDisplayContent::Tool {
+        call_id: Some("call-1".to_owned()),
+        tool_name: Some("shell".to_owned()),
+        output: Some("bounded preview".to_owned()),
+        truncated: true,
+        original_content_bytes: 1_024,
+        artifact_ref: Some(format!("ta1_{}", "a".repeat(32))),
+        artifact_availability: Some(crate::DesktopToolArtifactAvailability::Available),
+        observed_bytes: Some(1_024),
+        persisted_bytes: Some(1_024),
+        has_more: true,
+    };
+    validate_conversation_display_page(&typed_tool_page, "http-session-1")
+        .expect("typed artifact metadata should validate");
+    if let crate::DesktopConversationDisplayContent::Tool {
+        artifact_availability,
+        ..
+    } = &mut typed_tool_page.items[0].content
+    {
+        *artifact_availability = None;
+    }
+    assert!(matches!(
+        validate_conversation_display_page(&typed_tool_page, "http-session-1"),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
     let mut oversized = page.clone();
     let task = oversized
         .task_control
@@ -527,6 +554,135 @@ fn conversation_display_rejects_noncanonical_decimal_text() {
             }));
         assert!(result.is_err(), "{invalid} must be rejected");
     }
+}
+
+#[test]
+fn tool_artifact_page_decodes_only_bounded_path_free_contract() {
+    assert!(valid_tool_artifact_continuation(
+        &crate::DesktopToolArtifactSelector::LinePage {
+            start_line: 0,
+            line_count: 1,
+        },
+        Some(&crate::DesktopToolArtifactSelector::ByteSlice {
+            offset: DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES as u64,
+            limit: DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES,
+        }),
+        false,
+    ));
+    let request = crate::DesktopToolArtifactReadRequest {
+        artifact_ref: format!("ta1_{}", "a".repeat(32)),
+        selector: crate::DesktopToolArtifactSelector::ByteSlice {
+            offset: 0,
+            limit: 16,
+        },
+    };
+    let page: crate::DesktopToolArtifactPage = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "request_scope": "http-session-1",
+        "artifact_ref": format!("ta1_{}", "a".repeat(32)),
+        "selector": {
+            "kind": "byte_slice",
+            "offset": 0,
+            "limit": 16
+        },
+        "body": "bounded page",
+        "body_encoding": "utf8",
+        "returned_bytes": 12,
+        "page_sha256": sha256_prefixed(b"bounded page"),
+        "artifact_sha256": format!("sha256:{}", "c".repeat(64)),
+        "eof": true,
+        "match_count": 0
+    }))
+    .expect("bounded artifact page should decode");
+
+    validate_tool_artifact_page(&page, "http-session-1", &request)
+        .expect("bounded artifact page should validate");
+
+    let with_path = serde_json::json!({
+        "schema_version": 1,
+        "request_scope": "http-session-1",
+        "artifact_ref": format!("ta1_{}", "a".repeat(32)),
+        "selector": {"kind": "byte_slice", "offset": 0, "limit": 16},
+        "body": "bounded page",
+        "body_encoding": "utf8",
+        "returned_bytes": 12,
+        "page_sha256": sha256_prefixed(b"bounded page"),
+        "artifact_sha256": format!("sha256:{}", "c".repeat(64)),
+        "eof": true,
+        "match_count": 0,
+        "artifact_path": "/private/session/artifacts/blob"
+    });
+    assert!(serde_json::from_value::<crate::DesktopToolArtifactPage>(with_path).is_err());
+
+    let mut wrong_scope = page.clone();
+    wrong_scope.request_scope = "other-session".to_owned();
+    assert!(matches!(
+        validate_tool_artifact_page(&wrong_scope, "http-session-1", &request),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
+    let mut invalid_page_hash = page.clone();
+    invalid_page_hash.page_sha256 = format!("sha256:{}", "b".repeat(64));
+    assert!(matches!(
+        validate_tool_artifact_page(&invalid_page_hash, "http-session-1", &request),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
+    let mut invalid_continuation = page.clone();
+    invalid_continuation.next_selector = Some(crate::DesktopToolArtifactSelector::ByteSlice {
+        offset: 16,
+        limit: 16,
+    });
+    assert!(matches!(
+        validate_tool_artifact_page(&invalid_continuation, "http-session-1", &request),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
+    let mut invalid_encoding = page;
+    invalid_encoding.body_encoding = crate::DesktopToolArtifactPageEncoding::Base64;
+    assert!(matches!(
+        validate_tool_artifact_page(&invalid_encoding, "http-session-1", &request),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+}
+
+#[test]
+fn conversation_display_tool_decodes_typed_artifact_metadata() {
+    let content: crate::DesktopConversationDisplayContent =
+        serde_json::from_value(serde_json::json!({
+            "type": "tool",
+            "call_id": "call-1",
+            "tool_name": "shell",
+            "output": "bounded preview",
+            "truncated": true,
+            "original_content_bytes": 1048576,
+            "artifact_ref": format!("ta1_{}", "d".repeat(32)),
+            "artifact_availability": "available",
+            "observed_bytes": 1048576,
+            "persisted_bytes": 1048576,
+            "has_more": true
+        }))
+        .expect("typed tool display metadata should decode");
+
+    assert!(matches!(
+        content,
+        crate::DesktopConversationDisplayContent::Tool {
+            artifact_ref: Some(_),
+            has_more: true,
+            ..
+        }
+    ));
+
+    let invalid_availability =
+        serde_json::from_value::<crate::DesktopConversationDisplayContent>(serde_json::json!({
+            "type": "tool",
+            "output": "bounded preview",
+            "truncated": false,
+            "original_content_bytes": 15,
+            "artifact_availability": "/private/session/artifacts/blob",
+            "has_more": false
+        }));
+    assert!(invalid_availability.is_err());
 }
 
 #[test]
@@ -1068,6 +1224,61 @@ async fn conversation_display_query_rejects_unbounded_values_before_transport() 
     ] {
         assert!(matches!(
             client.conversation_display("session-1", &query).await,
+            Err(DesktopClientError::InvalidRoute)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn tool_artifact_request_rejects_unbounded_values_before_transport() {
+    let bearer = Arc::new(DesktopBearerToken::generate().expect("token should generate"));
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        "127.0.0.1:3210".parse().expect("address should parse"),
+        bearer,
+    );
+    let artifact_ref = format!("ta1_{}", "a".repeat(32));
+    for request in [
+        crate::DesktopToolArtifactReadRequest {
+            artifact_ref: "../private".to_owned(),
+            selector: crate::DesktopToolArtifactSelector::ByteSlice {
+                offset: 0,
+                limit: 16,
+            },
+        },
+        crate::DesktopToolArtifactReadRequest {
+            artifact_ref: artifact_ref.clone(),
+            selector: crate::DesktopToolArtifactSelector::ByteSlice {
+                offset: DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE + 1,
+                limit: 16,
+            },
+        },
+        crate::DesktopToolArtifactReadRequest {
+            artifact_ref: artifact_ref.clone(),
+            selector: crate::DesktopToolArtifactSelector::ByteSlice {
+                offset: 0,
+                limit: DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES + 1,
+            },
+        },
+        crate::DesktopToolArtifactReadRequest {
+            artifact_ref: artifact_ref.clone(),
+            selector: crate::DesktopToolArtifactSelector::LinePage {
+                start_line: 0,
+                line_count: DESKTOP_TOOL_ARTIFACT_MAX_LINES + 1,
+            },
+        },
+        crate::DesktopToolArtifactReadRequest {
+            artifact_ref: artifact_ref.clone(),
+            selector: crate::DesktopToolArtifactSelector::SearchLiteral {
+                query: "x".repeat(DESKTOP_TOOL_ARTIFACT_MAX_QUERY_BYTES + 1),
+                start_offset: 0,
+                max_matches: 1,
+                context_lines: 0,
+            },
+        },
+    ] {
+        assert!(matches!(
+            client.tool_artifact_page("session-1", &request).await,
             Err(DesktopClientError::InvalidRoute)
         ));
     }

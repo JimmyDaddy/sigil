@@ -1,5 +1,6 @@
 import type { Translate } from "../../i18n";
 import type { MessageView } from "../../Message";
+import type { ToolArtifactAvailability } from "../../types";
 import type { ConversationTimelineItem } from "./continuityReducer";
 import {
   compareRunSequence,
@@ -17,7 +18,14 @@ interface TimelineRowBase {
 
 export type ConversationTimelineRow =
   | (TimelineRowBase & { kind: MessageView["kind"] })
-  | (TimelineRowBase & { kind: "tool"; input?: string });
+  | (TimelineRowBase & {
+      kind: "tool";
+      input?: string;
+      artifactRef?: string;
+      artifactAvailability?: ToolArtifactAvailability;
+      artifactHasMore?: boolean;
+      artifactPersistedBytes?: number;
+    });
 
 export function projectConversationRows(
   items: readonly ConversationTimelineItem[],
@@ -130,6 +138,10 @@ function projectDisplayItem(
         text: content.output ?? "",
         input: "toolInput" in item ? item.toolInput : undefined,
         status: item.status,
+        artifactRef: content.artifactRef,
+        artifactAvailability: content.artifactAvailability,
+        artifactHasMore: content.hasMore,
+        artifactPersistedBytes: content.persistedBytes,
       }];
     case "approval": {
       const approved = item.status === "approved";

@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::session::ToolArtifactDescriptorV1;
 use crate::{
     ControlEntry, ControlledCheckpointProjection, DurableEventType, EventClass,
     ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session, SessionLogEntry,
-    SessionRef, SessionStreamRecord, StoredEvent, stable_event_hash, stable_event_uuid,
+    SessionRef, SessionStreamRecord, StoredEvent, ToolArtifactBindingV1, ToolArtifactStore,
+    ToolResultRecordedV2, stable_event_hash, stable_event_uuid,
 };
 
 /// Stable, append-only binding for one finalized user turn that can be forked safely.
@@ -266,13 +268,14 @@ fn create_conversation_fork(
     checkpoint: Option<(String, String)>,
 ) -> Result<ConversationForkOutput> {
     validate_source_and_destination(source_store.path(), &source_session_ref, &destination_path)?;
-    let prefix = safe_prefix_for_complete_turn(records, &point)?;
+    let mut prefix = safe_prefix_for_complete_turn(records, &point)?;
     if let Some(route) = resolved_model_route.as_ref() {
         anyhow::ensure!(
             route.model_ref.model_id == model_name,
             "conversation fork route model does not match destination identity"
         );
     }
+    remap_forked_tool_artifacts(source_store, &destination_path, &mut prefix.messages)?;
     let destination_store = JsonlSessionStore::new(&destination_path)?;
     let mut destination = resolved_model_route
         .clone()
@@ -325,7 +328,12 @@ fn create_conversation_fork(
         .ok_or_else(|| anyhow!("conversation fork destination is not durable"))?;
 
     for entry in &prefix.messages {
-        destination.append(entry.clone())?;
+        match entry {
+            SessionLogEntry::ToolResultV2(result) => {
+                destination.append_tool_result_bundle(result.clone(), Vec::new())?;
+            }
+            _ => destination.append(entry.clone())?,
+        }
     }
     for provenance in prefix.provenance {
         destination.append_external_provenance(rebind_external_provenance(
@@ -342,6 +350,37 @@ fn create_conversation_fork(
         copied_message_count: prefix.messages.len(),
         copied_external_provenance_count: payload.copied_external_provenance_count,
     })
+}
+
+fn remap_forked_tool_artifacts(
+    source_store: &JsonlSessionStore,
+    destination_path: &Path,
+    messages: &mut [SessionLogEntry],
+) -> Result<()> {
+    let source_artifacts = ToolArtifactStore::for_session_store(source_store);
+    let destination_artifacts = ToolArtifactStore::for_session_path(destination_path);
+    for entry in messages {
+        let SessionLogEntry::ToolResultV2(result) = entry else {
+            continue;
+        };
+        let ToolArtifactBindingV1::Published { descriptor } = &result.artifact else {
+            continue;
+        };
+        let descriptor =
+            destination_artifacts.fork_descriptor_from(&source_artifacts, descriptor)?;
+        remap_tool_result_artifact(result, descriptor)?;
+    }
+    Ok(())
+}
+
+fn remap_tool_result_artifact(
+    result: &mut ToolResultRecordedV2,
+    descriptor: ToolArtifactDescriptorV1,
+) -> Result<()> {
+    result.initial_model_view.artifact_ref = Some(descriptor.artifact_ref.clone());
+    result.artifact = ToolArtifactBindingV1::Published { descriptor };
+    result.initial_model_view_sha256 = stable_event_hash(result.model_content()?.as_bytes());
+    result.validate()
 }
 
 #[derive(Debug)]
@@ -390,6 +429,10 @@ fn safe_prefix_for_complete_turn(
                 SessionLogEntry::ToolResult(message) => {
                     message_ids.insert(message.id.clone());
                     messages.push(SessionLogEntry::ToolResult(message));
+                }
+                SessionLogEntry::ToolResultV2(result) => {
+                    message_ids.insert(result.message_id.clone());
+                    messages.push(SessionLogEntry::ToolResultV2(result));
                 }
                 SessionLogEntry::Control(ControlEntry::ExternalProvenance(entry)) => {
                     provenance.push(entry);

@@ -80,7 +80,7 @@ impl AppState {
         }
     }
 
-    fn refresh_replaced_tool_timeline_entry(&mut self, index: usize) {
+    pub(super) fn refresh_replaced_tool_timeline_entry(&mut self, index: usize) {
         if let Some(entry) = self.timeline.get(index)
             && let Some(activity) = self.tool_activity_cache_entry(index, entry)
         {
@@ -802,6 +802,43 @@ impl AppState {
                         format!("ignored stale inspect response {request_id}"),
                     );
                 }
+            }
+            WorkerMessage::ToolArtifactPageRead {
+                request_id,
+                page,
+                entries,
+            } => {
+                self.sync_current_session_state(entries);
+                if self.apply_tool_artifact_page(&page) {
+                    self.push_event(
+                        "tool:artifact-page",
+                        format!(
+                            "request={request_id} ref={} bytes={} eof={} matches={}",
+                            page.artifact_ref.artifact_id,
+                            page.returned_bytes,
+                            page.eof,
+                            page.match_count
+                        ),
+                    );
+                }
+            }
+            WorkerMessage::ToolArtifactPageReadFailed {
+                request_id,
+                artifact_ref,
+                failure,
+                entries,
+            } => {
+                if !entries.is_empty() {
+                    self.sync_current_session_state(entries);
+                }
+                self.apply_tool_artifact_read_failure(&artifact_ref, failure);
+                self.push_event(
+                    "tool:artifact-page",
+                    format!(
+                        "request={request_id} ref={} failure={failure:?}",
+                        artifact_ref.artifact_id
+                    ),
+                );
             }
             WorkerMessage::LocalSessionForked {
                 request_id,

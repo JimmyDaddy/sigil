@@ -175,6 +175,13 @@ impl Tool for McpTool {
         let result = response
             .get("result")
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
+        let artifact = capture_mcp_result_artifact(
+            &ctx,
+            &call_id,
+            &self.spec.name,
+            &self.client.secret_redactor,
+            result,
+        );
         let budget = match result.get("content") {
             Some(Value::Array(items)) => {
                 if items
@@ -204,11 +211,9 @@ impl Tool for McpTool {
             "tools/call",
             budget,
         );
-        Ok(ToolResult::ok(
-            call_id,
-            self.spec.name.clone(),
-            content,
-            metadata,
+        Ok(attach_mcp_artifact(
+            ToolResult::ok(call_id, self.spec.name.clone(), content, metadata),
+            artifact,
         ))
     }
 }

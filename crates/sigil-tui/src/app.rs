@@ -1218,23 +1218,31 @@ impl AppState {
         }
 
         if let Some(command) = command_for_key_event(key) {
-            if command == UiCommand::OpenCheckpointRestore {
-                return Ok(self.open_checkpoint_restore_modal());
+            let composer_owns_shortcut = command == UiCommand::SearchToolArtifact
+                && self.active_pane == PaneFocus::Composer
+                && !self.composer.input.is_empty();
+            // Alt-F remains readline-compatible while the user is editing.
+            // Artifact search is available when activity focus owns the
+            // shortcut or the composer is empty.
+            if !composer_owns_shortcut {
+                if command == UiCommand::OpenCheckpointRestore {
+                    return Ok(self.open_checkpoint_restore_modal());
+                }
+                if command == UiCommand::OpenIntentStack {
+                    return Ok(self.open_intent_stack_modal());
+                }
+                if command == UiCommand::CheckChangedFilesDiagnostics {
+                    return Ok(self.request_changed_files_diagnostics());
+                }
+                if command == UiCommand::PauseActiveTask {
+                    return Ok(self.request_active_task_pause());
+                }
+                if command == UiCommand::CancelFocusedTerminalTask {
+                    return Ok(self.request_focused_terminal_task_cancel());
+                }
+                self.handle_ui_command(command);
+                return Ok(None);
             }
-            if command == UiCommand::OpenIntentStack {
-                return Ok(self.open_intent_stack_modal());
-            }
-            if command == UiCommand::CheckChangedFilesDiagnostics {
-                return Ok(self.request_changed_files_diagnostics());
-            }
-            if command == UiCommand::PauseActiveTask {
-                return Ok(self.request_active_task_pause());
-            }
-            if command == UiCommand::CancelFocusedTerminalTask {
-                return Ok(self.request_focused_terminal_task_cancel());
-            }
-            self.handle_ui_command(command);
-            return Ok(None);
         }
 
         match key.code {

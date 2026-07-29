@@ -17,10 +17,11 @@ use sigil_kernel::{
     ExtensionProcessLifecycleAudit, ExtensionProcessLifecycleStatus, McpServerConfig,
     McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, MutationEventRecorder,
     NetworkEffect, NetworkPolicy, ProcessEnvironmentPolicy, ProviderCapabilities,
-    ResolvedProcessEnvironment, SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolEffect, ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
+    ResolvedProcessEnvironment, SecretRedactor, Tool, ToolAccess, ToolArtifactDescriptorV1,
+    ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolEffect,
+    ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolOperation, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, VerificationScope,
+    WorkspaceMutationScan, resolve_extension_process_environment, safe_persistence_json_value,
     validate_extension_process_network_admission,
 };
 use tokio::{
@@ -70,10 +71,10 @@ use framing::{
     McpFrame, McpFramingError, read_ndjson_message_with_wire_limit, write_ndjson_message,
 };
 use output::{
-    bounded_mcp_destination, bounded_mcp_identity_projection, bounded_mcp_json,
-    bounded_mcp_metadata_text, bounded_mcp_protocol_error, bounded_mcp_text,
-    bounded_mcp_text_segments, bounded_mcp_tool_result, secret_safe_mcp_metadata,
-    summarize_egress_json,
+    attach_mcp_artifact, bounded_mcp_destination, bounded_mcp_identity_projection,
+    bounded_mcp_json, bounded_mcp_metadata_text, bounded_mcp_protocol_error, bounded_mcp_text,
+    bounded_mcp_text_segments, bounded_mcp_tool_result, capture_mcp_result_artifact,
+    secret_safe_mcp_metadata, summarize_egress_json,
 };
 use process::{
     McpProcessCleanupSummary, McpStderrFault, McpStderrSummary, drain_mcp_stderr,

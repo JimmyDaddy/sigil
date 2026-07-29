@@ -87,6 +87,7 @@ impl SessionContextProjection {
         let lifecycle = CompactionLifecycleProjection::from_records(records)?;
         let sidecars = CompactionSidecarProjection::from_records(records)?;
         let output_sidecars = ToolOutputProjectionSidecarProjection::from_records(records)?;
+        let aged_outputs = ToolOutputAgingProjectionV1::from_records(records)?;
         let activated = lifecycle
             .attempts()
             .filter_map(|attempt| {
@@ -114,7 +115,11 @@ impl SessionContextProjection {
 
         if let Some((_, applied, sidecar)) = activated {
             let outputs = output_sidecars.active_outputs(Some(&applied.compaction_id));
-            let raw_messages = raw_model_messages_from_durable_records(records, &outputs)?;
+            let raw_messages = raw_model_messages_from_durable_records(
+                records,
+                &outputs,
+                aged_outputs.replacements(),
+            )?;
             let portable_retained_raw_event_ids = (sidecar.is_some()
                 && applied.checkpoint.kind == ContinuationCheckpointKind::PortableSemantic)
                 .then(|| portable_retained_raw_event_ids(records, &applied))
@@ -127,8 +132,12 @@ impl SessionContextProjection {
             )?;
         } else {
             let outputs = output_sidecars.active_outputs(None);
-            if !outputs.is_empty() {
-                let raw_messages = raw_model_messages_from_durable_records(records, &outputs)?;
+            if !outputs.is_empty() || !aged_outputs.replacements().is_empty() {
+                let raw_messages = raw_model_messages_from_durable_records(
+                    records,
+                    &outputs,
+                    aged_outputs.replacements(),
+                )?;
                 projection.retained_entries = into_projection_entries(repair_orphan_tool_results(
                     &raw_messages
                         .into_iter()
@@ -283,9 +292,17 @@ pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessag
                 Some(promotion.durable_user_message.clone())
             }
             SessionLogEntry::User(message) if promoted_message_ids.contains(&message.id) => None,
-            SessionLogEntry::User(message)
-            | SessionLogEntry::Assistant(message)
-            | SessionLogEntry::ToolResult(message) => Some(message.clone()),
+            SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
+                Some(message.clone())
+            }
+            // Clean cutover: even a manually assembled in-memory legacy entry is not eligible
+            // for provider context. Durable loading rejects this shape with LegacyUnavailable.
+            SessionLogEntry::ToolResult(_) => None,
+            SessionLogEntry::ToolResultV2(result) => Some(
+                result
+                    .model_message()
+                    .expect("validated in-memory tool result V2 must materialize"),
+            ),
             SessionLogEntry::Control(_) => None,
         })
         .collect()
@@ -300,6 +317,7 @@ struct DurableProjectionMessage {
 fn raw_model_messages_from_durable_records(
     records: &[SessionStreamRecord],
     outputs: &[ProjectedToolOutput],
+    aged_outputs: &std::collections::BTreeMap<EventId, ToolOutputAgedViewV1>,
 ) -> Result<Vec<DurableProjectionMessage>> {
     let replacements = outputs
         .iter()
@@ -353,6 +371,23 @@ fn raw_model_messages_from_durable_records(
                 .get(event.event_id.as_str())
                 .cloned()
                 .unwrap_or(message),
+            SessionLogEntry::ToolResultV2(result) => {
+                if let Some(aged) = aged_outputs.get(event.event_id.as_str()) {
+                    if aged.source_message_id != result.message_id
+                        || aged.call_id != result.call_id
+                        || aged.tool_name != result.tool_name
+                        || aged.source_initial_model_view_sha256 != result.initial_model_view_sha256
+                    {
+                        bail!("tool-output aged view does not match its durable source");
+                    }
+                    result.model_message_with_view(&aged.aged_model_view)?
+                } else {
+                    replacements
+                        .get(event.event_id.as_str())
+                        .cloned()
+                        .unwrap_or(result.model_message()?)
+                }
+            }
             SessionLogEntry::Control(_) => continue,
         };
         messages.push(DurableProjectionMessage {
@@ -372,7 +407,9 @@ pub(crate) fn portable_candidate_model_messages(
     task_memory: &TaskMemoryV1,
 ) -> Result<Vec<ModelMessage>> {
     let checkpoint_message = checkpoint.render_for_provider(task_memory)?;
-    let raw_messages = raw_model_messages_from_durable_records(records, &[])?;
+    let aged_outputs = ToolOutputAgingProjectionV1::from_records(records)?;
+    let raw_messages =
+        raw_model_messages_from_durable_records(records, &[], aged_outputs.replacements())?;
     let retained_raw_event_ids = portable_retained_raw_event_ids_for_plan(records, plan)?;
     let mut candidate = Vec::with_capacity(raw_messages.len().saturating_add(1));
     candidate.push(checkpoint_message);
@@ -416,6 +453,7 @@ fn portable_retained_raw_event_ids_for_plan(
             SessionLogEntry::User(_)
                 | SessionLogEntry::Assistant(_)
                 | SessionLogEntry::ToolResult(_)
+                | SessionLogEntry::ToolResultV2(_)
         ) || (matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
@@ -472,6 +510,7 @@ fn portable_retained_raw_event_ids(
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
                     | SessionLogEntry::ToolResult(_)
+                    | SessionLogEntry::ToolResultV2(_)
             )
         ) || (matches!(
             entry,

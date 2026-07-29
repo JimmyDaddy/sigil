@@ -7,7 +7,9 @@ use crate::{
     ExternalProvenanceEntry, ExternalTrust,
     event::{EventHandler, RunEvent},
     provider::ToolCall,
-    session::{ControlEntry, Session, ToolExecutionStatus},
+    session::{
+        ControlEntry, Session, ToolArtifactSensitivity, ToolExecutionStatus, ToolResultRecordedV2,
+    },
     tool::{ToolErrorKind, ToolResult, ToolResultStatus, ToolSubject},
 };
 
@@ -39,7 +41,22 @@ where
 {
     let mut registrations = std::mem::take(&mut result.url_capability_registrations);
     let external_sources = std::mem::take(&mut result.external_sources);
-    let message = result.to_model_message();
+    let bundled_receipts = std::mem::take(&mut result.control_entries);
+    if bundled_receipts
+        .iter()
+        .any(|control| !matches!(control, ControlEntry::ToolArtifactRead(_)))
+    {
+        anyhow::bail!("tool result contains an unsupported deferred control entry");
+    }
+    let sensitivity = if external_sources.is_empty() {
+        ToolArtifactSensitivity::Ordinary
+    } else {
+        ToolArtifactSensitivity::ExternalUntrusted
+    };
+    let artifact_store = session.tool_artifact_store();
+    let (recorded, display) =
+        ToolResultRecordedV2::capture(&result, artifact_store.as_ref(), sensitivity)?;
+    let message = recorded.model_message()?;
     for registration in registrations.iter_mut() {
         registration.durable_entry_id.clone_from(&message.id);
     }
@@ -55,8 +72,10 @@ where
             }
         }
     }
-    let mut controls =
-        Vec::with_capacity(registrations.len() + usize::from(!external_sources.is_empty()));
+    let mut controls = Vec::with_capacity(
+        bundled_receipts.len() + registrations.len() + usize::from(!external_sources.is_empty()),
+    );
+    controls.extend(bundled_receipts);
     for registration in registrations.iter() {
         let descriptor = registration.durable_descriptor(session.session_scope_id());
         controls.push(ControlEntry::WebUrlCapabilityDescriptor(descriptor));
@@ -71,7 +90,7 @@ where
         };
         controls.push(ControlEntry::ExternalProvenance(provenance));
     }
-    if let Err(error) = session.append_tool_result_bundle(message.clone(), controls.clone()) {
+    if let Err(error) = session.append_tool_result_bundle(recorded, controls.clone()) {
         if !registrations.is_empty()
             && let Some(registrar) = registrar.as_ref()
         {
@@ -94,6 +113,12 @@ where
     for control in controls {
         handler.handle(RunEvent::Control(control))?;
     }
+    result.content = display.preview.clone();
+    result.metadata.bytes = Some(display.observed_bytes);
+    result.metadata.returned_bytes = Some(display.preview.len() as u64);
+    result.metadata.truncated = display.has_more;
+    result.metadata.details = serde_json::to_value(&display)
+        .unwrap_or_else(|_| serde_json::json!({"projection": "unavailable"}));
     handler.handle(RunEvent::ToolResult(result))
 }
 

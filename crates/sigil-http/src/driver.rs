@@ -15,8 +15,8 @@ use crate::dto::{
     HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
     HttpSessionSnapshot, HttpSessionTranscriptPage, HttpTaskContinuationRequest,
     HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
-    HttpTaskIntegrationReviewView, HttpTaskPauseRequest, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpTaskIntegrationReviewView, HttpTaskPauseRequest, HttpToolArtifactPage,
+    HttpToolArtifactReadRequest, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -283,6 +283,20 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpConversationDisplayDriverError::Unavailable)
     }
 
+    /// Reads one session-scoped, integrity-checked, bounded tool artifact page.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed fail-closed rejection. Implementations must not include physical paths,
+    /// artifact bodies, or backend error strings in an error returned to clients.
+    fn tool_artifact_page(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpToolArtifactReadRequest,
+    ) -> Result<HttpToolArtifactPage, HttpToolArtifactReadDriverError> {
+        Err(HttpToolArtifactReadDriverError::Unavailable)
+    }
+
     /// Reads the current scope-checked durable frontier without mutating session truth.
     ///
     /// # Errors
@@ -544,6 +558,26 @@ pub enum HttpConversationDisplayDriverError {
     /// Durable projection could not be proven safely.
     #[error("conversation display projection is unavailable")]
     Unavailable,
+}
+
+/// Typed fail-closed errors for display-surface artifact retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum HttpToolArtifactReadDriverError {
+    /// The opaque reference does not conform to the supported schema.
+    #[error("tool artifact reference is invalid")]
+    InvalidReference,
+    /// The selector exceeds a byte, line, match, context, or literal bound.
+    #[error("tool artifact selector is invalid")]
+    InvalidSelector,
+    /// The reference is not resolvable in this logical session scope or has expired.
+    #[error("tool artifact is unavailable")]
+    Unavailable,
+    /// The immutable artifact bytes no longer match their durable descriptor.
+    #[error("tool artifact failed integrity validation")]
+    Corrupt,
+    /// Current persistence or retrieval policy does not authorize display access.
+    #[error("tool artifact retrieval is not authorized")]
+    PolicyRevoked,
 }
 
 /// Typed rejection surface for checkpoint and conversation-fork recovery operations.

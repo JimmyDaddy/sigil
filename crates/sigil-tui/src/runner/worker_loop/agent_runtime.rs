@@ -239,6 +239,7 @@ pub(in crate::runner) fn start_agent_result_continuation_run<P>(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     next_run_id: &mut u64,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
     completed_thread_ids: Vec<AgentThreadId>,
 ) -> Option<ActiveRun>
 where
@@ -305,6 +306,7 @@ where
                     AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
                         continuation_prompt,
                     )])
+                    .with_tool_artifact_read_budget(tool_artifact_read_budget)
                     .with_cancellation(cancellation_handle),
                     options,
                     &mut handler,
@@ -397,6 +399,7 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     session_log_path: &Path,
     next_run_id: &mut u64,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
     queued: PreparedQueuedConversationCandidate,
 ) -> Option<ActiveRun>
 where
@@ -497,7 +500,8 @@ where
         let mut payload = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
             let input = AgentRunInput::without_persisted_user_message(Vec::new())
-                .with_initial_frozen_provider_request(frozen_request);
+                .with_initial_frozen_provider_request(frozen_request)
+                .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
             let input = conversation_coordinator
                 .enforce_orchestration_route_kill_switch(&mut run_session, current_unix_time_ms())
                 .and_then(|_| {
@@ -561,6 +565,7 @@ where
                                         role_provider_builder: role_provider_builder.as_ref(),
                                         handler: &mut handler,
                                         cancellation_handle,
+                                        tool_artifact_read_budget,
                                     },
                                     &mut approval_handler,
                                 )
@@ -688,6 +693,7 @@ pub(in crate::runner) fn start_portable_overflow_recovery_run<P>(
     next_run_id: &mut u64,
     frozen_request: sigil_kernel::FrozenProviderRequestMaterial,
     logical_run_id: String,
+    tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 ) -> anyhow::Result<ActiveRun>
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -731,6 +737,7 @@ where
             let input = AgentRunInput::without_persisted_user_message(Vec::new())
                 .with_initial_frozen_provider_request(frozen_request)
                 .with_logical_run_id(logical_run_id)
+                .with_tool_artifact_read_budget(tool_artifact_read_budget)
                 .with_cancellation(cancellation_handle);
             agent
                 .run_with_approval_input_and_agent_delegate(

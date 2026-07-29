@@ -36,7 +36,7 @@ use crate::{
         HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
         HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
         HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpTaskIntegrationReviewRequest,
-        HttpTaskPauseRequest, HttpVerificationRerunRequest,
+        HttpTaskPauseRequest, HttpToolArtifactReadRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -895,6 +895,33 @@ fn route_http_request(
         };
         return match registry.execute_intent_drop_command(session_id, command) {
             Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/tool-artifacts/read"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(body) = parse_json_body::<HttpToolArtifactReadRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_tool_artifact_request",
+                "invalid tool artifact read body",
+            );
+        };
+        if body.validate().is_err() {
+            return http_error_response(
+                400,
+                "invalid_tool_artifact_request",
+                "tool artifact reference or selector exceeds the supported contract",
+            );
+        }
+        return match registry.tool_artifact_page(session_id, &body) {
+            Ok(page) => json_response(200, json!(page)),
             Err(error) => registry_error_response(error),
         };
     }
@@ -1881,7 +1908,9 @@ async fn write_http_response(
 fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
     let status = match &error {
         HttpRegistryError::SessionNotFound { .. } | HttpRegistryError::RunNotFound { .. } => 404,
-        HttpRegistryError::DurableSessionNotFound => 404,
+        HttpRegistryError::DurableSessionNotFound | HttpRegistryError::ToolArtifactUnavailable => {
+            404
+        }
         HttpRegistryError::UnsupportedProtocolVersion { .. }
         | HttpRegistryError::CommandSessionMismatch { .. }
         | HttpRegistryError::CommandPathSessionMismatch { .. }
@@ -1915,7 +1944,9 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ConversationRecoveryConflict
         | HttpRegistryError::IntentStackStale
         | HttpRegistryError::IntentStackPermissionRequired
-        | HttpRegistryError::IntentStackConflict => 409,
+        | HttpRegistryError::IntentStackConflict
+        | HttpRegistryError::ToolArtifactCorrupt
+        | HttpRegistryError::ToolArtifactPolicyRevoked => 409,
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidTaskContinuation
@@ -1924,6 +1955,8 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::IntentStackInvalidRequest
         | HttpRegistryError::InvalidSessionOpenRequest
         | HttpRegistryError::ConversationDisplayCursorInvalid
+        | HttpRegistryError::ToolArtifactReferenceInvalid
+        | HttpRegistryError::ToolArtifactSelectorInvalid
         | HttpRegistryError::ConversationQueueInvalidCommand
         | HttpRegistryError::ConversationRecoveryInvalidCommand
         | HttpRegistryError::ConversationQueueUnsupported => 400,
@@ -1953,6 +1986,11 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationDisplayCursorInvalid => "invalid_display_cursor",
         HttpRegistryError::ConversationDisplayCursorStale => "display_cursor_stale",
         HttpRegistryError::ConversationDisplayUnavailable => "conversation_display_unavailable",
+        HttpRegistryError::ToolArtifactReferenceInvalid => "invalid_tool_artifact_ref",
+        HttpRegistryError::ToolArtifactSelectorInvalid => "invalid_tool_artifact_selector",
+        HttpRegistryError::ToolArtifactUnavailable => "tool_artifact_unavailable",
+        HttpRegistryError::ToolArtifactCorrupt => "tool_artifact_corrupt",
+        HttpRegistryError::ToolArtifactPolicyRevoked => "tool_artifact_policy_revoked",
         HttpRegistryError::SessionRunCleanupActive { .. } => "session_run_cleanup_active",
         HttpRegistryError::ConversationQueueInvalidCommand => "invalid_queue_command",
         HttpRegistryError::ConversationQueueGenerationStale => "queue_generation_stale",

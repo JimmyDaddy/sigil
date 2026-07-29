@@ -453,10 +453,16 @@ pub(super) fn append_tool_control_entries_from_result(
     handler: &mut impl EventHandler,
     result: &mut ToolResult,
 ) -> Result<()> {
+    let mut bundled_receipts = Vec::new();
     for control in std::mem::take(&mut result.control_entries) {
+        if matches!(control, ControlEntry::ToolArtifactRead(_)) {
+            bundled_receipts.push(control);
+            continue;
+        }
         session.append_control(control.clone())?;
         handler.handle(RunEvent::Control(control))?;
     }
+    result.control_entries = bundled_receipts;
     Ok(())
 }
 

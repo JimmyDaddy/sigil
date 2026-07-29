@@ -10,10 +10,12 @@ use async_trait::async_trait;
 use sigil_kernel::{
     AgentRole, AssistantMessageKind, CandidateCheck, CheckCommand, CheckDiscoverySource,
     CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope,
-    NetworkEffect, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus,
-    SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
-    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolSpec,
+    JsonlSessionStore, NetworkEffect, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction,
+    RunStatus, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry,
+    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode,
+    TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval, ToolArtifactDescriptorV1,
+    ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory,
+    ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolSpec,
     VerificationPolicy, VerificationPolicyChangedEntry, VerificationProductAction,
     VerificationVerdict, VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
@@ -294,6 +296,348 @@ fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpS
         session_log_path: session_path.display().to_string(),
         foreground_run_id: None,
     }
+}
+
+fn append_durable_tool_artifact(
+    session: &HttpSessionSnapshot,
+    result: ToolResult,
+) -> ToolArtifactDescriptorV1 {
+    let session_store = JsonlSessionStore::new(std::path::Path::new(&session.session_log_path))
+        .expect("session store should reopen");
+    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
+    let (recorded, _display) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )
+    .expect("tool result should capture");
+    let descriptor = recorded
+        .artifact
+        .descriptor()
+        .expect("tool result should publish an artifact")
+        .clone();
+    session_store
+        .append(&SessionLogEntry::ToolResultV2(recorded))
+        .expect("tool result should append durably");
+    descriptor
+}
+
+#[tokio::test]
+async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "artifact-read");
+    let session = production_queue_session_named(&temp, "artifact-owner");
+    let store =
+        ToolArtifactStore::for_session_path(std::path::Path::new(&session.session_log_path));
+    let descriptor = append_durable_tool_artifact(
+        &session,
+        ToolResult::ok(
+            "call-artifact",
+            "shell",
+            "line one\nline two\nline three\n",
+            ToolResultMeta::default(),
+        ),
+    );
+    assert!(
+        store.source_event_id(&descriptor.artifact_ref).is_err(),
+        "retrieval authority must not require a post-append sidecar"
+    );
+    let request = crate::HttpToolArtifactReadRequest {
+        artifact_ref: descriptor.artifact_ref.artifact_id.clone(),
+        selector: crate::HttpToolArtifactSelector::LinePage {
+            start_line: 1,
+            line_count: 2,
+        },
+    };
+
+    let page = driver
+        .tool_artifact_page(&session, &request)
+        .expect("session owner should read a bounded page");
+    assert_eq!(page.request_scope, session.id);
+    assert_eq!(page.body, "line two\nline three\n");
+    assert_eq!(page.returned_bytes, 20);
+    assert_eq!(page.artifact_sha256, descriptor.content_sha256);
+    let metrics_after_first_page = driver
+        .session_projection_stores
+        .lock()
+        .expect("projection store cache should not be poisoned")
+        .entries
+        .get(&session.durable_session_scope_id)
+        .expect("artifact read should retain the session projection store")
+        .store
+        .active_projection_metrics();
+    driver
+        .tool_artifact_page(&session, &request)
+        .expect("a second page read should reuse the active projection");
+    let metrics_after_second_page = driver
+        .session_projection_stores
+        .lock()
+        .expect("projection store cache should not be poisoned")
+        .entries
+        .get(&session.durable_session_scope_id)
+        .expect("artifact read should retain the session projection store")
+        .store
+        .active_projection_metrics();
+    assert_eq!(
+        metrics_after_second_page.full_rebuild_total, metrics_after_first_page.full_rebuild_total,
+        "steady-state typed retrieval must not rescan the durable session"
+    );
+
+    let other_session = production_queue_session_named(&temp, "artifact-other");
+    assert_eq!(
+        driver.tool_artifact_page(&other_session, &request),
+        Err(crate::HttpToolArtifactReadDriverError::Unavailable)
+    );
+
+    let binary_descriptor = store
+        .capture_policy_safe_bytes(
+            "call-binary",
+            "read_binary",
+            &[0xff, 0x00],
+            2,
+            "application/octet-stream",
+            ToolArtifactEncoding::Binary,
+            ToolArtifactSensitivity::Ordinary,
+            0,
+        )
+        .expect("binary artifact should publish");
+    let binary_descriptor = append_durable_tool_artifact(
+        &session,
+        ToolResult::ok(
+            "call-binary",
+            "read_binary",
+            "binary output",
+            ToolResultMeta::default(),
+        )
+        .with_captured_artifact(binary_descriptor),
+    );
+    assert_eq!(
+        driver.tool_artifact_page(
+            &session,
+            &crate::HttpToolArtifactReadRequest {
+                artifact_ref: binary_descriptor.artifact_ref.artifact_id,
+                selector: crate::HttpToolArtifactSelector::LinePage {
+                    start_line: 0,
+                    line_count: 1,
+                },
+            }
+        ),
+        Err(crate::HttpToolArtifactReadDriverError::InvalidSelector)
+    );
+
+    let long_line = "x".repeat(sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES as usize + 128);
+    let long_line_descriptor = append_durable_tool_artifact(
+        &session,
+        ToolResult::ok(
+            "call-long-line",
+            "shell",
+            long_line,
+            ToolResultMeta::default(),
+        ),
+    );
+    let long_line_request = crate::HttpToolArtifactReadRequest {
+        artifact_ref: long_line_descriptor.artifact_ref.artifact_id,
+        selector: crate::HttpToolArtifactSelector::LinePage {
+            start_line: 0,
+            line_count: 1,
+        },
+    };
+    let long_line_page = driver
+        .tool_artifact_page(&session, &long_line_request)
+        .expect("line paging should fall through to a bounded byte continuation");
+    assert!(matches!(
+        &long_line_page.next_selector,
+        Some(crate::HttpToolArtifactSelector::ByteSlice { .. })
+    ));
+    long_line_page
+        .validate(&session.id, &long_line_request)
+        .expect("transport validation should accept the typed byte continuation");
+
+    let digest = descriptor
+        .content_sha256
+        .strip_prefix("sha256:")
+        .expect("descriptor hash prefix");
+    let blob_path = store
+        .root()
+        .join("blobs")
+        .join(&digest[..2])
+        .join(format!("{digest}.blob"));
+    std::fs::write(&blob_path, b"tampered")
+        .expect("test should replace the session-owned artifact bytes");
+    assert_eq!(
+        driver.tool_artifact_page(&session, &request),
+        Err(crate::HttpToolArtifactReadDriverError::Corrupt)
+    );
+
+    let oversized = crate::HttpToolArtifactReadRequest {
+        artifact_ref: descriptor.artifact_ref.artifact_id,
+        selector: crate::HttpToolArtifactSelector::ByteSlice {
+            offset: 0,
+            limit: sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES + 1,
+        },
+    };
+    assert_eq!(
+        driver.tool_artifact_page(&session, &oversized),
+        Err(crate::HttpToolArtifactReadDriverError::InvalidSelector)
+    );
+}
+
+#[tokio::test]
+async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact_sidecars() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "artifact-binding");
+    let session = production_queue_session_named(&temp, "artifact-binding-owner");
+    let store =
+        ToolArtifactStore::for_session_path(std::path::Path::new(&session.session_log_path));
+
+    let orphan = store
+        .capture_text(
+            "call-orphan",
+            "shell",
+            "not durably bound",
+            ToolArtifactSensitivity::Ordinary,
+        )
+        .expect("orphan artifact should publish");
+    store
+        .bind_source_event(&orphan.artifact_ref, "forged-source-event")
+        .expect("legacy sidecar should be forgeable for the regression fixture");
+    assert_eq!(
+        driver.tool_artifact_page(
+            &session,
+            &crate::HttpToolArtifactReadRequest {
+                artifact_ref: orphan.artifact_ref.artifact_id,
+                selector: crate::HttpToolArtifactSelector::ByteSlice {
+                    offset: 0,
+                    limit: 64,
+                },
+            }
+        ),
+        Err(crate::HttpToolArtifactReadDriverError::Unavailable),
+        "a sidecar without a durable ToolResultV2 must never authorize retrieval"
+    );
+
+    let descriptor = append_durable_tool_artifact(
+        &session,
+        ToolResult::ok(
+            "call-bound",
+            "shell",
+            "durably projected",
+            ToolResultMeta::default(),
+        ),
+    );
+    let manifest_path = store
+        .root()
+        .join("refs")
+        .join(format!("{}.json", descriptor.artifact_ref.artifact_id));
+    let mut forged_descriptor = descriptor.clone();
+    forged_descriptor.tool_name = "forged-tool".to_owned();
+    std::fs::write(
+        manifest_path,
+        serde_json::to_vec(&forged_descriptor).expect("forged descriptor should encode"),
+    )
+    .expect("test should replace the descriptor manifest");
+    let projected_binding = driver
+        .retained_session_projection_store(&session)
+        .expect("projection store should remain available")
+        .active_projection_snapshot()
+        .expect("active projection should remain valid")
+        .tool_output_pressure()
+        .artifact_source_binding(&descriptor.artifact_ref)
+        .expect("durable binding should remain authoritative");
+    assert_eq!(projected_binding.tool_name, "shell");
+    assert_eq!(
+        store
+            .resolve(&descriptor.artifact_ref)
+            .expect("forged but well-formed physical descriptor should resolve")
+            .tool_name,
+        "forged-tool"
+    );
+    assert_eq!(
+        driver.tool_artifact_page(
+            &session,
+            &crate::HttpToolArtifactReadRequest {
+                artifact_ref: descriptor.artifact_ref.artifact_id,
+                selector: crate::HttpToolArtifactSelector::ByteSlice {
+                    offset: 0,
+                    limit: 64,
+                },
+            }
+        ),
+        Err(crate::HttpToolArtifactReadDriverError::Corrupt),
+        "a physical manifest that disagrees with durable projection must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn production_driver_bounds_retained_session_projections_with_scope_safe_lru() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "projection-cache");
+    let snapshot = |index: usize, path_suffix: &str| HttpSessionSnapshot {
+        id: format!("adapter-cache-{index}"),
+        label: None,
+        run_ids: Vec::new(),
+        durable_session_scope_id: format!("scope-cache-{index}"),
+        session_log_path: temp
+            .path()
+            .join(format!("projection-cache-{index}-{path_suffix}.jsonl"))
+            .display()
+            .to_string(),
+        foreground_run_id: None,
+    };
+
+    for index in 0..MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES {
+        driver
+            .retained_session_projection_store(&snapshot(index, "original"))
+            .expect("bounded projection store should cache");
+    }
+    let first = snapshot(0, "original");
+    driver
+        .retained_session_projection_store(&first)
+        .expect("touching the first scope should refresh its LRU position");
+    let overflow = snapshot(MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES, "original");
+    driver
+        .retained_session_projection_store(&overflow)
+        .expect("one overflow scope should evict the coldest store");
+
+    {
+        let stores = driver
+            .session_projection_stores
+            .lock()
+            .expect("projection store cache should lock");
+        assert_eq!(
+            stores.entries.len(),
+            MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES
+        );
+        assert!(stores.entries.contains_key(&first.durable_session_scope_id));
+        assert!(
+            !stores.entries.contains_key("scope-cache-1"),
+            "the least recently used cold scope should be evicted"
+        );
+        assert!(
+            stores
+                .entries
+                .contains_key(&overflow.durable_session_scope_id)
+        );
+    }
+
+    let conflicting_path = snapshot(0, "conflicting");
+    assert!(matches!(
+        driver.retained_session_projection_store(&conflicting_path),
+        Err(crate::HttpToolArtifactReadDriverError::Unavailable)
+    ));
+    let stores = driver
+        .session_projection_stores
+        .lock()
+        .expect("projection store cache should relock");
+    assert_eq!(
+        stores
+            .entries
+            .get(&first.durable_session_scope_id)
+            .expect("original scope binding should remain")
+            .session_log_path,
+        first.session_log_path,
+        "the same durable scope must never switch to another physical path"
+    );
 }
 
 fn queue_command(
@@ -941,6 +1285,21 @@ async fn production_queue_session_delete_purges_only_matching_exact_prompt_mater
             .len(),
         2
     );
+    driver
+        .retained_session_projection_store(&first_session)
+        .expect("first projection store should cache");
+    driver
+        .retained_session_projection_store(&second_session)
+        .expect("second projection store should cache");
+    assert_eq!(
+        driver
+            .session_projection_stores
+            .lock()
+            .expect("projection store cache should lock")
+            .entries
+            .len(),
+        2
+    );
 
     driver.purge_session_local_state(&first_session.durable_session_scope_id);
 
@@ -953,6 +1312,17 @@ async fn production_queue_session_delete_purges_only_matching_exact_prompt_mater
         exact_prompts
             .keys()
             .all(|key| key.session_scope_id == second_session.durable_session_scope_id)
+    );
+    let session_projection_stores = driver
+        .session_projection_stores
+        .lock()
+        .expect("projection store cache should relock");
+    assert_eq!(session_projection_stores.entries.len(), 1);
+    assert!(
+        session_projection_stores
+            .entries
+            .contains_key(&second_session.durable_session_scope_id),
+        "session deletion must release only the matching active projection handle"
     );
 }
 

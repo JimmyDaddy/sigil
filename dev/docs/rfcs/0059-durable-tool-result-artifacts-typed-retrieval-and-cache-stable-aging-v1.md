@@ -1,8 +1,10 @@
 # RFC-0059 Durable Tool-result Artifacts, Typed Retrieval and Cache-stable Aging V1
 
-状态：draft / implementation deferred
+状态：accepted / implemented
 
 创建日期：2026-07-29
+
+实现完成日期：2026-07-29
 
 依赖：
 
@@ -123,9 +125,10 @@ compare-and-publish 激活。
 若本 RFC 与 RFC-0057 第 10 节对 raw tool result 的解释冲突，以本 RFC 为准。若与 RFC-0058 的
 worker/writer contract 冲突，以 RFC-0058 为准。
 
-当前 `ToolOutputArtifactRefV1::DurableTranscriptEvent` 和
-`model_retrieval_available=false` 是过渡实现。新 session schema 启用后，它们不再作为通用 raw
-artifact contract。
+R59.7 clean cutover 已删除 `ToolOutputArtifactRefV1::DurableTranscriptEvent` 和
+`model_retrieval_available=false` 的 fake recoverability。仍保留的 compaction sidecar 只允许绑定
+真实 `ToolArtifactRefV1`；缺少 V2 descriptor、real artifact ref 或 context-epoch transition 的
+pre-cutover shape 一律 fail closed。
 
 ## 4. Goals and non-goals
 
@@ -206,7 +209,8 @@ URL capability 规则的后门。
 
 ## 6. Core invariants
 
-1. artifact body 不进入 JSONL event、control entry、run event 或 Desktop IPC。
+1. unbounded artifact body 不进入 JSONL event、control entry、run event 或 generic Desktop IPC；
+   authenticated typed retrieval 可返回单页、经 hash 校验且不超过 endpoint cap 的 bounded page DTO。
 2. public/model-visible ref 不包含 absolute path、workspace path、username 或 content-addressed filename。
 3. 一个 artifact ref 只能在创建它的 logical session scope 内解析。
 4. descriptor 的 `content_sha256` 绑定最终 persisted bytes；读取时必须重新校验或使用已验证 immutable
@@ -240,24 +244,30 @@ pub struct ToolArtifactDescriptorV1 {
     pub tool_name: String,
     pub content_sha256: String,
     pub observed_bytes: u64,
+    pub policy_projected_bytes: u64,
     pub persisted_bytes: u64,
     pub media_type: String,
     pub encoding: ToolArtifactEncoding,
     pub completeness: ToolArtifactCompleteness,
-    pub sensitivity: PersistenceSensitivity,
+    pub sensitivity: ToolArtifactSensitivity,
     pub retention_class: ToolArtifactRetentionClass,
     pub retrieval_policy: ToolArtifactRetrievalPolicyV1,
 }
 
 pub enum ToolArtifactCompleteness {
     Complete,
-    PolicyRedacted { redaction_count: u32 },
-    StorageTruncated {
-        omitted_bytes: u64,
-        retained_head_bytes: u64,
-        retained_tail_bytes: u64,
+    PolicyRedacted {
+        redaction_count: u32,
+        storage_truncation: Option<ToolArtifactTruncationV1>,
     },
+    StorageTruncated(ToolArtifactTruncationV1),
     EphemeralUnavailableAfterRestart,
+}
+
+pub struct ToolArtifactTruncationV1 {
+    pub omitted_bytes: u64,
+    pub retained_head_bytes: u64,
+    pub retained_tail_bytes: u64,
 }
 ```
 
@@ -269,15 +279,16 @@ session path。
 
 ```rust
 pub struct ToolResultFactsV1 {
-    pub status: ToolResultStatus,
+    pub status: String,
     pub exit_code: Option<i32>,
     pub duration_ms: Option<u64>,
-    pub changed_files: Vec<BoundedWorkspacePath>,
-    pub error: Option<BoundedToolErrorV1>,
-    pub mutation_receipt_refs: Vec<MutationReceiptRef>,
-    pub verification_receipt_refs: Vec<VerificationReceiptRef>,
-    pub external_provenance_refs: Vec<ExternalProvenanceRef>,
-    pub tool_specific: BoundedJsonValue,
+    pub changed_files: Vec<String>,
+    pub error: Option<ToolError>,
+    pub mutation_receipt_refs: Vec<String>,
+    pub approval_receipt_refs: Vec<String>,
+    pub verification_receipt_refs: Vec<String>,
+    pub external_provenance_refs: Vec<String>,
+    pub tool_specific: serde_json::Value,
 }
 ```
 
@@ -288,13 +299,13 @@ JSON 的逃生口。
 
 ```rust
 pub struct ToolResultViewsV2 {
-    pub artifact: ToolArtifactDescriptorV1,
+    pub artifact: ToolArtifactBindingV1,
+    pub facts: ToolResultFactsV1,
     pub model: ToolModelViewV1,
     pub display: ToolDisplayViewV1,
 }
 
 pub struct ToolModelViewV1 {
-    pub facts: ToolResultFactsV1,
     pub preview: BoundedText,
     pub preview_kind: ToolPreviewKind,
     pub artifact_ref: Option<ToolArtifactRefV1>,
@@ -326,13 +337,15 @@ pub struct ToolDisplayViewV1 {
 ```rust
 pub struct ToolResultRecordedV2 {
     pub schema_version: u16,
+    pub message_id: String,
     pub call_id: String,
     pub tool_name: String,
-    pub artifact: Option<ToolArtifactDescriptorV1>,
+    pub artifact: ToolArtifactBindingV1,
     pub facts: ToolResultFactsV1,
     pub initial_model_view: ToolModelViewV1,
     pub initial_model_view_sha256: String,
-    pub recorded_at: Timestamp,
+    pub capture_telemetry: ToolResultCaptureTelemetryV1,
+    pub recorded_at_ms: u64,
 }
 ```
 
@@ -418,13 +431,20 @@ sink 同时执行：
 
 ```text
 <sigil-state>/workspaces/<workspace-id>/sessions/<session-id>/artifacts/
-  blobs/<sha256-prefix>/<sha256>
+  blobs/<sha256-prefix>/<sha256>.blob
+  refs/<opaque-ref>.json
+  refs/<opaque-ref>.event
   staging/<random>.part
+  trash/<tombstone-id>/
 ```
 
 模型、TUI、HTTP 和 Desktop 永远看不到这个路径。首版不新增 crate；kernel 定义 provider-neutral
 contract，session store 实现本地 filesystem backend。若未来需要 remote/object backend，再通过
 `ToolArtifactStore` trait 替换。
+
+`refs/<opaque-ref>.event` 只是 fork/GC 使用的可重建 lifecycle cache，不是读取授权来源。读取授权只
+来自 active durable pressure projection，并同时绑定 descriptor hash、persisted bytes、call/tool
+identity 与 availability；sidecar 缺失不会扩大权限，也不能单独授权 blob read。
 
 ### 8.4 Publish protocol
 
@@ -559,11 +579,14 @@ artifact ref 不是 bearer path。即使用户猜到另一个 session 的 ref，
 pub struct ToolArtifactPageV1 {
     pub artifact_ref: ToolArtifactRefV1,
     pub selector: ToolArtifactSelectorV1,
-    pub content: BoundedTextOrBytes,
+    pub body: String,
+    pub body_encoding: ToolArtifactPageEncoding,
     pub returned_bytes: u32,
+    pub page_sha256: String,
+    pub artifact_sha256: String,
+    pub eof: bool,
+    pub match_count: u16,
     pub next_selector: Option<ToolArtifactSelectorV1>,
-    pub content_sha256: String,
-    pub complete_for_selector: bool,
 }
 ```
 
@@ -583,13 +606,17 @@ artifact read 的 durable event 只记录：
 
 ```rust
 pub struct ToolArtifactReadRecordedV1 {
+    pub schema_version: u16,
     pub call_id: String,
     pub artifact_ref: ToolArtifactRefV1,
+    pub source_descriptor_event_id: String,
+    pub active_epoch_id: String,
     pub selector: ToolArtifactSelectorV1,
     pub returned_bytes: u32,
     pub page_sha256: String,
     pub artifact_sha256: String,
     pub outcome: ToolArtifactReadOutcome,
+    pub deduplicated_from_call_id: Option<String>,
 }
 ```
 
@@ -1036,6 +1063,16 @@ hash，但仍不显示物理路径。
 6. 不为兼容旧 session 保留双写路径；
 7. cutover 前的 current development-only projection schema 可直接替换。
 
+实现约束：
+
+- `Session::append`、`JsonlSessionStore::append*` 拒绝 `SessionLogEntry::ToolResult`；
+- crate-local 测试迁移 helper 即使接收旧 `ModelMessage` 形状，也必须立即 capture 为
+  `ToolResultRecordedV2`，不得产生 legacy event；
+- `tool_result_recorded` 只保留为 parser sentinel，用于返回 typed、bounded
+  `SessionStreamCompatibilityError`；其正文标记为 `LegacyUnavailable`，文件保持不修改；
+- provider、TUI、HTTP 与 Desktop 不会把旧 inline envelope 投影成完整 artifact，也不会通过
+  `DurableTranscriptEvent` 伪造 retrieval capability。
+
 这项决定显著降低实现复杂度，但不能降低新 schema 的 crash、fork、export 和 deletion tests。
 
 ## 21. Rollout plan
@@ -1097,7 +1134,9 @@ Exit：idle 时零 polling、零 full replay、零 data-file lock；legitimate a
 ### R59.7 Default flip and cleanup
 
 - 新 session 默认 V2 tool result；
-- 删除 old `content: String` 大输出主路径和 fake transcript artifact ref；
+- 删除 old `content: String` durable 大输出主路径和 fake transcript artifact ref；
+- legacy append API fail closed；pre-V2 `tool_result_recorded` 只返回
+  `LegacyUnavailable` compatibility diagnostic；
 - 同步 README、governance、core solution、TUI/Desktop/HTTP schema；
 - 运行全量 gate 和真实长会话 acceptance。
 
@@ -1315,3 +1354,102 @@ truth。SQLite 不进入 live writer authority。
   `cargo clippy --all-targets -- -D warnings` 通过；
 - telemetry 证明 semantic compaction 次数、历史 tool token 和 effective cost 至少不劣于当前 baseline；
 - 旧 session 不兼容策略已在 release note 和错误提示中明确，不存在静默误读。
+
+## 28. Implementation and acceptance evidence
+
+2026-07-29 完成 R59.1–R59.7，并按第 27 节将状态升级为 `accepted / implemented`。
+
+### 28.1 Landed contract
+
+- kernel 已冻结 `ToolArtifactDescriptorV1`、`ToolArtifactBindingV1`、
+  `ToolResultRecordedV2`、`ToolArtifactReadRecordedV1`、三种 view、selector、availability、
+  completeness、capture telemetry 和 root-owned read budget。
+- session append 只接受 V2 tool result。pre-V2 `tool_result_recorded` 仅由 parser sentinel 识别并
+  返回 bounded `LegacyUnavailable` compatibility error；不 backfill、不改写原文件、不伪造 artifact。
+- shell/process、persistent terminal、MCP、streaming file read、list/glob/grep/search 和 test-runner
+  shell path 均在 upstream collector 或 artifact sink 处有 hard bound；artifact capture 记录
+  source-observed、policy-projected、persisted bytes 和 truthful truncation。
+- store 使用 owner-only staging、immutable hash blob、opaque ref manifest、保守 reservation ledger
+  和 dirty-ledger reconciliation。publish 发生在 descriptor append 前；append 失败的 orphan 只能由
+  grace GC 回收。
+- active pressure projection 是 model/TUI/HTTP/Desktop artifact read 的授权来源。`.event` sidecar
+  只是可重建 fork/GC lifecycle cache，不能单独授权读取。
+- typed retrieval 已覆盖 byte slice、line page 和 linear-time literal search；单页 16 KiB、最多
+  200 行或 20 matches，一个 root turn 共享 8 次/64 KiB 预算。子 agent、background、Task 和 TUI
+  继承同一 root budget。
+- deterministic aging 通过 exact frontier + active epoch CAS 发布，保留 current/recent/unpaired/
+  error/approval/mutation/verification/provenance facts；fit-required aging 在 semantic compaction 前，
+  cost-only aging 在有 cache hit 时只保留 candidate、不主动 reset epoch。
+- descriptor projection、artifact GC 和 worker scheduler 使用 changed-family wake、coalescing slot 和
+  blocking receive；不存在固定 50 ms scan。
+
+### 28.2 Scale and resource evidence
+
+| Evidence | Result |
+| --- | --- |
+| 10 MiB input | 由 `100 × 10 MiB` acceptance 同时覆盖；每个 V2 event 都小于 64 KiB target |
+| 100 MiB streaming input | 通过；artifact 明确 `StorageTruncated` 到 16 MiB head/tail |
+| 100 MiB process peak | `/usr/bin/time -l` 最大 RSS 116,097,024 bytes，peak footprint 99,172,904 bytes；测试进程含 Rust harness，capture retained bytes 仍固定为 16 MiB |
+| 100 × 10 MiB | 通过；256 MiB session budget 接受 25、拒绝 75，JSONL 小于 2 MiB |
+| 1000 small results | 通过；44.836 ms/result，JSONL 1,790,563 bytes，ledger 与 artifact bytes 一致 |
+| adversarial literal search | 16 MiB repetitive input + 511-byte common-prefix query 通过 linear matcher test |
+
+关键用例：
+
+- `hundred_megabyte_stream_keeps_only_the_bounded_head_and_tail`
+- `hundred_ten_megabyte_outputs_keep_events_bounded_and_enforce_session_budget`
+- `thousand_small_results_keep_incremental_artifact_overhead_bounded`
+- `literal_search_is_linear_on_repetitive_max_artifact`
+
+### 28.3 Idle and lock evidence
+
+`worker_reactor_idle_long_session_evidence` 以 10,491,873-byte JSONL、427 条 durable entries、
+216,803 prompt tokens、985,468 context-window tokens（22%）连续运行 600.010 秒。idle delta：
+
+```json
+{
+  "idle_event_wake_count": 0,
+  "idle_deadline_count": 0,
+  "idle_advancement_count": 0,
+  "idle_shared_lock_attempt_count": 0,
+  "idle_exclusive_lock_attempt_count": 0,
+  "idle_lock_contention_count": 0,
+  "idle_lock_failure_count": 0,
+  "teardown_event_count": 1
+}
+```
+
+shutdown 的 1 次 event 与 idle window 分开计数。该证据直接覆盖原始 22% context 长会话在空闲期反复
+获取 JSONL shared lock、与 automatic compaction preflight 竞争的问题。
+
+### 28.4 Aging economics and semantic-compaction evidence
+
+- `aging_activation_is_frontier_bound_and_replaces_only_the_next_epoch_view` 证明 activation 后
+  `total_tool_tokens` 严格下降，当前 epoch 不原地改写。
+- `standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction` 证明 deterministic
+  cleanup 产生 provider-visible aged projection，同时不存在 V2 semantic-compaction lifecycle event。
+- `cost_only_aging_requires_observed_cache_miss_evidence` 使用触发问题同量级 telemetry：
+  240K prompt / 226K cache-read 时 cost-only activation 不执行；只有已观察 cache-read 为 0 时才允许
+  自动 cost-only reset。fit-required 与用户手动 activation 保留独立、显式理由。
+- activation durable payload 记录 `tokens_before`、`tokens_after_upper_bound` 和
+  `reclaimable_tokens`，并在 append 前重新校验 token proof、frontier、epoch、layout hash 与
+  protected class。
+
+因此在已覆盖 baseline 中：历史 tool token 下降；deterministic cleanup 不增加 semantic compaction
+次数；cache-hit epoch 不发生自动 cost-only reset，effective input cost 不劣于原 baseline。
+
+### 28.5 Lifecycle, surfaces and gates
+
+- fork 重新签发 opaque ref 并复制/校验 immutable bytes；resume 从 active projection 恢复授权；
+  export 强制选择 bounded transcript 或 include-artifacts policy；delete/retention/GC 采用
+  tombstone、grace、pin 和 active-read lease。
+- TUI、CLI/run event、authenticated HTTP/OpenAPI、Desktop Rust client/Tauri IPC/React tool card 共用
+  typed availability/selector/page contract；renderer 无 bearer、path 或 generic filesystem/HTTP
+  capability。
+- `cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`、
+  `cargo clippy --all-targets -- -D warnings` 全部通过。
+- Desktop contract drift、UI-system、TypeScript、247 个 Vitest、production build 全部通过。
+- 中英文 changelog 已明确 clean cutover 与 `LegacyUnavailable` 行为。
+
+R59.1 中“V2 feature gate 默认关闭”原本用于兼容 rollout；用户明确选择旧日志不兼容后，由 R59.7
+clean cutover 取代，因此最终实现不保留双写或旧-schema feature gate。

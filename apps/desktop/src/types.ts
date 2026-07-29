@@ -634,6 +634,11 @@ export type ConversationDisplayContent =
       output?: string;
       truncated: boolean;
       originalContentBytes: number;
+      artifactRef?: string;
+      artifactAvailability?: ToolArtifactAvailability;
+      observedBytes?: number;
+      persistedBytes?: number;
+      hasMore?: boolean;
     }
   | {
       type: "approval";
@@ -740,6 +745,53 @@ export interface ConversationTaskControl {
 export interface ConversationDisplayRequest {
   cursor?: string;
   limit?: number;
+}
+
+export type ToolArtifactAvailability =
+  | "available"
+  | "expired"
+  | "missing"
+  | "hash_mismatch"
+  | "policy_revoked"
+  | "legacy_unavailable";
+
+export type ToolArtifactSelector =
+  | {
+      kind: "byte_slice";
+      offset: number;
+      limit: number;
+    }
+  | {
+      kind: "line_page";
+      startLine: number;
+      lineCount: number;
+    }
+  | {
+      kind: "search_literal";
+      query: string;
+      startOffset: number;
+      maxMatches: number;
+      contextLines: number;
+    };
+
+export interface ToolArtifactReadInput {
+  artifactRef: string;
+  selector: ToolArtifactSelector;
+}
+
+export interface ToolArtifactPage {
+  schemaVersion: 1;
+  requestScope: string;
+  artifactRef: string;
+  selector: ToolArtifactSelector;
+  body: string;
+  bodyEncoding: "utf8" | "base64";
+  returnedBytes: number;
+  pageSha256: string;
+  artifactSha256: string;
+  eof: boolean;
+  matchCount: number;
+  nextSelector?: ToolArtifactSelector;
 }
 
 export type RunStatus =

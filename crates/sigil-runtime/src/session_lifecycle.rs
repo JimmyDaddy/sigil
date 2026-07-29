@@ -10,13 +10,16 @@ use std::{
 use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sigil_kernel::session::ToolArtifactDescriptorV1;
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, ConversationForkOutput, ConversationForkProjection,
     ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
     JsonlSessionStore, MessageRole, ModelMessage, RootConfig, SessionLogEntry, SessionRef,
-    SessionStreamCompatibilityError, SessionStreamRecord, fork_conversation_at_turn,
+    SessionStreamCompatibilityError, SessionStreamRecord, ToolArtifactBindingV1,
+    ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactStore, fork_conversation_at_turn,
     safe_persistence_text,
 };
 use thiserror::Error as ThisError;
@@ -26,10 +29,10 @@ mod projection;
 mod retention;
 
 pub use journal::{
-    LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionDeleteJournalBinding,
-    LocalSessionDisplayNameJournalBinding, LocalSessionExportJournalBinding,
-    LocalSessionLifecycleEvent, LocalSessionLifecycleRecord, LocalSessionPinJournalBinding,
-    LocalSessionRetentionJournalBinding,
+    LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionArtifactGcJournalBinding,
+    LocalSessionDeleteJournalBinding, LocalSessionDisplayNameJournalBinding,
+    LocalSessionExportJournalBinding, LocalSessionLifecycleEvent, LocalSessionLifecycleRecord,
+    LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
 };
 pub use projection::{
     DEFAULT_SESSION_CATALOG_PAGE_SIZE, MAX_SESSION_CATALOG_PAGE_SIZE,
@@ -47,13 +50,16 @@ pub use retention::{
     SessionRetentionPreview, SessionRetentionReason,
 };
 
-pub const SESSION_EXPORT_SCHEMA_VERSION: u16 = 1;
+pub const SESSION_EXPORT_SCHEMA_VERSION: u16 = 2;
 pub const DEFAULT_SESSION_CATALOG_MAX_ENTRIES: usize = 4_096;
 pub const DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_SESSION_CATALOG_MAX_TOTAL_VALIDATION_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_SESSION_EXPORT_MAX_MESSAGES: usize = 20_000;
 pub const DEFAULT_SESSION_EXPORT_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub const SESSION_DELETE_TOMBSTONE_GRACE_MS: u64 = 24 * 60 * 60 * 1_000;
 const SESSION_TITLE_MAX_BYTES: usize = 160;
+const SESSION_RESOURCE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const SESSION_RESOURCE_MAX_ENTRIES: usize = 200_000;
 
 /// Explicit resource limits for local session discovery and portable export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +199,46 @@ pub struct SessionExportPayloadV1 {
     pub messages: Vec<SessionExportMessageV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_provenance: Vec<ExternalProvenanceEntry>,
+    pub tool_artifacts: SessionExportToolArtifactsV1,
+}
+
+/// Explicit policy selected for raw tool-output artifacts in a portable export.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionArtifactExportModeV1 {
+    IncludeArtifacts,
+    BoundedTranscript,
+    RejectIfIncomplete,
+}
+
+/// Truthful completeness of the tool-output portion of a session export.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionArtifactExportCompletenessV1 {
+    Complete,
+    Incomplete,
+}
+
+/// One exported immutable artifact. Bodies are base64 and present only in include mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionExportToolArtifactV1 {
+    pub descriptor: ToolArtifactDescriptorV1,
+    pub body_base64: String,
+}
+
+/// Explicit tool-output manifest retained in every export.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionExportToolArtifactsV1 {
+    pub mode: SessionArtifactExportModeV1,
+    pub completeness: SessionArtifactExportCompletenessV1,
+    pub published_artifact_count: usize,
+    pub included_artifact_count: usize,
+    pub omitted_artifact_count: usize,
+    pub unavailable_tool_result_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<SessionExportToolArtifactV1>,
 }
 
 /// Portable JSON artifact. The digest binds the canonical serialized `payload` only.
@@ -230,6 +276,8 @@ pub struct SessionExportOutput {
     pub source_session_id: String,
     pub payload_sha256: String,
     pub message_count: usize,
+    pub artifact_completeness: SessionArtifactExportCompletenessV1,
+    pub included_artifact_count: usize,
     pub journal_sequence: u64,
 }
 
@@ -243,6 +291,8 @@ pub struct SessionDeletePreview {
     pub source_content_sha256: String,
     pub source_bytes: u64,
     pub source_modified_at_unix_ms: u64,
+    pub resource_tree_sha256: String,
+    pub resource_bytes: u64,
     pub preview_digest: String,
 }
 
@@ -253,7 +303,17 @@ pub struct SessionDeleteOutput {
     pub operation_id: String,
     pub source_session_ref: SessionRef,
     pub deleted_bytes: u64,
+    pub tombstoned_resource_bytes: u64,
+    pub tombstone_id: String,
     pub journal_sequence: u64,
+}
+
+/// Result of unlinking delete tombstones whose mandatory grace has elapsed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionTombstonePruneOutput {
+    pub removed_tombstones: usize,
+    pub removed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -345,6 +405,7 @@ impl LocalSessionLifecycleService {
                 record.event,
                 LocalSessionLifecycleEvent::PinChanged(_)
                     | LocalSessionLifecycleEvent::DisplayNameChanged(_)
+                    | LocalSessionLifecycleEvent::ArtifactGcCompleted(_)
             ) {
                 continue;
             }
@@ -381,6 +442,9 @@ impl LocalSessionLifecycleService {
                     }
                     LocalSessionLifecycleEvent::DisplayNameChanged(_) => {
                         return Err(anyhow!("display-name event entered operation recovery"));
+                    }
+                    LocalSessionLifecycleEvent::ArtifactGcCompleted(_) => {
+                        return Err(anyhow!("artifact GC event entered operation recovery"));
                     }
                     LocalSessionLifecycleEvent::RetentionBatchCompleted(_) => (
                         LocalSessionLifecycleOperationKind::Retention,
@@ -661,10 +725,43 @@ impl LocalSessionLifecycleService {
         destination: Option<&Path>,
         exported_at_unix_ms: u64,
     ) -> Result<SessionExportOutput> {
+        self.export_session_with_artifacts(
+            source_path,
+            destination,
+            exported_at_unix_ms,
+            SessionArtifactExportModeV1::BoundedTranscript,
+        )
+    }
+
+    /// Writes a content-bound export with an explicit raw tool-artifact policy.
+    ///
+    /// `BoundedTranscript` never copies raw artifact bytes and marks the export incomplete when
+    /// the source contained published or unavailable tool output. `IncludeArtifacts` embeds each
+    /// immutable body as base64. `RejectIfIncomplete` refuses sources with any artifact dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for source drift, an unsafe destination, missing/corrupt artifacts, an
+    /// export budget violation, or a failed lifecycle journal append.
+    pub fn export_session_with_artifacts(
+        &self,
+        source_path: &Path,
+        destination: Option<&Path>,
+        exported_at_unix_ms: u64,
+        artifact_mode: SessionArtifactExportModeV1,
+    ) -> Result<SessionExportOutput> {
         let source = self.resolve_ready_source(source_path)?;
         let before_hash = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
         let records = JsonlSessionStore::read_event_records(&source.path)?;
         let projection = project_records(&records)?;
+        let artifact_store = ToolArtifactStore::for_session_path(&source.path);
+        let tool_artifacts = export_tool_artifacts(
+            &artifact_store,
+            &projection.tool_artifacts,
+            projection.unavailable_tool_result_count,
+            artifact_mode,
+            self.limits.max_export_bytes,
+        )?;
         let after_hash = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
         if before_hash != after_hash {
             bail!("source session changed while export was being prepared");
@@ -685,6 +782,7 @@ impl LocalSessionLifecycleService {
             model_name: projection.model_name,
             messages,
             external_provenance: projection.external_provenance,
+            tool_artifacts,
         };
         let payload_sha256 = digest_serializable(&payload)?;
         let artifact = SessionExportV1 {
@@ -716,6 +814,9 @@ impl LocalSessionLifecycleService {
             destination_path_sha256: digest_serializable(&canonical_destination.to_string_lossy())?,
             artifact_payload_sha256: payload_sha256.clone(),
             message_count: artifact.payload.messages.len(),
+            artifact_mode,
+            artifact_completeness: artifact.payload.tool_artifacts.completeness,
+            included_artifact_count: artifact.payload.tool_artifacts.included_artifact_count,
         };
         let operation_id = format!("session-export:{}", uuid::Uuid::new_v4());
         self.lifecycle_journal().append(
@@ -735,8 +836,62 @@ impl LocalSessionLifecycleService {
             source_session_id,
             payload_sha256,
             message_count: artifact.payload.messages.len(),
+            artifact_completeness: artifact.payload.tool_artifacts.completeness,
+            included_artifact_count: artifact.payload.tool_artifacts.included_artifact_count,
             journal_sequence: completed.sequence,
         })
+    }
+
+    /// Runs manifest-only artifact GC for one exact session identity.
+    ///
+    /// `roots` must come from the active incremental descriptor/context/read projections. The
+    /// lifecycle service adds a whole-session hold when the session is pinned, then delegates to
+    /// the store without reading or locking the session JSONL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session identity, invalid roots, unsafe manifests, failed
+    /// tombstone moves, or a failed bounded audit append.
+    pub fn garbage_collect_session_artifacts(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+        mut roots: ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+    ) -> Result<ToolArtifactGcReportV1> {
+        let _maintenance = self.acquire_maintenance_lease()?;
+        let store = self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
+        if self.is_session_pinned(session_ref, expected_session_id)? {
+            roots.explicit_holds.extend(
+                store
+                    .manifest_inventory()?
+                    .into_iter()
+                    .map(|entry| entry.descriptor.artifact_ref),
+            );
+        }
+        let report = store.garbage_collect(
+            &roots,
+            now_unix_ms,
+            sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+        )?;
+        let operation_id = format!("session-artifact-gc:{}", uuid::Uuid::new_v4());
+        self.lifecycle_journal().append(
+            &operation_id,
+            now_unix_ms,
+            LocalSessionLifecycleEvent::ArtifactGcCompleted(LocalSessionArtifactGcJournalBinding {
+                source_session_ref: session_ref.clone(),
+                source_session_id: expected_session_id.to_owned(),
+                tombstone_id: report.tombstone_id.clone(),
+                scanned_manifests: report.scanned_manifests,
+                tombstoned_manifests: report.tombstoned_manifests,
+                tombstoned_blobs: report.tombstoned_blobs,
+                tombstoned_orphan_blobs: report.tombstoned_orphan_blobs,
+                tombstoned_staging_files: report.tombstoned_staging_files,
+                tombstoned_bytes: report.tombstoned_bytes,
+                skipped_active_reads: report.skipped_active_reads,
+            }),
+        )?;
+        Ok(report)
     }
 
     /// Appends a durable pin/unpin decision for one exact session identity.
@@ -876,6 +1031,8 @@ impl LocalSessionLifecycleService {
             .session_id
             .clone()
             .ok_or_else(|| anyhow!("source session has no durable identity"))?;
+        let resource_path = session_resource_path(&source.path)?;
+        let (resource_tree_sha256, resource_bytes) = hash_directory_tree_bounded(&resource_path)?;
         let preview_digest = delete_preview_digest(
             &self.workspace_id,
             &source.session_ref,
@@ -883,6 +1040,8 @@ impl LocalSessionLifecycleService {
             &source_content_sha256,
             source_bytes,
             source_modified_at_unix_ms,
+            &resource_tree_sha256,
+            resource_bytes,
         )?;
         Ok(SessionDeletePreview {
             source_path: source.path.clone(),
@@ -891,6 +1050,8 @@ impl LocalSessionLifecycleService {
             source_content_sha256,
             source_bytes,
             source_modified_at_unix_ms,
+            resource_tree_sha256,
+            resource_bytes,
             preview_digest,
         })
     }
@@ -938,6 +1099,13 @@ impl LocalSessionLifecycleService {
         {
             bail!("source session changed after delete preview");
         }
+        let resource_path = session_resource_path(&preview.source_path)?;
+        let (resource_tree_sha256, resource_bytes) = hash_directory_tree_bounded(&resource_path)?;
+        if resource_tree_sha256 != preview.resource_tree_sha256
+            || resource_bytes != preview.resource_bytes
+        {
+            bail!("session resources changed after delete preview");
+        }
         Ok(lease)
     }
 
@@ -947,12 +1115,16 @@ impl LocalSessionLifecycleService {
         lease: File,
         applied_at_unix_ms: u64,
     ) -> Result<SessionDeleteOutput> {
+        let tombstone_id = format!("session-delete-{}", uuid::Uuid::new_v4().simple());
         let binding = LocalSessionDeleteJournalBinding {
             source_session_ref: preview.source_session_ref.clone(),
             source_session_id: preview.source_session_id.clone(),
             source_content_sha256: preview.source_content_sha256.clone(),
             source_bytes: preview.source_bytes,
             source_modified_at_unix_ms: preview.source_modified_at_unix_ms,
+            resource_tree_sha256: preview.resource_tree_sha256.clone(),
+            resource_bytes: preview.resource_bytes,
+            tombstone_id: tombstone_id.clone(),
             preview_digest: preview.preview_digest.clone(),
         };
         let operation_id = format!("session-delete:{}", uuid::Uuid::new_v4());
@@ -961,13 +1133,7 @@ impl LocalSessionLifecycleService {
             applied_at_unix_ms,
             LocalSessionLifecycleEvent::DeletePlanned(binding.clone()),
         )?;
-        fs::remove_file(&preview.source_path)
-            .with_context(|| format!("failed to delete {}", preview.source_path.display()))?;
-        let session_parent = preview
-            .source_path
-            .parent()
-            .ok_or_else(|| anyhow!("source session has no parent directory"))?;
-        sync_directory(session_parent)?;
+        move_session_to_tombstone(&preview.source_path, &tombstone_id)?;
         drop(lease);
         let completed = self.lifecycle_journal().append(
             &operation_id,
@@ -978,7 +1144,63 @@ impl LocalSessionLifecycleService {
             operation_id,
             source_session_ref: preview.source_session_ref.clone(),
             deleted_bytes: preview.source_bytes,
+            tombstoned_resource_bytes: preview.resource_bytes,
+            tombstone_id,
             journal_sequence: completed.sequence,
+        })
+    }
+
+    /// Permanently unlinks session tombstones only after the mandatory grace period.
+    ///
+    /// This operation never scans active JSONL streams and rejects symlinked trash entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe tombstone entries, a read-lease inspection failure, or failed
+    /// unlink.
+    pub fn prune_delete_tombstones(&self, now_unix_ms: u64) -> Result<SessionTombstonePruneOutput> {
+        let _maintenance = self.acquire_maintenance_lease()?;
+        let trash = self.session_dir.join(".session-trash");
+        let entries = match fs::read_dir(&trash) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SessionTombstonePruneOutput {
+                    removed_tombstones: 0,
+                    removed_bytes: 0,
+                });
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", trash.display()));
+            }
+        };
+        let mut removed_tombstones = 0usize;
+        let mut removed_bytes = 0u64;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("failed to read {}", trash.display()))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("failed to inspect {}", path.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("session tombstone trash contains an unsafe entry");
+            }
+            if now_unix_ms.saturating_sub(modified_at_unix_ms(&metadata))
+                < SESSION_DELETE_TOMBSTONE_GRACE_MS
+            {
+                continue;
+            }
+            let Some(_artifact_read_leases) = acquire_tombstone_artifact_locks(&path)? else {
+                continue;
+            };
+            let (_, bytes) = hash_directory_tree_bounded(&path)?;
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to prune {}", path.display()))?;
+            removed_tombstones = removed_tombstones.saturating_add(1);
+            removed_bytes = removed_bytes.saturating_add(bytes);
+        }
+        sync_directory(&trash)?;
+        Ok(SessionTombstonePruneOutput {
+            removed_tombstones,
+            removed_bytes,
         })
     }
 
@@ -1055,6 +1277,42 @@ impl LocalSessionLifecycleService {
             bail!("source session is not ready for lifecycle operations");
         }
         Ok(entry)
+    }
+
+    fn resolve_artifact_store_without_jsonl(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+    ) -> Result<ToolArtifactStore> {
+        let relative = session_ref.as_path();
+        if relative.components().count() != 1
+            || relative.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
+            bail!("artifact GC source must be a direct session reference");
+        }
+        let directory_metadata = fs::symlink_metadata(&self.session_dir)
+            .with_context(|| format!("failed to inspect {}", self.session_dir.display()))?;
+        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+            bail!("configured session directory must be a real directory");
+        }
+        let directory = fs::canonicalize(&self.session_dir)
+            .with_context(|| format!("failed to canonicalize {}", self.session_dir.display()))?;
+        let path = session_ref.resolve(&directory);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("artifact GC source must be a real session file");
+        }
+        let path = fs::canonicalize(&path)
+            .with_context(|| format!("failed to canonicalize {}", path.display()))?;
+        if path.parent() != Some(directory.as_path()) {
+            bail!("artifact GC source escaped the configured session directory");
+        }
+        let store = ToolArtifactStore::for_session_path(&path);
+        if store.session_scope_id() != expected_session_id {
+            bail!("artifact GC session identity changed");
+        }
+        Ok(store)
     }
 
     fn allocate_export_path(
@@ -1189,7 +1447,17 @@ impl LocalSessionLifecycleService {
     ) -> LocalSessionLifecycleRecoveryStatus {
         let path = binding.source_session_ref.resolve(&self.session_dir);
         if !path.exists() {
-            return LocalSessionLifecycleRecoveryStatus::Uncertain;
+            let tombstoned = self
+                .session_dir
+                .join(".session-trash")
+                .join(&binding.tombstone_id)
+                .join("session.jsonl");
+            return match hash_file_bounded(&tombstoned, self.limits.max_stream_bytes) {
+                Ok(hash) if hash == binding.source_content_sha256 => {
+                    LocalSessionLifecycleRecoveryStatus::Completed
+                }
+                Ok(_) | Err(_) => LocalSessionLifecycleRecoveryStatus::Uncertain,
+            };
         }
         if fs::symlink_metadata(&path)
             .map(|metadata| metadata.file_type().is_symlink())
@@ -1320,6 +1588,8 @@ struct SessionRecordProjection {
     title: Option<String>,
     messages: Vec<ModelMessage>,
     external_provenance: Vec<ExternalProvenanceEntry>,
+    tool_artifacts: Vec<ToolArtifactDescriptorV1>,
+    unavailable_tool_result_count: usize,
     finalized_turn_count: usize,
 }
 
@@ -1355,6 +1625,20 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
                         .map(|title| truncate_utf8(&title, SESSION_TITLE_MAX_BYTES))
                         .filter(|title| !title.trim().is_empty());
                 }
+                messages_by_id.insert(message.id.clone(), message.clone());
+                projection.messages.push(message);
+            }
+            SessionLogEntry::ToolResultV2(result) => {
+                match &result.artifact {
+                    ToolArtifactBindingV1::Published { descriptor } => {
+                        projection.tool_artifacts.push(descriptor.clone());
+                    }
+                    ToolArtifactBindingV1::Unavailable { .. } => {
+                        projection.unavailable_tool_result_count =
+                            projection.unavailable_tool_result_count.saturating_add(1);
+                    }
+                }
+                let message = result.model_message()?;
                 messages_by_id.insert(message.id.clone(), message.clone());
                 projection.messages.push(message);
             }
@@ -1412,6 +1696,65 @@ fn export_messages(messages: &[ModelMessage], limit: usize) -> Result<Vec<Sessio
         .collect())
 }
 
+fn export_tool_artifacts(
+    store: &ToolArtifactStore,
+    descriptors: &[ToolArtifactDescriptorV1],
+    unavailable_tool_result_count: usize,
+    mode: SessionArtifactExportModeV1,
+    max_export_bytes: usize,
+) -> Result<SessionExportToolArtifactsV1> {
+    if mode == SessionArtifactExportModeV1::RejectIfIncomplete
+        && (!descriptors.is_empty() || unavailable_tool_result_count > 0)
+    {
+        bail!("session export would be incomplete without tool artifacts");
+    }
+    let mut artifacts = Vec::new();
+    if mode == SessionArtifactExportModeV1::IncludeArtifacts {
+        let estimated_artifact_bytes =
+            descriptors.iter().try_fold(0usize, |total, descriptor| {
+                let encoded_body = usize::try_from(descriptor.persisted_bytes)
+                    .unwrap_or(usize::MAX)
+                    .div_ceil(3)
+                    .saturating_mul(4);
+                let descriptor_bytes = serde_json::to_vec(descriptor)
+                    .context("failed to encode tool artifact export descriptor")?
+                    .len();
+                Ok::<_, anyhow::Error>(
+                    total
+                        .saturating_add(encoded_body)
+                        .saturating_add(descriptor_bytes),
+                )
+            })?;
+        if estimated_artifact_bytes > max_export_bytes {
+            bail!("tool artifacts exceed the configured export byte limit");
+        }
+        artifacts.reserve(descriptors.len());
+        for descriptor in descriptors {
+            let body = store.read_all(descriptor)?;
+            artifacts.push(SessionExportToolArtifactV1 {
+                descriptor: descriptor.clone(),
+                body_base64: BASE64_STANDARD.encode(body),
+            });
+        }
+    }
+    let included_artifact_count = artifacts.len();
+    let omitted_artifact_count = descriptors.len().saturating_sub(included_artifact_count);
+    let completeness = if omitted_artifact_count == 0 && unavailable_tool_result_count == 0 {
+        SessionArtifactExportCompletenessV1::Complete
+    } else {
+        SessionArtifactExportCompletenessV1::Incomplete
+    };
+    Ok(SessionExportToolArtifactsV1 {
+        mode,
+        completeness,
+        published_artifact_count: descriptors.len(),
+        included_artifact_count,
+        omitted_artifact_count,
+        unavailable_tool_result_count,
+        artifacts,
+    })
+}
+
 fn validate_export_provenance(
     messages: &[SessionExportMessageV1],
     provenance_entries: &[ExternalProvenanceEntry],
@@ -1449,6 +1792,8 @@ fn delete_preview_digest(
     source_content_sha256: &str,
     source_bytes: u64,
     source_modified_at_unix_ms: u64,
+    resource_tree_sha256: &str,
+    resource_bytes: u64,
 ) -> Result<String> {
     digest_serializable(&(
         workspace_id,
@@ -1457,6 +1802,8 @@ fn delete_preview_digest(
         source_content_sha256,
         source_bytes,
         source_modified_at_unix_ms,
+        resource_tree_sha256,
+        resource_bytes,
     ))
 }
 
@@ -1468,6 +1815,8 @@ fn validate_delete_preview(workspace_id: &str, preview: &SessionDeletePreview) -
         &preview.source_content_sha256,
         preview.source_bytes,
         preview.source_modified_at_unix_ms,
+        &preview.resource_tree_sha256,
+        preview.resource_bytes,
     )?;
     if expected != preview.preview_digest {
         bail!("session delete preview digest does not match");
@@ -1621,6 +1970,168 @@ fn hash_file_bounded(path: &Path, max_bytes: u64) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn session_resource_path(session_path: &Path) -> Result<PathBuf> {
+    let parent = session_path
+        .parent()
+        .ok_or_else(|| anyhow!("source session has no parent directory"))?;
+    let stem = session_path
+        .file_stem()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("source session has no resource stem"))?;
+    Ok(parent.join(stem))
+}
+
+fn hash_directory_tree_bounded(path: &Path) -> Result<(String, u64)> {
+    if !path.exists() {
+        return Ok((format!("{:x}", Sha256::digest(b"empty-directory-tree")), 0));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("session resource root must be a real directory");
+    }
+    let mut pending = vec![path.to_path_buf()];
+    let mut files = Vec::new();
+    let mut entry_count = 0usize;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("failed to read {}", directory.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
+            entry_count = entry_count.saturating_add(1);
+            if entry_count > SESSION_RESOURCE_MAX_ENTRIES {
+                bail!("session resource tree exceeds its entry limit");
+            }
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)
+                .with_context(|| format!("failed to inspect {}", entry_path.display()))?;
+            if metadata.file_type().is_symlink() {
+                bail!("session resource tree must not contain symlinks");
+            }
+            if metadata.is_dir() {
+                pending.push(entry_path);
+            } else if metadata.is_file() {
+                files.push(entry_path);
+            } else {
+                bail!("session resource tree contains a non-file entry");
+            }
+        }
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    for file_path in files {
+        let relative = file_path
+            .strip_prefix(path)
+            .context("session resource escaped its root")?;
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| anyhow!("session resource path is not UTF-8"))?;
+        hasher.update((relative.len() as u64).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        let mut file = File::open(&file_path)
+            .with_context(|| format!("failed to open {}", file_path.display()))?;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("failed to read {}", file_path.display()))?;
+            if read == 0 {
+                break;
+            }
+            total = total.saturating_add(read as u64);
+            if total > SESSION_RESOURCE_MAX_BYTES {
+                bail!("session resource tree exceeds its byte limit");
+            }
+            hasher.update(&buffer[..read]);
+        }
+    }
+    Ok((format!("{:x}", hasher.finalize()), total))
+}
+
+fn move_session_to_tombstone(source_path: &Path, tombstone_id: &str) -> Result<()> {
+    if tombstone_id.is_empty()
+        || tombstone_id.len() > 128
+        || !tombstone_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        bail!("session tombstone identity is malformed");
+    }
+    let session_parent = source_path
+        .parent()
+        .ok_or_else(|| anyhow!("source session has no parent directory"))?;
+    let trash = session_parent.join(".session-trash");
+    if trash.exists() {
+        let metadata = fs::symlink_metadata(&trash)
+            .with_context(|| format!("failed to inspect {}", trash.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("session tombstone root must be a real directory");
+        }
+    } else {
+        fs::create_dir(&trash).with_context(|| format!("failed to create {}", trash.display()))?;
+    }
+    let tombstone = trash.join(tombstone_id);
+    fs::create_dir(&tombstone)
+        .with_context(|| format!("failed to create {}", tombstone.display()))?;
+    let tombstoned_session = tombstone.join("session.jsonl");
+    fs::rename(source_path, &tombstoned_session)
+        .with_context(|| format!("failed to tombstone {}", source_path.display()))?;
+    let resource_path = session_resource_path(source_path)?;
+    if resource_path.exists() {
+        let destination = tombstone.join("resources");
+        if let Err(error) = fs::rename(&resource_path, &destination) {
+            let rollback = fs::rename(&tombstoned_session, source_path);
+            if rollback.is_ok() {
+                let _ = fs::remove_dir(&tombstone);
+            }
+            return Err(error)
+                .with_context(|| format!("failed to tombstone {}", resource_path.display()));
+        }
+    }
+    sync_directory(&tombstone)?;
+    sync_directory(&trash)?;
+    sync_directory(session_parent)
+}
+
+fn acquire_tombstone_artifact_locks(tombstone: &Path) -> Result<Option<Vec<File>>> {
+    let locks_dir = tombstone.join("resources").join("artifacts").join("locks");
+    let entries = match fs::read_dir(&locks_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", locks_dir.display()));
+        }
+    };
+    let mut leases = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", locks_dir.display()))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("session tombstone contains an unsafe artifact lock");
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        let lease = options
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        match lease.try_lock() {
+            Ok(()) => leases.push(lease),
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(error).with_context(|| {
+                    format!("failed to lock tombstoned artifact {}", path.display())
+                });
+            }
+        }
+    }
+    Ok(Some(leases))
 }
 
 fn digest_serializable(value: &impl Serialize) -> Result<String> {

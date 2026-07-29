@@ -10,6 +10,10 @@ export type HttpSessionTranscriptPage =
   components["schemas"]["SessionTranscriptPage"];
 export type HttpConversationDisplayPage =
   components["schemas"]["ConversationDisplayPage"];
+export type HttpToolArtifactReadRequest =
+  components["schemas"]["ToolArtifactReadRequest"];
+export type HttpToolArtifactPage =
+  components["schemas"]["ToolArtifactPage"];
 export type HttpRunSnapshot = components["schemas"]["RunSnapshot"];
 export type HttpRunStartCommand =
   components["schemas"]["RunStartCommand"];

@@ -13,6 +13,7 @@ use super::{
         worker_bridge::tool_card_replacement_key,
     },
     audit_log::{
+        render_legacy_tool_result_unavailable_content, render_tool_result_v2_content,
         restored_reasoning_note, restored_tool_call_index, restored_tool_execution_content,
         restored_tool_execution_index, restored_tool_preview_snapshot_index,
         restored_tool_result_call_ids, should_render_restored_tool_execution,
@@ -52,31 +53,45 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::ToolResult(message) => {
-                if let Some(content) = message.content.as_ref() {
-                    let execution = message
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|call_id| restored_tool_executions.get(call_id));
-                    let preview = message
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|call_id| restored_tool_previews.get(call_id));
-                    let tool_call = message
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|call_id| restored_tool_calls.get(call_id));
-                    push_restored_tool_card(
-                        &mut timeline,
-                        format_tool_content_block_redacted_for_restore(
-                            message.tool_call_id.as_deref(),
-                            content,
-                            execution,
-                            tool_call,
-                            preview,
-                            redactor,
-                        ),
-                    );
-                }
+                let execution = message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|call_id| restored_tool_executions.get(call_id));
+                let preview = message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|call_id| restored_tool_previews.get(call_id));
+                let tool_call = message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|call_id| restored_tool_calls.get(call_id));
+                push_restored_tool_card(
+                    &mut timeline,
+                    format_tool_content_block_redacted_for_restore(
+                        message.tool_call_id.as_deref(),
+                        &render_legacy_tool_result_unavailable_content(message),
+                        execution,
+                        tool_call,
+                        preview,
+                        redactor,
+                    ),
+                );
+            }
+            SessionLogEntry::ToolResultV2(result) => {
+                let execution = restored_tool_executions.get(&result.call_id);
+                let preview = restored_tool_previews.get(&result.call_id);
+                let tool_call = restored_tool_calls.get(&result.call_id);
+                push_restored_tool_card(
+                    &mut timeline,
+                    format_tool_content_block_redacted_for_restore(
+                        Some(&result.call_id),
+                        &render_tool_result_v2_content(result),
+                        execution,
+                        tool_call,
+                        preview,
+                        redactor,
+                    ),
+                );
             }
             SessionLogEntry::Control(ControlEntry::Note { kind, data })
                 if kind == "reasoning_delta" || kind == "reasoning_trace" =>

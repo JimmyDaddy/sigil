@@ -111,6 +111,43 @@ describe("canonical conversation rows", () => {
     });
   });
 
+  it("preserves opaque artifact capabilities without projecting a path", () => {
+    const tool: ConversationTimelineItem = {
+      identity: "tool-artifact",
+      source: "durable",
+      item: {
+        schemaVersion: 1,
+        displayId: "tool-artifact",
+        displayOrder: { sessionStreamSequence: "5", subindex: 0 },
+        sourceEventId: "event-tool-artifact",
+        source: "durable_transcript",
+        kind: "tool",
+        runId: "run-1",
+        status: "completed",
+        content: {
+          type: "tool",
+          toolName: "shell",
+          output: "bounded preview",
+          truncated: true,
+          originalContentBytes: 32,
+          artifactRef: `ta1_${"a".repeat(32)}`,
+          artifactAvailability: "available",
+          observedBytes: 32,
+          persistedBytes: 32,
+          hasMore: true,
+        },
+      },
+    };
+
+    expect(projectConversationRows([tool], [], translateEnglish)[0]).toMatchObject({
+      kind: "tool",
+      artifactRef: `ta1_${"a".repeat(32)}`,
+      artifactAvailability: "available",
+      artifactHasMore: true,
+      artifactPersistedBytes: 32,
+    });
+  });
+
   it("omits empty tool preambles without hiding visible preamble text", () => {
     const empty = durableAssistant("empty-preamble", "1", "", "tool_preamble");
     const visible = durableAssistant(

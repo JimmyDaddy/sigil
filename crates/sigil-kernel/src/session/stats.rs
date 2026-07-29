@@ -132,7 +132,8 @@ pub fn session_stats_from_entries(entries: &[SessionLogEntry]) -> SessionStats {
             SessionLogEntry::Control(control) => apply_usage_control_entry(&mut stats, control),
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
-            | SessionLogEntry::ToolResult(_) => {}
+            | SessionLogEntry::ToolResult(_)
+            | SessionLogEntry::ToolResultV2(_) => {}
         }
     }
     stats

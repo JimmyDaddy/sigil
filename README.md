@@ -41,6 +41,7 @@
 | --- | --- |
 | **TUI-first workspace**<br>Follow the conversation, tool activity, changes, and next action without leaving the terminal. | **Review before risk**<br>Inspect approvals and diffs before writes, commands, network access, or external integrations proceed. |
 | **Resumable sessions**<br>Return to saved work and recover interrupted tasks without silently rerunning an unfinished tool. | **Models and tools, your way**<br>Choose among supported providers, add MCP integrations, and enable repository-aware assistance when you need it. |
+| **Large outputs stay inspectable**<br>Sigil keeps bounded conversation views while preserving policy-safe tool output as session-scoped artifacts for precise, paged follow-up reads. | **Cache-stable context**<br>Historical tool output ages deterministically before semantic compaction, so long sessions shed token pressure without rewriting the active cached prefix. |
 
 ## Start in under a minute
 

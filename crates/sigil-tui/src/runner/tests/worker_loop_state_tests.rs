@@ -288,6 +288,19 @@ fn worker_commands_are_routed_to_explicit_domains() {
             WorkerCommandDomain::Session,
         ),
         (
+            WorkerCommand::ReadToolArtifactPage {
+                request_id: 8,
+                artifact_ref: sigil_kernel::ToolArtifactRefV1 {
+                    artifact_id: format!("ta1_{}", "a".repeat(32)),
+                },
+                selector: sigil_kernel::ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: 1024,
+                },
+            },
+            WorkerCommandDomain::Session,
+        ),
+        (
             WorkerCommand::PreviewV2Compaction,
             WorkerCommandDomain::QueueCompaction,
         ),

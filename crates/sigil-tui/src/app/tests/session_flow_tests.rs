@@ -74,22 +74,16 @@ fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()
             error: None,
             model_content_hash: Some("hash".to_owned()),
         }))),
-        SessionLogEntry::ToolResult(ModelMessage::tool(
+        v2_tool_result_entry(
             "call-read-1",
-            json!({
-                "status": "ok",
-                "content": "# Title\nbody",
-                "meta": {
-                    "bytes": 18,
-                    "details": {
-                        "call": {
-                            "summary": "path=README.md"
-                        }
-                    }
-                }
-            })
-            .to_string(),
-        )),
+            "read_file",
+            "# Title\nbody",
+            ToolResultMeta {
+                bytes: Some(18),
+                details: json!({"call": {"summary": "path=README.md"}}),
+                ..ToolResultMeta::default()
+            },
+        ),
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
@@ -122,15 +116,15 @@ fn restored_read_file_tool_result_uses_original_tool_call_for_code_preview() -> 
             }],
             AssistantMessageKind::ToolPreamble,
         )),
-        SessionLogEntry::ToolResult(ModelMessage::tool(
+        v2_tool_result_entry(
             "call-read-rs",
-            json!({
-                "status": "ok",
-                "content": "fn main() {}\n",
-                "meta": { "bytes": 13 }
-            })
-            .to_string(),
-        )),
+            "read_file",
+            "fn main() {}\n",
+            ToolResultMeta {
+                bytes: Some(13),
+                ..ToolResultMeta::default()
+            },
+        ),
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
@@ -462,18 +456,16 @@ fn restored_tool_result_uses_preview_snapshot_for_diff_card() -> Result<()> {
             error: None,
             model_content_hash: Some("hash".to_owned()),
         }))),
-        SessionLogEntry::ToolResult(ModelMessage::tool(
+        v2_tool_result_entry(
             "call-write-1",
-            json!({
-                "status": "ok",
-                "content": "wrote note.txt",
-                "meta": {
-                    "bytes": 14,
-                    "changed_files": ["note.txt"]
-                }
-            })
-            .to_string(),
-        )),
+            "write_file",
+            "wrote note.txt",
+            ToolResultMeta {
+                bytes: Some(14),
+                changed_files: vec!["note.txt".to_owned()],
+                ..ToolResultMeta::default()
+            },
+        ),
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
@@ -554,21 +546,17 @@ fn restored_delete_file_tool_result_uses_preview_snapshot_for_diff_card() -> Res
             error: None,
             model_content_hash: Some("hash".to_owned()),
         }))),
-        SessionLogEntry::ToolResult(ModelMessage::tool(
+        v2_tool_result_entry(
             "call-delete-1",
-            json!({
-                "status": "ok",
-                "content": "deleted /workspace/note.txt",
-                "meta": {
-                    "bytes": 11,
-                    "changed_files": ["note.txt"],
-                    "details": {
-                        "action": "delete"
-                    }
-                }
-            })
-            .to_string(),
-        )),
+            "delete_file",
+            "deleted /workspace/note.txt",
+            ToolResultMeta {
+                bytes: Some(11),
+                changed_files: vec!["note.txt".to_owned()],
+                details: json!({"action": "delete"}),
+                ..ToolResultMeta::default()
+            },
+        ),
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {

@@ -528,6 +528,32 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/tool-artifacts/read": {
+                "post": {
+                    "summary": "Read one bounded typed tool artifact page",
+                    "description": "Resolves an opaque artifact reference only in the addressed logical session, validates the immutable content hash, and returns a fixed-size byte, line, or literal-search page. Physical paths are never exposed.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ToolArtifactReadRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Bounded integrity-checked artifact page",
+                            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ToolArtifactPage" } } }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}/queue": {
                 "get": {
                     "summary": "Read the durable follow-up queue",
@@ -1039,12 +1065,13 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup", "provider_migration"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup", "provider_migration"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
                         "bounded_transcript_replay": { "type": "boolean" },
                         "canonical_conversation_display": { "type": "boolean" },
+                        "typed_tool_artifact_retrieval": { "type": "boolean" },
                         "conversation_recovery": { "type": "boolean" },
                         "durable_event_replay": { "type": "boolean" },
                         "live_events": { "type": "boolean" },
@@ -1600,14 +1627,19 @@ pub fn http_openapi_document() -> Value {
                         {
                             "type": "object",
                             "additionalProperties": false,
-                            "required": ["type", "truncated", "original_content_bytes"],
+                            "required": ["type", "truncated", "original_content_bytes", "has_more"],
                             "properties": {
                                 "type": { "const": "tool" },
                                 "call_id": { "type": ["string", "null"], "maxLength": 512 },
                                 "tool_name": { "type": ["string", "null"], "maxLength": 512 },
                                 "output": { "type": ["string", "null"], "maxLength": 65536 },
                                 "truncated": { "type": "boolean" },
-                                "original_content_bytes": { "type": "integer", "format": "uint64" }
+                                "original_content_bytes": { "type": "integer", "format": "uint64" },
+                                "artifact_ref": { "type": ["string", "null"], "pattern": "^ta1_[0-9a-fA-F]{32}$" },
+                                "artifact_availability": { "type": ["string", "null"], "enum": ["available", "expired", "missing", "hash_mismatch", "policy_revoked", "legacy_unavailable", null] },
+                                "observed_bytes": { "type": ["integer", "null"], "format": "uint64" },
+                                "persisted_bytes": { "type": ["integer", "null"], "format": "uint64", "maximum": 16777216 },
+                                "has_more": { "type": "boolean" }
                             }
                         },
                         {
@@ -1771,6 +1803,74 @@ pub fn http_openapi_document() -> Value {
                         "gap_facts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/ConversationDisplayGapFact" } },
                         "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] },
                         "task_control": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTaskControl" }, { "type": "null" }] }
+                    }
+                },
+                "ToolArtifactSelector": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "offset", "limit"],
+                            "properties": {
+                                "kind": { "type": "string", "const": "byte_slice" },
+                                "offset": { "type": "integer", "format": "uint64", "minimum": 0, "maximum": 16777216 },
+                                "limit": { "type": "integer", "format": "uint32", "minimum": 1, "maximum": 16384 }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "start_line", "line_count"],
+                            "properties": {
+                                "kind": { "type": "string", "const": "line_page" },
+                                "start_line": { "type": "integer", "format": "uint64", "minimum": 0, "maximum": 16777216 },
+                                "line_count": { "type": "integer", "format": "uint32", "minimum": 1, "maximum": 200 }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "query", "start_offset", "max_matches", "context_lines"],
+                            "properties": {
+                                "kind": { "type": "string", "const": "search_literal" },
+                                "query": { "type": "string", "minLength": 1, "maxLength": 512 },
+                                "start_offset": { "type": "integer", "format": "uint64", "minimum": 0, "maximum": 16777216 },
+                                "max_matches": { "type": "integer", "format": "uint16", "minimum": 1, "maximum": 20 },
+                                "context_lines": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 3 }
+                            }
+                        }
+                    ]
+                },
+                "ToolArtifactReadRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["artifact_ref", "selector"],
+                    "properties": {
+                        "artifact_ref": { "type": "string", "pattern": "^ta1_[0-9a-fA-F]{32}$" },
+                        "selector": { "$ref": "#/components/schemas/ToolArtifactSelector" }
+                    }
+                },
+                "ToolArtifactPageEncoding": {
+                    "type": "string",
+                    "enum": ["utf8", "base64"]
+                },
+                "ToolArtifactPage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["schema_version", "request_scope", "artifact_ref", "selector", "body", "body_encoding", "returned_bytes", "page_sha256", "artifact_sha256", "eof", "match_count"],
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 1 },
+                        "request_scope": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "artifact_ref": { "type": "string", "pattern": "^ta1_[0-9a-fA-F]{32}$" },
+                        "selector": { "$ref": "#/components/schemas/ToolArtifactSelector" },
+                        "body": { "type": "string", "maxLength": 21848 },
+                        "body_encoding": { "$ref": "#/components/schemas/ToolArtifactPageEncoding" },
+                        "returned_bytes": { "type": "integer", "format": "uint32", "minimum": 0, "maximum": 16384 },
+                        "page_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                        "artifact_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                        "eof": { "type": "boolean" },
+                        "match_count": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 20 },
+                        "next_selector": { "oneOf": [{ "$ref": "#/components/schemas/ToolArtifactSelector" }, { "type": "null" }] }
                     }
                 },
                 "ConversationQueueGeneration": {

@@ -7,7 +7,8 @@ use sigil_kernel::{
     FrozenProviderRequestMaterial, InputTokenEvidence, JsonlSessionStore, ModelMessage,
     PortableTargetRequestMaterial, Provider, ProviderCapabilities, ProviderChunk,
     ProviderRequestRejection, ReasoningEffort, RequestFitProof, Session, SessionLogEntry,
-    StorageRoot, TokenMeasurementBinding, TokenMeasurementScope, ToolCall, ToolRegistry,
+    StorageRoot, TokenMeasurementBinding, TokenMeasurementScope, ToolArtifactSensitivity,
+    ToolArtifactStore, ToolCall, ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV2,
     UsageStats, VersionedProfileIdentity,
 };
 use std::{
@@ -571,15 +572,52 @@ fn standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction
             args_json: "{}".to_owned(),
         }],
     )))?;
-    store.append(&SessionLogEntry::ToolResult(ModelMessage::tool(
-        "call-large",
-        serde_json::json!({
-            "status": "ok",
-            "content": format!("head:{}:tail", "middle-".repeat(2_000)),
-        })
-        .to_string(),
-    )))?;
+    let artifact_store = ToolArtifactStore::for_session_store(&store);
+    for index in 0..9 {
+        let call_id = if index == 0 {
+            "call-large".to_owned()
+        } else {
+            let call_id = format!("call-large-{index}");
+            store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+                None,
+                vec![ToolCall {
+                    id: call_id.clone(),
+                    name: "shell".to_owned(),
+                    args_json: "{}".to_owned(),
+                }],
+            )))?;
+            call_id
+        };
+        let (recorded, _) = ToolResultRecordedV2::capture(
+            &ToolResult::ok(
+                &call_id,
+                "shell",
+                format!("head:{index}:{}:tail", "middle-".repeat(20_000)),
+                ToolResultMeta::default(),
+            ),
+            Some(&artifact_store),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        let artifact_ref = recorded
+            .artifact
+            .descriptor()
+            .context("published tool artifact")?
+            .artifact_ref
+            .clone();
+        store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+        let source_event_id = JsonlSessionStore::read_event_records(&session_log_path)?
+            .last()
+            .context("tool result event")?
+            .event_id()
+            .to_owned();
+        artifact_store.bind_source_event(&artifact_ref, &source_event_id)?;
+    }
     store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let pressure = store.active_projection_snapshot()?.tool_output_pressure();
+    assert!(
+        pressure.ageable_count > 0,
+        "fixture must produce ageable V2 output: {pressure:?}"
+    );
     let before = std::fs::read(&session_log_path)?;
     let worker = spawn_test_worker(
         root_config,
@@ -597,12 +635,16 @@ fn standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction
     else {
         panic!("expected a local compaction review");
     };
-    assert!(matches!(
-        review.admission,
-        V2CompactionAdmission::Prepared {
-            standalone_tool_output_shrink_available: true,
-        }
-    ));
+    assert!(
+        matches!(
+            review.admission,
+            V2CompactionAdmission::Prepared {
+                standalone_tool_output_shrink_available: true,
+            }
+        ),
+        "unexpected admission: {:?}",
+        review.admission
+    );
     assert_eq!(review.tool_output_shrink_candidates.len(), 1);
     assert_eq!(std::fs::read(&session_log_path)?, before);
 
@@ -633,10 +675,10 @@ fn standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction
         .expect("standalone shrink creates a provider-visible projection");
     assert!(context.model_messages().iter().any(|message| {
         message.tool_call_id.as_deref() == Some("call-large")
-            && message
-                .content
-                .as_deref()
-                .is_some_and(|content| content.contains("next-epoch recoverable tool output"))
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains("\"preview_kind\":\"aged\"")
+                    && content.contains("read_tool_artifact")
+            })
     }));
     worker.shutdown()?;
     Ok(())

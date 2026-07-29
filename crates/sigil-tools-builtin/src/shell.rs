@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,8 +11,9 @@ use serde_json::{Value, json};
 use sigil_kernel::{
     ExecutionBackend, ExecutionCleanupStatus, ExecutionOutputReceipt, ExecutionReceipt,
     ExecutionRequest, ExecutionStreamCapture, ExecutionTerminationCause, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
+    ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolErrorKind,
+    ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolSubjectScope, safe_persistence_text,
 };
 use tree_sitter::{Node, Parser};
 
@@ -105,12 +107,46 @@ impl Tool for BashTool {
         {
             cancellation.mark_cleanup_incomplete();
         }
-        bash_tool_result_from_execution_receipt_with_analysis(
+        let observed_bytes = receipt.effective_output().combined_total_bytes;
+        let result = bash_tool_result_from_execution_receipt_with_analysis(
             call_id,
             self.spec().name,
             receipt,
             &analysis,
-        )
+        )?;
+        Ok(attach_bounded_shell_artifact(&ctx, result, observed_bytes))
+    }
+}
+
+fn attach_bounded_shell_artifact(
+    ctx: &ToolContext,
+    mut result: ToolResult,
+    observed_bytes: u64,
+) -> ToolResult {
+    let Some(mut sink) = ctx.create_policy_safe_tool_output_sink(
+        &result.call_id,
+        &result.tool_name,
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    ) else {
+        return result;
+    };
+    let policy_safe_content = safe_persistence_text(&result.content);
+    let redaction_count = u32::from(policy_safe_content != result.content);
+    let observed_bytes = observed_bytes.max(result.content.len() as u64);
+    let publication = sink
+        .write_all(policy_safe_content.as_bytes())
+        .map_err(anyhow::Error::from)
+        .and_then(|()| {
+            sink.finish_with_projection_evidence(observed_bytes, observed_bytes, redaction_count)
+        });
+    match publication {
+        Ok(descriptor) => result.with_captured_artifact(descriptor),
+        Err(_) => {
+            result = result.with_unavailable_artifact_capture(observed_bytes);
+            result
+        }
     }
 }
 

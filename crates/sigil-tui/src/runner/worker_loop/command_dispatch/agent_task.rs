@@ -44,6 +44,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
                 let mut run_session = run_session;
                 let safe_parent_prompt = sigil_kernel::safe_persistence_text(&parent_prompt);
                 if let Err(error) =
@@ -101,6 +103,10 @@ where
                 sigil_kernel::AgentToolDelegate::set_root_logical_run_id(
                     &mut agent_delegate,
                     Some(&format!("foreground-run-{run_id}")),
+                );
+                sigil_kernel::AgentToolDelegate::set_tool_artifact_read_budget(
+                    &mut agent_delegate,
+                    Some(tool_artifact_read_budget),
                 );
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
@@ -210,6 +216,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
 
                 let task_id = match next_task_id(&run_session) {
                     Ok(task_id) => task_id,
@@ -287,6 +295,7 @@ where
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
                         cancellation_handle,
                         cancellation_task_guard,
+                        tool_artifact_read_budget,
                     },
                 );
 
@@ -322,6 +331,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
 
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
@@ -414,6 +425,7 @@ where
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
                         cancellation_handle,
                         cancellation_task_guard,
+                        tool_artifact_read_budget,
                     },
                 );
 
@@ -449,6 +461,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
                 let (task_id, task_id_value, objective, needs_planning) =
                     match resolve_continue_task(&run_session, task_id) {
                         Ok(resolved) => resolved,
@@ -529,6 +543,7 @@ where
                             elicitation_audit_buffer: run_elicitation_audit_buffer,
                             cancellation_handle,
                             cancellation_task_guard,
+                            tool_artifact_read_budget: tool_artifact_read_budget.clone(),
                         },
                     )
                 } else {
@@ -554,6 +569,7 @@ where
                             elicitation_audit_buffer: run_elicitation_audit_buffer,
                             cancellation_handle,
                             cancellation_task_guard,
+                            tool_artifact_read_budget,
                         },
                     )
                 };
@@ -667,6 +683,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
@@ -727,6 +745,7 @@ where
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
                         cancellation_handle,
                         cancellation_task_guard,
+                        tool_artifact_read_budget,
                     },
                 );
                 state.run.active = Some(ActiveRun {

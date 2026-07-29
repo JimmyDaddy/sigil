@@ -15,6 +15,14 @@ fn maps_tool_card_key_events_to_commands() {
         Some(UiCommand::SelectPreviousToolCard)
     );
     assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::ALT)),
+        Some(UiCommand::ReadNextToolArtifactPage)
+    );
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)),
+        Some(UiCommand::SearchToolArtifact)
+    );
+    assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
         Some(UiCommand::ToggleSelectedToolCard)
     );
@@ -116,6 +124,16 @@ fn command_metadata_generates_help_and_control_hints() {
             .iter()
             .any(|hint| hint == "Alt-J: next activity")
     );
+    assert!(
+        activity_controls
+            .iter()
+            .any(|hint| hint == "Alt-N: next output page")
+    );
+    assert!(
+        activity_controls
+            .iter()
+            .any(|hint| hint == "Alt-F: search full output")
+    );
 
     let help = keyboard_help_lines(true);
     for section in [
@@ -205,6 +223,12 @@ fn command_metadata_generates_help_and_control_hints() {
         help.iter()
             .any(|line| { line == "Ctrl-T: Expand or collapse the focused activity." })
     );
+    assert!(help.iter().any(|line| {
+        line == "Alt-N: Read the next bounded page from the focused tool output artifact."
+    }));
+    assert!(help.iter().any(|line| {
+        line == "Alt-F: Search a bounded literal in the focused tool output artifact."
+    }));
 
     let slash = metadata_slash_help_lines();
     assert!(slash.iter().any(|line| line.starts_with("/config:")));

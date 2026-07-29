@@ -345,6 +345,15 @@
 .tool-output { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface); background: var(--sg-sys-color-surface-input); white-space: pre; }
 .tool-output code { color: inherit; font-family: ui-monospace, "SFMono-Regular", monospace; font-size: 12px; line-height: 1.55; }
 .tool-card-body > small { color: var(--sg-sys-color-on-surface-subtle); }
+.tool-artifact-retrieval { display: grid; min-width: 0; gap: 6px; margin: 7px 0 0 30px; padding-top: 6px; border-top: 1px solid var(--sg-sys-color-outline); }
+.tool-artifact-actions { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tool-artifact-actions form { display: flex; min-width: min(100%, 320px); flex: 1; align-items: center; gap: 5px; }
+.tool-artifact-search-field { min-width: 80px; flex: 1; }
+.tool-artifact-actions input { min-height: 28px; padding: 4px 7px; }
+.tool-artifact-retrieval > small, .tool-artifact-unavailable { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; }
+.tool-artifact-retrieval .syntax-highlight { max-height: 320px; overflow: auto; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-input); }
+.tool-artifact-retrieval pre { margin: 0; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; }
+.tool-artifact-unavailable { display: block; margin: 6px 0 0 30px; }
 .diff-viewer { margin: 0; overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-input); }
 .diff-viewer figcaption { display: flex; justify-content: space-between; padding: 7px 9px; color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface); font-size: 11px; }
 .diff-viewer pre { max-height: 300px; margin: 0; padding: 8px 0; overflow: auto; }
@@ -545,7 +554,7 @@
 @container (max-width: 480px) {
   .tool-card-main { grid-template-columns: minmax(0, 1fr); margin-left: 0; }
   .tool-result { max-width: none; }
-  .tool-output-section, .tool-details { margin-left: 0; }
+  .tool-output-section, .tool-details, .tool-artifact-retrieval, .tool-artifact-unavailable { margin-left: 0; }
   .composer-toolbar { align-items: flex-end; padding-left: 7px; }
   .composer-options { flex-wrap: nowrap; gap: 3px; }
   .composer-model { width: 108px; max-width: 108px; padding: 0 5px; font-size: 10px; }
@@ -574,7 +583,7 @@
   .tool-card-meta { display: none; }
   .tool-card-main { grid-template-columns: minmax(0, 1fr); margin-left: 0; }
   .tool-result { max-width: none; }
-  .tool-output-section, .tool-details { margin-left: 0; }
+  .tool-output-section, .tool-details, .tool-artifact-retrieval, .tool-artifact-unavailable { margin-left: 0; }
   .composer-toolbar { align-items: flex-end; }
   .composer-options { flex-wrap: nowrap; }
   .approval-dock dl, .verification-card dl, .task-integration-summary dl { grid-template-columns: 1fr; }

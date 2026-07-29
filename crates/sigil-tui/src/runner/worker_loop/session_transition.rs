@@ -180,10 +180,13 @@ where
     let entries = session.entries().to_vec();
 
     state.compaction.preparation_tasks.abort_all();
+    state.artifact_gc.tasks.abort_all();
     state.compaction.local_preview = None;
     state.compaction.pending = None;
     state.compaction.idle_auto = IdleAutoCompactionState::default();
     state.session.pending_queued_pre_turn_preparation = None;
+    state.session.pending_cost_only_tool_output_aging = None;
+    state.session.tool_artifact_read_budget = ToolArtifactReadBudgetV1::default();
     state.session.last_queued_pre_turn_block = None;
     state.session.last_task_guidance_block = None;
     state.session.pending_agent_result_continuations = pending_agent_result_continuations;
@@ -215,6 +218,8 @@ where
     );
     state.session.task_guidance_dirty = true;
     state.session.conversation_queue_dirty = true;
+    state.session.tool_output_pressure_dirty = true;
+    state.session.artifact_gc_dirty = true;
     state.session.task_guidance_retry_at = None;
     state.session.conversation_queue_retry_at = None;
     state.session.task_guidance_retry_attempts = 0;

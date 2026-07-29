@@ -3186,9 +3186,9 @@ async fn host_authorized_chat_subagent_prompt_spawns_child() -> Result<()> {
         .and_then(|message| message.content.clone())
         .expect("spawn tool result should be present");
     let spawn_payload: serde_json::Value = serde_json::from_str(&spawn_content)?;
-    assert_eq!(spawn_payload["meta"]["details"]["status"], "running");
+    assert_eq!(spawn_payload["facts"]["tool_specific"]["status"], "running");
     assert_eq!(
-        spawn_payload["meta"]["details"]["host_join_registered"],
+        spawn_payload["facts"]["tool_specific"]["host_join_registered"],
         true
     );
     assert_eq!(output.outcome.tool_call_ids, vec!["call-spawn-1"]);

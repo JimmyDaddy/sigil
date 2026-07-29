@@ -11,9 +11,10 @@ use sigil_kernel::{
     ApprovalMode, DurableEventType, ExtensionProcessLaunchPhase, ExtensionProcessLifecycleAudit,
     ExtensionProcessLifecycleStatus, JsonlSessionStore, McpServerConfig, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
-    ReasoningStreamSupport, SecretRedactor, SecretString, ToolAccess, ToolCategory, ToolContext,
-    ToolErrorKind, ToolRegistry, ToolResultStatus, ToolSubject, ToolSubjectKind, ToolSubjectScope,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
+    ReasoningStreamSupport, SecretRedactor, SecretString, ToolAccess, ToolArtifactBindingV1,
+    ToolArtifactSensitivity, ToolArtifactStore, ToolCategory, ToolContext, ToolErrorKind,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolResultStatus, ToolSubject,
+    ToolSubjectKind, ToolSubjectScope, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
 };
 use tokio::{
     io::{AsyncReadExt, BufReader},
@@ -55,6 +56,62 @@ macro_rules! set_mcp_server_config_field {
     ($config:ident, $field:ident, $value:expr) => {
         $config.$field = $value;
     };
+}
+
+#[test]
+fn mcp_large_json_capture_streams_policy_safe_artifact_without_expanding_tool_content() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
+    let context = ToolContext::new(temp.path(), 5).with_tool_artifact_reader(
+        artifact_store.clone(),
+        sigil_kernel::session::ToolArtifactReadBudgetV1::default(),
+        "context-epoch:test",
+    );
+    let redactor = SecretRedactor::from_values(["top-secret-value"]);
+    let source = json!({
+        "content": "x".repeat(2 * 1024 * 1024),
+        "authorization": "top-secret-value",
+    });
+    let artifact = super::capture_mcp_result_artifact(
+        &context,
+        "mcp-large",
+        "mcp__server__tool",
+        &redactor,
+        &source,
+    );
+    let result = super::attach_mcp_artifact(
+        ToolResult::ok(
+            "mcp-large",
+            "mcp__server__tool",
+            "bounded preview",
+            ToolResultMeta::default(),
+        ),
+        artifact,
+    );
+
+    assert_eq!(result.content, "bounded preview");
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::ExternalUntrusted,
+    )?;
+    let ToolArtifactBindingV1::Published { descriptor } = recorded.artifact else {
+        panic!("MCP safe JSON should publish a streamed artifact");
+    };
+    let body = artifact_store.read_all(&descriptor)?;
+    assert!(body.len() > 2 * 1024 * 1024);
+    assert!(
+        !body
+            .windows(b"top-secret-value".len())
+            .any(|window| { window == b"top-secret-value" })
+    );
+    assert!(
+        body.windows(b"[redacted]".len())
+            .any(|window| window == b"[redacted]")
+    );
+    Ok(())
 }
 
 macro_rules! mcp_server_config {

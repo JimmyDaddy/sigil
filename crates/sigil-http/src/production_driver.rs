@@ -20,9 +20,10 @@ use sigil_kernel::{
     ConversationQueueMutation, ConversationQueueMutationCommand, ConversationQueueRevision,
     JsonlSessionStore, ModelMessage, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptProjection, PublicRunEvent, PublicRunEventKind, RootConfig,
-    SecretString, SessionLogEntry, SessionRef, ToolApproval, ToolApprovalUserDecision, ToolCall,
-    ToolSpec, conversation_promotion_capability_digest,
-    project_conversation_prompt_for_persistence,
+    SecretString, SessionLogEntry, SessionRef, ToolApproval, ToolApprovalUserDecision,
+    ToolArtifactAvailability, ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactRefV1,
+    ToolArtifactStore, ToolCall, ToolOutputArchivedArtifactBindingV1, ToolSpec,
+    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
     project_user_message_for_persistence_with_nonce_and_issued_at, stable_event_uuid,
     tool_approval_session_grant_available_for_facets,
 };
@@ -85,7 +86,8 @@ use crate::{
     HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunTerminalOutcome,
     HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpToolOutputShrinkReceipt,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpToolArtifactPage,
+    HttpToolArtifactReadDriverError, HttpToolArtifactReadRequest, HttpToolOutputShrinkReceipt,
     HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
     HttpVerificationView,
 };
@@ -95,6 +97,7 @@ const DEFAULT_HTTP_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTTP_EXACT_QUEUE_PROMPTS: usize = 128;
 const MAX_HTTP_QUEUE_PREVIEW_CHARS: usize = 240;
 const MAX_HTTP_PENDING_COMPACTION_PREVIEWS: usize = 32;
+const MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES: usize = 256;
 
 /// Runtime inputs and bounded waits owned by the production HTTP driver.
 #[derive(Debug, Clone)]
@@ -269,11 +272,24 @@ pub struct HttpProductionRunDriver {
     active_runs_ready: Arc<Condvar>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     pending_compactions: Arc<Mutex<BTreeMap<String, PendingHttpCompaction>>>,
+    session_projection_stores: Mutex<HttpSessionProjectionStoreCache>,
 }
 
 enum PendingHttpCompaction {
     Local(Box<PendingApplicationCompactionPreview>),
     Ready(Box<PendingApplicationCompaction>),
+}
+
+struct HttpRetainedSessionProjectionStore {
+    session_log_path: String,
+    store: JsonlSessionStore,
+    last_used_sequence: u64,
+}
+
+#[derive(Default)]
+struct HttpSessionProjectionStoreCache {
+    entries: BTreeMap<String, HttpRetainedSessionProjectionStore>,
+    access_sequence: u64,
 }
 
 impl PendingHttpCompaction {
@@ -392,6 +408,7 @@ impl HttpProductionRunDriver {
             active_runs_ready: Arc::new(Condvar::new()),
             exact_queue_prompts: Arc::new(Mutex::new(BTreeMap::new())),
             pending_compactions: Arc::new(Mutex::new(BTreeMap::new())),
+            session_projection_stores: Mutex::new(HttpSessionProjectionStoreCache::default()),
         })
     }
 
@@ -816,6 +833,121 @@ impl HttpProductionRunDriver {
     }
 }
 
+impl HttpProductionRunDriver {
+    fn retained_session_projection_store(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<JsonlSessionStore, HttpToolArtifactReadDriverError> {
+        let mut stores = self
+            .session_projection_stores
+            .lock()
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        stores.access_sequence = stores.access_sequence.saturating_add(1);
+        let access_sequence = stores.access_sequence;
+        if let Some(retained) = stores.entries.get_mut(&session.durable_session_scope_id) {
+            if retained.session_log_path != session.session_log_path {
+                return Err(HttpToolArtifactReadDriverError::Unavailable);
+            }
+            retained.last_used_sequence = access_sequence;
+            return Ok(retained.store.clone());
+        }
+        let store = JsonlSessionStore::new(Path::new(&session.session_log_path))
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        if stores.entries.len() >= MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES
+            && let Some(evicted_scope_id) = stores
+                .entries
+                .iter()
+                .min_by(|(left_scope_id, left), (right_scope_id, right)| {
+                    left.last_used_sequence
+                        .cmp(&right.last_used_sequence)
+                        .then_with(|| left_scope_id.cmp(right_scope_id))
+                })
+                .map(|(scope_id, _)| scope_id.clone())
+        {
+            stores.entries.remove(&evicted_scope_id);
+        }
+        stores.entries.insert(
+            session.durable_session_scope_id.clone(),
+            HttpRetainedSessionProjectionStore {
+                session_log_path: session.session_log_path.clone(),
+                store: store.clone(),
+                last_used_sequence: access_sequence,
+            },
+        );
+        Ok(store)
+    }
+
+    fn projected_tool_artifact_binding(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        artifact_ref: &ToolArtifactRefV1,
+    ) -> Result<ToolOutputArchivedArtifactBindingV1, HttpToolArtifactReadDriverError> {
+        let session_store = self.retained_session_projection_store(session)?;
+        let active = session_store
+            .active_projection_snapshot()
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        if active.frontier().session_id() != session.durable_session_scope_id {
+            return Err(HttpToolArtifactReadDriverError::Unavailable);
+        }
+
+        let pressure = active.tool_output_pressure();
+        let active_matches = pressure
+            .items
+            .iter()
+            .filter(|item| item.artifact_ref.as_ref() == Some(artifact_ref))
+            .count();
+        let archived_by_key = pressure
+            .archived_artifact_bindings
+            .get(&artifact_ref.artifact_id);
+        if archived_by_key.is_some_and(|binding| &binding.artifact_ref != artifact_ref)
+            || active_matches > 1
+            || (active_matches == 1 && archived_by_key.is_some())
+        {
+            return Err(HttpToolArtifactReadDriverError::Corrupt);
+        }
+        if active_matches == 0 && archived_by_key.is_none() {
+            return Err(HttpToolArtifactReadDriverError::Unavailable);
+        }
+
+        let binding = pressure
+            .artifact_source_binding(artifact_ref)
+            .ok_or(HttpToolArtifactReadDriverError::Corrupt)?;
+        if binding.source_event_id.trim().is_empty()
+            || binding.source_stream_sequence == 0
+            || binding.source_message_id.trim().is_empty()
+        {
+            return Err(HttpToolArtifactReadDriverError::Corrupt);
+        }
+        match binding.artifact_availability {
+            ToolArtifactAvailability::Available => Ok(binding),
+            ToolArtifactAvailability::HashMismatch => Err(HttpToolArtifactReadDriverError::Corrupt),
+            ToolArtifactAvailability::PolicyRevoked => {
+                Err(HttpToolArtifactReadDriverError::PolicyRevoked)
+            }
+            ToolArtifactAvailability::Expired
+            | ToolArtifactAvailability::Missing
+            | ToolArtifactAvailability::LegacyUnavailable => {
+                Err(HttpToolArtifactReadDriverError::Unavailable)
+            }
+        }
+    }
+}
+
+fn validate_projected_tool_artifact_descriptor(
+    binding: &ToolOutputArchivedArtifactBindingV1,
+    descriptor: &ToolArtifactDescriptorV1,
+) -> Result<(), HttpToolArtifactReadDriverError> {
+    if binding.artifact_ref != descriptor.artifact_ref
+        || binding.artifact_sha256 != descriptor.content_sha256
+        || binding.persisted_bytes != descriptor.persisted_bytes
+        || binding.call_id != descriptor.tool_call_id
+        || binding.tool_name != descriptor.tool_name
+    {
+        return Err(HttpToolArtifactReadDriverError::Corrupt);
+    }
+    Ok(())
+}
+
 impl HttpRunDriver for HttpProductionRunDriver {
     fn requires_run_release_barrier(&self) -> bool {
         true
@@ -899,6 +1031,15 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         pending_compactions
             .retain(|_, pending| pending.session_scope_id() != durable_session_scope_id);
+        drop(exact_prompts);
+        drop(pending_compactions);
+        let mut session_projection_stores = self
+            .session_projection_stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        session_projection_stores
+            .entries
+            .remove(durable_session_scope_id);
     }
 
     fn session_frontier(
@@ -1147,6 +1288,57 @@ impl HttpRunDriver for HttpProductionRunDriver {
             });
         }
         Ok(page)
+    }
+
+    fn tool_artifact_page(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &HttpToolArtifactReadRequest,
+    ) -> Result<HttpToolArtifactPage, HttpToolArtifactReadDriverError> {
+        let artifact_ref = ToolArtifactRefV1 {
+            artifact_id: request.artifact_ref.clone(),
+        };
+        artifact_ref
+            .validate()
+            .map_err(|_| HttpToolArtifactReadDriverError::InvalidReference)?;
+        request
+            .selector
+            .validate()
+            .map_err(|_| HttpToolArtifactReadDriverError::InvalidSelector)?;
+
+        let binding = self.projected_tool_artifact_binding(session, &artifact_ref)?;
+        let store = ToolArtifactStore::for_session_path(Path::new(&session.session_log_path));
+        let descriptor = store
+            .resolve(&artifact_ref)
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        validate_projected_tool_artifact_descriptor(&binding, &descriptor)?;
+        if descriptor.encoding != ToolArtifactEncoding::Utf8
+            && matches!(
+                &request.selector,
+                crate::HttpToolArtifactSelector::LinePage { .. }
+                    | crate::HttpToolArtifactSelector::SearchLiteral { .. }
+            )
+        {
+            return Err(HttpToolArtifactReadDriverError::InvalidSelector);
+        }
+        let page = store
+            .read_page(&artifact_ref, request.selector.clone().into())
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        match store.availability(&descriptor) {
+            ToolArtifactAvailability::Available => {}
+            ToolArtifactAvailability::HashMismatch => {
+                return Err(HttpToolArtifactReadDriverError::Corrupt);
+            }
+            ToolArtifactAvailability::PolicyRevoked => {
+                return Err(HttpToolArtifactReadDriverError::PolicyRevoked);
+            }
+            ToolArtifactAvailability::Expired
+            | ToolArtifactAvailability::Missing
+            | ToolArtifactAvailability::LegacyUnavailable => {
+                return Err(HttpToolArtifactReadDriverError::Unavailable);
+            }
+        }
+        Ok(HttpToolArtifactPage::from_kernel(&session.id, page))
     }
 
     fn run_context_view(

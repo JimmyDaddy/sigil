@@ -12,6 +12,7 @@ mod shell_runtime;
 mod support;
 mod terminal_process;
 mod terminal_tools;
+mod tool_artifact_tool;
 pub mod webfetch;
 
 pub use changeset_tool::{
@@ -92,6 +93,8 @@ pub(crate) use shell::*;
 pub(crate) use support::*;
 #[cfg(test)]
 pub(crate) use terminal_tools::*;
+#[cfg(test)]
+pub(crate) use tool_artifact_tool::*;
 
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]

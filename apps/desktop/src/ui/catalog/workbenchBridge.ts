@@ -591,6 +591,19 @@ export function createCatalogWorkbenchBridge(
     }),
     transcript: async () => transcript,
     display: async () => displayPage,
+    readToolArtifact: async (_workspaceId, sessionId, input) => ({
+      schemaVersion: 1,
+      requestScope: sessionId,
+      artifactRef: input.artifactRef,
+      selector: input.selector,
+      body: "",
+      bodyEncoding: "utf8",
+      returnedBytes: 0,
+      pageSha256: `sha256:${"0".repeat(64)}`,
+      artifactSha256: `sha256:${"0".repeat(64)}`,
+      eof: true,
+      matchCount: 0,
+    }),
     continuity: async () => ({
       durableFrontier: { throughStreamSequence: 3 },
       foregroundOwner: {

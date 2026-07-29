@@ -42,6 +42,7 @@ pub(crate) struct TextLimitResult {
     pub(crate) omitted_bytes: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn limit_text_head(input: &str, max_bytes: usize, max_lines: usize) -> TextLimitResult {
     let mut output = String::new();
     let mut returned_lines = 0usize;

@@ -16,6 +16,51 @@ pub(super) struct McpProtocolErrorProjection {
     pub(super) details: Value,
 }
 
+pub(super) enum McpArtifactCapture {
+    NotAttached,
+    Published(Box<ToolArtifactDescriptorV1>),
+    Unavailable { observed_bytes: u64 },
+}
+
+pub(super) fn capture_mcp_result_artifact(
+    ctx: &ToolContext,
+    call_id: &str,
+    tool_name: &str,
+    secret_redactor: &SecretRedactor,
+    result: &Value,
+) -> McpArtifactCapture {
+    let Some(mut sink) = ctx.create_policy_safe_tool_output_sink(
+        call_id,
+        tool_name,
+        "application/json",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::ExternalUntrusted,
+    ) else {
+        return McpArtifactCapture::NotAttached;
+    };
+    let redacted = secret_redactor.redact_value(result);
+    let policy_safe = safe_persistence_json_value(redacted);
+    let redaction_count = u32::from(policy_safe != *result);
+    let observed_bytes = u64::try_from(json_wire_bytes(result)).unwrap_or(u64::MAX);
+    if serde_json::to_writer(&mut sink, &policy_safe).is_err() {
+        return McpArtifactCapture::Unavailable { observed_bytes };
+    }
+    match sink.finish_with_source_evidence(observed_bytes, redaction_count) {
+        Ok(descriptor) => McpArtifactCapture::Published(Box::new(descriptor)),
+        Err(_) => McpArtifactCapture::Unavailable { observed_bytes },
+    }
+}
+
+pub(super) fn attach_mcp_artifact(result: ToolResult, artifact: McpArtifactCapture) -> ToolResult {
+    match artifact {
+        McpArtifactCapture::NotAttached => result,
+        McpArtifactCapture::Published(descriptor) => result.with_captured_artifact(*descriptor),
+        McpArtifactCapture::Unavailable { observed_bytes } => {
+            result.with_unavailable_artifact_capture(observed_bytes)
+        }
+    }
+}
+
 pub(super) fn bounded_mcp_protocol_error(
     secret_redactor: &SecretRedactor,
     error: &Value,

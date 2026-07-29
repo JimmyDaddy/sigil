@@ -32,12 +32,13 @@ pub use driver::{
     HttpConversationRecoveryDriverError, HttpConversationRecoveryDriverOutput,
     HttpIntentStackDriverError, HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunDriver,
     HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunDriverTaskPause, HttpSessionOpenBindingError,
+    HttpRunDriverTaskPause, HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
 };
 pub use dto::{
     HTTP_APPROVAL_POLICY_VERSION, HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION,
-    HTTP_MAX_CONVERSATION_QUEUE_ITEMS, HTTP_SERVER_INFO_SCHEMA_VERSION, HttpAgentActivityItem,
-    HttpAgentActivityStatus, HttpAgentActivityView, HttpAgentHandoffStatus, HttpAgentUsageSummary,
+    HTTP_MAX_CONVERSATION_QUEUE_ITEMS, HTTP_SERVER_INFO_SCHEMA_VERSION,
+    HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION, HttpAgentActivityItem, HttpAgentActivityStatus,
+    HttpAgentActivityView, HttpAgentHandoffStatus, HttpAgentUsageSummary,
     HttpApplicationAgentBinding, HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
@@ -90,9 +91,10 @@ pub use dto::{
     HttpSupportPrivacy, HttpSupportStatus, HttpSupportSummary, HttpTaskContinuationRequest,
     HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
-    HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpToolOutputShrinkReceipt,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunCommandReceipt,
-    HttpVerificationRerunRequest, HttpVerificationView,
+    HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpToolArtifactPage,
+    HttpToolArtifactPageEncoding, HttpToolArtifactReadRequest, HttpToolArtifactSelector,
+    HttpToolOutputShrinkReceipt, HttpTranscriptAssistantKind, HttpTranscriptRole,
+    HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
 };
 pub use journal::{HttpDurableProtocolJournal, HttpProtocolJournalError};
 pub use listener::{HttpListenerError, HttpLocalServer};

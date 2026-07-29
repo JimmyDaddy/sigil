@@ -111,6 +111,20 @@ impl SharedSessionCoordinator {
         Ok(events)
     }
 
+    pub(super) fn append_crash_safe_bundle(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+    ) -> Result<Vec<StoredEvent>> {
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            let (events, _) = writer.append_crash_safe_bundle(pending)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(events)
+    }
+
     pub(super) fn append_events_if_active<F>(
         &self,
         pending: Vec<PendingStoredEvent>,
@@ -479,6 +493,18 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
                 | DurableEventType::CompactionFailed,
             ) => {
                 families.insert(ActiveProjectionFamily::Compaction);
+                if event.event_kind() == Some(DurableEventType::CompactionAppliedV2) {
+                    families.insert(ActiveProjectionFamily::ToolOutputPressure);
+                }
+            }
+            Some(
+                DurableEventType::UserMessageRecorded
+                | DurableEventType::AssistantMessageRecorded
+                | DurableEventType::ToolResultRecordedV2
+                | DurableEventType::ToolOutputProjectionShrinkRecorded
+                | DurableEventType::ToolOutputAgingActivated,
+            ) => {
+                families.insert(ActiveProjectionFamily::ToolOutputPressure);
             }
             Some(_) | None => {}
         }
@@ -1320,6 +1346,7 @@ pub(crate) enum SessionWriterFault {
     ParentDirectorySync,
     BeforeWrite,
     PartialFirstRecord,
+    PartialSecondRecord,
     BeforeSync,
 }
 
@@ -1558,6 +1585,25 @@ impl LinearSessionWriter {
         pending: Vec<PendingStoredEvent>,
         force_sync: bool,
     ) -> Result<StoredEventAppendResult> {
+        self.append_events_inner(pending, force_sync, false)
+    }
+
+    fn append_crash_safe_bundle(
+        &mut self,
+        pending: Vec<PendingStoredEvent>,
+    ) -> Result<StoredEventAppendResult> {
+        if pending.len() < 2 {
+            bail!("crash-safe append bundle requires at least two events");
+        }
+        self.append_events_inner(pending, true, true)
+    }
+
+    fn append_events_inner(
+        &mut self,
+        pending: Vec<PendingStoredEvent>,
+        force_sync: bool,
+        crash_safe_bundle: bool,
+    ) -> Result<StoredEventAppendResult> {
         if pending.is_empty() {
             bail!("session writer append batch must not be empty");
         }
@@ -1627,6 +1673,29 @@ impl LinearSessionWriter {
         file.seek(SeekFrom::End(0))
             .context("failed to seek session log before append batch")?;
         let start_offset = file.stream_position()?;
+        let bundle_bytes = crash_safe_bundle.then(|| {
+            lines
+                .iter()
+                .flat_map(|line| line.iter().copied())
+                .collect::<Vec<_>>()
+        });
+        if let Some(bundle_bytes) = bundle_bytes.as_ref() {
+            let end_offset = start_offset
+                .checked_add(bundle_bytes.len() as u64)
+                .context("session crash-safe bundle offset overflow")?;
+            write_append_bundle_intent(
+                &self.path,
+                &AppendBundleIntent {
+                    start_offset,
+                    end_offset,
+                    event_count: u32::try_from(lines.len())
+                        .context("session crash-safe bundle has too many events")?,
+                    bundle_sha256: stable_event_hash(bundle_bytes),
+                    bundle_jsonl: String::from_utf8(bundle_bytes.clone())
+                        .context("session crash-safe bundle is not valid UTF-8")?,
+                },
+            )?;
+        }
         let mut offsets = Vec::with_capacity(lines.len());
         let mut cursor = start_offset;
         #[cfg(test)]
@@ -1646,7 +1715,20 @@ impl LinearSessionWriter {
                     .context("failed to flush injected partial stored event write")?;
                 bail!("injected partial stored event write failure");
             }
+            #[cfg(test)]
+            let mut line_index = 0_usize;
             for line in &lines {
+                #[cfg(test)]
+                if injected_fault == Some(SessionWriterFault::PartialSecondRecord)
+                    && line_index == 1
+                {
+                    let partial_len = (line.len() / 2).max(1);
+                    file.write_all(&line[..partial_len])
+                        .context("failed to inject partial second stored event write")?;
+                    file.flush()
+                        .context("failed to flush injected partial stored event write")?;
+                    bail!("injected partial second stored event write failure");
+                }
                 file.write_all(line)
                     .context("failed to append stored event batch")?;
                 prefix_hasher.update(line);
@@ -1655,6 +1737,10 @@ impl LinearSessionWriter {
                     .context("session durable offset overflow")?;
                 offsets.push((cursor, end));
                 cursor = end;
+                #[cfg(test)]
+                {
+                    line_index = line_index.saturating_add(1);
+                }
             }
             file.flush().context("failed to flush stored event batch")?;
             #[cfg(test)]
@@ -1664,6 +1750,9 @@ impl LinearSessionWriter {
             if any_recovery_critical {
                 file.sync_all()
                     .context("failed to sync stored event batch")?;
+            }
+            if crash_safe_bundle {
+                clear_append_bundle_intent(&self.path)?;
             }
             let observed_len = file
                 .metadata()

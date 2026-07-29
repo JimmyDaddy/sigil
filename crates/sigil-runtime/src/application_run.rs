@@ -1683,6 +1683,7 @@ where
             role_provider_builder: role_provider_builder.as_ref(),
             handler,
             cancellation_handle: cancellation_handle.clone(),
+            tool_artifact_read_budget: None,
         },
         approval_handler,
     )
@@ -2897,6 +2898,11 @@ pub fn application_session_transcript_page(
             SessionLogEntry::ToolResult(message) => {
                 (message, ApplicationTranscriptRole::Tool, MessageRole::Tool)
             }
+            SessionLogEntry::ToolResultV2(result) => (
+                result.model_message()?,
+                ApplicationTranscriptRole::Tool,
+                MessageRole::Tool,
+            ),
             SessionLogEntry::Control(_) => unreachable!("control entries are handled above"),
         };
         if message.role != expected_role {

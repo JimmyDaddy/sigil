@@ -204,6 +204,31 @@ impl Session {
             .transpose()
     }
 
+    /// Returns the append-only context epoch currently governing V2 tool-result model views.
+    pub fn active_tool_output_context_epoch_id(&self) -> Result<String> {
+        Ok(self
+            .active_projection_snapshot()?
+            .map(|snapshot| snapshot.tool_output_pressure().active_epoch_id)
+            .unwrap_or_else(|| "context-epoch:root".to_owned()))
+    }
+
+    /// Publishes one frontier-bound tool-output aging activation through the attached authority.
+    ///
+    /// In-memory sessions cannot prove a durable frontier and therefore return `Ok(None)`.
+    /// Store-backed sessions compare the supplied frontier against the shared incremental
+    /// projection and append atomically without replaying the JSONL stream.
+    pub fn append_tool_output_aging_activation(
+        &self,
+        expected_frontier: &ActiveProjectionFrontier,
+        activation: ToolOutputAgingActivatedV1,
+    ) -> Result<Option<StoredEvent>> {
+        self.store
+            .as_ref()
+            .map(|store| store.append_tool_output_aging_activation(expected_frontier, activation))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     /// Registers a durable projection observer without exposing the underlying store or writer.
     ///
     /// In-memory sessions return `Ok(None)`. Dropping the returned subscription unregisters the
@@ -345,6 +370,18 @@ impl Session {
 
     /// Appends a single entry to the in-memory log and durable store when present.
     pub fn append(&mut self, entry: SessionLogEntry) -> Result<()> {
+        match &entry {
+            SessionLogEntry::ToolResult(_) => {
+                bail!(
+                    "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
+                );
+            }
+            SessionLogEntry::ToolResultV2(result) => result.validate()?,
+            SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) => {
+                receipt.validate()?;
+            }
+            _ => {}
+        }
         let event = self
             .store
             .as_ref()
@@ -413,16 +450,74 @@ impl Session {
         self.append(SessionLogEntry::Assistant(message))
     }
 
-    pub fn append_tool_message(&mut self, message: ModelMessage) -> Result<()> {
-        self.append(SessionLogEntry::ToolResult(message))
+    /// Crate-local migration helper for legacy tests. It always writes a V2 record and is not a
+    /// production persistence API.
+    #[cfg(test)]
+    pub(crate) fn append_tool_message(&mut self, message: ModelMessage) -> Result<()> {
+        if message.role != MessageRole::Tool
+            || !message.tool_calls.is_empty()
+            || message.tool_call_id.as_deref().is_none_or(str::is_empty)
+            || message.content.is_none()
+        {
+            bail!("legacy tool-message adapter requires one bounded tool-role message");
+        }
+        let call_id = message
+            .tool_call_id
+            .clone()
+            .expect("validated tool message has a call id");
+        let tool_name = self
+            .entries
+            .iter()
+            .rev()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .flat_map(|assistant| assistant.tool_calls.iter())
+            .find(|call| call.id == call_id)
+            .map_or_else(
+                || "legacy_inline_test_adapter".to_owned(),
+                |call| call.name.clone(),
+            );
+        let content = message
+            .content
+            .clone()
+            .expect("validated tool message has content");
+        let result = ToolResult::ok(call_id, tool_name, content, ToolResultMeta::default());
+        let artifact_store = self.tool_artifact_store();
+        let (mut recorded, _) = ToolResultRecordedV2::capture(
+            &result,
+            artifact_store.as_ref(),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        recorded.message_id = message.id;
+        self.append(SessionLogEntry::ToolResultV2(recorded))
     }
 
-    /// Persists one tool result and its URL provenance controls as a single ordered writer batch.
+    #[must_use]
+    pub fn tool_artifact_store(&self) -> Option<ToolArtifactStore> {
+        self.store
+            .as_ref()
+            .map(ToolArtifactStore::for_session_store)
+    }
+
+    /// Persists one tool result and its body-free receipts/provenance as one crash-safe bundle.
+    ///
+    /// The tool result is deliberately first. Even on media that persists only a prefix before a
+    /// crash, recovery can never expose a receipt without the provider-visible result that closes
+    /// the corresponding tool call. The writer's append-bundle intent then recovers the multi-
+    /// record range as all-or-none.
     pub(crate) fn append_tool_result_bundle(
         &mut self,
-        message: ModelMessage,
+        result: ToolResultRecordedV2,
         controls: Vec<ControlEntry>,
     ) -> Result<()> {
+        result.validate()?;
+        let artifact_ref = result
+            .artifact
+            .descriptor()
+            .map(|descriptor| descriptor.artifact_ref.clone());
+        let message = result.model_message()?;
         for control in &controls {
             match control {
                 ControlEntry::WebUrlCapabilityDescriptor(descriptor) => {
@@ -440,12 +535,19 @@ impl Session {
                     }
                     provenance.validate_against_message(&message)?;
                 }
+                ControlEntry::ToolArtifactRead(receipt) => {
+                    receipt.validate()?;
+                    if result.tool_name != "read_tool_artifact" || receipt.call_id != result.call_id
+                    {
+                        bail!("tool artifact read receipt belongs to a different tool result");
+                    }
+                }
                 _ => bail!("tool result bundle contains an unsupported control entry"),
             }
         }
 
         let mut entries = Vec::with_capacity(controls.len() + 1);
-        entries.push(SessionLogEntry::ToolResult(message));
+        entries.push(SessionLogEntry::ToolResultV2(result));
         entries.extend(controls.into_iter().map(SessionLogEntry::Control));
         let events = self
             .store
@@ -454,6 +556,20 @@ impl Session {
             .transpose()?;
         self.entries.extend(entries);
         if let Some(events) = events {
+            if let (Some(artifact_ref), Some(event), Some(store)) =
+                (artifact_ref.as_ref(), events.first(), self.store.as_ref())
+                && let Err(error) = ToolArtifactStore::for_session_store(store)
+                    .bind_source_event(artifact_ref, &event.event_id)
+            {
+                // The `.event` binding is a rebuildable fork/GC cache. Retrieval authorization
+                // comes only from the active durable pressure projection, so failure here cannot
+                // broaden read authority or invalidate the committed descriptor.
+                tracing::warn!(
+                    artifact_ref = %artifact_ref.artifact_id,
+                    error = %error,
+                    "failed to bind tool artifact to its durable descriptor event"
+                );
+            }
             self.advance_durable_session_entry_count(&events);
         }
         Ok(())
@@ -742,12 +858,17 @@ impl Session {
                 | SessionLogEntry::ToolResult(message)
                     if message.id == provenance.message_id =>
                 {
-                    Some(message)
+                    Some(message.clone())
+                }
+                SessionLogEntry::ToolResultV2(result)
+                    if result.message_id == provenance.message_id =>
+                {
+                    result.model_message().ok()
                 }
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("external provenance message does not exist"))?;
-        provenance.validate_against_message(message)?;
+        provenance.validate_against_message(&message)?;
         self.append_control(ControlEntry::ExternalProvenance(provenance))
     }
 
@@ -2117,13 +2238,19 @@ fn validated_recovered_entries(
                     | SessionLogEntry::ToolResult(message)
                         if message.id == provenance.message_id =>
                     {
-                        Some(message)
+                        Some(message.clone())
+                    }
+                    SessionLogEntry::ToolResultV2(result)
+                        if result.message_id == provenance.message_id =>
+                    {
+                        result.model_message().ok()
                     }
                     _ => None,
                 });
                 provenance.session_scope_id == session_scope_id
-                    && message
-                        .is_some_and(|message| provenance.validate_against_message(message).is_ok())
+                    && message.is_some_and(|message| {
+                        provenance.validate_against_message(&message).is_ok()
+                    })
             }
             SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(descriptor)) => {
                 descriptor.session_scope_id == session_scope_id
@@ -2141,6 +2268,12 @@ fn validated_recovered_entries(
                                 SessionLogEntry::Assistant(message)
                                 | SessionLogEntry::ToolResult(message),
                             ) => message.id == descriptor.durable_entry_id,
+                            (
+                                crate::WebUrlProvenanceKind::WebSearchResult
+                                | crate::WebUrlProvenanceKind::PriorWebFetch
+                                | crate::WebUrlProvenanceKind::RedirectTarget,
+                                SessionLogEntry::ToolResultV2(result),
+                            ) => result.message_id == descriptor.durable_entry_id,
                             _ => false,
                         }
                     })

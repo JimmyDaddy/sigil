@@ -79,6 +79,7 @@ fn base_summary(tool_name: &str) -> ToolCardRender {
         hidden_lines: 0,
         preview_value: None,
         diff: None,
+        artifact: None,
     }
 }
 

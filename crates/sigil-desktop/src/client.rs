@@ -1,5 +1,6 @@
 use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
 use ring::digest::{SHA256, digest};
 use serde::{Serialize, de::DeserializeOwned};
@@ -34,8 +35,10 @@ use crate::{
         DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportDoctorReport,
         DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopTaskIntegrationReviewRequest,
         DesktopTaskIntegrationReviewView, DesktopTaskPauseCommandReceipt, DesktopTaskPauseRequest,
-        DesktopTranscriptQuery, DesktopVerificationRerunCommandReceipt,
-        DesktopVerificationRerunRequest, DesktopVerificationView,
+        DesktopToolArtifactAvailability, DesktopToolArtifactPage, DesktopToolArtifactPageEncoding,
+        DesktopToolArtifactReadRequest, DesktopToolArtifactSelector, DesktopTranscriptQuery,
+        DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
+        DesktopVerificationView,
     },
     events::{DesktopProtocolEvent, DesktopProtocolEventClass, DesktopProtocolEventError},
     secret::DesktopBearerToken,
@@ -43,6 +46,16 @@ use crate::{
 
 const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TASK_INTEGRATION_DIFF_BYTES: usize = 4 * 1024 * 1024;
+const DESKTOP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION: u16 = 1;
+const DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES: u32 = 16 * 1024;
+const DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE: u64 = 16 * 1024 * 1024;
+const DESKTOP_TOOL_ARTIFACT_MAX_LINES: u32 = 200;
+const DESKTOP_TOOL_ARTIFACT_MAX_MATCHES: u16 = 20;
+const DESKTOP_TOOL_ARTIFACT_MAX_CONTEXT_LINES: u16 = 3;
+const DESKTOP_TOOL_ARTIFACT_MAX_QUERY_BYTES: usize = 512;
+// A 16 KiB UTF-8 page can expand sixfold when JSON escapes control bytes. The transport cap
+// remains fixed while leaving room for two bounded selectors and integrity metadata.
+const MAX_TOOL_ARTIFACT_PAGE_RESPONSE_BYTES: usize = 128 * 1024;
 const MAX_TASK_INTEGRATION_REVIEW_RESPONSE_BYTES: usize =
     MAX_TASK_INTEGRATION_DIFF_BYTES * 6 + 1024 * 1024;
 const MAX_TASK_INTEGRATION_ROWS: usize = 512;
@@ -378,6 +391,27 @@ impl DesktopHttpClient {
         }
         let page: DesktopConversationDisplayPage = self.get_json(url, StatusCode::OK).await?;
         validate_conversation_display_page(&page, session_id)?;
+        Ok(page)
+    }
+
+    /// Reads one typed, bounded tool artifact page by opaque session-scoped reference.
+    pub async fn tool_artifact_page(
+        &self,
+        session_id: &str,
+        request: &DesktopToolArtifactReadRequest,
+    ) -> Result<DesktopToolArtifactPage, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_tool_artifact_request(request)?;
+        let page: DesktopToolArtifactPage = self
+            .send_json_with_limit(
+                self.client
+                    .post(self.route(["sessions", session_id, "tool-artifacts", "read"])?)
+                    .json(request),
+                StatusCode::OK,
+                MAX_TOOL_ARTIFACT_PAGE_RESPONSE_BYTES,
+            )
+            .await?;
+        validate_tool_artifact_page(&page, session_id, request)?;
         Ok(page)
     }
 
@@ -1414,6 +1448,50 @@ fn validate_conversation_display_page(
     {
         return Err(DesktopClientError::InvalidResponse);
     }
+    for item in &page.items {
+        if let crate::DesktopConversationDisplayContent::Tool {
+            truncated,
+            original_content_bytes,
+            artifact_ref,
+            artifact_availability,
+            observed_bytes,
+            persisted_bytes,
+            has_more,
+            ..
+        } = &item.content
+        {
+            let typed_artifact_metadata_present = artifact_ref.is_some()
+                || observed_bytes.is_some()
+                || persisted_bytes.is_some()
+                || *has_more;
+            if artifact_ref
+                .as_deref()
+                .is_some_and(|value| !valid_tool_artifact_ref(value))
+                || persisted_bytes.is_some_and(|bytes| bytes > DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE)
+                || observed_bytes
+                    .zip(*persisted_bytes)
+                    .is_some_and(|(observed, persisted)| observed < persisted)
+                || artifact_ref.is_some() && artifact_availability.is_none()
+                || matches!(
+                    artifact_availability,
+                    Some(DesktopToolArtifactAvailability::Available)
+                ) && artifact_ref.is_none()
+                || typed_artifact_metadata_present
+                    && (artifact_availability.is_none()
+                        || observed_bytes != &Some(*original_content_bytes)
+                        || persisted_bytes.is_none()
+                        || *truncated != *has_more)
+                || !typed_artifact_metadata_present
+                    && artifact_availability.is_some()
+                    && !matches!(
+                        artifact_availability,
+                        Some(DesktopToolArtifactAvailability::LegacyUnavailable)
+                    )
+            {
+                return Err(DesktopClientError::InvalidResponse);
+            }
+        }
+    }
     let Some(task) = page.task_control.as_ref() else {
         return Ok(());
     };
@@ -1468,6 +1546,167 @@ fn validate_conversation_display_page(
         }
     }
     Ok(())
+}
+
+fn validate_tool_artifact_request(
+    request: &DesktopToolArtifactReadRequest,
+) -> Result<(), DesktopClientError> {
+    if !valid_tool_artifact_ref(&request.artifact_ref)
+        || !valid_tool_artifact_selector(&request.selector)
+    {
+        return Err(DesktopClientError::InvalidRoute);
+    }
+    Ok(())
+}
+
+fn validate_tool_artifact_page(
+    page: &DesktopToolArtifactPage,
+    session_id: &str,
+    request: &DesktopToolArtifactReadRequest,
+) -> Result<(), DesktopClientError> {
+    if page.schema_version != DESKTOP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION
+        || page.request_scope != session_id
+        || page.artifact_ref != request.artifact_ref
+        || page.selector != request.selector
+        || !valid_tool_artifact_ref(&page.artifact_ref)
+        || !valid_tool_artifact_selector(&page.selector)
+        || page
+            .next_selector
+            .as_ref()
+            .is_some_and(|selector| !valid_tool_artifact_selector(selector))
+        || !valid_tool_artifact_continuation(&page.selector, page.next_selector.as_ref(), page.eof)
+        || page.returned_bytes > DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES
+        || page.match_count > DESKTOP_TOOL_ARTIFACT_MAX_MATCHES
+        || match &page.selector {
+            DesktopToolArtifactSelector::ByteSlice { limit, .. } => page.returned_bytes > *limit,
+            DesktopToolArtifactSelector::SearchLiteral { max_matches, .. } => {
+                page.match_count > *max_matches
+            }
+            DesktopToolArtifactSelector::LinePage { .. } => false,
+        }
+        || !valid_tool_artifact_hash(&page.page_sha256)
+        || !valid_tool_artifact_hash(&page.artifact_sha256)
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+
+    let body_bytes = match page.body_encoding {
+        DesktopToolArtifactPageEncoding::Utf8 => page.body.as_bytes().to_vec(),
+        DesktopToolArtifactPageEncoding::Base64 => BASE64_STANDARD
+            .decode(&page.body)
+            .map_err(|_| DesktopClientError::InvalidResponse)?,
+    };
+    if body_bytes.len() != page.returned_bytes as usize
+        || body_bytes.len() > DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES as usize
+        || sha256_prefixed(&body_bytes) != page.page_sha256
+        || (!matches!(
+            &page.selector,
+            DesktopToolArtifactSelector::SearchLiteral { .. }
+        ) && page.match_count != 0)
+    {
+        return Err(DesktopClientError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn valid_tool_artifact_ref(value: &str) -> bool {
+    value.strip_prefix("ta1_").is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn valid_tool_artifact_selector(selector: &DesktopToolArtifactSelector) -> bool {
+    match selector {
+        DesktopToolArtifactSelector::ByteSlice { offset, limit } => {
+            *offset <= DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE
+                && (1..=DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES).contains(limit)
+        }
+        DesktopToolArtifactSelector::LinePage {
+            start_line,
+            line_count,
+        } => {
+            *start_line <= DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE
+                && (1..=DESKTOP_TOOL_ARTIFACT_MAX_LINES).contains(line_count)
+        }
+        DesktopToolArtifactSelector::SearchLiteral {
+            query,
+            start_offset,
+            max_matches,
+            context_lines,
+        } => {
+            !query.is_empty()
+                && query.len() <= DESKTOP_TOOL_ARTIFACT_MAX_QUERY_BYTES
+                && *start_offset <= DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE
+                && (1..=DESKTOP_TOOL_ARTIFACT_MAX_MATCHES).contains(max_matches)
+                && *context_lines <= DESKTOP_TOOL_ARTIFACT_MAX_CONTEXT_LINES
+        }
+    }
+}
+
+fn valid_tool_artifact_continuation(
+    current: &DesktopToolArtifactSelector,
+    next: Option<&DesktopToolArtifactSelector>,
+    eof: bool,
+) -> bool {
+    if eof != next.is_none() {
+        return false;
+    }
+    match (current, next) {
+        (_, None) => true,
+        (
+            DesktopToolArtifactSelector::ByteSlice { offset, limit },
+            Some(DesktopToolArtifactSelector::ByteSlice {
+                offset: next_offset,
+                limit: next_limit,
+            }),
+        ) => next_offset > offset && next_limit == limit,
+        (
+            DesktopToolArtifactSelector::LinePage {
+                start_line,
+                line_count,
+            },
+            Some(DesktopToolArtifactSelector::LinePage {
+                start_line: next_line,
+                line_count: next_count,
+            }),
+        ) => next_line > start_line && next_count == line_count,
+        (
+            DesktopToolArtifactSelector::LinePage { .. },
+            Some(DesktopToolArtifactSelector::ByteSlice {
+                offset: next_offset,
+                ..
+            }),
+        ) => *next_offset > 0,
+        (
+            DesktopToolArtifactSelector::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            },
+            Some(DesktopToolArtifactSelector::SearchLiteral {
+                query: next_query,
+                start_offset: next_offset,
+                max_matches: next_matches,
+                context_lines: next_context,
+            }),
+        ) => {
+            next_offset > start_offset
+                && next_query == query
+                && next_matches == max_matches
+                && next_context == context_lines
+        }
+        _ => false,
+    }
+}
+
+fn valid_tool_artifact_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn validate_task_control_label(value: &str) -> Result<(), DesktopClientError> {

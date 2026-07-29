@@ -15,7 +15,10 @@ use sigil_desktop::{
     DesktopConversationTaskLane, DesktopConversationTaskPlanStep,
     DesktopConversationTerminalFrontier, DesktopDurableSessionFrontier, DesktopForegroundRunOwner,
     DesktopPublicTaskPhase, DesktopSessionContinuityView, DesktopSessionSnapshot,
-    DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage, DesktopTranscriptAssistantKind,
+    DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
+    DesktopToolArtifactPage as NativeToolArtifactPage,
+    DesktopToolArtifactPageEncoding as NativeToolArtifactPageEncoding,
+    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptAssistantKind,
     DesktopTranscriptRole,
 };
 
@@ -489,6 +492,112 @@ fn conversation_display_query_validation_bounds_renderer_values() {
             .expect_err("unbounded display request must fail");
         assert_eq!(error.code, "conversation_display_query_invalid");
     }
+}
+
+#[test]
+fn tool_artifact_projection_is_bounded_and_path_free() {
+    let projected = crate::ipc::DesktopToolArtifactPage::from(NativeToolArtifactPage {
+        schema_version: 1,
+        request_scope: "http-session-safe".to_owned(),
+        artifact_ref: format!("ta1_{}", "a".repeat(32)),
+        selector: NativeToolArtifactSelector::LinePage {
+            start_line: 120,
+            line_count: 80,
+        },
+        body: "bounded page\n".to_owned(),
+        body_encoding: NativeToolArtifactPageEncoding::Utf8,
+        returned_bytes: 13,
+        page_sha256: format!("sha256:{}", "b".repeat(64)),
+        artifact_sha256: format!("sha256:{}", "c".repeat(64)),
+        eof: false,
+        match_count: 0,
+        next_selector: Some(NativeToolArtifactSelector::LinePage {
+            start_line: 200,
+            line_count: 80,
+        }),
+    });
+    let json = serde_json::to_value(projected).expect("artifact page should serialize");
+
+    assert_eq!(json["artifactRef"], format!("ta1_{}", "a".repeat(32)));
+    assert_eq!(json["selector"]["kind"], "line_page");
+    assert_eq!(json["selector"]["startLine"], 120);
+    assert_eq!(json["bodyEncoding"], "utf8");
+    assert_eq!(json["nextSelector"]["lineCount"], 80);
+    assert!(json.get("sessionLogPath").is_none());
+    assert!(json.get("artifactPath").is_none());
+}
+
+#[test]
+fn tool_artifact_input_validation_enforces_opaque_ref_and_selector_caps() {
+    let valid = DesktopToolArtifactReadInput {
+        artifact_ref: format!("ta1_{}", "a".repeat(32)),
+        selector: DesktopToolArtifactSelector::SearchLiteral {
+            query: "needle".to_owned(),
+            start_offset: 0,
+            max_matches: 20,
+            context_lines: 3,
+        },
+    };
+    validate_tool_artifact_read_input(&valid).expect("bounded selector should validate");
+
+    for invalid in [
+        DesktopToolArtifactReadInput {
+            artifact_ref: "/private/artifact".to_owned(),
+            selector: DesktopToolArtifactSelector::ByteSlice {
+                offset: 0,
+                limit: 16,
+            },
+        },
+        DesktopToolArtifactReadInput {
+            artifact_ref: format!("ta1_{}", "a".repeat(32)),
+            selector: DesktopToolArtifactSelector::ByteSlice {
+                offset: 16_777_217,
+                limit: 16,
+            },
+        },
+        DesktopToolArtifactReadInput {
+            artifact_ref: format!("ta1_{}", "a".repeat(32)),
+            selector: DesktopToolArtifactSelector::ByteSlice {
+                offset: 0,
+                limit: 16_385,
+            },
+        },
+        DesktopToolArtifactReadInput {
+            artifact_ref: format!("ta1_{}", "a".repeat(32)),
+            selector: DesktopToolArtifactSelector::SearchLiteral {
+                query: String::new(),
+                start_offset: 0,
+                max_matches: 1,
+                context_lines: 0,
+            },
+        },
+    ] {
+        let error =
+            validate_tool_artifact_read_input(&invalid).expect_err("invalid input must fail");
+        assert_eq!(error.code, "tool_artifact_request_invalid");
+    }
+}
+
+#[test]
+fn tool_artifact_errors_are_specific_and_path_free() {
+    let unavailable = project_tool_artifact_client_error(DesktopClientError::Rejected {
+        status: 404,
+        code: Some("tool_artifact_unavailable".to_owned()),
+    });
+    assert_eq!(unavailable.code, "tool_artifact_unavailable");
+    assert!(!unavailable.message.contains('/'));
+
+    let corrupt = project_tool_artifact_client_error(DesktopClientError::Rejected {
+        status: 409,
+        code: Some("tool_artifact_corrupt".to_owned()),
+    });
+    assert_eq!(corrupt.code, "tool_artifact_corrupt");
+    assert!(
+        corrupt
+            .recovery_actions
+            .contains(&DesktopRecoveryAction::OpenDiagnostics)
+    );
+    assert!(!corrupt.message.contains('/'));
 }
 
 #[test]

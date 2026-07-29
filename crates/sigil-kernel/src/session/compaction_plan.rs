@@ -309,6 +309,12 @@ impl CompactionFoldPlan {
                         message,
                     });
                 }
+                Some(SessionLogEntry::ToolResultV2(result)) => {
+                    messages.push(FoldMessage {
+                        event: reference,
+                        message: result.model_message()?,
+                    });
+                }
                 Some(SessionLogEntry::Control(_)) => {
                     protected.insert(reference, CompactionFoldProtectionReason::ControlState);
                 }
@@ -671,6 +677,12 @@ fn fold_messages_from_records(records: &[SessionStreamRecord]) -> Result<Vec<Fol
                 messages.push(FoldMessage {
                     event: event_ref(event),
                     message,
+                });
+            }
+            Some(SessionLogEntry::ToolResultV2(result)) => {
+                messages.push(FoldMessage {
+                    event: event_ref(event),
+                    message: result.model_message()?,
                 });
             }
             Some(SessionLogEntry::Control(_)) | None => {}

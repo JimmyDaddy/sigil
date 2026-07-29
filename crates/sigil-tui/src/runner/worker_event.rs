@@ -14,7 +14,9 @@ use sigil_runtime::ProviderStatusTaskResult;
 use super::{
     mcp_event_bridge::McpRuntimeEvent,
     protocol::{WorkerCommand, is_urgent_worker_command},
-    worker_loop::{CompactionPreparationTaskResult, McpOAuthTaskResult, RunTaskResult},
+    worker_loop::{
+        ArtifactGcTaskResult, CompactionPreparationTaskResult, McpOAuthTaskResult, RunTaskResult,
+    },
 };
 
 pub(in crate::runner) const MAX_PENDING_MCP_RUNTIME_EVENTS: usize = 128;
@@ -26,6 +28,7 @@ pub(in crate::runner) enum WorkerEvent {
     CompactionPrepared(CompactionPreparationTaskResult),
     ProviderStatusResolved(ProviderStatusTaskResult),
     McpOAuthCompleted(McpOAuthTaskResult),
+    ArtifactGcCompleted(ArtifactGcTaskResult),
     McpRuntimeReady(WorkerMcpRuntimeEventSender),
     Wake(WorkerWakeCoalescer),
     TimerDue,
@@ -431,6 +434,7 @@ impl ActiveProjectionObserver for WorkerActiveProjectionObserver {
                         | ActiveProjectionFamily::Usage
                         | ActiveProjectionFamily::Readiness
                         | ActiveProjectionFamily::Compaction
+                        | ActiveProjectionFamily::ToolOutputPressure
                 )
             })
             .collect::<BTreeSet<_>>();
@@ -468,6 +472,13 @@ impl WorkerWakeReadiness {
                 .projection_families
                 .contains(&ActiveProjectionFamily::Queue)
     }
+
+    pub(in crate::runner) fn tool_output_pressure_dirty(&self) -> bool {
+        self.projection_invalid
+            || self
+                .projection_families
+                .contains(&ActiveProjectionFamily::ToolOutputPressure)
+    }
 }
 
 pub(in crate::runner) struct WorkerReadiness {
@@ -477,6 +488,7 @@ pub(in crate::runner) struct WorkerReadiness {
     pub(in crate::runner) compaction_results: VecDeque<CompactionPreparationTaskResult>,
     pub(in crate::runner) provider_status_results: VecDeque<ProviderStatusTaskResult>,
     pub(in crate::runner) mcp_oauth_results: VecDeque<McpOAuthTaskResult>,
+    pub(in crate::runner) artifact_gc_results: VecDeque<ArtifactGcTaskResult>,
     pub(in crate::runner) mcp_runtime_events: VecDeque<McpRuntimeEvent>,
     pub(in crate::runner) mcp_resync_servers: BTreeSet<String>,
     wakes: VecDeque<WorkerWakeBatch>,
@@ -492,6 +504,7 @@ impl WorkerReadiness {
             compaction_results: VecDeque::new(),
             provider_status_results: VecDeque::new(),
             mcp_oauth_results: VecDeque::new(),
+            artifact_gc_results: VecDeque::new(),
             mcp_runtime_events: VecDeque::new(),
             mcp_resync_servers: BTreeSet::new(),
             wakes: VecDeque::new(),
@@ -508,6 +521,9 @@ impl WorkerReadiness {
                 self.provider_status_results.push_back(result);
             }
             WorkerEvent::McpOAuthCompleted(result) => self.mcp_oauth_results.push_back(result),
+            WorkerEvent::ArtifactGcCompleted(result) => {
+                self.artifact_gc_results.push_back(result);
+            }
             WorkerEvent::McpRuntimeReady(sender) => {
                 let (events, resync_servers) = sender.drain();
                 self.mcp_runtime_events.extend(events);
@@ -547,6 +563,7 @@ impl WorkerReadiness {
             || !self.compaction_results.is_empty()
             || !self.provider_status_results.is_empty()
             || !self.mcp_oauth_results.is_empty()
+            || !self.artifact_gc_results.is_empty()
             || !self.mcp_runtime_events.is_empty()
             || !self.mcp_resync_servers.is_empty()
             || !self.wakes.is_empty()
@@ -670,6 +687,12 @@ impl WorkerEventPayloadSender<CompactionPreparationTaskResult> {
 impl WorkerEventPayloadSender<McpOAuthTaskResult> {
     pub(in crate::runner) fn mcp_oauth(event_tx: mpsc::Sender<WorkerEvent>) -> Self {
         Self::new(event_tx, WorkerEvent::McpOAuthCompleted)
+    }
+}
+
+impl WorkerEventPayloadSender<ArtifactGcTaskResult> {
+    pub(in crate::runner) fn artifact_gc(event_tx: mpsc::Sender<WorkerEvent>) -> Self {
+        Self::new(event_tx, WorkerEvent::ArtifactGcCompleted)
     }
 }
 

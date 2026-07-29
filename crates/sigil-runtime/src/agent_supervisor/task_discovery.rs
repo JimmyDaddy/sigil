@@ -67,6 +67,7 @@ pub(super) struct TaskDiscoveryDelegate<'a> {
     requested: bool,
     cancellation: Option<RunCancellationHandle>,
     web_task_tree_budget: Option<Arc<WebTaskTreeBudget>>,
+    tool_artifact_read_budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
 }
 
 impl<'a> TaskDiscoveryDelegate<'a> {
@@ -93,6 +94,7 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             requested: false,
             cancellation: None,
             web_task_tree_budget: None,
+            tool_artifact_read_budget: None,
         }
     }
 
@@ -199,6 +201,9 @@ impl<'a> TaskDiscoveryDelegate<'a> {
             ));
             if let Some(budget) = &self.web_task_tree_budget {
                 child_input = child_input.with_web_task_tree_budget(Arc::clone(budget));
+            }
+            if let Some(budget) = &self.tool_artifact_read_budget {
+                child_input = child_input.with_tool_artifact_read_budget(budget.clone());
             }
             let child_session = build_child_session(self.parent_session, &child_session_ref)?;
             let step = TaskStepSpec {
@@ -442,6 +447,13 @@ impl sigil_kernel::AgentToolDelegate for TaskDiscoveryDelegate<'_> {
 
     fn set_web_task_tree_budget(&mut self, budget: Option<Arc<WebTaskTreeBudget>>) {
         self.web_task_tree_budget = budget;
+    }
+
+    fn set_tool_artifact_read_budget(
+        &mut self,
+        budget: Option<sigil_kernel::ToolArtifactReadBudgetV1>,
+    ) {
+        self.tool_artifact_read_budget = budget;
     }
 
     async fn handle_agent_tool_call(

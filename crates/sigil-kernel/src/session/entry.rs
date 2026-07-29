@@ -16,7 +16,15 @@ use crate::{
 pub enum SessionLogEntry {
     User(ModelMessage),
     Assistant(ModelMessage),
+    /// Parser sentinel for an unsupported pre-cutover record.
+    ///
+    /// Session/store append APIs reject this variant, durable loading reports
+    /// `LegacyUnavailable`, and provider context excludes it. It remains in the enum only long
+    /// enough to recognize the old serialized tag and return a bounded compatibility diagnostic.
+    #[doc(hidden)]
     ToolResult(ModelMessage),
+    /// Artifact-backed result used by all new tool executions.
+    ToolResultV2(ToolResultRecordedV2),
     Control(ControlEntry),
 }
 
@@ -198,6 +206,7 @@ pub enum ControlEntry {
     ToolApproval(ToolApprovalEntry),
     ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry),
     ToolExecution(Box<ToolExecutionEntry>),
+    ToolArtifactRead(ToolArtifactReadRecordedV1),
     ToolEgress(Box<ToolEgressEntry>),
     McpElicitation(Box<McpElicitationEntry>),
     ToolPreviewCaptured(ToolPreviewSnapshot),

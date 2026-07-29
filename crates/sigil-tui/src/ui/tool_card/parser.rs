@@ -14,6 +14,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         hidden_lines: text.lines().count().saturating_sub(8),
         preview_value: None,
         diff: None,
+        artifact: None,
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return fallback;
@@ -80,6 +81,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         })
         .unwrap_or_default();
     let diff = object.get("diff").and_then(parse_tool_diff);
+    let artifact = object.get("artifact").and_then(parse_tool_artifact);
 
     ToolCardRender {
         call_id: object
@@ -97,7 +99,31 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         hidden_lines,
         preview_value,
         diff,
+        artifact,
     }
+}
+
+fn parse_tool_artifact(value: &Value) -> Option<ToolCardArtifact> {
+    let object = value.as_object()?;
+    Some(ToolCardArtifact {
+        availability: object
+            .get("availability")
+            .and_then(Value::as_str)
+            .unwrap_or("unavailable")
+            .to_owned(),
+        observed_bytes: object
+            .get("observed_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        persisted_bytes: object
+            .get("persisted_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        has_more: object
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 pub(super) fn parse_tool_diff(value: &Value) -> Option<ToolCardDiff> {

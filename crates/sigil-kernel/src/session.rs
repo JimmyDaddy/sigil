@@ -145,6 +145,8 @@ mod provider_native_compaction;
 mod recovery;
 mod stats;
 mod store;
+mod tool_artifact;
+mod tool_output_pressure_projection;
 mod tool_output_projection;
 mod writer;
 
@@ -292,6 +294,38 @@ pub(crate) use store::session_entry_from_domain_event;
 pub use store::{
     JsonlSessionStore, SessionIoBusyError, SessionIoBusyKind, SessionIoLockMetricsSnapshot,
     SessionStreamCompatibilityError, session_io_lock_metrics,
+};
+pub use tool_artifact::{
+    TOOL_ARTIFACT_DESCRIPTOR_SCHEMA_VERSION, TOOL_ARTIFACT_MAX_BYTES,
+    TOOL_ARTIFACT_ORPHAN_GRACE_MS, TOOL_ARTIFACT_READ_BYTES_PER_TURN, TOOL_ARTIFACT_READ_MAX_BYTES,
+    TOOL_ARTIFACT_READ_MAX_LINES, TOOL_ARTIFACT_READ_SCHEMA_VERSION, TOOL_ARTIFACT_READS_PER_TURN,
+    TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES, TOOL_ARTIFACT_SEARCH_MAX_MATCHES,
+    TOOL_ARTIFACT_SESSION_BUDGET_BYTES, TOOL_DISPLAY_VIEW_MAX_BYTES, TOOL_MODEL_VIEW_MAX_BYTES,
+    TOOL_MODEL_VIEW_SCHEMA_VERSION, TOOL_RESULT_EVENT_TARGET_BYTES,
+    TOOL_RESULT_LEGACY_INLINE_MAX_BYTES, TOOL_RESULT_RECORDED_SCHEMA_VERSION,
+    ToolArtifactAvailability, ToolArtifactBindingV1, ToolArtifactBudgetedReadV1,
+    ToolArtifactCaptureSink, ToolArtifactCompleteness, ToolArtifactDescriptorV1,
+    ToolArtifactEncoding, ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactId,
+    ToolArtifactManifestEntryV1, ToolArtifactPageEncoding, ToolArtifactPageV1,
+    ToolArtifactReadBudgetV1, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
+    ToolArtifactRefV1, ToolArtifactRetentionClass, ToolArtifactRetrievalPolicyV1,
+    ToolArtifactSelectorV1, ToolArtifactSensitivity, ToolArtifactStore,
+    ToolArtifactTrashPruneReportV1, ToolArtifactTruncationV1, ToolArtifactUnavailableV1,
+    ToolDisplayCapability, ToolDisplayViewV1, ToolModelViewV1, ToolPreviewKind,
+    ToolResultCapturePathV1, ToolResultCaptureTelemetryV1, ToolResultFactsV1, ToolResultRecordedV2,
+    ToolResultViewsV2,
+};
+pub use tool_output_pressure_projection::{
+    TOOL_OUTPUT_AGED_RESULT_MAX_BYTES, TOOL_OUTPUT_AGED_RESULT_TARGET_TOKENS,
+    TOOL_OUTPUT_AGING_ACTIVATION_SCHEMA_VERSION, TOOL_OUTPUT_AGING_MAX_RESULTS,
+    TOOL_OUTPUT_AGING_POLICY_VERSION, TOOL_OUTPUT_ARCHIVED_ARTIFACT_BINDING_MAX,
+    TOOL_OUTPUT_MIN_BATCH_RECLAIM_TOKENS, TOOL_OUTPUT_OPEN_CALL_MAX,
+    TOOL_OUTPUT_PRESSURE_HARD_MAX_RESULTS, TOOL_OUTPUT_PRESSURE_MAX_RESULTS,
+    TOOL_OUTPUT_PRESSURE_PROJECTION_SCHEMA_VERSION, TOOL_OUTPUT_RECENT_PROTECTED_TOKENS,
+    ToolOutputAgedViewV1, ToolOutputAgingActivatedV1, ToolOutputAgingBatchV1,
+    ToolOutputAgingProjectionV1, ToolOutputAgingReasonV1, ToolOutputArchivedArtifactBindingV1,
+    ToolOutputPressureItemV1, ToolOutputPressureProjectionV1, ToolOutputPressureSnapshotV1,
+    ToolOutputRetentionClassV1,
 };
 pub use tool_output_projection::{
     MAX_TOOL_OUTPUT_PROJECTION_SHRINKS, ProjectedToolOutput,

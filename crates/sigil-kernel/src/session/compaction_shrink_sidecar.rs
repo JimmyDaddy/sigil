@@ -100,8 +100,8 @@ pub struct ToolOutputProjectionShrinkRecorded {
     pub prior_folded_through: Option<super::compaction_v2::CompactionCursor>,
     pub policy: ToolOutputProjectionPolicy,
     pub shrinks: Vec<ToolOutputProjectionShrink>,
-    /// New sidecars always bind shrink activation to a distinct epoch. Legacy sidecars decode
-    /// without this field and retain their V2 compatibility behavior.
+    /// Every sidecar binds shrink activation to a distinct epoch. Missing transitions are an
+    /// unsupported pre-cutover shape and fail closed during validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch_transition: Option<ToolOutputContextEpochTransitionV1>,
 }
@@ -228,20 +228,21 @@ impl ToolOutputProjectionShrinkRecorded {
                 bail!("tool-output projection sidecar duplicates a source event");
             }
         }
-        if let Some(transition) = &self.epoch_transition {
-            transition.validate()?;
-            if transition.reason == ToolOutputContextEpochTransitionReasonV1::SemanticCompaction
-                && transition.target_epoch_id != format!("context-epoch:{}", self.compaction_id)
-            {
-                bail!("semantic tool-output epoch does not bind its compaction");
-            }
-            if transition.reason == ToolOutputContextEpochTransitionReasonV1::StandaloneShrink
-                && (transition.target_epoch_id != self.compaction_id
-                    || self.attempt_id
-                        != format!("standalone-shrink-attempt:{}", self.compaction_id))
-            {
-                bail!("standalone tool-output epoch does not bind its durable identity");
-            }
+        let transition = self
+            .epoch_transition
+            .as_ref()
+            .context("tool-output projection sidecar is missing its context epoch transition")?;
+        transition.validate()?;
+        if transition.reason == ToolOutputContextEpochTransitionReasonV1::SemanticCompaction
+            && transition.target_epoch_id != format!("context-epoch:{}", self.compaction_id)
+        {
+            bail!("semantic tool-output epoch does not bind its compaction");
+        }
+        if transition.reason == ToolOutputContextEpochTransitionReasonV1::StandaloneShrink
+            && (transition.target_epoch_id != self.compaction_id
+                || self.attempt_id != format!("standalone-shrink-attempt:{}", self.compaction_id))
+        {
+            bail!("standalone tool-output epoch does not bind its durable identity");
         }
         Ok(())
     }

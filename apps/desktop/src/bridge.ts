@@ -68,6 +68,8 @@ import type {
   IntentStackState,
   IntentVersionRef,
   TaskPauseBinding,
+  ToolArtifactPage,
+  ToolArtifactReadInput,
   SupportDoctorReport,
   SupportSaveSummary,
 } from "./types";
@@ -135,6 +137,11 @@ export interface DesktopBridge {
     sessionId: string,
     request: ConversationDisplayRequest,
   ): Promise<ConversationDisplayPage>;
+  readToolArtifact(
+    workspaceId: string,
+    sessionId: string,
+    input: ToolArtifactReadInput,
+  ): Promise<ToolArtifactPage>;
   continuity(workspaceId: string, sessionId: string): Promise<ConversationContinuity>;
   conversationQueue(workspaceId: string, sessionId: string): Promise<ConversationQueueView>;
   commandConversationQueue(
@@ -293,6 +300,12 @@ export const desktopBridge: DesktopBridge = {
       workspaceId,
       sessionId,
       request,
+    }),
+  readToolArtifact: (workspaceId, sessionId, input) =>
+    invoke<ToolArtifactPage>("desktop_read_tool_artifact", {
+      workspaceId,
+      sessionId,
+      input,
     }),
   continuity: (workspaceId, sessionId) =>
     invoke<ConversationContinuity>("desktop_continuity", { workspaceId, sessionId }),

@@ -3448,7 +3448,7 @@ fn adaptive_compaction_review_shows_protected_tail_and_recoverable_artifact_refs
                 artifact_ref: "durable transcript event event-large".to_owned(),
                 reason: "large completed historical result".to_owned(),
                 recovery_instruction:
-                    "Re-read the durable transcript event when omitted details are required."
+                    "Use read_tool_artifact with the opaque artifact ref when omitted details are required."
                         .to_owned(),
             }],
             continuity: Some(V2ContinuityPreview {

@@ -6,6 +6,7 @@ pub struct SequentialTaskOrchestrator<R> {
     child_runner: R,
     execution_backend: Option<Arc<dyn ExecutionBackend>>,
     cancellation: Option<RunCancellationHandle>,
+    tool_artifact_read_budget: Option<crate::ToolArtifactReadBudgetV1>,
     max_parallel_read_steps: usize,
     max_parallel_changeset_steps: usize,
 }
@@ -19,6 +20,7 @@ where
             child_runner,
             execution_backend: None,
             cancellation: None,
+            tool_artifact_read_budget: None,
             max_parallel_read_steps: DEFAULT_TASK_READ_ONLY_CONCURRENCY,
             max_parallel_changeset_steps: 1,
         }
@@ -31,9 +33,23 @@ where
     }
 
     fn bind_cancellation(&self, input: AgentRunInput) -> AgentRunInput {
+        let input = match self.tool_artifact_read_budget.as_ref() {
+            Some(budget) => input.with_tool_artifact_read_budget(budget.clone()),
+            None => input,
+        };
         self.cancellation.as_ref().map_or(input.clone(), |handle| {
             input.with_child_cancellation(handle.clone())
         })
+    }
+
+    /// Binds all planner, executor and child runs to one root artifact-read budget.
+    #[must_use]
+    pub fn with_tool_artifact_read_budget(
+        mut self,
+        budget: crate::ToolArtifactReadBudgetV1,
+    ) -> Self {
+        self.tool_artifact_read_budget = Some(budget);
+        self
     }
 
     /// Returns an orchestrator that uses the provided backend for verification check execution.

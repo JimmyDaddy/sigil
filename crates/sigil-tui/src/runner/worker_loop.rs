@@ -32,13 +32,13 @@ use sigil_kernel::{
     TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry,
     TaskGuidancePromotedEntry, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus,
     TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepId, TaskStepSpec,
-    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
-    ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, UserUrlCapabilityRegistrar,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, admit_suggested_decomposition,
-    append_task_intent_plan_admission, bind_task_plan_intents, build_workspace_snapshot,
-    default_user_config_dir, discover_candidate_checks_with_user_config, plan_draft_created_entry,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
+    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval,
+    ToolArtifactReadBudgetV1, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
+    ToolSubjectAudit, UserUrlCapabilityRegistrar, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    admit_suggested_decomposition, append_task_intent_plan_admission, bind_task_plan_intents,
+    build_workspace_snapshot, default_user_config_dir, discover_candidate_checks_with_user_config,
+    plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
     rerun_task_verification_check, saturating_elapsed, stable_event_uuid, stable_workspace_id,
     task_id_from_plan_draft, task_plan_from_plan_draft,
 };
@@ -61,8 +61,9 @@ use super::{
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{
-        McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, V2CompactionApplySource,
-        WorkerApprovalCommand, WorkerCommand, WorkerMessage,
+        McpActivationStatus, McpOAuthUserAction, QueueMoveDirection,
+        ToolArtifactDisplayReadFailure, V2CompactionApplySource, WorkerApprovalCommand,
+        WorkerCommand, WorkerMessage,
     },
     session_flow::{
         load_routed_session_with_runtime_attachments, load_session,
@@ -77,6 +78,7 @@ use super::{
 mod active_run;
 mod advancement;
 mod agent_runtime;
+mod artifact_gc_tasks;
 mod checkpoint_runtime;
 mod command_dispatch;
 mod compaction_runtime;
@@ -114,6 +116,8 @@ pub(in crate::runner) use agent_runtime::{
     message_agent_thread, start_agent_result_continuation_run,
     start_portable_overflow_recovery_run, start_queued_conversation_run,
 };
+pub(in crate::runner) use artifact_gc_tasks::{ArtifactGcTaskManager, ArtifactGcTaskResult};
+pub use artifact_gc_tasks::{ArtifactGcTaskMetricsSnapshot, artifact_gc_task_metrics};
 pub(in crate::runner) use checkpoint_runtime::{
     execute_current_checkpoint_restore, fork_current_conversation,
     preview_current_checkpoint_restore,
@@ -123,7 +127,8 @@ pub(in crate::runner) use command_dispatch::{
 };
 #[cfg(test)]
 pub(in crate::runner) use command_dispatch::{
-    WorkerCommandDomain, classify_worker_command, validate_task_pause_request,
+    WorkerCommandDomain, classify_worker_command, read_tool_artifact_page_for_display,
+    validate_task_pause_request,
 };
 pub(in crate::runner) use compaction_runtime::{
     IdleAutoCompactionPreflightDecision, IdleAutoCompactionPreparation,
@@ -172,7 +177,8 @@ pub use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
 pub(in crate::runner) use scheduler::{finish_idle_auto_compaction, run_worker_loop};
 pub(in crate::runner) use session_lifecycle_runtime::{
     apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
-    inspect_local_session, local_session_lifecycle_service, preview_local_session_delete,
+    inspect_local_session, local_session_lifecycle_service,
+    local_session_lifecycle_service_for_source, preview_local_session_delete,
     preview_session_retention, set_local_session_pin,
 };
 pub(in crate::runner) use session_transition::{

@@ -73,6 +73,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
 
                 let safe_started_prompt = if prompt.is_empty() && !attachments.is_empty() {
                     sigil_kernel::render_image_attachment_placeholders(&attachments)
@@ -173,7 +175,8 @@ where
                             Vec::new(),
                         )
                         .await
-                        .with_image_attachments(attachments);
+                        .with_image_attachments(attachments)
+                        .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
                         let input = if plan_mode {
                             // Plan-mode prompts are intentionally transient and therefore have no
                             // durable user turn for ConversationCoordinator to bind. They keep the
@@ -264,6 +267,7 @@ where
                                                         task_role_provider_builder.as_ref(),
                                                     handler: &mut handler,
                                                     cancellation_handle,
+                                                    tool_artifact_read_budget,
                                                 },
                                                 &mut approval_handler,
                                             )
@@ -413,6 +417,8 @@ where
                     ));
                     continue;
                 };
+                let tool_artifact_read_budget =
+                    state.session.begin_root_tool_artifact_read_budget();
 
                 let prompt = skill_invocation_prompt(&skill_id, &arguments);
                 let _ = message_tx.send(WorkerMessage::SkillRunStarted {
@@ -459,6 +465,7 @@ where
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
                     let input = AgentRunInput::transient(prompt, vec![loaded.transient_context])
+                        .with_tool_artifact_read_budget(tool_artifact_read_budget)
                         .with_cancellation(cancellation_handle);
                     let result =
                         match run_session.append_control(ControlEntry::SkillLoaded(loaded.entry)) {

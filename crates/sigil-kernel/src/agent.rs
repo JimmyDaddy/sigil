@@ -300,6 +300,7 @@ pub struct AgentRunInput {
     max_output_tokens: Option<u32>,
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
+    tool_artifact_read_budget: Option<crate::session::ToolArtifactReadBudgetV1>,
 }
 
 impl fmt::Debug for AgentRunInput {
@@ -317,6 +318,10 @@ impl fmt::Debug for AgentRunInput {
             )
             .field("transient_context_count", &self.transient_context.len())
             .field("runtime_context", &self.runtime_context)
+            .field(
+                "tool_artifact_read_budget",
+                &self.tool_artifact_read_budget.is_some(),
+            )
             .field("task_plan_update", &self.task_plan_update)
             .field(
                 "task_guidance_assessment",
@@ -403,6 +408,7 @@ impl AgentRunInput {
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
+            tool_artifact_read_budget: None,
         }
     }
 
@@ -432,6 +438,7 @@ impl AgentRunInput {
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
+            tool_artifact_read_budget: None,
         }
     }
 
@@ -460,6 +467,7 @@ impl AgentRunInput {
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
+            tool_artifact_read_budget: None,
         }
     }
 
@@ -614,6 +622,22 @@ impl AgentRunInput {
     #[must_use]
     pub fn web_task_tree_budget(&self) -> Option<Arc<crate::WebTaskTreeBudget>> {
         self.web_task_tree_budget.clone()
+    }
+
+    /// Binds artifact retrieval in this run and delegated descendants to one root-owned budget.
+    #[must_use]
+    pub fn with_tool_artifact_read_budget(
+        mut self,
+        budget: crate::session::ToolArtifactReadBudgetV1,
+    ) -> Self {
+        self.tool_artifact_read_budget = Some(budget);
+        self
+    }
+
+    /// Returns the shared root artifact-read budget supplied by a parent run.
+    #[must_use]
+    pub fn tool_artifact_read_budget(&self) -> Option<crate::session::ToolArtifactReadBudgetV1> {
+        self.tool_artifact_read_budget.clone()
     }
 
     pub fn with_runtime_context(mut self, context: RuntimeContextCandidates) -> Self {
@@ -828,6 +852,13 @@ pub trait AgentToolDelegate: Send {
 
     /// Binds the root-owned Web budget so delegated children cannot create a fresh owner.
     fn set_web_task_tree_budget(&mut self, _budget: Option<Arc<crate::WebTaskTreeBudget>>) {}
+
+    /// Binds the root-owned artifact-read budget so delegated children cannot create a fresh one.
+    fn set_tool_artifact_read_budget(
+        &mut self,
+        _budget: Option<crate::session::ToolArtifactReadBudgetV1>,
+    ) {
+    }
 
     /// Supplies the current provider tool batch for host-owned child-join admission.
     ///
@@ -1252,6 +1283,7 @@ where
             max_output_tokens,
             suppressed_tool_names,
             web_task_tree_budget,
+            tool_artifact_read_budget,
         } = input;
         // An explicit per-run registrar is useful for constrained callers and tests; production
         // sessions fall back to their non-serializable session-scoped runtime attachment so live
@@ -1478,6 +1510,7 @@ where
         let mut participant_finalization_pending = false;
         let mut participant_finalization_prompt_injected = false;
         let mut participant_finalization_dispatched = false;
+        let tool_artifact_read_budget = tool_artifact_read_budget.unwrap_or_default();
 
         let mut model_turns = 0usize;
         loop {
@@ -1785,6 +1818,20 @@ where
                 if let Some(recorder) = session.mutation_event_recorder() {
                     tool_ctx = tool_ctx.with_mutation_recorder(recorder);
                 }
+                if let Some(store) = session.tool_artifact_store() {
+                    let active = session.active_projection_snapshot()?.ok_or_else(|| {
+                        anyhow!("active artifact source projection is unavailable")
+                    })?;
+                    let pressure = active.tool_output_pressure();
+                    let source_bindings = pressure.artifact_source_bindings()?;
+                    tool_ctx = tool_ctx
+                        .with_tool_artifact_reader(
+                            store,
+                            tool_artifact_read_budget.clone(),
+                            pressure.active_epoch_id,
+                        )
+                        .with_tool_artifact_source_bindings(source_bindings);
+                }
                 if let Ok(recorder) = session.egress_audit_recorder() {
                     tool_ctx = tool_ctx.with_egress_audit_recorder(recorder);
                 }
@@ -2040,6 +2087,7 @@ where
                         satisfied_agent_tool_calls: &mut satisfied_agent_tool_calls,
                         transient_context: &mut transient_context,
                         web_task_tree_budget: web_task_tree_budget.clone(),
+                        tool_artifact_read_budget: tool_artifact_read_budget.clone(),
                     };
                     if let Err(error) = process_tool_call(tool_call_context, call, safe_call).await
                     {
@@ -2386,6 +2434,7 @@ struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
     satisfied_agent_tool_calls: &'run mut usize,
     transient_context: &'run mut Vec<ModelMessage>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
+    tool_artifact_read_budget: crate::session::ToolArtifactReadBudgetV1,
 }
 
 async fn process_tool_call<H, A>(
@@ -2413,6 +2462,7 @@ where
         satisfied_agent_tool_calls,
         transient_context,
         web_task_tree_budget,
+        tool_artifact_read_budget,
     } = context;
     let mut explicit_network_approval = false;
     let mut explicit_user_approval = false;
@@ -3020,6 +3070,7 @@ where
             satisfied_agent_tool_calls,
             transient_context,
             web_task_tree_budget,
+            tool_artifact_read_budget,
         },
         authorized,
     )
@@ -3051,6 +3102,7 @@ where
         satisfied_agent_tool_calls,
         transient_context,
         web_task_tree_budget,
+        tool_artifact_read_budget,
     } = context;
     let AuthorizedToolCall {
         call,
@@ -3166,6 +3218,7 @@ where
                 delegate.set_agent_delegation_run_context(agent_delegation_run_context);
                 delegate.set_agent_tool_authorization(Some(&call), explicit_user_approval);
                 delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
+                delegate.set_tool_artifact_read_budget(Some(tool_artifact_read_budget.clone()));
                 let result = delegate
                     .handle_agent_tool_call(session, &call, options, handler, approval_handler)
                     .await;

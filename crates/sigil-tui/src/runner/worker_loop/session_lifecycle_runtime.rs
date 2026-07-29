@@ -28,6 +28,26 @@ pub(in crate::runner) fn local_session_lifecycle_service(
     .with_lifecycle_journal_path(paths.session_lifecycle_journal)
 }
 
+pub(in crate::runner) fn local_session_lifecycle_service_for_source(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    source_path: &Path,
+) -> Option<LocalSessionLifecycleService> {
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    let configured_dir = fs::canonicalize(&paths.session_log_dir).ok()?;
+    let source_dir = source_path
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())?;
+    (source_dir == configured_dir).then(|| {
+        LocalSessionLifecycleService::new(
+            paths.workspace_id,
+            paths.session_log_dir,
+            paths.session_exports_root,
+        )
+        .with_lifecycle_journal_path(paths.session_lifecycle_journal)
+    })
+}
+
 pub(in crate::runner) fn inspect_local_session(
     service: &LocalSessionLifecycleService,
     source_path: &Path,

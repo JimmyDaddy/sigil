@@ -44,7 +44,8 @@ use audit_log::{
     verification_stale_reason_label, verification_verdict_label, workspace_trust_label,
 };
 use audit_log::{
-    render_model_message_line, render_session_log_entry, render_tool_execution_line,
+    render_legacy_tool_result_unavailable_content, render_model_message_line,
+    render_session_log_entry, render_tool_execution_line, render_tool_result_v2_content_with_store,
     restored_reasoning_note, restored_tool_call_index, restored_tool_execution_content,
     restored_tool_execution_index, restored_tool_preview_snapshot_index,
     restored_tool_result_call_ids, should_render_restored_tool_execution, unix_time_ms,
@@ -542,6 +543,8 @@ impl AppState {
         let restored_tool_result_call_ids = restored_tool_result_call_ids(&entries);
         let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(&entries);
         let suppressed_assistant_preamble_indices = suppressed_assistant_preamble_indices(&entries);
+        let tool_artifact_store =
+            sigil_kernel::ToolArtifactStore::for_session_path(&self.session_log_path);
         self.tool_preview_snapshots = restored_tool_previews.clone();
         for (entry_index, entry) in entries.into_iter().enumerate() {
             match entry {
@@ -559,30 +562,42 @@ impl AppState {
                     }
                 }
                 SessionLogEntry::ToolResult(message) => {
-                    if let Some(content) = message.content {
-                        let execution = message
-                            .tool_call_id
-                            .as_deref()
-                            .and_then(|call_id| restored_tool_executions.get(call_id));
-                        let preview = message
-                            .tool_call_id
-                            .as_deref()
-                            .and_then(|call_id| restored_tool_previews.get(call_id));
-                        let tool_call = message
-                            .tool_call_id
-                            .as_deref()
-                            .and_then(|call_id| restored_tool_calls.get(call_id));
-                        self.replace_or_push_tool_card(
-                            format_tool_content_block_redacted_for_restore(
-                                message.tool_call_id.as_deref(),
-                                &content,
-                                execution,
-                                tool_call,
-                                preview,
-                                &self.secret_redactor,
-                            ),
-                        );
-                    }
+                    let execution = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| restored_tool_executions.get(call_id));
+                    let preview = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| restored_tool_previews.get(call_id));
+                    let tool_call = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| restored_tool_calls.get(call_id));
+                    self.replace_or_push_tool_card(format_tool_content_block_redacted_for_restore(
+                        message.tool_call_id.as_deref(),
+                        &render_legacy_tool_result_unavailable_content(&message),
+                        execution,
+                        tool_call,
+                        preview,
+                        &self.secret_redactor,
+                    ));
+                }
+                SessionLogEntry::ToolResultV2(result) => {
+                    let execution = restored_tool_executions.get(&result.call_id);
+                    let preview = restored_tool_previews.get(&result.call_id);
+                    let tool_call = restored_tool_calls.get(&result.call_id);
+                    self.replace_or_push_tool_card(format_tool_content_block_redacted_for_restore(
+                        Some(&result.call_id),
+                        &render_tool_result_v2_content_with_store(
+                            &result,
+                            Some(&tool_artifact_store),
+                        ),
+                        execution,
+                        tool_call,
+                        preview,
+                        &self.secret_redactor,
+                    ));
                 }
                 SessionLogEntry::Control(control) => match control {
                     ControlEntry::Note { kind, data }

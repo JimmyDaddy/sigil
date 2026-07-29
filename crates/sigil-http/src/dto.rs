@@ -1,13 +1,17 @@
 use std::{fmt, net::SocketAddr};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 
 /// Policy identity bound to every V1 HTTP approval request.
 pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
+use sigil_kernel::session::TOOL_ARTIFACT_MAX_BYTES;
 use sigil_kernel::{
     IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
     PublicIntentStackStateV1, PublicTaskPhase, TaskIntegrationReviewRequest, TaskPauseRequest,
-    TaskVerificationRerunRequest, ToolApprovalUserDecision, VerificationProductView,
+    TaskVerificationRerunRequest, ToolApprovalUserDecision, ToolArtifactPageEncoding,
+    ToolArtifactPageV1, ToolArtifactRefV1, ToolArtifactSelectorV1, VerificationProductView,
+    stable_event_hash,
 };
 use sigil_runtime::application_compaction::{
     ApplicationCompactionAdmission, ApplicationCompactionDetailsView,
@@ -34,7 +38,9 @@ use sigil_runtime::support::{
 };
 
 /// Schema version for the desktop launcher/server metadata handshake.
-pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 12;
+pub const HTTP_SERVER_INFO_SCHEMA_VERSION: u16 = 13;
+/// Schema version for one bounded display-surface artifact page.
+pub const HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION: u16 = 1;
 
 /// Authentication mode enforced by the local desktop/app-server adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +62,8 @@ pub struct HttpServerCapabilities {
     pub bounded_transcript_replay: bool,
     /// A bound durable session exposes canonical identity/order display pages.
     pub canonical_conversation_display: bool,
+    /// A bound durable session exposes typed, bounded artifact pages by opaque reference.
+    pub typed_tool_artifact_retrieval: bool,
     /// Durable run events support cursor-bound replay.
     pub durable_event_replay: bool,
     /// Transient and durable run events can be followed while the server is active.
@@ -97,6 +105,7 @@ impl HttpServerCapabilities {
             durable_session_reopen: true,
             bounded_transcript_replay: true,
             canonical_conversation_display: true,
+            typed_tool_artifact_retrieval: true,
             durable_event_replay: true,
             live_events: true,
             approval: true,
@@ -1018,6 +1027,16 @@ pub enum HttpConversationDisplayContent {
         output: Option<String>,
         truncated: bool,
         original_content_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_availability: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persisted_bytes: Option<u64>,
+        #[serde(default)]
+        has_more: bool,
     },
     Approval {
         call_id: String,
@@ -1237,6 +1256,293 @@ impl HttpConversationDisplayPage {
     }
 }
 
+/// Typed, bounded selector accepted by the authenticated display artifact endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum HttpToolArtifactSelector {
+    ByteSlice {
+        offset: u64,
+        limit: u32,
+    },
+    LinePage {
+        start_line: u64,
+        line_count: u32,
+    },
+    SearchLiteral {
+        query: String,
+        start_offset: u64,
+        max_matches: u16,
+        context_lines: u16,
+    },
+}
+
+impl HttpToolArtifactSelector {
+    /// Validates this transport selector against the kernel-owned retrieval policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a byte, line, match, context, or literal bound is invalid.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        let coordinate = match self {
+            Self::ByteSlice { offset, .. } => *offset,
+            Self::LinePage { start_line, .. } => *start_line,
+            Self::SearchLiteral { start_offset, .. } => *start_offset,
+        };
+        if coordinate > TOOL_ARTIFACT_MAX_BYTES as u64 {
+            anyhow::bail!("tool artifact selector coordinate exceeds the artifact hard limit");
+        }
+        ToolArtifactSelectorV1::from(self.clone()).validate()
+    }
+}
+
+impl From<HttpToolArtifactSelector> for ToolArtifactSelectorV1 {
+    fn from(selector: HttpToolArtifactSelector) -> Self {
+        match selector {
+            HttpToolArtifactSelector::ByteSlice { offset, limit } => {
+                Self::ByteSlice { offset, limit }
+            }
+            HttpToolArtifactSelector::LinePage {
+                start_line,
+                line_count,
+            } => Self::LinePage {
+                start_line,
+                line_count,
+            },
+            HttpToolArtifactSelector::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            } => Self::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            },
+        }
+    }
+}
+
+impl From<ToolArtifactSelectorV1> for HttpToolArtifactSelector {
+    fn from(selector: ToolArtifactSelectorV1) -> Self {
+        match selector {
+            ToolArtifactSelectorV1::ByteSlice { offset, limit } => {
+                Self::ByteSlice { offset, limit }
+            }
+            ToolArtifactSelectorV1::LinePage {
+                start_line,
+                line_count,
+            } => Self::LinePage {
+                start_line,
+                line_count,
+            },
+            ToolArtifactSelectorV1::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            } => Self::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            },
+        }
+    }
+}
+
+/// Authenticated request for one display-safe artifact page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpToolArtifactReadRequest {
+    /// Opaque session-scoped artifact reference. This is never a physical path.
+    pub artifact_ref: String,
+    pub selector: HttpToolArtifactSelector,
+}
+
+impl HttpToolArtifactReadRequest {
+    /// Validates the opaque reference and selector without touching storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reference schema or selector bounds are invalid.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        ToolArtifactRefV1 {
+            artifact_id: self.artifact_ref.clone(),
+        }
+        .validate()?;
+        self.selector.validate()
+    }
+}
+
+/// Encoding of one bounded artifact page body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpToolArtifactPageEncoding {
+    Utf8,
+    Base64,
+}
+
+/// One bounded artifact page safe for authenticated local display clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpToolArtifactPage {
+    pub schema_version: u16,
+    /// Process-local adapter session id; the durable scope and physical path are omitted.
+    pub request_scope: String,
+    pub artifact_ref: String,
+    pub selector: HttpToolArtifactSelector,
+    pub body: String,
+    pub body_encoding: HttpToolArtifactPageEncoding,
+    pub returned_bytes: u32,
+    pub page_sha256: String,
+    pub artifact_sha256: String,
+    pub eof: bool,
+    pub match_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_selector: Option<HttpToolArtifactSelector>,
+}
+
+impl HttpToolArtifactPage {
+    pub(crate) fn from_kernel(request_scope: &str, page: ToolArtifactPageV1) -> Self {
+        Self {
+            schema_version: HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION,
+            request_scope: request_scope.to_owned(),
+            artifact_ref: page.artifact_ref.artifact_id,
+            selector: page.selector.into(),
+            body: page.body,
+            body_encoding: match page.body_encoding {
+                ToolArtifactPageEncoding::Utf8 => HttpToolArtifactPageEncoding::Utf8,
+                ToolArtifactPageEncoding::Base64 => HttpToolArtifactPageEncoding::Base64,
+            },
+            returned_bytes: page.returned_bytes,
+            page_sha256: page.page_sha256,
+            artifact_sha256: page.artifact_sha256,
+            eof: page.eof,
+            match_count: page.match_count,
+            next_selector: page.next_selector.map(Into::into),
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        request_scope: &str,
+        request: &HttpToolArtifactReadRequest,
+    ) -> anyhow::Result<()> {
+        if self.schema_version != HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION
+            || self.request_scope != request_scope
+            || self.artifact_ref != request.artifact_ref
+            || self.selector != request.selector
+            || self.returned_bytes > sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES
+            || self.match_count > sigil_kernel::session::TOOL_ARTIFACT_SEARCH_MAX_MATCHES
+            || match &self.selector {
+                HttpToolArtifactSelector::ByteSlice { limit, .. } => self.returned_bytes > *limit,
+                HttpToolArtifactSelector::SearchLiteral { max_matches, .. } => {
+                    self.match_count > *max_matches
+                }
+                HttpToolArtifactSelector::LinePage { .. } => false,
+            }
+            || !valid_tool_artifact_hash(&self.page_sha256)
+            || !valid_tool_artifact_hash(&self.artifact_sha256)
+            || self
+                .next_selector
+                .as_ref()
+                .is_some_and(|selector| selector.validate().is_err())
+            || !valid_tool_artifact_continuation(
+                &self.selector,
+                self.next_selector.as_ref(),
+                self.eof,
+            )
+            || (!matches!(
+                &self.selector,
+                HttpToolArtifactSelector::SearchLiteral { .. }
+            ) && self.match_count != 0)
+        {
+            anyhow::bail!("tool artifact page violates the bounded response contract");
+        }
+        request.validate()?;
+        let body_bytes = match self.body_encoding {
+            HttpToolArtifactPageEncoding::Utf8 => self.body.as_bytes().to_vec(),
+            HttpToolArtifactPageEncoding::Base64 => BASE64_STANDARD
+                .decode(&self.body)
+                .map_err(|_| anyhow::anyhow!("tool artifact body is not valid base64"))?,
+        };
+        if body_bytes.len() != self.returned_bytes as usize
+            || body_bytes.len() > sigil_kernel::session::TOOL_ARTIFACT_READ_MAX_BYTES as usize
+            || stable_event_hash(&body_bytes) != self.page_sha256
+        {
+            anyhow::bail!("tool artifact page body violates its integrity contract");
+        }
+        Ok(())
+    }
+}
+
+fn valid_tool_artifact_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
+fn valid_tool_artifact_continuation(
+    current: &HttpToolArtifactSelector,
+    next: Option<&HttpToolArtifactSelector>,
+    eof: bool,
+) -> bool {
+    if eof != next.is_none() {
+        return false;
+    }
+    match (current, next) {
+        (_, None) => true,
+        (
+            HttpToolArtifactSelector::ByteSlice { offset, limit },
+            Some(HttpToolArtifactSelector::ByteSlice {
+                offset: next_offset,
+                limit: next_limit,
+            }),
+        ) => next_offset > offset && next_limit == limit,
+        (
+            HttpToolArtifactSelector::LinePage {
+                start_line,
+                line_count,
+            },
+            Some(HttpToolArtifactSelector::LinePage {
+                start_line: next_line,
+                line_count: next_count,
+            }),
+        ) => next_line > start_line && next_count == line_count,
+        (
+            HttpToolArtifactSelector::LinePage { .. },
+            Some(HttpToolArtifactSelector::ByteSlice {
+                offset: next_offset,
+                ..
+            }),
+        ) => *next_offset > 0,
+        (
+            HttpToolArtifactSelector::SearchLiteral {
+                query,
+                start_offset,
+                max_matches,
+                context_lines,
+            },
+            Some(HttpToolArtifactSelector::SearchLiteral {
+                query: next_query,
+                start_offset: next_offset,
+                max_matches: next_matches,
+                context_lines: next_context,
+            }),
+        ) => {
+            next_offset > start_offset
+                && next_query == query
+                && next_matches == max_matches
+                && next_context == context_lines
+        }
+        _ => false,
+    }
+}
+
 impl From<ConversationTerminalFrontierV1> for HttpConversationTerminalFrontier {
     fn from(frontier: ConversationTerminalFrontierV1) -> Self {
         Self {
@@ -1306,12 +1612,22 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 output,
                 truncated,
                 original_content_bytes,
+                artifact_ref,
+                artifact_availability,
+                observed_bytes,
+                persisted_bytes,
+                has_more,
             } => Self::Tool {
                 call_id,
                 tool_name,
                 output,
                 truncated,
                 original_content_bytes: usize_as_u64(original_content_bytes),
+                artifact_ref,
+                artifact_availability,
+                observed_bytes,
+                persisted_bytes,
+                has_more,
             },
             ConversationDisplayContentV1::Approval {
                 call_id,

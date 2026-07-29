@@ -1,6 +1,8 @@
 use anyhow::Result;
 use sigil_kernel::{
-    ConnectionId, ControlEntry, JsonlSessionStore, ModelMessage, ModelRef, Session, ToolCall,
+    ConnectionId, ControlEntry, JsonlSessionStore, ModelMessage, ModelRef, Session,
+    SessionLogEntry, ToolArtifactEncoding, ToolArtifactSensitivity, ToolCall, ToolResult,
+    ToolResultMeta, ToolResultRecordedV2,
 };
 
 use super::*;
@@ -169,17 +171,71 @@ tail_messages = 2
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_tool_message(ModelMessage::tool(
+    let legacy_inline_body = serde_json::json!({
+        "status": "completed",
+        "content": format!(
+            "head {secret} {} tail {secret}",
+            "large-build-output ".repeat(20_000)
+        ),
+    })
+    .to_string();
+    let artifact_store = session
+        .tool_artifact_store()
+        .expect("durable session exposes its artifact store");
+    let descriptor = artifact_store.capture_policy_safe_bytes(
         "call-build-log",
-        serde_json::json!({
-            "status": "completed",
-            "content": format!(
-                "head {secret} {} tail {secret}",
-                "large-build-output ".repeat(20_000)
+        "cargo_test",
+        legacy_inline_body.as_bytes(),
+        legacy_inline_body.len() as u64,
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+        0,
+    )?;
+    let result = ToolResult::ok(
+        "call-build-log",
+        "cargo_test",
+        legacy_inline_body,
+        ToolResultMeta::default(),
+    )
+    .with_captured_artifact(descriptor);
+    let (recorded, _) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    // The newest bounded tool-token window is protected by design. Fill it with high-signal
+    // failures so the original successful build log becomes the only ageable artifact.
+    for index in 0..9 {
+        let call_id = format!("call-recent-error-{index}");
+        session.append_assistant_message(ModelMessage::assistant(
+            None,
+            vec![ToolCall {
+                id: call_id.clone(),
+                name: "recent_check".to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        ))?;
+        let error_result = ToolResult::ok(
+            call_id,
+            "recent_check",
+            format!(
+                "recent high-signal failure {index} {}",
+                "detail ".repeat(3_000)
             ),
-        })
-        .to_string(),
-    ))?;
+            ToolResultMeta {
+                exit_code: Some(1),
+                ..ToolResultMeta::default()
+            },
+        );
+        let (recorded, _) = ToolResultRecordedV2::capture(
+            &error_result,
+            Some(&artifact_store),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    }
     session.append_assistant_message(ModelMessage::assistant(
         Some("old build log inspected".to_owned()),
         Vec::new(),
@@ -226,11 +282,8 @@ tail_messages = 2
         artifact.head_excerpt.contains("[redacted]")
             || artifact.tail_excerpt.contains("[redacted]")
     );
-    assert!(
-        artifact
-            .recovery_instruction
-            .contains("durable transcript event")
-    );
+    assert!(artifact.recovery_instruction.contains("read_tool_artifact"));
+    assert!(artifact.recovery_instruction.contains("opaque ref"));
     assert_eq!(std::fs::read(&session_path)?, before);
     assert!(
         String::from_utf8(before)?.contains(secret),

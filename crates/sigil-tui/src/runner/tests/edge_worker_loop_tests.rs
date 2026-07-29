@@ -38,8 +38,9 @@ use super::{
         worker_loop::{
             CreateTaskFromPlanRequest, PlanApprovalRequest, RuntimeTaskRoleProviderBuilder,
             WorkerLoopMcpHandlers, agent_result_continuation_run_result,
-            append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
-            create_task_from_plan, next_task_id, partition_agent_result_continuations,
+            append_mcp_elicitation_audits, approve_plan, artifact_gc_task_metrics,
+            cancel_terminal_task, close_agent_thread, create_task_from_plan, next_task_id,
+            partition_agent_result_continuations,
             pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
             queued_background_ready_transient_context, refresh_terminal_task_statuses,
@@ -636,10 +637,14 @@ fn detached_durable_continuation_is_visible_through_active_projection() -> Resul
 #[test]
 #[ignore = "release-profile long-session evidence"]
 fn worker_reactor_idle_long_session_evidence() -> Result<()> {
-    const IDLE_SECONDS: u64 = 30;
     const TARGET_DURABLE_BYTES: u64 = 10 * 1024 * 1024;
     const PROMPT_TOKENS: u64 = 216_803;
     const CONTEXT_WINDOW_TOKENS: u64 = 985_468;
+    let idle_seconds = std::env::var("SIGIL_IDLE_EVIDENCE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds >= 30)
+        .unwrap_or(30);
 
     let temp = tempdir()?;
     let session_path = temp.path().join("idle-session.jsonl");
@@ -685,20 +690,24 @@ fn worker_reactor_idle_long_session_evidence() -> Result<()> {
         "idle worker emitted output while settling onto its blocking receive"
     );
     let reactor_before = worker_reactor_metrics();
+    let artifact_gc_before = artifact_gc_task_metrics();
     let locks_before = session_io_lock_metrics();
     let started = Instant::now();
     assert!(
         worker
-            .recv_with_timeout(Duration::from_secs(IDLE_SECONDS))
+            .recv_with_timeout(Duration::from_secs(idle_seconds))
             .is_err(),
         "idle worker emitted output without an external event or armed deadline"
     );
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let reactor_idle = worker_reactor_metrics().saturating_delta(reactor_before);
+    let artifact_gc_idle = artifact_gc_task_metrics().saturating_delta(artifact_gc_before);
     let locks_idle = session_io_lock_metrics().saturating_delta(locks_before);
     assert_eq!(reactor_idle.event_wake_total, 0);
     assert_eq!(reactor_idle.deadline_total, 0);
     assert_eq!(reactor_idle.advancement_total, 0);
+    assert_eq!(artifact_gc_idle.started_total, 0);
+    assert_eq!(artifact_gc_idle.completed_total, 0);
     assert_eq!(locks_idle.shared_lock_attempt_total, 0);
     assert_eq!(locks_idle.exclusive_lock_attempt_total, 0);
     assert_eq!(locks_idle.contention_total, 0);
@@ -709,7 +718,7 @@ fn worker_reactor_idle_long_session_evidence() -> Result<()> {
         "SIGIL_LONG_SESSION_EVIDENCE {}",
         serde_json::json!({
             "schema_version": 1,
-            "scenario": "worker_reactor_idle_10mib_30s",
+            "scenario": format!("worker_reactor_idle_10mib_{idle_seconds}s"),
             "scale": durable_bytes,
             "elapsed_ms": elapsed_ms,
             "facts": {

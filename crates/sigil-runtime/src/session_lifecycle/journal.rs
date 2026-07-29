@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{digest_serializable, sync_directory};
 
-pub const LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION: u16 = 1;
+pub const LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION: u16 = 2;
 const MAX_LIFECYCLE_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LIFECYCLE_JOURNAL_RECORDS: usize = 200_000;
 
@@ -24,6 +24,9 @@ pub struct LocalSessionExportJournalBinding {
     pub destination_path_sha256: String,
     pub artifact_payload_sha256: String,
     pub message_count: usize,
+    pub artifact_mode: super::SessionArtifactExportModeV1,
+    pub artifact_completeness: super::SessionArtifactExportCompletenessV1,
+    pub included_artifact_count: usize,
 }
 
 /// Exact source file binding used by delete preview/apply and recovery.
@@ -35,6 +38,9 @@ pub struct LocalSessionDeleteJournalBinding {
     pub source_content_sha256: String,
     pub source_bytes: u64,
     pub source_modified_at_unix_ms: u64,
+    pub resource_tree_sha256: String,
+    pub resource_bytes: u64,
+    pub tombstone_id: String,
     pub preview_digest: String,
 }
 
@@ -56,6 +62,21 @@ pub struct LocalSessionDisplayNameJournalBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct LocalSessionArtifactGcJournalBinding {
+    pub source_session_ref: sigil_kernel::SessionRef,
+    pub source_session_id: String,
+    pub tombstone_id: String,
+    pub scanned_manifests: usize,
+    pub tombstoned_manifests: usize,
+    pub tombstoned_blobs: usize,
+    pub tombstoned_orphan_blobs: usize,
+    pub tombstoned_staging_files: usize,
+    pub tombstoned_bytes: u64,
+    pub skipped_active_reads: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct LocalSessionRetentionJournalBinding {
     pub preview_digest: String,
     pub candidate_count: usize,
@@ -73,6 +94,7 @@ pub enum LocalSessionLifecycleEvent {
     DeleteCompleted(LocalSessionDeleteJournalBinding),
     PinChanged(LocalSessionPinJournalBinding),
     DisplayNameChanged(LocalSessionDisplayNameJournalBinding),
+    ArtifactGcCompleted(LocalSessionArtifactGcJournalBinding),
     RetentionBatchPlanned(LocalSessionRetentionJournalBinding),
     RetentionBatchCompleted(LocalSessionRetentionJournalBinding),
 }
@@ -314,6 +336,7 @@ fn validate_operation_transition(
         | LocalSessionLifecycleEvent::DeletePlanned(_)
         | LocalSessionLifecycleEvent::PinChanged(_)
         | LocalSessionLifecycleEvent::DisplayNameChanged(_)
+        | LocalSessionLifecycleEvent::ArtifactGcCompleted(_)
         | LocalSessionLifecycleEvent::RetentionBatchPlanned(_) => {
             if !prior.is_empty() {
                 bail!("local session lifecycle operation is already recorded");

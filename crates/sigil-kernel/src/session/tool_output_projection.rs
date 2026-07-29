@@ -2,14 +2,12 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::*;
 
 /// Current schema for a recoverable old tool-output shrink descriptor.
 pub const TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION: u16 = 2;
-const LEGACY_TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION: u16 = 1;
 /// Current schema for an in-memory recoverable shrink candidate.
 pub const RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION: u16 = 1;
 /// A bounded plan avoids materializing an unbounded number of old outputs in one projection.
@@ -49,15 +47,14 @@ impl ToolOutputProjectionPolicy {
     }
 }
 
-/// Truthful source reference included whenever a model-visible tool output is projection-shrunk.
-///
-/// It intentionally does not grant the model a retrieval capability. The TUI/audit surface may
-/// inspect the raw append-only event, while a later retrieval-artifact implementation can add a
-/// separate explicit capability rather than silently treating a local path as model-callable.
+/// Source event plus the real opaque artifact capability for a projected V2 tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ToolOutputProjectionSourceRef {
-    DurableTranscriptEvent { event_id: crate::EventId },
+    PublishedArtifact {
+        source_event_id: crate::EventId,
+        artifact_ref: ToolArtifactRefV1,
+    },
 }
 
 /// Why a completed tool output is eligible for a next-epoch bounded preview.
@@ -67,12 +64,12 @@ pub enum ToolOutputShrinkReasonV1 {
     LargeCompletedHistoricalResult,
 }
 
-/// Session-owned durable reference used to recover a projected tool result.
+/// Session-owned durable reference used to retrieve a projected V2 tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ToolOutputArtifactRefV1 {
-    DurableTranscriptEvent {
-        event_id: crate::EventId,
+    PublishedArtifact {
+        artifact_ref: ToolArtifactRefV1,
         content_sha256: String,
     },
 }
@@ -92,8 +89,7 @@ pub struct ToolOutputProjectionShrink {
     pub retained_tail_bytes: u64,
     pub omitted_bytes: u64,
     pub source_ref: ToolOutputProjectionSourceRef,
-    /// V2 metadata is deterministic and contains no raw output excerpt. Legacy V1 descriptors
-    /// decode with these fields absent and are re-derived from their immutable source event.
+    /// V2 metadata is deterministic and contains no raw output excerpt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,11 +106,8 @@ pub struct ToolOutputProjectionShrink {
 
 impl ToolOutputProjectionShrink {
     pub(crate) fn validate_shape(&self) -> Result<()> {
-        if !matches!(
-            self.schema_version,
-            LEGACY_TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION
-                | TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION
-        ) || self.source_event.stream_sequence == 0
+        if self.schema_version != TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION
+            || self.source_event.stream_sequence == 0
             || self.source_event.event_id.trim().is_empty()
             || self.tool_call_id.trim().is_empty()
             || !is_sha256(&self.source_message_sha256)
@@ -134,60 +127,62 @@ impl ToolOutputProjectionShrink {
             bail!("tool-output projection byte metadata does not cover original content");
         }
         match &self.source_ref {
-            ToolOutputProjectionSourceRef::DurableTranscriptEvent { event_id }
-                if event_id == &self.source_event.event_id => {}
-            ToolOutputProjectionSourceRef::DurableTranscriptEvent { .. } => {
+            ToolOutputProjectionSourceRef::PublishedArtifact {
+                source_event_id,
+                artifact_ref,
+            } if source_event_id == &self.source_event.event_id => {
+                artifact_ref.validate()?;
+            }
+            ToolOutputProjectionSourceRef::PublishedArtifact { .. } => {
                 bail!("tool-output projection source ref does not match its source event");
             }
         }
-        if self.schema_version == TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION {
-            let tool_name = self
-                .tool_name
-                .as_deref()
-                .context("tool-output projection tool name is missing")?;
-            let status = self
-                .status
-                .as_deref()
-                .context("tool-output projection status is missing")?;
-            let content_sha256 = self
-                .content_sha256
-                .as_deref()
-                .context("tool-output projection content hash is missing")?;
-            let content_token_upper_bound = self
-                .content_token_upper_bound
-                .context("tool-output projection token upper bound is missing")?;
-            let artifact_ref = self
-                .artifact_ref
-                .as_ref()
-                .context("tool-output projection artifact ref is missing")?;
-            if tool_name.trim().is_empty()
-                || tool_name.len() > 256
-                || status.trim().is_empty()
-                || status.len() > 64
-                || !is_sha256(content_sha256)
-                || content_token_upper_bound == 0
-                || self.reason.is_none()
-            {
-                bail!("recoverable tool-output projection metadata is invalid");
-            }
-            match artifact_ref {
-                ToolOutputArtifactRefV1::DurableTranscriptEvent {
-                    event_id,
-                    content_sha256: artifact_hash,
-                } if event_id == &self.source_event.event_id && artifact_hash == content_sha256 => {
-                }
-                ToolOutputArtifactRefV1::DurableTranscriptEvent { .. } => {
-                    bail!("tool-output projection artifact ref does not bind its source");
-                }
-            }
-        } else if self.tool_name.is_some()
-            || self.status.is_some()
-            || self.content_sha256.is_some()
-            || self.content_token_upper_bound.is_some()
-            || self.artifact_ref.is_some()
-            || self.reason.is_some()
+        let tool_name = self
+            .tool_name
+            .as_deref()
+            .context("tool-output projection tool name is missing")?;
+        let status = self
+            .status
+            .as_deref()
+            .context("tool-output projection status is missing")?;
+        let content_sha256 = self
+            .content_sha256
+            .as_deref()
+            .context("tool-output projection content hash is missing")?;
+        let content_token_upper_bound = self
+            .content_token_upper_bound
+            .context("tool-output projection token upper bound is missing")?;
+        let artifact_ref = self
+            .artifact_ref
+            .as_ref()
+            .context("tool-output projection artifact ref is missing")?;
+        if tool_name.trim().is_empty()
+            || tool_name.len() > 256
+            || status.trim().is_empty()
+            || status.len() > 64
+            || !is_sha256(content_sha256)
+            || content_token_upper_bound == 0
+            || self.reason.is_none()
         {
-            bail!("legacy tool-output projection descriptor contains V2 metadata");
+            bail!("recoverable tool-output projection metadata is invalid");
+        }
+        match artifact_ref {
+            ToolOutputArtifactRefV1::PublishedArtifact {
+                artifact_ref: candidate_ref,
+                content_sha256: artifact_hash,
+            } if artifact_hash == content_sha256 => {
+                candidate_ref.validate()?;
+                let ToolOutputProjectionSourceRef::PublishedArtifact {
+                    artifact_ref: source_ref,
+                    ..
+                } = &self.source_ref;
+                if candidate_ref != source_ref {
+                    bail!("tool-output projection artifact refs do not match");
+                }
+            }
+            ToolOutputArtifactRefV1::PublishedArtifact { .. } => {
+                bail!("tool-output projection artifact ref does not bind its source");
+            }
         }
         Ok(())
     }
@@ -229,10 +224,9 @@ pub struct ToolOutputProjection {
 impl ToolOutputProjection {
     /// Builds bounded model-visible replacements for old, completed tool results in `plan`.
     ///
-    /// The complete raw durable stream is revalidated through [`CompactionFoldPlan`]. Only a
-    /// `ToolResult` event that is already in that plan's folded set can shrink. Tail entries,
-    /// controls, tool-call assistant arguments, unfinished pairs and non-structured legacy-like
-    /// tool content are never modified by this projection.
+    /// The complete durable stream is revalidated through [`CompactionFoldPlan`]. Only an
+    /// artifact-backed `ToolResultV2` event already in the folded set can shrink. Legacy inline
+    /// results fail session loading before this projection and are never treated as recoverable.
     ///
     /// # Errors
     ///
@@ -253,44 +247,18 @@ impl ToolOutputProjection {
                 (event.event_id.as_str(), event)
             })
             .collect::<BTreeMap<_, _>>();
-        let tool_names = records.iter().try_fold(
-            BTreeMap::<String, String>::new(),
-            |mut names, record| -> Result<_> {
-                if let Some(SessionLogEntry::Assistant(message)) =
-                    session_entry_from_stored_event(record.stored_event())?
-                {
-                    for call in message.tool_calls {
-                        if let Some(previous) = names.insert(call.id.clone(), call.name.clone())
-                            && previous != call.name
-                        {
-                            bail!("tool call id resolves to multiple tool names");
-                        }
-                    }
-                }
-                Ok(names)
-            },
-        )?;
         let mut outputs = Vec::new();
         for event_id in &plan.folded_event_ids {
             let event = by_id
                 .get(event_id.as_str())
                 .copied()
                 .expect("validated fold plan references its current durable stream");
-            let Some(SessionLogEntry::ToolResult(message)) =
+            let Some(SessionLogEntry::ToolResultV2(result)) =
                 session_entry_from_stored_event(event)?
             else {
                 continue;
             };
-            let tool_call_id = message
-                .tool_call_id
-                .as_deref()
-                .context("validated tool result has no call id")?;
-            let tool_name = tool_names
-                .get(tool_call_id)
-                .with_context(|| format!("tool result {tool_call_id} has no durable tool name"))?;
-            let Some(projected) =
-                project_tool_result(event_ref(event), message, tool_name, policy)?
-            else {
+            let Some(projected) = project_tool_result_v2(event_ref(event), &result, policy)? else {
                 continue;
             };
             if outputs.len() == MAX_TOOL_OUTPUT_PROJECTION_SHRINKS {
@@ -302,54 +270,31 @@ impl ToolOutputProjection {
     }
 }
 
-fn project_tool_result(
+fn project_tool_result_v2(
     source_event: CompactionEventRef,
-    mut message: crate::ModelMessage,
-    tool_name: &str,
+    result: &ToolResultRecordedV2,
     policy: &ToolOutputProjectionPolicy,
 ) -> Result<Option<ProjectedToolOutput>> {
-    if !matches!(message.role, crate::MessageRole::Tool)
-        || message
-            .tool_call_id
-            .as_deref()
-            .is_none_or(|tool_call_id| tool_call_id.trim().is_empty())
-        || !message.tool_calls.is_empty()
-    {
-        bail!("folded tool result has an unsafe model-message shape");
-    }
-    let Some(raw_message_content) = message.content.as_deref() else {
+    result.validate()?;
+    let Some(descriptor) = result.artifact.descriptor() else {
         return Ok(None);
     };
-    let source_message_sha256 = format!("sha256:{:x}", Sha256::digest(raw_message_content));
-    let mut envelope = match serde_json::from_str::<Value>(raw_message_content) {
-        Ok(Value::Object(envelope)) => envelope,
-        Ok(_) | Err(_) => return Ok(None),
-    };
-    let Some(content) = envelope.get("content").and_then(Value::as_str) else {
-        return Ok(None);
-    };
+    let raw_message_content = result.model_content()?;
+    let source_message_sha256 = format!(
+        "sha256:{:x}",
+        Sha256::digest(raw_message_content.as_bytes())
+    );
+    let content = result.initial_model_view.preview.as_str();
     if content.len() <= policy.max_projected_content_bytes {
         return Ok(None);
     }
-    let tool_call_id = message
-        .tool_call_id
-        .clone()
-        .expect("safe tool result was checked above");
-    let status = normalized_tool_status(&envelope);
-    let content_sha256 = format!("sha256:{:x}", Sha256::digest(content));
-    let artifact_ref = ToolOutputArtifactRefV1::DurableTranscriptEvent {
-        event_id: source_event.event_id.clone(),
+    let content_sha256 = descriptor.content_sha256.clone();
+    let artifact_ref = ToolOutputArtifactRefV1::PublishedArtifact {
+        artifact_ref: descriptor.artifact_ref.clone(),
         content_sha256: content_sha256.clone(),
     };
-    let (head_bytes, tail_bytes, marker) = marker_budget(
-        content,
-        &source_event,
-        tool_name,
-        &tool_call_id,
-        &status,
-        &content_sha256,
-        policy,
-    )?;
+    let (head_bytes, tail_bytes, marker) =
+        marker_budget(content, &descriptor.artifact_ref, policy)?;
     let head_end = previous_char_boundary(content, head_bytes);
     let tail_start =
         next_char_boundary(content, content.len().saturating_sub(tail_bytes)).max(head_end);
@@ -365,17 +310,18 @@ fn project_tool_result(
     let shrink = ToolOutputProjectionShrink {
         schema_version: TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION,
         source_event: source_event.clone(),
-        tool_call_id,
+        tool_call_id: result.call_id.clone(),
         source_message_sha256,
         original_content_bytes: content.len() as u64,
         retained_head_bytes,
         retained_tail_bytes,
         omitted_bytes,
-        source_ref: ToolOutputProjectionSourceRef::DurableTranscriptEvent {
-            event_id: source_event.event_id.clone(),
+        source_ref: ToolOutputProjectionSourceRef::PublishedArtifact {
+            source_event_id: source_event.event_id.clone(),
+            artifact_ref: descriptor.artifact_ref.clone(),
         },
-        tool_name: Some(tool_name.to_owned()),
-        status: Some(status.clone()),
+        tool_name: Some(result.tool_name.clone()),
+        status: Some(result.facts.status.clone()),
         content_sha256: Some(content_sha256.clone()),
         content_token_upper_bound: Some(content.len() as u64),
         artifact_ref: Some(artifact_ref.clone()),
@@ -387,22 +333,20 @@ fn project_tool_result(
     rendered.push_str(&marker);
     rendered.push_str(&content[tail_start..]);
     debug_assert!(rendered.len() <= policy.max_projected_content_bytes);
-    envelope.insert("content".to_owned(), Value::String(rendered));
-    envelope.insert(
-        "compaction_projection".to_owned(),
-        projection_metadata_value(&shrink)?,
-    );
-    message.content = Some(
-        serde_json::to_string(&Value::Object(envelope))
-            .context("failed to serialize projected tool-result envelope")?,
-    );
+    let mut projected_view = result.initial_model_view.clone();
+    projected_view.preview = rendered;
+    projected_view.preview_kind = ToolPreviewKind::HeadTail;
+    projected_view.token_upper_bound = projected_view.preview.len().div_ceil(4) as u64;
+    projected_view.retrieval_hint =
+        Some("use read_tool_artifact with the opaque artifact_ref".to_owned());
+    let message = result.model_message_with_view(&projected_view)?;
     let candidate = RecoverableToolOutputShrinkCandidateV1 {
         schema_version: RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
         raw_durable_result: artifact_ref,
         epoch_visible_source_message_sha256: shrink.source_message_sha256.clone(),
-        tool_name: tool_name.to_owned(),
+        tool_name: result.tool_name.clone(),
         tool_call_id: shrink.tool_call_id.clone(),
-        status,
+        status: result.facts.status.clone(),
         original_content_bytes: shrink.original_content_bytes,
         original_content_token_upper_bound: shrink
             .content_token_upper_bound
@@ -412,7 +356,8 @@ fn project_tool_result(
         content_sha256,
         reason: ToolOutputShrinkReasonV1::LargeCompletedHistoricalResult,
         recovery_instruction:
-            "Re-read the durable transcript event when omitted details are required.".to_owned(),
+            "Use read_tool_artifact with the opaque artifact ref when omitted details are required."
+                .to_owned(),
     };
     Ok(Some(ProjectedToolOutput {
         shrink,
@@ -423,11 +368,7 @@ fn project_tool_result(
 
 fn marker_budget(
     content: &str,
-    source_event: &CompactionEventRef,
-    tool_name: &str,
-    tool_call_id: &str,
-    status: &str,
-    content_sha256: &str,
+    artifact_ref: &ToolArtifactRefV1,
     policy: &ToolOutputProjectionPolicy,
 ) -> Result<(usize, usize, String)> {
     let mut available = policy.max_projected_content_bytes;
@@ -448,11 +389,7 @@ fn marker_budget(
         let tail_bytes = content.len().saturating_sub(tail_start);
         let marker = tool_output_marker(
             content.len() as u64,
-            source_event,
-            tool_name,
-            tool_call_id,
-            status,
-            content_sha256,
+            artifact_ref,
             head_end as u64,
             tail_bytes as u64,
             tail_start.saturating_sub(head_end) as u64,
@@ -473,70 +410,15 @@ fn marker_budget(
 
 fn tool_output_marker(
     original_bytes: u64,
-    source_event: &CompactionEventRef,
-    tool_name: &str,
-    tool_call_id: &str,
-    status: &str,
-    content_sha256: &str,
+    artifact_ref: &ToolArtifactRefV1,
     retained_head_bytes: u64,
     retained_tail_bytes: u64,
     omitted_bytes: u64,
 ) -> String {
     format!(
-        "\n[sigil: next-epoch recoverable tool output; tool={tool_name}; call_id={tool_call_id}; status={status}; original_bytes={original_bytes}; retained_head_bytes={retained_head_bytes}; retained_tail_bytes={retained_tail_bytes}; omitted_bytes={omitted_bytes}; content_hash={content_sha256}; durable_transcript_event={}; re_read_when_needed=true; model_retrieval_available=false]\n",
-        source_event.event_id,
+        "\n[sigil: next-epoch artifact-backed tool output; original_bytes={original_bytes}; retained_head_bytes={retained_head_bytes}; retained_tail_bytes={retained_tail_bytes}; omitted_bytes={omitted_bytes}; artifact_ref={}; use_read_tool_artifact=true; model_retrieval_available=true]\n",
+        artifact_ref.artifact_id,
     )
-}
-
-fn normalized_tool_status(envelope: &Map<String, Value>) -> String {
-    let status = envelope
-        .get("status")
-        .and_then(|value| match value {
-            Value::String(status) => Some(status.as_str()),
-            Value::Bool(true) => Some("ok"),
-            Value::Bool(false) => Some("failed"),
-            _ => None,
-        })
-        .unwrap_or("unknown")
-        .trim();
-    let status = if status.is_empty() { "unknown" } else { status };
-    status.chars().take(64).collect()
-}
-
-fn projection_metadata_value(shrink: &ToolOutputProjectionShrink) -> Result<Value> {
-    let mut retrieval = Map::new();
-    match &shrink.source_ref {
-        ToolOutputProjectionSourceRef::DurableTranscriptEvent { event_id } => {
-            retrieval.insert(
-                "kind".to_owned(),
-                Value::String("durable_transcript_event".to_owned()),
-            );
-            retrieval.insert("event_id".to_owned(), Value::String(event_id.clone()));
-            retrieval.insert("model_retrieval_available".to_owned(), Value::Bool(false));
-        }
-    }
-    serde_json::to_value(serde_json::json!({
-        "schema_version": shrink.schema_version,
-        "source_event": {
-            "stream_sequence": shrink.source_event.stream_sequence,
-            "event_id": shrink.source_event.event_id,
-        },
-        "tool_call_id": shrink.tool_call_id,
-        "source_message_sha256": shrink.source_message_sha256,
-        "original_content_bytes": shrink.original_content_bytes,
-        "retained_head_bytes": shrink.retained_head_bytes,
-        "retained_tail_bytes": shrink.retained_tail_bytes,
-        "omitted_bytes": shrink.omitted_bytes,
-        "source_ref": Value::Object(retrieval),
-        "tool_name": shrink.tool_name,
-        "status": shrink.status,
-        "content_sha256": shrink.content_sha256,
-        "content_token_upper_bound": shrink.content_token_upper_bound,
-        "artifact_ref": shrink.artifact_ref,
-        "reason": shrink.reason,
-        "recovery_instruction": "Re-read the durable transcript event when omitted details are required.",
-    }))
-    .context("failed to serialize tool-output projection metadata")
 }
 
 fn event_ref(event: &crate::StoredEvent) -> CompactionEventRef {

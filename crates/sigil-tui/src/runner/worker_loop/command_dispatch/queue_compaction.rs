@@ -514,106 +514,63 @@ where
                     });
                     continue;
                 }
-                let records = match session.read_durable_event_records() {
-                    Ok(records) => records,
+                let active = match session.active_projection_snapshot() {
+                    Ok(Some(active)) => active,
+                    Ok(None) => {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: "standalone cleanup requires a durable active projection"
+                                .to_owned(),
+                        });
+                        continue;
+                    }
                     Err(error) => {
                         state.compaction.local_preview = Some(local_preview);
                         let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                             request_id,
-                            error: format!("failed to read shrink source: {error:#}"),
+                            error: format!("failed to read tool-output pressure: {error:#}"),
                         });
                         continue;
                     }
                 };
-                let sidecars =
-                    match sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(
-                        &records,
-                    ) {
-                        Ok(sidecars) => sidecars,
+                let pressure = active.tool_output_pressure();
+                let batch = match sigil_kernel::ToolOutputAgingBatchV1::select(
+                    &pressure,
+                    sigil_kernel::ToolOutputAgingReasonV1::Manual,
+                ) {
+                    Ok(Some(batch)) => batch,
+                    Ok(None) => {
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: "no new large historical tool outputs are eligible".to_owned(),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        state.compaction.local_preview = Some(local_preview);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!("failed to select tool-output cleanup: {error:#}"),
+                        });
+                        continue;
+                    }
+                };
+                let activation =
+                    match sigil_kernel::ToolOutputAgingActivatedV1::prepare(&pressure, &batch) {
+                        Ok(activation) => activation,
                         Err(error) => {
                             state.compaction.local_preview = Some(local_preview);
                             let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                                 request_id,
-                                error: format!(
-                                    "failed to resolve current context epoch: {error:#}"
-                                ),
+                                error: format!("failed to prepare tool-output cleanup: {error:#}"),
                             });
                             continue;
                         }
                     };
-                let active_sources = sidecars.active_standalone_source_event_ids();
-                let projection = match sigil_kernel::ToolOutputProjection::from_fold_plan(
-                    &records,
-                    &local_preview.preview().plan,
-                    &sigil_kernel::ToolOutputProjectionPolicy::default(),
-                ) {
-                    Ok(projection) => projection,
-                    Err(error) => {
-                        state.compaction.local_preview = Some(local_preview);
-                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
-                            request_id,
-                            error: format!("standalone shrink plan is stale: {error:#}"),
-                        });
-                        continue;
-                    }
-                };
-                let projected_output_count = projection
-                    .outputs
-                    .iter()
-                    .filter(|output| !active_sources.contains(&output.shrink.source_event.event_id))
-                    .count();
-                if projected_output_count == 0 {
-                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
-                        request_id,
-                        error: "no new large historical tool outputs are eligible".to_owned(),
-                    });
-                    continue;
-                }
-                let source_epoch_id = sidecars.latest_context_epoch_id().map_or_else(
-                    || {
-                        local_preview
-                            .preview()
-                            .active_compaction_id
-                            .as_ref()
-                            .map_or_else(
-                                || "context-epoch:root".to_owned(),
-                                |compaction_id| format!("context-epoch:{compaction_id}"),
-                            )
-                    },
-                    str::to_owned,
-                );
-                let context_epoch_id = format!(
-                    "context-epoch:standalone-{}",
-                    stable_event_uuid(
-                        "sigil-tui-standalone-tool-output-shrink",
-                        &format!(
-                            "{}:{}:{request_id}",
-                            session.session_scope_id(),
-                            local_preview
-                                .preview()
-                                .plan
-                                .base_stream_cursor
-                                .last_applied_event_id,
-                        ),
-                    )
-                );
-                let store = match JsonlSessionStore::new(&state.session.log_path) {
-                    Ok(store) => store,
-                    Err(error) => {
-                        state.compaction.local_preview = Some(local_preview);
-                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
-                            request_id,
-                            error: format!("failed to open shrink writer: {error:#}"),
-                        });
-                        continue;
-                    }
-                };
-                match store.append_standalone_tool_output_projection(
-                    source_epoch_id,
-                    context_epoch_id.clone(),
-                    local_preview.preview().plan.clone(),
-                    sigil_kernel::ToolOutputProjectionPolicy::default(),
-                ) {
+                let projected_output_count = activation.replacements.len();
+                let context_epoch_id = activation.target_epoch_id.clone();
+                match session.append_tool_output_aging_activation(active.frontier(), activation) {
                     Ok(Some(_)) => {
                         let entries = state
                             .session
