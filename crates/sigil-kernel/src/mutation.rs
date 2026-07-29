@@ -61,6 +61,15 @@ pub use retention::{
     MutationArtifactRetentionPolicy, MutationArtifactRetentionReport,
 };
 
+/// Renders one UTF-8 workspace-relative path with portable `/` separators.
+///
+/// Mutation subjects are stored as `PathBuf` for filesystem access, while intent and checkpoint
+/// contracts use platform-independent path strings. Keep comparisons at that boundary portable so
+/// Windows evidence does not drift solely because `PathBuf` renders `\`.
+pub(crate) fn portable_relative_path(path: &std::path::Path) -> Option<String> {
+    path.to_str().map(|value| value.replace('\\', "/"))
+}
+
 /// Returns whether RFC-0002 forbids persisting a path as mutation artifact content.
 #[must_use]
 pub fn is_sensitive_mutation_artifact_path(path: &std::path::Path) -> bool {

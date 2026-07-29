@@ -4019,8 +4019,10 @@ async fn changeset_only_ready_steps_batch_proposals_without_parent_workspace_mut
 #[tokio::test]
 async fn intent_bound_changeset_steps_persist_exact_attempt_and_proposal_lineage() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace_root)?;
+    std::fs::write(workspace_root.join("note.txt"), b"old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
     let mut session = Session::load_from_store("planner", "model", store)?;
     let task_id = TaskId::new("task_intent_changesets")?;
     let request = SequentialTaskRequest {
@@ -4071,7 +4073,7 @@ async fn intent_bound_changeset_steps_persist_exact_attempt_and_proposal_lineage
     let admission = crate::admit_suggested_decomposition(
         &crate::IntentAdmissionContextV1::initial(
             crate::IntentStackId::new("stack-task-lineage")?,
-            stable_workspace_id(temp.path())?,
+            stable_workspace_id(&workspace_root)?,
             session.session_scope_id(),
         )?,
         &proposal,
@@ -4122,7 +4124,7 @@ async fn intent_bound_changeset_steps_persist_exact_attempt_and_proposal_lineage
         .with_max_parallel_changeset_steps(2);
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
-    let options = options_for_workspace(temp.path());
+    let options = options_for_workspace(&workspace_root);
     let output = orchestrator
         .continue_run(
             &mut session,

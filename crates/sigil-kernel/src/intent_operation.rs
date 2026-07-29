@@ -2155,7 +2155,7 @@ fn mutation_file_path(subject: &MutationSubject) -> Option<String> {
     let MutationSubject::File { path, .. } = subject else {
         return None;
     };
-    path.to_str().map(str::to_owned)
+    crate::mutation::portable_relative_path(path)
 }
 
 fn intent_conflict(

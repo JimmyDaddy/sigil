@@ -1039,7 +1039,8 @@ impl DurableLineageFacts {
 fn mutation_subject_matches_path(subject: &MutationSubject, expected_path: &str) -> bool {
     matches!(
         subject,
-        MutationSubject::File { path, .. } if path.to_string_lossy() == expected_path
+        MutationSubject::File { path, .. }
+            if crate::mutation::portable_relative_path(path).as_deref() == Some(expected_path)
     )
 }
 
@@ -1488,10 +1489,8 @@ fn direct_mutation_changeset(
     {
         bail!("Chat direct ChangeSet requires a normalized workspace-relative file path");
     }
-    let path = path
-        .to_str()
-        .context("Chat direct ChangeSet path is not valid UTF-8")?
-        .to_owned();
+    let path = crate::mutation::portable_relative_path(path)
+        .context("Chat direct ChangeSet path is not valid UTF-8")?;
     let action = match (
         prepared.value.before_hash.as_ref(),
         committed.value.observed_after_hash.as_ref(),

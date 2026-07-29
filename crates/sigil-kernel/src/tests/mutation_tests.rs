@@ -52,6 +52,37 @@ fn artifact_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 #[test]
+fn portable_relative_path_uses_contract_separators() -> Result<()> {
+    assert_eq!(
+        super::portable_relative_path(Path::new(r"src\nested\file.rs")).as_deref(),
+        Some("src/nested/file.rs")
+    );
+    assert_eq!(
+        super::portable_relative_path(Path::new("src/nested/file.rs")).as_deref(),
+        Some("src/nested/file.rs")
+    );
+    assert_eq!(
+        super::operation_id_for(
+            "workspace",
+            "tool-call",
+            None,
+            Path::new(r"src\nested\file.rs"),
+            None,
+            Some("sha256:after"),
+        )?,
+        super::operation_id_for(
+            "workspace",
+            "tool-call",
+            None,
+            Path::new("src/nested/file.rs"),
+            None,
+            Some("sha256:after"),
+        )?
+    );
+    Ok(())
+}
+
+#[test]
 fn workspace_mutation_lease_serializes_regular_controlled_writes() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let state = tempfile::tempdir()?;

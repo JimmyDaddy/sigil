@@ -702,7 +702,7 @@ pub(super) fn single_subject_snapshot_id(
     };
     let manifest = WorkspaceSnapshotManifestV1 {
         workspace_id: workspace_id.to_owned(),
-        scope_hash: mutation_scope_hash(relative_path),
+        scope_hash: mutation_scope_hash(relative_path)?,
         entries: vec![WorkspaceSnapshotEntry {
             normalized_path: relative_path.to_path_buf(),
             file_type,
@@ -716,9 +716,11 @@ pub(super) fn single_subject_snapshot_id(
     manifest.workspace_snapshot_id()
 }
 
-fn mutation_scope_hash(relative_path: &Path) -> VerificationScopeHash {
-    let digest = Sha256::digest(relative_path.to_string_lossy().as_bytes());
-    format!("mutation-scope:sha256:{digest:x}")
+fn mutation_scope_hash(relative_path: &Path) -> Result<VerificationScopeHash> {
+    let portable_path = super::portable_relative_path(relative_path)
+        .context("mutation snapshot path is not valid UTF-8")?;
+    let digest = Sha256::digest(portable_path.as_bytes());
+    Ok(format!("mutation-scope:sha256:{digest:x}"))
 }
 
 fn workspace_scan_from_snapshot(

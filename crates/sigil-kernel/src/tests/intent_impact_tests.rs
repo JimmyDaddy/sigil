@@ -494,6 +494,7 @@ fn workspace_scope_and_explicit_fork_adoption_are_fail_closed() -> Result<()> {
             String::from_utf8_lossy(&clone_output.stderr)
         );
     }
+    let destination_tracked_content = fs::read(destination_workspace.join("tracked.txt"))?;
 
     let (_source_store, source) = session_at(&temp.path().join("source.jsonl"))?;
     let root_admission = admit_user_declared_root(
@@ -594,7 +595,10 @@ fn workspace_scope_and_explicit_fork_adoption_are_fail_closed() -> Result<()> {
         .to_string()
         .contains("proof changed")
     );
-    fs::write(destination_workspace.join("tracked.txt"), "same\n")?;
+    fs::write(
+        destination_workspace.join("tracked.txt"),
+        destination_tracked_content,
+    )?;
     assert!(
         adopt_forked_intent_stack(
             &source,

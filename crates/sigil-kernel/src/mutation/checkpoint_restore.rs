@@ -231,9 +231,8 @@ fn resolve_restore(
                 binding.path.clone()
             }
         };
-        let intent_state_conflict = relative_path
-            .to_str()
-            .is_some_and(|path| intent_conflict_paths.contains(path));
+        let intent_state_conflict = super::portable_relative_path(&relative_path)
+            .is_some_and(|path| intent_conflict_paths.contains(&path));
         let absolute_path = workspace_root.join(&relative_path);
         if ensure_absolute_path_matches_subject(&workspace_root, &relative_path, &absolute_path)
             .is_err()

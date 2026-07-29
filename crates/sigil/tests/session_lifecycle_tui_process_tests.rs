@@ -552,9 +552,10 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                     }
                     thread::sleep(Duration::from_millis(25));
                 }
-                thread::sleep(Duration::from_millis(300));
+                wait_for_text_after(output, catalog_loading_offset, "gpt-4.1  [current]")?;
+                let model_apply_offset = captured_len(output);
                 write_input(writer, b"\r")?;
-                thread::sleep(Duration::from_millis(150));
+                wait_for_text_after(output, model_apply_offset, "Custom endpoint · Responses")?;
 
                 write_input(writer, b"\x1b[B\r")?;
 

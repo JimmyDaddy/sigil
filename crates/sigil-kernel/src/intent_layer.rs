@@ -652,7 +652,8 @@ fn mutation_subject_matches_path(subject: &MutationSubject, expected_path: &str)
     matches!(
         subject,
         MutationSubject::File { path, file_type }
-            if *file_type == FileType::File && path.to_string_lossy() == expected_path
+            if *file_type == FileType::File
+                && crate::mutation::portable_relative_path(path).as_deref() == Some(expected_path)
     )
 }
 

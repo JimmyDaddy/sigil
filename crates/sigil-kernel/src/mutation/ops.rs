@@ -12,7 +12,7 @@ use super::{
     CheckpointRestored, CommittedDirectoryMutation, CommittedFileMutation, MutationBatchId,
     MutationEventRecorder, MutationSubject, OperationId, RestoredFileMutation, SnapshotCoverage,
     bytes_hash, directory_present_hash, ensure_empty_directory, file_content_hash,
-    read_mutation_artifact_content,
+    portable_relative_path, read_mutation_artifact_content,
 };
 
 pub fn write_file_with_mutation(
@@ -214,17 +214,16 @@ pub(super) fn operation_id_for(
     relative_path: &Path,
     before_hash: Option<&str>,
     intended_after_hash: Option<&str>,
-) -> OperationId {
-    stable_event_uuid(
+) -> Result<OperationId> {
+    let portable_path = portable_relative_path(relative_path)
+        .ok_or_else(|| anyhow!("mutation path is not valid UTF-8"))?;
+    Ok(stable_event_uuid(
         "sigil-mutation-operation",
         &format!(
             "{workspace_id}:{tool_call_id}:{:?}:{}:{:?}:{:?}",
-            batch_id,
-            relative_path.display(),
-            before_hash,
-            intended_after_hash
+            batch_id, portable_path, before_hash, intended_after_hash
         ),
-    )
+    ))
 }
 
 pub(super) fn normalize_relative_path(path: PathBuf) -> Result<PathBuf> {

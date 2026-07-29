@@ -70,7 +70,7 @@ impl MutationCoordinator {
             &relative_path,
             before_hash.as_deref(),
             intended_after_hash.as_deref(),
-        );
+        )?;
         let payload = MutationPrepared {
             operation_id: operation_id.clone(),
             batch_id: self.batch_id.clone(),
@@ -166,7 +166,7 @@ impl MutationCoordinator {
             &relative_path,
             before_hash.as_deref(),
             intended_after_hash.as_deref(),
-        );
+        )?;
         let snapshot_coverage = snapshot_coverage_for_pre_mutation_content(
             &self.recorder.artifact_root,
             &self.workspace_id,
