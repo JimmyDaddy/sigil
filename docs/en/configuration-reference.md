@@ -13,7 +13,7 @@ This page is a lookup reference for the public `sigil.toml` surface. Start with 
 | `[workspace].root` | `"."` | Workspace directory; `"."` follows the directory where `sigil` starts. |
 | `[storage].state_root` | `"auto"` | Per-user durable Sigil state. `SIGIL_STATE_HOME` overrides it. |
 | `[storage].cache_root` | `"auto"` | Rebuildable per-user cache. `SIGIL_CACHE_HOME` overrides it. |
-| `[storage].credential_store` | `"auto"` | Provider API-key storage: `auto`, strict `keyring`, or owner-only `file` at `~/.sigil/credentials.json`. |
+| `[storage].credential_store` | `"file"` | Provider API-key storage: owner-only `file` at `~/.sigil/credentials.json`, non-interactive `auto`, or explicit native `keyring`. |
 | `[session].log_dir` | workspace state `sessions` child | Session-log location. A relative value resolves under workspace state. |
 | `[session.retention].max_sessions` | `500` | Maximum retained ready sessions after an explicit cleanup. |
 | `[session.retention].max_bytes` | `2147483648` | Maximum bytes retained across ready sessions after explicit cleanup. |

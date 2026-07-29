@@ -130,7 +130,11 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         pinned: true,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionPinChanged { request_id: 13, .. }))?,
+        worker.recv_until(|message| matches!(
+            message,
+            WorkerMessage::LocalSessionPinChanged { request_id: 13, .. }
+                | WorkerMessage::LocalSessionLifecycleFailed { request_id: 13, .. }
+        ))?,
         WorkerMessage::LocalSessionPinChanged { entry, .. } if entry.pinned
     ));
     worker.send(WorkerCommand::SetLocalSessionPin {
@@ -139,7 +143,11 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         pinned: false,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionPinChanged { request_id: 14, .. }))?,
+        worker.recv_until(|message| matches!(
+            message,
+            WorkerMessage::LocalSessionPinChanged { request_id: 14, .. }
+                | WorkerMessage::LocalSessionLifecycleFailed { request_id: 14, .. }
+        ))?,
         WorkerMessage::LocalSessionPinChanged { entry, .. } if !entry.pinned
     ));
 

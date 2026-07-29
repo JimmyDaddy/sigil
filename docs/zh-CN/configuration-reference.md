@@ -13,7 +13,7 @@
 | `[workspace].root` | `"."` | 工作区目录；`"."` 表示启动 `sigil` 时所在的目录。 |
 | `[storage].state_root` | `"auto"` | 当前用户的 Sigil 持久状态目录。可用 `SIGIL_STATE_HOME` 覆盖。 |
 | `[storage].cache_root` | `"auto"` | 当前用户可重新生成的缓存目录。可用 `SIGIL_CACHE_HOME` 覆盖。 |
-| `[storage].credential_store` | `"auto"` | Provider API key 存储策略：`auto`、严格 `keyring`，或使用 `~/.sigil/credentials.json` 的 owner-only `file`。 |
+| `[storage].credential_store` | `"file"` | Provider API key 存储策略：使用 `~/.sigil/credentials.json` 的 owner-only `file`、非交互 `auto`，或显式原生 `keyring`。 |
 | `[session].log_dir` | 工作区状态目录下的 `sessions` | 会话日志位置。相对路径从工作区状态目录开始解析。 |
 | `[session.retention].max_sessions` | `500` | 手动清理后最多保留多少个状态为 `ready` 的会话。 |
 | `[session.retention].max_bytes` | `2147483648` | 手动清理后，状态为 `ready` 的会话最多占用多少字节。 |

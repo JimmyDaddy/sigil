@@ -293,7 +293,9 @@ Provider connection 配置采用 V2 复合身份。kernel 只定义中立的 `Co
 provider-native catalog 及其 exact-fingerprint cache。`sigil.toml` 只保存连接、endpoint、
 协议选项、默认 `ModelRef` 和 credential reference，不保存新输入的密钥。凭据可来自命名环境
 变量、OS credential store，或 owner-only `~/.sigil/credentials.json`；新配置默认使用 file
-backend，`auto` / `keyring` 作为显式 native-store 策略保留，已有显式策略不静默迁移。因此这里
+backend。`auto` 也是 non-interactive file-backed 策略，只在 macOS file miss 时以禁止认证 UI
+的查询读取旧 native record；`keyring` 是唯一允许平台认证 UI 的显式 native-store 策略。旧
+native record 不静默迁移。因此这里
 的安全承诺是“凭据与普通配置、session、catalog cache、日志和 support bundle 分离”，而不是
 “任何凭据绝不在本机持久化”。TUI 首启与 `/config` 采用 connection-first 流程；启动只投影
 secret-free offline readiness，用户主动进入配置流程后才异步验证 stored credential。native

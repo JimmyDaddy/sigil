@@ -34,7 +34,7 @@ max_tokens = 4096
 
 ## 认证
 
-示例把当前连接绑定到 `SIGIL_ANTHROPIC_API_KEY`。首次设置和 `/config` 也可以把密钥保存到安全凭据存储；`sigil.toml` 中只保留不透明的 `stored` ID。默认 `auto` 优先系统存储，仅在不可用时使用 owner-only credential file。
+示例把当前连接绑定到 `SIGIL_ANTHROPIC_API_KEY`。首次设置和 `/config` 也可以把密钥保存到受保护凭据存储；`sigil.toml` 中只保留不透明的 `stored` ID。默认 `file` 使用 owner-only credential file，不会触发系统认证框。
 
 ## 选项与可见限制
 

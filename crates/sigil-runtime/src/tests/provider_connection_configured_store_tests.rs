@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -14,6 +14,9 @@ struct MemoryStore {
     records: Mutex<BTreeMap<CredentialId, ProviderCredentialRecord>>,
     unavailable: AtomicBool,
     rejected: bool,
+    loads: AtomicUsize,
+    stores: AtomicUsize,
+    deletes: AtomicUsize,
 }
 
 impl MemoryStore {
@@ -46,10 +49,6 @@ impl MemoryStore {
         }
         Ok(())
     }
-
-    fn set_unavailable(&self, unavailable: bool) {
-        self.unavailable.store(unavailable, Ordering::SeqCst);
-    }
 }
 
 #[async_trait]
@@ -58,6 +57,7 @@ impl ProviderCredentialStore for MemoryStore {
         &self,
         credential_id: &CredentialId,
     ) -> Result<Option<ProviderCredentialRecord>, ProviderCredentialError> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
         self.preflight()?;
         Ok(self
             .records
@@ -71,6 +71,7 @@ impl ProviderCredentialStore for MemoryStore {
         &self,
         record: &ProviderCredentialRecord,
     ) -> Result<(), ProviderCredentialError> {
+        self.stores.fetch_add(1, Ordering::SeqCst);
         self.preflight()?;
         self.records
             .lock()
@@ -80,6 +81,7 @@ impl ProviderCredentialStore for MemoryStore {
     }
 
     async fn delete(&self, credential_id: &CredentialId) -> Result<bool, ProviderCredentialError> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
         self.preflight()?;
         Ok(self
             .records
@@ -98,85 +100,221 @@ fn record() -> ProviderCredentialRecord {
 }
 
 #[tokio::test]
-async fn auto_falls_back_only_when_native_store_is_unavailable() {
+async fn auto_writes_and_reads_file_without_probing_native_storage() {
+    let native = Arc::new(MemoryStore::rejected());
+    let legacy_native = Arc::new(MemoryStore::rejected());
     let file = Arc::new(MemoryStore::default());
     let store = ConfiguredProviderCredentialStore::injected(
         CredentialStorageMode::Auto,
-        Arc::new(MemoryStore::unavailable()),
+        native.clone(),
+        Some(legacy_native.clone()),
         Some(file.clone()),
     );
     let record = record();
 
-    store.store(&record).await.expect("file fallback store");
+    store.store(&record).await.expect("auto file store");
     let loaded = store
         .load(&record.credential_id)
         .await
-        .expect("file fallback load")
-        .expect("fallback record");
+        .expect("auto file load")
+        .expect("file record");
+
     assert_eq!(loaded.secret().expose_secret(), "auto-secret");
-    let delete_error = store
+    assert_eq!(file.stores.load(Ordering::SeqCst), 1);
+    assert_eq!(file.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(native.stores.load(Ordering::SeqCst), 0);
+    assert_eq!(native.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(legacy_native.stores.load(Ordering::SeqCst), 0);
+    assert_eq!(legacy_native.loads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn auto_reads_a_silently_available_legacy_native_record_when_file_is_missing() {
+    let legacy_native = Arc::new(MemoryStore::default());
+    let file = Arc::new(MemoryStore::default());
+    let record = record();
+    legacy_native
+        .store(&record)
+        .await
+        .expect("seed legacy native record");
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Auto,
+        Arc::new(MemoryStore::rejected()),
+        Some(legacy_native.clone()),
+        Some(file.clone()),
+    );
+
+    let loaded = store
+        .load(&record.credential_id)
+        .await
+        .expect("silent legacy load")
+        .expect("legacy record");
+
+    assert_eq!(loaded.secret().expose_secret(), "auto-secret");
+    assert_eq!(file.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(legacy_native.loads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn auto_treats_unavailable_non_interactive_native_access_as_missing() {
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Auto,
+        Arc::new(MemoryStore::rejected()),
+        Some(Arc::new(MemoryStore::unavailable())),
+        Some(Arc::new(MemoryStore::default())),
+    );
+
+    assert!(
+        store
+            .load(&CredentialId::random())
+            .await
+            .expect("authentication-required native record should be skipped")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn auto_does_not_hide_a_rejected_silent_native_record() {
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Auto,
+        Arc::new(MemoryStore::default()),
+        Some(Arc::new(MemoryStore::rejected())),
+        Some(Arc::new(MemoryStore::default())),
+    );
+
+    let error = store
+        .load(&CredentialId::random())
+        .await
+        .expect_err("non-authentication native failures must remain visible");
+    assert_eq!(
+        error.code,
+        ProviderCredentialErrorCode::CredentialStoreRejected.as_str()
+    );
+}
+
+#[tokio::test]
+async fn auto_delete_cleans_file_and_silently_accessible_legacy_native_records() {
+    let legacy_native = Arc::new(MemoryStore::default());
+    let file = Arc::new(MemoryStore::default());
+    let record = record();
+    legacy_native
+        .store(&record)
+        .await
+        .expect("seed legacy native record");
+    file.store(&record).await.expect("seed file record");
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Auto,
+        Arc::new(MemoryStore::default()),
+        Some(legacy_native.clone()),
+        Some(file.clone()),
+    );
+
+    assert!(
+        store
+            .delete(&record.credential_id)
+            .await
+            .expect("clean both backends")
+    );
+    assert!(
+        legacy_native
+            .load(&record.credential_id)
+            .await
+            .expect("legacy native query")
+            .is_none()
+    );
+    assert!(
+        file.load(&record.credential_id)
+            .await
+            .expect("file query")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn auto_delete_fails_closed_when_legacy_native_cleanup_cannot_be_verified() {
+    let file = Arc::new(MemoryStore::default());
+    let record = record();
+    file.store(&record).await.expect("seed file record");
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Auto,
+        Arc::new(MemoryStore::default()),
+        Some(Arc::new(MemoryStore::unavailable())),
+        Some(file.clone()),
+    );
+
+    let error = store
         .delete(&record.credential_id)
         .await
-        .expect_err("auto delete must not claim full cleanup while keyring is unavailable");
+        .expect_err("unverified native cleanup must remain visible");
     assert_eq!(
-        delete_error.code,
+        error.code,
         ProviderCredentialErrorCode::CredentialStoreUnavailable.as_str()
     );
     assert!(
         file.load(&record.credential_id)
             .await
-            .expect("file fallback query")
+            .expect("file query")
             .is_none()
     );
-
-    let rejected = ConfiguredProviderCredentialStore::injected(
-        CredentialStorageMode::Auto,
-        Arc::new(MemoryStore::rejected()),
-        Some(file),
-    );
-    assert!(rejected.store(&record).await.is_err());
 }
 
 #[tokio::test]
-async fn auto_delete_waits_for_native_store_recovery_before_claiming_cleanup() {
-    let keyring = Arc::new(MemoryStore::default());
+async fn auto_without_a_platform_silent_store_stays_file_only() {
     let file = Arc::new(MemoryStore::default());
+    let record = record();
     let store = ConfiguredProviderCredentialStore::injected(
         CredentialStorageMode::Auto,
-        keyring.clone(),
+        Arc::new(MemoryStore::rejected()),
+        None,
         Some(file),
     );
-    let record = record();
 
-    store
-        .store(&record)
-        .await
-        .expect("native store should accept");
-    keyring.set_unavailable(true);
-    let error = store
-        .delete(&record.credential_id)
-        .await
-        .expect_err("temporary native outage must keep cleanup fail-closed");
-    assert_eq!(
-        error.code,
-        ProviderCredentialErrorCode::CredentialStoreUnavailable.as_str()
-    );
-
-    keyring.set_unavailable(false);
+    store.store(&record).await.expect("auto file store");
     assert!(
         store
             .delete(&record.credential_id)
             .await
-            .expect("recovered native store should complete cleanup")
+            .expect("file-only auto cleanup")
     );
 }
 
 #[tokio::test]
-async fn explicit_file_mode_does_not_probe_the_native_store() {
+async fn explicit_keyring_mode_uses_only_the_interactive_native_store() {
+    let native = Arc::new(MemoryStore::default());
+    let legacy_native = Arc::new(MemoryStore::rejected());
+    let file = Arc::new(MemoryStore::rejected());
+    let record = record();
+    let store = ConfiguredProviderCredentialStore::injected(
+        CredentialStorageMode::Keyring,
+        native.clone(),
+        Some(legacy_native.clone()),
+        Some(file.clone()),
+    );
+
+    store.store(&record).await.expect("keyring store");
+    assert!(
+        store
+            .load(&record.credential_id)
+            .await
+            .expect("keyring load")
+            .is_some()
+    );
+
+    assert_eq!(native.stores.load(Ordering::SeqCst), 1);
+    assert_eq!(native.loads.load(Ordering::SeqCst), 1);
+    assert_eq!(legacy_native.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(file.loads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn explicit_file_mode_does_not_probe_native_storage() {
+    let native = Arc::new(MemoryStore::rejected());
+    let legacy_native = Arc::new(MemoryStore::rejected());
     let file = Arc::new(MemoryStore::default());
     let store = ConfiguredProviderCredentialStore::injected(
         CredentialStorageMode::File,
-        Arc::new(MemoryStore::rejected()),
+        native.clone(),
+        Some(legacy_native.clone()),
         Some(file),
     );
     let record = record();
@@ -189,48 +327,6 @@ async fn explicit_file_mode_does_not_probe_the_native_store() {
             .expect("file-only load")
             .is_some()
     );
-}
-
-#[tokio::test]
-async fn auto_reads_and_cleans_a_prior_file_fallback_when_native_store_recovers() {
-    let keyring = Arc::new(MemoryStore::default());
-    let file = Arc::new(MemoryStore::default());
-    let record = record();
-    file.store(&record).await.expect("seed file fallback");
-    let store = ConfiguredProviderCredentialStore::injected(
-        CredentialStorageMode::Auto,
-        keyring.clone(),
-        Some(file.clone()),
-    );
-
-    assert!(
-        store
-            .load(&record.credential_id)
-            .await
-            .expect("auto load")
-            .is_some()
-    );
-    keyring
-        .store(&record)
-        .await
-        .expect("seed recovered keyring");
-    assert!(
-        store
-            .delete(&record.credential_id)
-            .await
-            .expect("clean both backends")
-    );
-    assert!(
-        keyring
-            .load(&record.credential_id)
-            .await
-            .expect("keyring query")
-            .is_none()
-    );
-    assert!(
-        file.load(&record.credential_id)
-            .await
-            .expect("file query")
-            .is_none()
-    );
+    assert_eq!(native.loads.load(Ordering::SeqCst), 0);
+    assert_eq!(legacy_native.loads.load(Ordering::SeqCst), 0);
 }

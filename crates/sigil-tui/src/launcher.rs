@@ -20,7 +20,7 @@ use anyhow::Result;
 use crossterm::{
     cursor::Show,
     event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
         EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyCode,
         KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
@@ -29,7 +29,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
 #[cfg(not(test))]
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 #[cfg(not(test))]
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use ratatui::{
@@ -527,17 +527,7 @@ async fn run_app(
                     if break_batch || processed_events + 1 >= EVENT_BATCH_LIMIT {
                         break;
                     }
-                    next_event = match terminal_events.next().now_or_never() {
-                        Some(Some(event)) => Some(event?),
-                        Some(None) => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "terminal event stream closed",
-                            )
-                            .into());
-                        }
-                        None => None,
-                    };
+                    next_event = event::poll(Duration::ZERO)?.then(event::read).transpose()?;
                 }
             }
             WakeEvent::Worker(message) => {

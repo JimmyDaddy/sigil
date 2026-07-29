@@ -18,6 +18,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ### Changed
 
+- Provider API-key storage now defaults to the owner-only credential file. Existing explicit `auto` configuration is non-interactive and file-backed; on macOS it can silently read an older Keychain record only when no authentication UI is required. Only explicit `keyring` mode may show a system password prompt.
 - Context compaction now defaults to cache-aware V3: stable provider/tool prefixes, source-bound intent continuity across repeated compactions, complete-turn tails, and trusted cache-cost admission. Manual compaction first produces a local-only plan with separate keep-current, recoverable tool-output cleanup, and full-semantic choices; only the full-semantic choice sends a billed request. Normal semantic compaction makes one extra LLM request on the current route, retaining the old request as its cacheable prefix and appending only a strict summary instruction; model narrative cannot grant authority or verification, and observed cache/output cost is shown before final activation confirmation. Provider-native materialization remains fail-closed until exact-route resume is implemented, preventing a billed request whose result would not yet be reused. Legacy threshold/tail fields remain readable for rollback and migration.
 - Reworked the desktop dogfood shell around workspace/session navigation, one conversation task surface, and a verification inspector. It replays bounded saved messages, retains control of runs across navigation while the workspace service stays open, separates final replies from progress and tool output, and provides focused approval, diff, evidence, and draft-aware composer behavior.
 - Added one consistent desktop visual system, adaptive wide/two-pane/compact layouts, system light and dark themes, high-contrast and reduced-motion handling, keyboard focus capture/restore, terminal-only streaming announcements, and usable reflow down to 320 CSS pixels.
@@ -27,6 +28,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 ### Fixed
 
 - Fixed the packaged desktop app reading Tauri-managed state before its setup lifecycle ran, which previously made the macOS app exit before creating a window.
+- Fixed the event-driven TUI input loop stalling after the first key while idle.
 
 ## v0.0.1-alpha.5 - 2026-07-18
 

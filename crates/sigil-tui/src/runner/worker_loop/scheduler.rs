@@ -262,9 +262,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
             continue;
         }
 
-        if let Some(command) =
-            pop_next_ordinary_command(&mut state.readiness, state.session.projection_reconciling)
-        {
+        let artifact_gc_active = state.artifact_gc.tasks.has_active();
+        if let Some(command) = pop_next_ordinary_command(
+            &mut state.readiness,
+            state.session.projection_reconciling,
+            artifact_gc_active,
+        ) {
             if matches!(
                 dispatch_worker_command(
                     WorkerCommandContext {
@@ -364,12 +367,30 @@ fn pop_next_urgent_command(
 fn pop_next_ordinary_command(
     readiness: &mut WorkerReadiness,
     projection_reconciling: bool,
+    artifact_gc_active: bool,
 ) -> Option<WorkerCommand> {
     if projection_reconciling {
         readiness.pop_projection_recovery_command()
+    } else if artifact_gc_active {
+        readiness.pop_ordinary_command_unless(command_conflicts_with_artifact_gc)
     } else {
         readiness.pop_ordinary_command()
     }
+}
+
+fn command_conflicts_with_artifact_gc(command: &WorkerCommand) -> bool {
+    matches!(
+        command,
+        WorkerCommand::ReadToolArtifactPage { .. }
+            | WorkerCommand::InspectLocalSession { .. }
+            | WorkerCommand::ForkLocalSession { .. }
+            | WorkerCommand::ExportLocalSession { .. }
+            | WorkerCommand::SetLocalSessionPin { .. }
+            | WorkerCommand::PreviewLocalSessionDelete { .. }
+            | WorkerCommand::ApplyLocalSessionDelete { .. }
+            | WorkerCommand::PreviewSessionRetention { .. }
+            | WorkerCommand::ApplySessionRetention { .. }
+    )
 }
 
 fn ingest_worker_event_batch(
@@ -1035,14 +1056,37 @@ mod reactor_tests {
             Some(WorkerCommand::CancelRun)
         ));
         assert!(matches!(
-            pop_next_ordinary_command(&mut readiness, true),
+            pop_next_ordinary_command(&mut readiness, true, false),
             Some(WorkerCommand::SwitchSession { session_log_path })
                 if session_log_path == std::path::Path::new("recover-session.jsonl")
         ));
-        assert!(pop_next_ordinary_command(&mut readiness, true).is_none());
+        assert!(pop_next_ordinary_command(&mut readiness, true, false).is_none());
         assert!(matches!(
-            pop_next_ordinary_command(&mut readiness, false),
+            pop_next_ordinary_command(&mut readiness, false, false),
             Some(WorkerCommand::SubmitTask { prompt }) if prompt == "ordinary"
+        ));
+    }
+
+    #[test]
+    fn active_artifact_gc_defers_conflicting_session_commands_without_reordering() {
+        let mut readiness = WorkerReadiness::new();
+        readiness.ingest(WorkerEvent::Command(WorkerCommand::SetLocalSessionPin {
+            request_id: 7,
+            source_path: PathBuf::from("session.jsonl"),
+            pinned: true,
+        }));
+        readiness.ingest(WorkerEvent::Command(WorkerCommand::SubmitTask {
+            prompt: "later".to_owned(),
+        }));
+
+        assert!(pop_next_ordinary_command(&mut readiness, false, true).is_none());
+        assert!(matches!(
+            pop_next_ordinary_command(&mut readiness, false, false),
+            Some(WorkerCommand::SetLocalSessionPin { request_id: 7, .. })
+        ));
+        assert!(matches!(
+            pop_next_ordinary_command(&mut readiness, false, false),
+            Some(WorkerCommand::SubmitTask { prompt }) if prompt == "later"
         ));
     }
 

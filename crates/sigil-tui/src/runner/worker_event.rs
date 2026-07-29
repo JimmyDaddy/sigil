@@ -548,6 +548,17 @@ impl WorkerReadiness {
         self.ordinary_commands.pop_front()
     }
 
+    pub(in crate::runner) fn pop_ordinary_command_unless(
+        &mut self,
+        blocked: impl FnOnce(&WorkerCommand) -> bool,
+    ) -> Option<WorkerCommand> {
+        if self.ordinary_commands.front().is_some_and(blocked) {
+            None
+        } else {
+            self.ordinary_commands.pop_front()
+        }
+    }
+
     pub(in crate::runner) fn pop_projection_recovery_command(&mut self) -> Option<WorkerCommand> {
         let index = self.ordinary_commands.iter().position(|command| {
             matches!(

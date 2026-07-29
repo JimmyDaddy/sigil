@@ -556,6 +556,26 @@ fn manifest_gc_retains_active_hold_and_tombstones_only_grace_expired_orphan() ->
 }
 
 #[test]
+fn manifest_gc_initializes_an_absent_session_artifact_namespace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = ToolArtifactStore::for_session_path(&temp.path().join("legacy-session.jsonl"));
+    assert!(!store.root().exists());
+
+    let report = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        current_unix_ms(),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+
+    assert_eq!(report.scanned_manifests, 0);
+    assert_eq!(report.tombstoned_manifests, 0);
+    assert!(store.root().is_dir());
+    assert!(store.root().join("refs").is_dir());
+    assert!(store.root().join("trash").is_dir());
+    Ok(())
+}
+
+#[test]
 fn manifest_gc_skips_artifact_with_concurrent_read_lease() -> Result<()> {
     let (_temp, store) = store_fixture()?;
     let artifact = store.capture_text(

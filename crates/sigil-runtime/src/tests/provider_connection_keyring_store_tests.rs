@@ -87,6 +87,29 @@ fn keyring_platform_failures_fail_closed_instead_of_triggering_file_fallback() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn silent_macos_authentication_failures_are_non_interactive_unavailability() {
+    for code in [
+        MACOS_ERR_NOT_AVAILABLE,
+        MACOS_ERR_READ_ONLY,
+        MACOS_ERR_AUTH_FAILED,
+        MACOS_ERR_NO_SUCH_KEYCHAIN,
+        MACOS_ERR_INVALID_KEYCHAIN,
+        MACOS_ERR_INTERACTION_NOT_ALLOWED,
+    ] {
+        assert_eq!(
+            map_silent_macos_error(security_framework::base::Error::from_code(code)).code,
+            ProviderCredentialErrorCode::CredentialStoreUnavailable.as_str()
+        );
+    }
+
+    assert_eq!(
+        map_silent_macos_error(security_framework::base::Error::from_code(-50)).code,
+        ProviderCredentialErrorCode::CredentialStoreRejected.as_str()
+    );
+}
+
 #[cfg(any(
     target_os = "macos",
     target_os = "ios",

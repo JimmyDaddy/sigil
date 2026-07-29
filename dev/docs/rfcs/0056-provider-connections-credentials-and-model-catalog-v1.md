@@ -33,6 +33,27 @@ support artifact。默认后端与启动时序调整如下：
 - worker 不再用固定 readiness deadline 丢弃等待系统认证的 prompt；provider build 在 ready 前
   明确失败时，TUI 直接退休该 worker 与尚未发送的 pending command，不再追加第二条泛化错误。
 
+### 2026-07-29 non-interactive auto amendment
+
+7 月 28 日保留 `auto` 原生优先语义后，真实发布包仍会在 macOS 启动阶段触发 Keychain ACL
+认证。ad-hoc 或不同签名发布包的 code requirement 会变化，因此把 provider API key 的普通启动
+依赖原生记录会持续制造登录密码框。该体验与 CLI coding agent 的常见文件凭据行为不一致。
+
+本修订替代上一修订中 `auto` 的 native-first 语义，但不改变 strict `keyring`：
+
+- `file` 仍是默认值，写入 owner-only `~/.sigil/credentials.json`。
+- `auto` 改为非交互文件策略：读取时 file-first，新 secret 只写 file，不主动写 native store。
+- macOS 上 file 缺少目标记录时，`auto` 可用 `kSecUseAuthenticationUISkip` 静默查询旧 native
+  记录；需要认证 UI、Keychain 不可用或记录不存在时均视为 missing，不打开系统密码框。
+- 静默可读的旧 native 记录只在内存中使用，不复制到 file。这不是一次性迁移；需要认证的旧记录
+  由用户在 `/config` 中重新输入一次后建立新的 file record。
+- `auto` 删除先清理 file，再以同样的 non-interactive 查询尝试清理旧 native 记录；无法验证旧
+  native cleanup 时返回 typed cleanup failure，不弹认证框，也不谎报完整清理。
+- `keyring` 仍是用户显式选择的 native-only 策略；该模式可以触发平台认证 UI，并在 unavailable
+  时 fail closed。
+- 非 macOS 平台的 `auto` 不探测 native backend；只有显式 `keyring` 使用 Windows Credential
+  Manager 或 Linux Secret Service。
+
 ## 1. Problem statement
 
 Sigil 当前已经支持 DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic
@@ -96,7 +117,8 @@ V1 采用以下方案：
 6. remote catalog 只证明“该 ID 被当前 connection 暴露”；它不能授予 tool、image、reasoning、
    context window 或 hosted search 等安全/能力位。能力仍由 provider-owned exact matrix 保守解释。
 7. 新输入的 API key 默认进入独立、owner-only 的 `~/.sigil/credentials.json`。
-   `[storage].credential_store = "auto" | "keyring"` 作为显式 native system store 策略保留。
+   `[storage].credential_store = "auto"` 保留为 non-interactive file 策略，并可在 macOS 静默
+   兼容读取旧 native record；`keyring` 是唯一显式 native system store 策略。
    TOML connection 只保存 opaque credential reference；environment reference 和显式
    unauthenticated local connection 也是一等来源。这里不承诺“secret 在任何地方都不落盘”，
    而是承诺 secret 不进入主配置、workspace、session、catalog cache、log、snapshot 或
@@ -312,8 +334,9 @@ V1 支持三种用户可选来源：
    - secret 只进入 modal buffer 和 runtime-owned credential store；
    - 验证/保存后立即清空 draft secret carrier；
    - 新配置默认写入 owner-only credential file；
-   - `auto` 只在 system store 明确不可用时回退到 owner-only credential file；
-   - system store 的拒绝、损坏或 record mismatch 不得被 file fallback 隐藏；
+   - `auto` 与 `file` 都把 owner-only credential file 作为新记录的唯一写入位置；
+   - macOS `auto` 只在 file 缺失时 non-interactive 读取旧 native record，不显示认证 UI；
+   - 静默读取到的 native record 损坏或 mismatch 时 fail closed，不把它伪装为 missing；
    - `keyring` 模式不可用时明确报错，任何模式都不得回退写入 `sigil.toml`。
 3. **No authentication**
    - 只对 provider template 显式声明允许的 local/custom connection 可选；
@@ -780,12 +803,13 @@ config 即使不再保存 secret，也保持 `0600`，因为它可能包含 priv
 
 | Mode | Behavior | Failure semantics |
 | --- | --- | --- |
-| `auto` | 优先 system credential store；system store 明确 unavailable 时使用 owner-only credential file | rejected、invalid、mismatch 不回退 |
-| `keyring` | 只使用 system credential store | unavailable 时 fail closed |
+| `auto` | owner-only credential file 权威；macOS file miss 时只做禁止认证 UI 的旧 native read/cleanup | auth-required/unavailable native read 视为 missing；invalid、mismatch fail closed；未验证 cleanup 明确报错 |
+| `keyring` | 只使用 system credential store，并允许显式平台认证 UI | unavailable 时 fail closed |
 | `file` | 只使用 `~/.sigil/credentials.json` | path、permission、lock、schema 或 atomic publish 异常时 fail closed |
 
-新配置默认 `file`。`auto` / `keyring` 必须由用户显式配置；读取已有显式策略时不做隐式 backend
-迁移。
+新配置默认 `file`。`auto` / `keyring` 必须由用户显式配置。读取已有 `auto` 时不复制旧 native
+record；静默查询需要认证时按 missing 处理，用户可在 `/config` 重新输入一次。该行为是读取策略
+cutover，不是 credential migration。
 
 credential file 与 `sigil.toml` 分离，使用 versioned bounded JSON、advisory lock、same-parent atomic
 publish、Unix parent `0700`/file `0600` 和 Windows current-user ACL。其内容是 plaintext-equivalent
@@ -1278,7 +1302,8 @@ UI-facing error 使用 stable code + bounded message：
 ### R56.7 Completion and platform conformance
 
 - native macOS Keychain、Windows Credential Manager、Linux Secret Service round trip；
-- `auto` unavailable-only fallback 与 explicit `file` round trip/permission/lock/atomic publish；
+- `auto` file-first write/read、macOS no-auth-UI legacy native read/cleanup 与 explicit `file`
+  round trip/permission/lock/atomic publish；
 - real PTY first-run；
 - optional real-provider catalog acceptance；
 - legacy inline migration；
@@ -1315,8 +1340,9 @@ configuration-wide、本地完成且不依赖 provider 网络的显式操作：
   owner-only recovery record，保证 marker 失败时不会调用 credential store；record 只保存
   native reconcile/cleanup 所需的 opaque credential ID 与原始 credential storage mode，不进入
   renderer、HTTP response、日志或诊断。recheck 持 config update lock 后必须再次匹配 exact
-  config bytes 与 exact recovery record，不能删除另一轮迁移的新 guard；`auto` 在 system store
-  不可用时保持阻断。确认发布或完整回滚后删除；不确定时 Desktop/TUI/进程重启从 record 重建阻断。
+  config bytes 与 exact recovery record，不能删除另一轮迁移的新 guard；`auto` 无法通过
+  non-interactive native cleanup 验证完整清理时保持阻断。确认发布或完整回滚后删除；不确定时
+  Desktop/TUI/进程重启从 record 重建阻断。
   显式 recheck 会保留 healthy V2 实际引用的 ID、删除未引用 ID；rollback 后 exact unchanged
   valid V1 可在 cleanup 后恢复 migration-ready，publication reconcile 仍要求 healthy V2；
 - TUI 在 config missing/malformed 且 recovery pending/unavailable 时，初始化保存路径保持
@@ -1402,7 +1428,8 @@ provider conformance 入口。
 - macOS native Keychain round trip；
 - Windows native credential store + ACL；
 - Linux Secret Service 可用路径；
-- protected store unavailable 的 fail-closed path 和 `auto` 的 unavailable-only fallback；
+- protected store unavailable 的 fail-closed path、`auto` file round trip 与 macOS
+  auth-required legacy record 的 no-prompt path；
 - terminal PTY on macOS/Linux/Windows；
 - no plaintext write to main config/workspace/session/cache/log/support on every platform。
 
@@ -1416,8 +1443,9 @@ V1 完成必须同时满足：
 4. 五个 canonical provider 都有 provider-owned default 和 discovery-or-explicit-manual contract。
 5. remote empty、auth rejected、offline、unsupported 和 malformed 有不同 UI。
 6. user 粘贴的新 API key 不出现在 V2 config、session、cache、logs 或 snapshots。
-7. strict keyring 不可用时 fail closed；`auto` 只可回退到 owner-only 专属 credential file，且
-   不得把 secret 写入主配置、workspace、session、cache、log 或 support artifact。
+7. strict keyring 不可用时 fail closed；`auto` 只写 owner-only 专属 credential file，普通启动
+   不得显示系统认证 UI，且不得把 secret 写入主配置、workspace、session、cache、log 或
+   support artifact。
 8. V1 legacy config 可启动；显式 migration 保留 exact provider/model。
 9. model recent/cache/session identity 都包含 connection ID；未来若加入 favorite，也必须使用相同
    compound identity。
@@ -1549,6 +1577,6 @@ legacy migration、write-ahead recovery/recheck 与 Desktop/TUI fail-closed 恢�
 
 这里的“密钥不进入配置”不是“任何持久介质都不保存密钥”：`sigil.toml`、workspace、
 session、cache、log 和 support artifact 永远不承载 secret；新配置默认使用 owner-only
-`~/.sigil/credentials.json`，用户可显式选择 `auto`、`keyring` 或非持久化 environment
-reference。已有显式 native-store 策略不静默迁移。该边界与 §7.3、§8.4、§12.1 和
-§17.5 保持一致。
+`~/.sigil/credentials.json`，用户可显式选择 non-interactive `auto`、native-only `keyring`
+或非持久化 environment reference。旧 native record 不静默迁移。该边界与 §7.3、§8.4、
+§12.1 和 §17.5 保持一致。

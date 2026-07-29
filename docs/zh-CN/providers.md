@@ -51,8 +51,9 @@ Desktop renderer 或 TUI 输入框；原有环境变量引用仍保持引用。�
 每次写入待迁移凭据之前，Sigil 都会先在配置旁发布一个有界、typed、无 secret、仅 owner
 可读的恢复记录。记录最多只包含 native owner 用于核对或清理的 opaque credential ID，以及写入
 时选择的原始凭据存储模式；这些值不会进入 renderer、HTTP response、日志或诊断。复核持有配置
-更新锁，并在清理前同时确认配置字节和恢复记录仍是用户刚刚检查的版本；`auto` 模式下系统凭据
-存储不可用时不会宣称清理成功。确认发布成功或完整回滚后会删除记录；结果不确定时，这个阻断会跨
+更新锁，并在清理前同时确认配置字节和恢复记录仍是用户刚刚检查的版本；`auto` 无法验证
+non-interactive 旧 native cleanup 时不会宣称完整清理成功。确认发布成功或完整回滚后会删除记录；
+结果不确定时，这个阻断会跨
 Desktop/TUI 重启和项目切换保留。Desktop 的主动作会变为**重新检查配置**；TUI 第一行会变为
 **Migration recovery** / **Enter recheck**。请先修复当前配置或凭据来源，再执行这个显式动作。
 复核会保留健康 V2 配置实际引用的 ID、删除未引用的 tracked credential；如果回滚后精确的合法
@@ -66,18 +67,20 @@ V2 不会把新输入的 API key 写入 `sigil.toml`。每个 connection 选择�
 
 | 来源 | 适用场景 | 配置中保存的内容 |
 | --- | --- | --- |
-| 安全凭据存储 | 普通本机使用 | 仅随机 `source = "stored"` 引用；`auto` 优先系统存储，仅在不可用时回退 |
+| 受保护凭据存储 | 普通本机使用 | 仅随机 `source = "stored"` 引用；`file` 和 `auto` 写入 owner-only 凭据文件 |
 | 环境变量 | CI 或已由 Shell 管理的 secret | 仅允许列表中的变量名 |
 | 无认证 | 显式回环地址的自定义端点 | `source = "none"`；带凭据的远端 HTTP 会被拒绝 |
 
 各 provider 的环境变量依次为 `SIGIL_API_KEY`、`SIGIL_OPENAI_COMPATIBLE_API_KEY`、
 `SIGIL_OPENAI_RESPONSES_API_KEY`、`SIGIL_ANTHROPIC_API_KEY` 与
-`SIGIL_GEMINI_API_KEY`。`[storage].credential_store` 可选 `auto`、`keyring` 或 `file`。默认
-`auto` 会优先使用 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；仅当
-系统存储不可用时，才使用 owner-only 的 `~/.sigil/credentials.json`。该专属文件保存的是受权限
-保护的明文凭据材料，不是加密。严格 `keyring` 模式在系统存储不可用时 fail closed。任何模式都
-不会把新粘贴的 secret 写入 `sigil.toml`、workspace、session、模型缓存、日志、快照或支持报告。
-修改凭据后运行 `sigil doctor`；诊断只显示来源和就绪状态，不会打印值或凭据 ID。
+`SIGIL_GEMINI_API_KEY`。`[storage].credential_store` 可选 `file`、`auto` 或 `keyring`。默认
+`file` 与非交互 `auto` 都写入 owner-only 的 `~/.sigil/credentials.json`。在 macOS 上，`auto`
+可以在操作系统无需认证界面时静默读取或清理旧原生记录；它不会弹出密码框，也不会把该记录复制到
+文件。如果旧记录必须认证，请打开 `/config` 重新输入一次 key。严格 `keyring` 模式才会显式使用
+macOS Keychain、Windows Credential Manager 或 Linux Secret Service，并可能显示平台认证界面。
+该专属文件保存的是受权限保护的明文凭据材料，不是加密。任何模式都不会把新粘贴的 secret 写入
+`sigil.toml`、workspace、session、模型缓存、日志、快照或支持报告。修改凭据后运行
+`sigil doctor`；诊断只显示来源和就绪状态，不会打印值或凭据 ID。
 
 ## 可复制起点
 

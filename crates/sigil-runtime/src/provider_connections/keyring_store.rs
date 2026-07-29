@@ -20,6 +20,10 @@ static CREDENTIAL_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemProviderCredentialStore;
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SilentSystemProviderCredentialStore;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialRecordWire {
@@ -106,6 +110,129 @@ impl ProviderCredentialStore for SystemProviderCredentialStore {
             }
         })
         .await
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait]
+impl ProviderCredentialStore for SilentSystemProviderCredentialStore {
+    async fn load(
+        &self,
+        credential_id: &CredentialId,
+    ) -> Result<Option<ProviderCredentialRecord>, ProviderCredentialError> {
+        let expected = credential_id.clone();
+        let account = keyring_account(credential_id);
+        let bytes = run_keyring_task(move || silent_macos_load(&account)).await?;
+        bytes
+            .map(|bytes| decode_record(&expected, bytes.as_slice()))
+            .transpose()
+    }
+
+    async fn store(
+        &self,
+        _record: &ProviderCredentialRecord,
+    ) -> Result<(), ProviderCredentialError> {
+        Err(ProviderCredentialError::new(
+            ProviderCredentialErrorCode::CredentialStoreUnavailable,
+            "non-interactive native credential access does not accept writes",
+        ))
+    }
+
+    async fn delete(&self, credential_id: &CredentialId) -> Result<bool, ProviderCredentialError> {
+        let account = keyring_account(credential_id);
+        run_keyring_task(move || silent_macos_delete(&account)).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn silent_macos_load(account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ProviderCredentialError> {
+    use security_framework::item::SearchResult;
+
+    let options = silent_macos_search(account, true)?;
+    match options.search() {
+        Ok(results) => match results.into_iter().next() {
+            Some(SearchResult::Data(bytes)) => Ok(Some(Zeroizing::new(bytes))),
+            None => Ok(None),
+            Some(_) => Err(invalid_record()),
+        },
+        Err(error) if error.code() == MACOS_ERR_ITEM_NOT_FOUND => Ok(None),
+        Err(error) => Err(map_silent_macos_error(error)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn silent_macos_delete(account: &str) -> Result<bool, ProviderCredentialError> {
+    let options = silent_macos_search(account, false)?;
+    match options.delete() {
+        Ok(()) => Ok(true),
+        Err(error) if error.code() == MACOS_ERR_ITEM_NOT_FOUND => Ok(false),
+        Err(error) => Err(map_silent_macos_error(error)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn silent_macos_search(
+    account: &str,
+    load_data: bool,
+) -> Result<security_framework::item::ItemSearchOptions, ProviderCredentialError> {
+    use security_framework::{
+        item::{ItemClass, ItemSearchOptions},
+        os::macos::keychain::{SecKeychain, SecPreferencesDomain},
+    };
+
+    let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
+        .map_err(map_silent_macos_error)?;
+    let mut options = ItemSearchOptions::new();
+    options
+        .keychains(&[keychain])
+        .class(ItemClass::generic_password())
+        .service(CREDENTIAL_SERVICE)
+        .account(account)
+        // Keep the no-prompt guarantee local to this query. Process-global Keychain UI toggles
+        // would also affect explicit `keyring`, MCP OAuth, and continuation credential owners.
+        .skip_authenticated_items(true);
+    if load_data {
+        options.load_data(true).limit(1);
+    }
+    Ok(options)
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_ERR_NOT_AVAILABLE: i32 = -25291;
+#[cfg(target_os = "macos")]
+const MACOS_ERR_READ_ONLY: i32 = -25292;
+#[cfg(target_os = "macos")]
+const MACOS_ERR_AUTH_FAILED: i32 = -25293;
+#[cfg(target_os = "macos")]
+const MACOS_ERR_NO_SUCH_KEYCHAIN: i32 = -25294;
+#[cfg(target_os = "macos")]
+const MACOS_ERR_INVALID_KEYCHAIN: i32 = -25295;
+#[cfg(target_os = "macos")]
+const MACOS_ERR_ITEM_NOT_FOUND: i32 = -25300;
+#[cfg(target_os = "macos")]
+const MACOS_ERR_INTERACTION_NOT_ALLOWED: i32 = -25308;
+
+#[cfg(target_os = "macos")]
+fn map_silent_macos_error(error: security_framework::base::Error) -> ProviderCredentialError {
+    let unavailable = matches!(
+        error.code(),
+        MACOS_ERR_NOT_AVAILABLE
+            | MACOS_ERR_READ_ONLY
+            | MACOS_ERR_AUTH_FAILED
+            | MACOS_ERR_NO_SUCH_KEYCHAIN
+            | MACOS_ERR_INVALID_KEYCHAIN
+            | MACOS_ERR_INTERACTION_NOT_ALLOWED
+    );
+    if unavailable {
+        ProviderCredentialError::new(
+            ProviderCredentialErrorCode::CredentialStoreUnavailable,
+            "native credential store requires authentication UI or is unavailable",
+        )
+    } else {
+        ProviderCredentialError::new(
+            ProviderCredentialErrorCode::CredentialStoreRejected,
+            "native credential store rejected non-interactive access",
+        )
     }
 }
 

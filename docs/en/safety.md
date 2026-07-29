@@ -32,7 +32,7 @@ Deny and restate the scope when the preview is surprising or too broad.
 - A file restore does not undo shell commands, remote services, MCP effects, or other outside changes.
 - An interrupted tool is shown as interrupted after restore and is not silently run again.
 - `sigil serve` is for a trusted local client: it listens on loopback and requires authentication for privileged routes.
-- Saving a pasted credential through Quick Setup or `/config` writes it to the configured secure credential store and keeps only an opaque reference in `sigil.toml`. Default `auto` may use owner-only `~/.sigil/credentials.json` when the system store is unavailable; that dedicated file is protected plaintext, not encryption.
+- Saving a pasted credential through Quick Setup or `/config` writes it to the configured protected credential store and keeps only an opaque reference in `sigil.toml`. Default `file` and non-interactive `auto` use owner-only `~/.sigil/credentials.json`; that dedicated file is protected plaintext, not encryption. Only explicit `keyring` may show system authentication UI.
 - Automatic Task routing and proactive Explore agents do not grant tool permission. File, Shell, network, MCP, external-directory, and merge decisions remain independent.
 - A zero-tolerance orchestration invariant disables only the affected provider/model/build route for that session. Subsequent input falls back to `manual + explicit_request_only`; accepted Task-plan recovery remains available, and durable Task history is retained.
 

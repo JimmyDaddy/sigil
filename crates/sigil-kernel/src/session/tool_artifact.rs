@@ -1722,7 +1722,7 @@ impl ToolArtifactStore {
         let trash_refs = trash_root.join("refs");
         let trash_blobs = trash_root.join("blobs");
         let trash_staging = trash_root.join("staging");
-        create_private_dir(&self.root)?;
+        self.ensure_root_dir()?;
         create_private_dir(&self.root.join("trash"))?;
         create_private_dir(&self.root.join("refs"))?;
         create_private_dir(&trash_root)?;
@@ -1917,6 +1917,7 @@ impl ToolArtifactStore {
             bail!("tool artifact source event id is malformed");
         }
         let refs_dir = self.root.join("refs");
+        self.ensure_root_dir()?;
         create_private_dir(&refs_dir)?;
         let path = refs_dir.join(format!("{}.event", artifact_ref.artifact_id));
         publish_private_noclobber(&refs_dir, &path, source_event_id.as_bytes())?;
@@ -2048,10 +2049,19 @@ impl ToolArtifactStore {
         Ok(())
     }
 
+    fn ensure_root_dir(&self) -> Result<()> {
+        let session_dir = self
+            .root
+            .parent()
+            .context("tool artifact root has no session directory")?;
+        create_private_dir(session_dir)?;
+        create_private_dir(&self.root)
+    }
+
     fn open_ref_lock(&self, artifact_ref: &ToolArtifactRefV1) -> Result<File> {
         artifact_ref.validate()?;
         let locks_dir = self.root.join("locks");
-        create_private_dir(&self.root)?;
+        self.ensure_root_dir()?;
         create_private_dir(&locks_dir)?;
         let path = locks_dir.join(format!("{}.lock", artifact_ref.artifact_id));
         let mut options = OpenOptions::new();
@@ -2083,12 +2093,7 @@ impl ToolArtifactStore {
             .parent()
             .context("tool artifact blob path has no parent")?;
         let staging_dir = self.root.join("staging");
-        let session_dir = self
-            .root
-            .parent()
-            .context("tool artifact root has no session directory")?;
-        create_private_dir(session_dir)?;
-        create_private_dir(&self.root)?;
+        self.ensure_root_dir()?;
         create_private_dir(&self.root.join("blobs"))?;
         create_private_dir(blob_dir)?;
         create_private_dir(&staging_dir)?;
@@ -2166,7 +2171,7 @@ impl ToolArtifactStore {
     }
 
     fn open_blob_usage_lock(&self) -> Result<File> {
-        create_private_dir(&self.root)?;
+        self.ensure_root_dir()?;
         let path = self.root.join("usage.lock");
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true).truncate(false);
@@ -2236,6 +2241,7 @@ impl ToolArtifactStore {
         let refs_dir = path
             .parent()
             .context("tool artifact ref path has no parent")?;
+        self.ensure_root_dir()?;
         create_private_dir(refs_dir)?;
         let bytes =
             serde_json::to_vec(descriptor).context("failed to encode tool artifact manifest")?;

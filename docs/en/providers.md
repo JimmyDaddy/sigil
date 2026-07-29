@@ -64,7 +64,8 @@ owner-only recovery record beside the config. The record can contain only the op
 IDs that the native owner must reconcile plus the original credential-storage mode; those values
 never enter the renderer, HTTP responses, logs, or diagnostics. Recheck holds the config update
 lock and confirms that both the config bytes and recovery record are still the reviewed versions
-before cleanup. `auto` does not claim cleanup while the system credential store is unavailable.
+before cleanup. `auto` does not claim complete cleanup when its non-interactive legacy native
+cleanup cannot be verified.
 The record is removed after a confirmed publish or complete rollback. If either result is
 uncertain, the block survives Desktop/TUI restarts and project switches. Desktop changes the
 primary action to **Recheck configuration**; TUI changes the first row to
@@ -82,19 +83,23 @@ connection:
 
 | Source | Use it for | Stored in config |
 | --- | --- | --- |
-| Secure credential store | Normal local use | Random `source = "stored"` reference only; `auto` prefers the system store and falls back only when it is unavailable |
+| Protected credential store | Normal local use | Random `source = "stored"` reference only; `file` and `auto` write an owner-only credential file |
 | Environment | CI or an already managed shell secret | Allowlisted variable name only |
 | No authentication | Explicit loopback custom endpoints | `source = "none"`; rejected for credentialed remote HTTP |
 
 Provider environment names are `SIGIL_API_KEY`, `SIGIL_OPENAI_COMPATIBLE_API_KEY`,
 `SIGIL_OPENAI_RESPONSES_API_KEY`, `SIGIL_ANTHROPIC_API_KEY`, and `SIGIL_GEMINI_API_KEY`.
-`[storage].credential_store` accepts `auto`, `keyring`, or `file`. The default `auto` uses macOS
-Keychain, Windows Credential Manager, or Linux Secret Service when available, and otherwise uses
-the owner-only `~/.sigil/credentials.json`. That dedicated file contains protected plaintext
-credential material; it is not encryption. Strict `keyring` mode fails closed when the system
-store is unavailable. No mode writes a newly pasted secret to `sigil.toml`, workspace data,
-sessions, model cache, logs, snapshots, or support output. Run `sigil doctor` after changing a
-credential; it reports source and readiness without printing the value or identifier.
+`[storage].credential_store` accepts `file`, `auto`, or `keyring`. The default `file` and
+non-interactive `auto` modes write the owner-only `~/.sigil/credentials.json`. On macOS, `auto`
+may silently read or clean up an older native record when the OS allows access without
+authentication UI; it never opens a password prompt and never copies that record into the file.
+If the older record requires authentication, reopen `/config` and enter the key once. Strict
+`keyring` mode explicitly uses macOS Keychain, Windows Credential Manager, or Linux Secret
+Service and may show platform authentication UI. The dedicated file contains protected plaintext
+credential material; it is not encryption. No mode writes a newly pasted secret to `sigil.toml`,
+workspace data, sessions, model cache, logs, snapshots, or support output. Run `sigil doctor`
+after changing a credential; it reports source and readiness without printing the value or
+identifier.
 
 ## Copyable Starting Points
 

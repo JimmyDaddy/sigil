@@ -33,7 +33,7 @@ See [deepseek-basic.toml](../examples/config/deepseek-basic.toml) for a copyable
 
 ## Authentication
 
-The example binds this connection to `SIGIL_API_KEY`. You can instead choose the **secure credential store** in setup or `/config`; `sigil.toml` stores only an opaque `stored` ID. Default `auto` prefers the system store and may use owner-only `~/.sigil/credentials.json` only when it is unavailable. Pasted secrets are never valid connection fields.
+The example binds this connection to `SIGIL_API_KEY`. You can instead choose the **protected credential store** in setup or `/config`; `sigil.toml` stores only an opaque `stored` ID. The default `file` mode uses owner-only `~/.sigil/credentials.json` without system authentication prompts. Pasted secrets are never valid connection fields.
 
 ## Options And Visible Limits
 

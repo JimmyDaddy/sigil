@@ -2727,9 +2727,9 @@ impl Default for StorageConfig {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialStorageMode {
-    /// Prefer the OS credential store and fall back to an owner-only local credential file.
+    /// Use the owner-only local file and silently read prior native records when possible.
     Auto,
-    /// Require the OS credential store and fail when it is unavailable.
+    /// Require the OS credential store, allowing explicit system authentication UI.
     Keyring,
     /// Use the owner-only local credential file.
     #[default]

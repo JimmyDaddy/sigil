@@ -33,7 +33,7 @@ fim_model = "deepseek-v4-pro"
 
 ## 认证
 
-示例只把当前连接绑定到 `SIGIL_API_KEY`。也可以在首次设置或 `/config` 中选择**安全凭据存储**；此时 `sigil.toml` 只保存不透明的 `stored` ID。默认 `auto` 优先系统存储，仅在不可用时使用 owner-only 的 `~/.sigil/credentials.json`。粘贴的密钥不是合法 connection 字段。
+示例只把当前连接绑定到 `SIGIL_API_KEY`。也可以在首次设置或 `/config` 中选择**受保护凭据存储**；此时 `sigil.toml` 只保存不透明的 `stored` ID。默认 `file` 使用 owner-only 的 `~/.sigil/credentials.json`，不会触发系统认证框。粘贴的密钥不是合法 connection 字段。
 
 ## 选项与可见限制
 

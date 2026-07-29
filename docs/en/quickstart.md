@@ -38,11 +38,11 @@ In Sigil Desktop, open a project first. A new computer or missing config opens t
 provider wizard before **New conversation** becomes available. The Settings page later shows every
 saved connection and can add another one without opening a conversation first.
 
-For normal local use, choose the secure credential store; a pasted key is held only long enough
-to create a credential record, and `sigil.toml` stores a random reference. The default `auto`
-policy prefers the system store and uses owner-only `~/.sigil/credentials.json` only when the
-system store is unavailable. Choose an allowlisted environment variable for CI or an already
-managed shell secret. See the [provider guide](providers.md#authentication-priority).
+For normal local use, choose the protected credential store; a pasted key is held only long
+enough to create a credential record, and `sigil.toml` stores a random reference. The default
+`file` policy writes owner-only `~/.sigil/credentials.json` without system authentication prompts.
+Choose an allowlisted environment variable for CI or an already managed shell secret. See the
+[provider guide](providers.md#authentication-priority).
 
 Later, `/model connection-id/model-id` starts a fresh session on a ready route. In its selector,
 Enter starts the session and `D` changes only the saved default; the current and saved routes are

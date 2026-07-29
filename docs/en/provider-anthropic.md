@@ -34,7 +34,7 @@ See [anthropic.toml](../examples/config/anthropic.toml) for a copyable file.
 
 ## Authentication
 
-The example binds this connection to `SIGIL_ANTHROPIC_API_KEY`. Setup and `/config` can save the secret to the secure credential store instead; `sigil.toml` then contains only an opaque `stored` ID. Default `auto` prefers the system store and uses the owner-only credential file only when that store is unavailable.
+The example binds this connection to `SIGIL_ANTHROPIC_API_KEY`. Setup and `/config` can save the secret to the protected credential store instead; `sigil.toml` then contains only an opaque `stored` ID. The default `file` mode uses the owner-only credential file without system authentication prompts.
 
 ## Options And Visible Limits
 

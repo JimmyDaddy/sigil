@@ -9,14 +9,18 @@ use super::{
     SystemProviderCredentialStore,
 };
 
+#[cfg(target_os = "macos")]
+use super::keyring_store::SilentSystemProviderCredentialStore;
+
 /// Credential store selected by `[storage].credential_store`.
 ///
-/// `auto` falls back only when the native store is unavailable. Rejected or malformed native
-/// records remain hard failures rather than being hidden by a second backend.
+/// `auto` keeps the private credential file authoritative. On macOS it may read or clean up a
+/// prior native record only through a query that forbids authentication UI.
 #[derive(Clone)]
 pub struct ConfiguredProviderCredentialStore {
     mode: CredentialStorageMode,
-    keyring: Arc<dyn ProviderCredentialStore>,
+    native: Arc<dyn ProviderCredentialStore>,
+    legacy_native: Option<Arc<dyn ProviderCredentialStore>>,
     file: Option<Arc<dyn ProviderCredentialStore>>,
 }
 
@@ -31,9 +35,14 @@ impl ConfiguredProviderCredentialStore {
         let file = FileProviderCredentialStore::default_path()
             .ok()
             .map(|path| Arc::new(FileProviderCredentialStore::new(path)) as Arc<_>);
+        let legacy_native = match mode {
+            CredentialStorageMode::Auto => silent_legacy_native_store(),
+            CredentialStorageMode::Keyring | CredentialStorageMode::File => None,
+        };
         Self {
             mode,
-            keyring: Arc::new(SystemProviderCredentialStore),
+            native: Arc::new(SystemProviderCredentialStore),
+            legacy_native,
             file,
         }
     }
@@ -41,12 +50,14 @@ impl ConfiguredProviderCredentialStore {
     #[cfg(test)]
     fn injected(
         mode: CredentialStorageMode,
-        keyring: Arc<dyn ProviderCredentialStore>,
+        native: Arc<dyn ProviderCredentialStore>,
+        legacy_native: Option<Arc<dyn ProviderCredentialStore>>,
         file: Option<Arc<dyn ProviderCredentialStore>>,
     ) -> Self {
         Self {
             mode,
-            keyring,
+            native,
+            legacy_native,
             file,
         }
     }
@@ -66,7 +77,14 @@ impl fmt::Debug for ConfiguredProviderCredentialStore {
         formatter
             .debug_struct("ConfiguredProviderCredentialStore")
             .field("mode", &self.mode)
-            .field("keyring", &"[system credential store]")
+            .field("native", &"[system credential store]")
+            .field(
+                "legacy_native",
+                &self
+                    .legacy_native
+                    .as_ref()
+                    .map(|_| "[non-interactive system credential store]"),
+            )
             .field(
                 "file",
                 &self.file.as_ref().map(|_| "[private credential file]"),
@@ -82,19 +100,21 @@ impl ProviderCredentialStore for ConfiguredProviderCredentialStore {
         credential_id: &CredentialId,
     ) -> Result<Option<ProviderCredentialRecord>, ProviderCredentialError> {
         match self.mode {
-            CredentialStorageMode::Keyring => self.keyring.load(credential_id).await,
+            CredentialStorageMode::Keyring => self.native.load(credential_id).await,
             CredentialStorageMode::File => self.file()?.load(credential_id).await,
-            CredentialStorageMode::Auto => match self.keyring.load(credential_id).await {
-                Ok(Some(record)) => Ok(Some(record)),
-                Ok(None) => match self.file.as_deref() {
-                    Some(file) => file.load(credential_id).await,
-                    None => Ok(None),
-                },
-                Err(error) if error_is_unavailable(&error) => {
-                    self.file()?.load(credential_id).await
+            CredentialStorageMode::Auto => {
+                if let Some(record) = self.file()?.load(credential_id).await? {
+                    return Ok(Some(record));
                 }
-                Err(error) => Err(error),
-            },
+                let Some(legacy_native) = self.legacy_native.as_deref() else {
+                    return Ok(None);
+                };
+                match legacy_native.load(credential_id).await {
+                    Ok(record) => Ok(record),
+                    Err(error) if error_is_unavailable(&error) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
         }
     }
 
@@ -103,38 +123,39 @@ impl ProviderCredentialStore for ConfiguredProviderCredentialStore {
         record: &ProviderCredentialRecord,
     ) -> Result<(), ProviderCredentialError> {
         match self.mode {
-            CredentialStorageMode::Keyring => self.keyring.store(record).await,
-            CredentialStorageMode::File => self.file()?.store(record).await,
-            CredentialStorageMode::Auto => match self.keyring.store(record).await {
-                Ok(()) => Ok(()),
-                Err(error) if error_is_unavailable(&error) => self.file()?.store(record).await,
-                Err(error) => Err(error),
-            },
+            CredentialStorageMode::Keyring => self.native.store(record).await,
+            CredentialStorageMode::File | CredentialStorageMode::Auto => {
+                self.file()?.store(record).await
+            }
         }
     }
 
     async fn delete(&self, credential_id: &CredentialId) -> Result<bool, ProviderCredentialError> {
         match self.mode {
-            CredentialStorageMode::Keyring => self.keyring.delete(credential_id).await,
+            CredentialStorageMode::Keyring => self.native.delete(credential_id).await,
             CredentialStorageMode::File => self.file()?.delete(credential_id).await,
-            CredentialStorageMode::Auto => match self.keyring.delete(credential_id).await {
-                Ok(keyring_deleted) => match self.file.as_deref() {
-                    Some(file) => file
-                        .delete(credential_id)
-                        .await
-                        .map(|file_deleted| keyring_deleted || file_deleted),
-                    None => Ok(keyring_deleted),
-                },
-                Err(error) if error_is_unavailable(&error) => {
-                    if let Some(file) = self.file.as_deref() {
-                        let _ = file.delete(credential_id).await;
-                    }
-                    Err(error)
-                }
-                Err(error) => Err(error),
-            },
+            CredentialStorageMode::Auto => {
+                let file_deleted = self.file()?.delete(credential_id).await?;
+                let Some(legacy_native) = self.legacy_native.as_deref() else {
+                    return Ok(file_deleted);
+                };
+                legacy_native
+                    .delete(credential_id)
+                    .await
+                    .map(|native_deleted| file_deleted || native_deleted)
+            }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn silent_legacy_native_store() -> Option<Arc<dyn ProviderCredentialStore>> {
+    Some(Arc::new(SilentSystemProviderCredentialStore))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn silent_legacy_native_store() -> Option<Arc<dyn ProviderCredentialStore>> {
+    None
 }
 
 fn error_is_unavailable(error: &ProviderCredentialError) -> bool {
