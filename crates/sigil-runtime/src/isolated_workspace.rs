@@ -2121,9 +2121,13 @@ async fn canonical_directory(path: &Path) -> Result<PathBuf> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         bail!("path is not a regular directory: {}", path.display());
     }
-    tokio::fs::canonicalize(path)
+    let canonical = tokio::fs::canonicalize(path)
         .await
-        .with_context(|| format!("failed to canonicalize directory {}", path.display()))
+        .with_context(|| format!("failed to canonicalize directory {}", path.display()))?;
+    // Windows canonicalization returns a verbatim `\\?\` path. Rust can consume that path,
+    // but Git for Windows rejects it when the path is passed as a worktree destination.
+    // Simplifying removes only that compatibility prefix and leaves the canonical path intact.
+    Ok(dunce::simplified(&canonical).to_path_buf())
 }
 
 async fn git_text(current_dir: &Path, args: impl IntoIterator<Item = OsString>) -> Result<String> {

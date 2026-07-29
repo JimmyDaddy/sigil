@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+dunce.workspace = true
 futures.workspace = true
 fs2.workspace = true
 ignore.workspace = true

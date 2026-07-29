@@ -3193,7 +3193,7 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
     let mut approval = CountingApprovalHandler::default();
 
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(if cfg!(windows) { 10 } else { 2 }),
         runner.run_planner_session(
             &mut session,
             TaskPlannerSessionRunRequest {

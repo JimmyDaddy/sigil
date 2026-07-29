@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use fs2::FileExt;
 use futures::{Stream, stream};
@@ -1251,7 +1251,7 @@ async fn wait_until_agent_result_available(
             )
             .await?
             .expect("wait_agent handled");
-        let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+        let payload = parse_agent_tool_payload(&wait)?;
         if payload["result_available"] == true {
             return Ok(payload);
         }
@@ -1261,6 +1261,15 @@ async fn wait_until_agent_result_available(
         "agent thread {} did not produce a result in time",
         thread_id.as_str()
     )
+}
+
+fn parse_agent_tool_payload(result: &ToolResult) -> Result<serde_json::Value> {
+    serde_json::from_str(&result.content).with_context(|| {
+        format!(
+            "{} returned {:?}: {}",
+            result.tool_name, result.status, result.content
+        )
+    })
 }
 
 #[async_trait]
@@ -6725,7 +6734,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         )
         .await?
         .expect("spawn handled");
-    let spawn_payload: serde_json::Value = serde_json::from_str(&spawn_result.content)?;
+    let spawn_payload = parse_agent_tool_payload(&spawn_result)?;
     assert_eq!(spawn_payload["status"], "running");
     assert_eq!(spawn_payload["terminal"], false);
     assert_eq!(spawn_payload["result_available"], false);
@@ -6752,7 +6761,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
             )
             .await?
             .expect("wait handled");
-        let payload: serde_json::Value = serde_json::from_str(&wait_result.content)?;
+        let payload = parse_agent_tool_payload(&wait_result)?;
         if payload["result_available"] == true {
             wait_payload = Some(payload);
             break;
@@ -6785,7 +6794,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         )
         .await?
         .expect("read handled");
-    let read_payload: serde_json::Value = serde_json::from_str(&read_result.content)?;
+    let read_payload = parse_agent_tool_payload(&read_result)?;
     assert!(read_payload.get("summary").is_none());
     let page = &read_payload["page"];
 
@@ -6909,7 +6918,7 @@ async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read()
         .expect("first read handled");
 
     assert!(!first.is_error());
-    let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
+    let first_payload = parse_agent_tool_payload(&first)?;
     assert_eq!(first_payload["request"]["requested_max_chars"], 80_000);
     assert_eq!(first_payload["request"]["max_chars"], 40_000);
     assert_eq!(first_payload["request"]["max_chars_clamped"], true);
@@ -6965,7 +6974,7 @@ async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read()
         )
         .await?
         .expect("second read handled");
-    let second_payload: serde_json::Value = serde_json::from_str(&second.content)?;
+    let second_payload = parse_agent_tool_payload(&second)?;
     assert_eq!(second_payload["page"]["offset_chars"], 40_000);
     assert_eq!(second_payload["page"]["truncated"], false);
     assert!(second_payload["page"]["next_offset_chars"].is_null());
@@ -7097,7 +7106,7 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         )
         .await?
         .expect("read handled");
-    let payload: serde_json::Value = serde_json::from_str(&read.content)?;
+    let payload = parse_agent_tool_payload(&read)?;
     assert_eq!(payload["page"]["truncated"], false);
     assert!(payload["next_read_args"].is_null());
     assert!(
@@ -7181,7 +7190,7 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
             )
             .await?
             .expect("wait handled");
-        let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+        let payload = parse_agent_tool_payload(&wait)?;
         if payload["result_available"] == true {
             break;
         }
@@ -7208,7 +7217,7 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         .await?
         .expect("first read handled");
     assert_eq!(first.transient_context.len(), 1);
-    let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
+    let first_payload = parse_agent_tool_payload(&first)?;
     assert_eq!(first_payload["page"]["truncated"], false);
     assert!(first_payload["next_read_args"].is_null());
     assert_eq!(
@@ -7248,7 +7257,7 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         )
         .await?
         .expect("second read handled");
-    let second_payload: serde_json::Value = serde_json::from_str(&second.content)?;
+    let second_payload = parse_agent_tool_payload(&second)?;
     assert_eq!(second_payload["already_delivered"], true);
     assert_eq!(second_payload["rerun_not_needed"], true);
     assert!(second.transient_context.is_empty());

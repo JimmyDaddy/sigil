@@ -1042,7 +1042,7 @@ fn run_context_uses_only_the_exact_connection_fresh_catalog_cache() -> Result<()
             r#"config_version = 2
 
 [storage]
-cache_root = "{}"
+cache_root = {}
 
 [workspace]
 root = "."
@@ -1058,7 +1058,7 @@ protocol = "responses"
 base_url = "http://127.0.0.1:11434/v1"
 credential = {{ source = "none" }}
 "#,
-            cache_root.display()
+            toml::Value::String(cache_root.to_string_lossy().into_owned())
         ),
     )?;
     let root_config = RootConfig::load(&config_path)?;

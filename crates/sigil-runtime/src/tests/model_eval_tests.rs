@@ -926,7 +926,10 @@ fn model_eval_verification_records_pass_then_durable_stale_mutation() {
     runtime.block_on(async {
         let fixture =
             load_model_eval_fixture(fixture_root("stale-after-write")).expect("load fixture");
-        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical repository root");
         let ignored_target_root = repository_root.join("target");
         fs::create_dir_all(&ignored_target_root).expect("create target root");
         let temp = tempfile::tempdir_in(&ignored_target_root).expect("ignored temp dir");

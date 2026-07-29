@@ -796,7 +796,7 @@ Plan through Claude.
     assert!(registry.warnings().iter().any(|warning| {
         warning.contains(&id)
             && warning.contains("shadowed")
-            && warning.contains(".opencode/agents")
+            && warning.replace('\\', "/").contains(".opencode/agents")
     }));
     let catalog = crate::application_extension_catalog_view(&root_config(), &workspace, &[])?;
     let catalog_agent = catalog

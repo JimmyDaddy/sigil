@@ -5107,6 +5107,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "dunce",
  "fs2",
  "futures",
  "ignore",

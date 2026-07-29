@@ -99,6 +99,9 @@ fn local_preview_builds_continuity_without_provider_or_durable_mutation() -> Res
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     let session_path = temp.path().join("session.jsonl");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::fs::write(workspace.join("fixture.txt"), "stable workspace")?;
     write_config(&config_path, true)?;
     let large = format!("one {}", "history ".repeat(4_000));
     let scope = session_with_messages(
@@ -113,7 +116,7 @@ fn local_preview_builds_continuity_without_provider_or_durable_mutation() -> Res
     let before = std::fs::read(&session_path)?;
 
     let (review, pending) =
-        preview_application_compaction(&config_path, temp.path(), &session_path, &scope)?;
+        preview_application_compaction(&config_path, &workspace, &session_path, &scope)?;
 
     let pending = pending.expect("foldable local preview");
     assert_eq!(review.preview_id.as_deref(), Some(pending.preview_id()));
@@ -134,6 +137,9 @@ fn local_preview_exposes_bounded_recoverable_and_redacted_tool_artifact_details(
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     let session_path = temp.path().join("session.jsonl");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::fs::write(workspace.join("fixture.txt"), "stable workspace")?;
     let secret = "sigil-preview-secret-57";
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", secret);
     std::fs::write(
@@ -259,7 +265,7 @@ tail_messages = 2
     let before = std::fs::read(&session_path)?;
 
     let (review, pending) =
-        preview_application_compaction(&config_path, temp.path(), &session_path, &scope)?;
+        preview_application_compaction(&config_path, &workspace, &session_path, &scope)?;
 
     assert!(pending.is_some());
     let details = review.details.expect("local preview details");

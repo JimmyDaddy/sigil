@@ -715,17 +715,30 @@ fn session_delete_tombstones_artifacts_before_grace_prune() -> Result<()> {
         LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
     let preview = service.preview_delete(&source, &[])?;
     assert!(preview.resource_bytes > 0);
-    let active_read = std::fs::OpenOptions::new().read(true).write(true).open(
-        artifact_store
-            .root()
-            .join("locks")
-            .join(format!("{}.lock", descriptor.artifact_ref.artifact_id)),
-    )?;
+    let lock_name = format!("{}.lock", descriptor.artifact_ref.artifact_id);
+    #[cfg(not(windows))]
+    let active_read = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(artifact_store.root().join("locks").join(&lock_name))?;
+    #[cfg(not(windows))]
     active_read.try_lock_shared()?;
 
     let output = service.apply_delete(&preview, &[], 5_678)?;
 
     let tombstone = sessions.join(".session-trash").join(&output.tombstone_id);
+    // Windows cannot rename a directory while an open handle exists below it. Acquire the
+    // equivalent read lease after the atomic tombstone move there; pruning must still honor it.
+    #[cfg(windows)]
+    let active_read = std::fs::OpenOptions::new().read(true).write(true).open(
+        tombstone
+            .join("resources")
+            .join("artifacts")
+            .join("locks")
+            .join(&lock_name),
+    )?;
+    #[cfg(windows)]
+    active_read.try_lock_shared()?;
     assert!(!source.exists());
     assert!(tombstone.join("session.jsonl").is_file());
     assert!(
