@@ -625,10 +625,12 @@ fn standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction
         Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new()),
         workspace_root,
     )?;
+    let worker_timeout = Duration::from_secs(15);
 
     worker.send(WorkerCommand::PreviewV2Compaction)?;
-    let preview = worker
-        .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
+    let preview = worker.recv_until_with_timeout(worker_timeout, |message| {
+        matches!(message, WorkerMessage::V2CompactionPreviewed { .. })
+    })?;
     let WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(review),
     } = preview
@@ -651,7 +653,7 @@ fn standalone_tool_output_cleanup_uses_local_preview_without_semantic_compaction
     worker.send(WorkerCommand::ApplyStandaloneToolOutputShrink {
         request_id: review.request_id,
     })?;
-    let applied = worker.recv_until(|message| {
+    let applied = worker.recv_until_with_timeout(worker_timeout, |message| {
         matches!(
             message,
             WorkerMessage::StandaloneToolOutputShrinkApplied { .. }

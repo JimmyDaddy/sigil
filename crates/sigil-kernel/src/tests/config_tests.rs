@@ -815,7 +815,7 @@ fn private_windows_acl_excludes_broad_read_principals_for_files_and_directories(
     let file = directory.join("state.json");
     std::fs::write(&file, b"private").expect("private file should write");
     let current_user_sid =
-        super::windows_current_process_user_sid().expect("current user SID should resolve");
+        super::current_windows_user_sid_string().expect("current user SID should resolve");
 
     for path in [&directory, &file] {
         super::secure_private_path_permissions(path).expect("private ACL should apply");
