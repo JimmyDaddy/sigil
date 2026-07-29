@@ -6405,6 +6405,15 @@ fn bash_path_subjects_and_tokenizer_cover_segmented_and_quoted_edges() -> Result
             .iter()
             .any(|subject| subject.normalized == "combined.log")
     );
+
+    let find_subjects =
+        super::bash_path_subjects(workspace.path(), "find src -name '*.rs' -exec wc -l {} +")?;
+    assert!(
+        find_subjects
+            .iter()
+            .all(|subject| subject.original != "*.rs"),
+        "find pattern operands are filters, not filesystem subjects"
+    );
     Ok(())
 }
 

@@ -1602,12 +1602,22 @@ pub(crate) fn collect_bash_segment_subjects(
                 push_shell_path_subject(subjects, workspace_root, cwd, target)?;
                 index += 1;
             }
-        } else if is_path_argument(command, word) {
+        } else if is_path_argument(command, word) && !find_pattern_argument(words, command, index) {
             push_shell_path_subject(subjects, workspace_root, cwd, word)?;
         }
         index += 1;
     }
     Ok(())
+}
+
+fn find_pattern_argument(words: &[String], command: &str, index: usize) -> bool {
+    command == "find"
+        && index.checked_sub(1).is_some_and(|previous| {
+            matches!(
+                words[previous].as_str(),
+                "-name" | "-iname" | "-path" | "-ipath" | "-regex" | "-iregex"
+            )
+        })
 }
 
 fn push_shell_path_subject(
