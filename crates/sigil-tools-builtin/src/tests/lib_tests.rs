@@ -5156,7 +5156,7 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
         super::ShellClassificationSource::AstKnownReadonly
     );
 
-    let workspace_cd = format!("cd {} && ", workspace.path().display());
+    let workspace_cd = "cd . && ";
     for command in [
         format!(
             "{workspace_cd}grep -rn '#[allow' --include='*.rs' crates/ 2>/dev/null | grep -v unwrap | head"
