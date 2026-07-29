@@ -695,8 +695,16 @@ pub struct ProviderContinuationState {
 #### PrefixSnapshot
 
 ```rust
+pub struct PrefixSnapshotMaterialization {
+    pub schema_version: u16,
+    pub byte_len: usize,
+    pub message_count: usize,
+    pub tool_schema_count: usize,
+    pub runtime_context: Option<PrefixRuntimeContextSummary>,
+}
+
 pub struct PrefixSnapshot {
-    pub materialized_text: String,
+    pub materialization: PrefixSnapshotMaterialization,
     pub sha256: String,
     pub provider_name: String,
     pub model_name: String,
@@ -706,11 +714,17 @@ pub struct PrefixSnapshot {
 }
 ```
 
-这类结构非常重要，因为“缓存极致利用”不是抽象口号，而是要能明确知道：
+`sha256` 对完整 `messages_json + "\n" + tools_json` 计算，`materialization` 只保存固定上界的
+字节/消息/工具计数和最多 8 条无正文 Context provenance；完整历史不会复制进 control event。
+因此 `PrefixSnapshotCaptured` 的大小不随 session 历史增长，但仍能回答：
 
-- 这段 prefix 到底是什么
+- 完整 prefix 的稳定 identity、字节量和组成是什么
 - 它是不是被意外改了
 - 当前 session 为什么还能命中，或者为什么突然掉命中
+
+该 V2 shape 是一次显式 alpha session-format 断代：缺少 `materialization`、仍依赖
+`materialized_text` 的旧日志不保证恢复，用户可放弃旧 session；实现不通过提高 1 MiB event limit
+掩盖无界 control payload。
 
 #### ResponseHandle / BackgroundTaskHandle / ReasoningArtifact
 

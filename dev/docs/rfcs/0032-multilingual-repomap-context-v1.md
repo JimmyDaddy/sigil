@@ -90,14 +90,14 @@ symbol snippet 以 range 为中心；最终 repository candidates 仍最多三�
 
 included/excluded row 继续携带 source、source ref、trust、sensitivity、egress、repo revision、token cost、score breakdown、reason、body ref 和 bounded snippet。
 
-Context V1 只通过既有 `PrefixSnapshotCaptured` 成为 durable request evidence；不创建 RepoMap event、LSP cache event 或独立 index artifact。TUI 必须同时读取旧 Context V0 snapshot 和新 Context V1 snapshot。
+Context V1 只通过既有 `PrefixSnapshotCaptured` 成为 durable request evidence；不创建 RepoMap event、LSP cache event 或独立 index artifact。PrefixSnapshot V2 只保留完整 request hash、materialization 计数和 bounded typed Context V1 provenance；TUI 不解析完整 request，也不兼容旧 Context V0 full-material snapshot。
 
 ## 9. Ownership
 
 - `sigil-code-intel`：adapter、bounded walk/read、tags、RepoMap、warm LSP query ranking。
 - `sigil-runtime`：共享 service/tool surface、request resolver、selection、candidate ranking/snippet。
 - `sigil-kernel`：Context V1 render、packing、trust/sensitivity/egress、prefix materialization。
-- `sigil-tui`：所有 production path wiring 和 V0/V1 provenance surface。
+- `sigil-tui`：所有 production path wiring 和 typed Context V1 provenance surface。
 
 `sigil-kernel` 不依赖 Tree-sitter，也不暴露 provider 或 language-server 私有类型。
 
@@ -145,7 +145,7 @@ git diff --check
 
 - R32.0 complete：互联网/竞品调研、language/admission/durable contract、commit/gate 边界已冻结；implementation 从 R32.1 开始。
 - R32.1-R32.2 complete：编译期 grammar adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go；request-local RepoMap 已切换到 ignore-aware deterministic walker、bounded UTF-8 reader、硬上限和 same-language unique-reference heuristic。由于 adapter 在 R32.2 接入前没有 production consumer、无法独立通过 strict Clippy，两个相邻切片合并为同一个可独立通过 gate 的 semantic commit。
-- R32.3 complete：新 request wire 使用 `Sigil Context V1`、`sigil_context_v1`、固定 selection policy 和 content-addressed `context:v1:<sha256>`；runtime query/ranking 支持 Unicode/CJK、identifier separator/case，source candidate 保留 Tree-sitter symbol range 并以定义位置为中心生成 bounded snippet。旧 Context V0 durable prefix 的 TUI reader 保持不变，R32.5 再扩展为 V0/V1 双读。
+- R32.3 complete：新 request wire 使用 `Sigil Context V1`、`sigil_context_v1`、固定 selection policy 和 content-addressed `context:v1:<sha256>`；runtime query/ranking 支持 Unicode/CJK、identifier separator/case，source candidate 保留 Tree-sitter symbol range 并以定义位置为中心生成 bounded snippet。当时保留的 V0/V1 full-material 双读已由后续 PrefixSnapshot V2 格式断代移除。
 - R32.4 complete：runtime tool surface 同时返回 registry 与绑定到同一 `CodeIntelligenceService` inner 的 request resolver；resolver 在 35ms 内只读 warm cache，query-relevant hit 使用 explicit path + LSP 并跳过 RepoMap，miss/disabled/timeout 使用 request-local RepoMap 并保留 excluded LSP provenance。TUI normal/plan 与 headless application preparation 已消费该 resolver；queue/compaction 留在 R32.5 的 freeze 边界接入。
 - R32.5 complete：queued pre-turn 只对 exact prompt 选择一次 context，并让 direct dispatch、unavailable-compaction fallback 与 portable target 复用同一 process-local frozen candidates；manual、idle 和 guarded overflow compaction 在各自 owned preparation boundary 使用同一 resolver。TUI provenance 同时读取旧 V0 与新 V1 prefix；EN/ZH README、用户指南、status、架构说明与 site 已同步。Queue/compaction/context targeted tests、TUI full test、affected check、strict Clippy、fmt、docs/site 和 diff gates 通过。
 - R32.6 complete：新增真实 production `sigil run --output json` loopback acceptance，在一个包含 Rust、Python、JavaScript/JSX、TypeScript 和 Go 的临时仓库中逐一证明 exact symbol 进入 provider Context V1 与 durable `PrefixSnapshotCaptured`，并证明 unavailable-LSP fallback canary、V1-only new prefix、ignored/generated/secret/symlink/oversize sentinel 不进入请求或 session。真实验收发现并修复 workspace `sigil.toml` secret 被 lexical scorer 读取、旧 lexical walker 不尊重 ignore、explicit path 可跟随 symlink 三个问题；secret 判断现在先于内容评分，lexical fallback 与 RepoMap 共用 ignore/no-follow 约束。TUI V0/V1 replay tests、全部 targeted/full tests、strict Clippy、fmt、docs/site 和两轮本地审查通过，未发现剩余 P1/P2 finding。release binary 从 58,051,648 bytes 增至 62,540,144 bytes，增加 4,488,496 bytes（7.73%），对应编译期多语言 grammar 与 adapter。

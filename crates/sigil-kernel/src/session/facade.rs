@@ -143,6 +143,11 @@ struct AssembledRequest {
     prefix_snapshot: PrefixSnapshot,
 }
 
+struct RuntimeContextMaterialization {
+    message: ModelMessage,
+    summary: PrefixRuntimeContextSummary,
+}
+
 impl Session {
     /// Creates a new in-memory session with the given provider and model identity.
     pub fn new(provider_name: impl Into<String>, model_name: impl Into<String>) -> Self {
@@ -1788,7 +1793,7 @@ impl Session {
         &self,
         memory: &MemorySnapshot,
         projected_messages: Vec<ModelMessage>,
-        context_message: Option<ModelMessage>,
+        runtime_context: Option<RuntimeContextMaterialization>,
         tools: Vec<ToolSpec>,
         target_max_tokens: Option<u32>,
         reasoning_effort: Option<crate::provider::ReasoningEffort>,
@@ -1798,9 +1803,10 @@ impl Session {
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<AssembledRequest> {
         let mut safe_request_messages = memory.messages.clone();
-        if let Some(context_message) = context_message {
-            safe_request_messages.push(context_message);
-        }
+        let runtime_context_summary = runtime_context.map(|materialization| {
+            safe_request_messages.push(materialization.message);
+            materialization.summary
+        });
         let mut exact_overlays = overlays.to_vec();
         let (system_transients, non_system_transients): (Vec<_>, Vec<_>) = transient_messages
             .iter()
@@ -1823,11 +1829,22 @@ impl Session {
             .context("failed to serialize messages")?;
         let materialized_tools =
             serde_json::to_string(&tools).context("failed to serialize tool specs")?;
-        let prefix_materialized = format!("{materialized_messages}\n{materialized_tools}");
-        let digest = Sha256::digest(prefix_materialized.as_bytes());
+        let materialized_bytes = materialized_messages
+            .len()
+            .saturating_add(1)
+            .saturating_add(materialized_tools.len());
+        let mut digest = Sha256::new();
+        digest.update(materialized_messages.as_bytes());
+        digest.update(b"\n");
+        digest.update(materialized_tools.as_bytes());
         let mut prefix_snapshot = PrefixSnapshot {
-            materialized_text: prefix_materialized,
-            sha256: format!("{digest:x}"),
+            materialization: PrefixSnapshotMaterialization::new(
+                materialized_bytes,
+                safe_request_messages.len(),
+                tools.len(),
+                runtime_context_summary,
+            ),
+            sha256: format!("{:x}", digest.finalize()),
             provider_name: self.provider_name.clone(),
             model_name: self.model_name.clone(),
             memory_fingerprint: "none".to_owned(),
@@ -1863,7 +1880,7 @@ impl Session {
         session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
-    ) -> Result<Option<ModelMessage>> {
+    ) -> Result<Option<RuntimeContextMaterialization>> {
         let runtime_candidate_count = runtime_context.items.len();
         let runtime_item_ids = runtime_context
             .items
@@ -1895,7 +1912,7 @@ impl Session {
         session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
-    ) -> Result<Option<ModelMessage>> {
+    ) -> Result<Option<RuntimeContextMaterialization>> {
         let mut snippets = BTreeMap::new();
         let mut items = Vec::new();
 
@@ -1972,7 +1989,9 @@ impl Session {
             items,
             ContextPackOptions::new(REQUEST_CONTEXT_V0_MAX_TOKENS),
         )?;
-        render_runtime_context_v1_message(&packed, &snippets)
+        let summary = summarize_runtime_context(&packed);
+        Ok(render_runtime_context_v1_message(&packed, &snippets)?
+            .map(|message| RuntimeContextMaterialization { message, summary }))
     }
 
     fn memory_snapshot_for_request(

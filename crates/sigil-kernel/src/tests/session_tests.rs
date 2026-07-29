@@ -41,8 +41,8 @@ use crate::{
 };
 
 use super::{
-    ControlEntry, JsonlSessionStore, PrefixSnapshot, Session, SessionIoBusyError,
-    SessionIoBusyKind, SessionLogEntry, SessionStreamCompatibilityError,
+    ControlEntry, JsonlSessionStore, PrefixSnapshot, PrefixSnapshotMaterialization, Session,
+    SessionIoBusyError, SessionIoBusyKind, SessionLogEntry, SessionStreamCompatibilityError,
     session_stats_from_entries,
 };
 
@@ -65,6 +65,10 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
 ```
 "#
     )
+}
+
+fn test_prefix_materialization(byte_len: usize) -> PrefixSnapshotMaterialization {
+    PrefixSnapshotMaterialization::new(byte_len, 0, 0, None)
 }
 
 #[test]
@@ -717,7 +721,7 @@ fn append_session_entry_event_maps_tool_result_and_context_classes() -> Result<(
     let tool_entry = SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "ok"));
     let context_entry =
         SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-            materialized_text: "prefix".to_owned(),
+            materialization: test_prefix_materialization("prefix".len()),
             sha256: "sha256:prefix".to_owned(),
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
@@ -1230,7 +1234,7 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
         ),
         (
             SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-                materialized_text: "prefix".to_owned(),
+                materialization: test_prefix_materialization("prefix".len()),
                 sha256: "sha256:prefix".to_owned(),
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
@@ -1351,7 +1355,7 @@ fn append_session_entry_event_uses_noncritical_class_for_compatibility_records()
     }))?;
     let context = store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-            materialized_text: "prefix".to_owned(),
+            materialization: test_prefix_materialization("prefix".len()),
             sha256: "sha256:prefix".to_owned(),
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
@@ -2454,7 +2458,7 @@ fn load_from_store_recovers_identity_from_prefix_snapshot() -> Result<()> {
     let store = JsonlSessionStore::new(&path)?;
     store.append(&SessionLogEntry::Control(
         ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-            materialized_text: "prefix".to_owned(),
+            materialization: test_prefix_materialization("prefix".len()),
             sha256: "abc".to_owned(),
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
@@ -4128,6 +4132,74 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
 }
 
 #[test]
+fn build_request_persists_bounded_prefix_snapshot_for_materialization_over_event_limit()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let message_body = "bounded-prefix-regression ".repeat(800);
+    for index in 0..64 {
+        session.append_user_message(ModelMessage::user(format!("{index}: {message_body}")))?;
+    }
+    session.append_user_message(ModelMessage::user("continue"))?;
+
+    let request = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+
+    let snapshot = session.latest_prefix_snapshot().expect("prefix snapshot");
+    let materialization = &snapshot.materialization;
+    assert!(materialization.byte_len > MAX_EVENT_BYTES);
+    assert_eq!(materialization.message_count, request.messages.len());
+    assert_eq!(materialization.tool_schema_count, request.tools.len());
+
+    let durable_text = fs::read_to_string(store.path())?;
+    let prefix_record = durable_text.lines().last().expect("prefix record");
+    assert!(prefix_record.len() < MAX_EVENT_BYTES);
+    assert!(!prefix_record.contains(&message_body));
+    println!(
+        "SIGIL_PREFIX_SNAPSHOT_SMOKE {}",
+        serde_json::json!({
+            "materialized_bytes": materialization.byte_len,
+            "request_messages": request.messages.len(),
+            "prefix_record_bytes": prefix_record.len(),
+            "event_limit_bytes": MAX_EVENT_BYTES,
+        })
+    );
+
+    let restored = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let restored_snapshot = restored
+        .latest_prefix_snapshot()
+        .expect("restored snapshot");
+    assert_eq!(restored_snapshot.sha256, snapshot.sha256);
+    assert_eq!(restored_snapshot.materialization, snapshot.materialization);
+    Ok(())
+}
+
+#[test]
+fn legacy_prefix_snapshot_without_bounded_materialization_is_rejected() {
+    let legacy = serde_json::json!({
+        "materialized_text": "[{\"role\":\"user\",\"content\":\"hello\"}]\n[]",
+        "sha256": "legacy",
+        "provider_name": "deepseek",
+        "model_name": "deepseek-v4-flash",
+        "memory_fingerprint": "none",
+        "tool_schema_fingerprint": "tools",
+        "skill_index_fingerprint": "none"
+    });
+
+    let error = serde_json::from_value::<PrefixSnapshot>(legacy)
+        .expect_err("legacy full-material prefix snapshots are intentionally unsupported");
+    assert!(error.to_string().contains("materialization"));
+}
+
+#[test]
 fn build_request_reuses_an_identical_durable_prefix_snapshot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
@@ -4287,7 +4359,68 @@ fn build_request_injects_context_v1_from_runtime_candidates() -> Result<()> {
     assert!(context_text.contains("Sigil readme context"));
     assert!(context_text.contains("snapshot-readme"));
     let prefix = session.latest_prefix_snapshot().expect("prefix snapshot");
-    assert!(prefix.materialized_text.contains("repo-file:README.md"));
+    let context = prefix
+        .materialization
+        .runtime_context
+        .as_ref()
+        .expect("bounded runtime context summary");
+    assert_eq!(context.schema, "sigil_context_v1");
+    assert_eq!(context.included_count, 1);
+    assert_eq!(
+        context.top_included[0].source,
+        ContextSource::RepositoryFile
+    );
+    Ok(())
+}
+
+#[test]
+fn prefix_snapshot_caps_runtime_context_rows_without_persisting_item_content() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("Summarize the selected context"))?;
+    let mut runtime_context = RuntimeContextCandidates::new();
+    for index in 0..12 {
+        let id = format!("context-row-{index}");
+        let snippet = format!("bounded context snippet {index}");
+        runtime_context.items.push(ContextItem {
+            id: id.clone(),
+            source: ContextSource::RepositoryFile,
+            source_event_id: None,
+            trust_level: ContextTrustLevel::UntrustedRepositoryData,
+            sensitivity: ContextSensitivity::Repository,
+            egress_decision: None,
+            repo_revision: None,
+            token_cost: 8,
+            score: Some((12 - index) as f32),
+            score_breakdown: Vec::new(),
+            inclusion_reason: ContextInclusionReason::RetrievalHit,
+            body_ref: ContextBodyRef::inline(&snippet),
+        });
+        runtime_context.snippets.insert(id, snippet);
+    }
+
+    session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        runtime_context,
+    )?;
+
+    let prefix = session.latest_prefix_snapshot().expect("prefix snapshot");
+    let summary = prefix
+        .materialization
+        .runtime_context
+        .as_ref()
+        .expect("runtime context summary");
+    assert_eq!(summary.included_count, 12);
+    assert_eq!(summary.top_included.len(), 8);
+    let durable_snapshot_json = serde_json::to_string(&prefix)?;
+    assert!(!durable_snapshot_json.contains("context-row-"));
+    assert!(!durable_snapshot_json.contains("bounded context snippet"));
     Ok(())
 }
 
@@ -4424,7 +4557,7 @@ fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> 
             .contains("snippet token cost 7 exceeds declared token cost 1")
     );
     let prefix = session.latest_prefix_snapshot().expect("prefix snapshot");
-    assert!(!prefix.materialized_text.contains("sigil_context_v1"));
+    assert!(prefix.materialization.runtime_context.is_none());
     Ok(())
 }
 
@@ -4682,7 +4815,7 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         continuation_cursor: None,
     }))?;
     session.append_control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-        materialized_text: "prefix-old".to_owned(),
+        materialization: test_prefix_materialization("prefix-old".len()),
         sha256: "old".to_owned(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -4712,7 +4845,7 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         continuation_cursor: Some("cursor-new".to_owned()),
     }))?;
     session.append_control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-        materialized_text: "prefix-new".to_owned(),
+        materialization: test_prefix_materialization("prefix-new".len()),
         sha256: "new".to_owned(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),

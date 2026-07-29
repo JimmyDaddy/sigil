@@ -162,14 +162,17 @@ fn restored_read_file_tool_result_uses_original_tool_call_for_code_preview() -> 
 }
 
 #[test]
-fn restored_prefix_snapshot_keeps_large_materialized_text_out_of_activity() -> Result<()> {
+fn restored_prefix_snapshot_keeps_materialization_metadata_out_of_activity() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
-    let sentinel = "VERY_LONG_PREFIX_SENTINEL";
-    let large_prefix = format!("{sentinel}{}", "x".repeat(64 * 1024));
     let entries = vec![SessionLogEntry::Control(
         ControlEntry::PrefixSnapshotCaptured(sigil_kernel::PrefixSnapshot {
-            materialized_text: large_prefix,
+            materialization: sigil_kernel::PrefixSnapshotMaterialization::new(
+                64 * 1024 * 1024,
+                50_000,
+                128,
+                None,
+            ),
             sha256: "abcdef1234567890abcdef1234567890".to_owned(),
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
@@ -192,7 +195,7 @@ fn restored_prefix_snapshot_keeps_large_materialized_text_out_of_activity() -> R
         .find(|event| event.label == "control:restore")
         .expect("expected restored control activity");
     assert!(restored.detail.contains("[ctl] prefix"));
-    assert!(!restored.detail.contains(sentinel));
+    assert!(!restored.detail.contains("67108864"));
     assert!(restored.detail.len() < 160);
     Ok(())
 }
@@ -1135,7 +1138,12 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
         )),
         SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(
             sigil_kernel::PrefixSnapshot {
-                materialized_text: "system".to_owned(),
+                materialization: sigil_kernel::PrefixSnapshotMaterialization::new(
+                    "system".len(),
+                    1,
+                    0,
+                    None,
+                ),
                 sha256: "abcdef1234567890".to_owned(),
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),

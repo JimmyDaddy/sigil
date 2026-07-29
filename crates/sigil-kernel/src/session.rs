@@ -70,8 +70,10 @@ use crate::{
         PluginStateProjection, PluginTrustEntry,
     },
     provider::{
-        CompletionRequest, MessageRole, ModelMessage, PrefixSnapshot, ProviderContinuationState,
-        ResponseHandle, SessionStats, UsageStats,
+        CompletionRequest, MessageRole, ModelMessage, PREFIX_SNAPSHOT_CONTEXT_ITEM_LIMIT,
+        PrefixRuntimeContextExclusionSummary, PrefixRuntimeContextItemSummary,
+        PrefixRuntimeContextSummary, PrefixSnapshot, PrefixSnapshotMaterialization,
+        ProviderContinuationState, ResponseHandle, SessionStats, UsageStats,
     },
     skill::{SkillIndexSnapshot, SkillLoadEntry, SkillStateProjection},
     task::{

@@ -2000,7 +2000,7 @@ fn continuation_state(state_kind: &str) -> ProviderContinuationState {
 
 fn prefix_snapshot() -> PrefixSnapshot {
     PrefixSnapshot {
-        materialized_text: "system".to_owned(),
+        materialization: crate::PrefixSnapshotMaterialization::new("system".len(), 0, 0, None),
         sha256: "hash".to_owned(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-chat".to_owned(),

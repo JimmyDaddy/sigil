@@ -248,6 +248,56 @@ pub(super) fn render_runtime_context_v1_message(
     }))
 }
 
+pub(super) fn summarize_runtime_context(packed: &PackedContext) -> PrefixRuntimeContextSummary {
+    let mut included = packed
+        .stable_prefix
+        .iter()
+        .chain(packed.dynamic_suffix.iter())
+        .enumerate()
+        .collect::<Vec<_>>();
+    included.sort_by(|left, right| {
+        right
+            .1
+            .token_cost
+            .cmp(&left.1.token_cost)
+            .then_with(|| left.1.id.cmp(&right.1.id))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let top_included = included
+        .into_iter()
+        .take(PREFIX_SNAPSHOT_CONTEXT_ITEM_LIMIT)
+        .map(|(_, item)| PrefixRuntimeContextItemSummary {
+            source: item.source.clone(),
+            inclusion_reason: item.inclusion_reason.clone(),
+            token_cost: item.token_cost,
+        })
+        .collect();
+
+    let mut excluded_counts = BTreeMap::<ContextInclusionReason, usize>::new();
+    for item in &packed.excluded {
+        *excluded_counts
+            .entry(item.inclusion_reason.clone())
+            .or_default() += 1;
+    }
+    let excluded_by_reason = excluded_counts
+        .into_iter()
+        .map(|(reason, count)| PrefixRuntimeContextExclusionSummary { reason, count })
+        .collect();
+
+    PrefixRuntimeContextSummary {
+        schema: RUNTIME_CONTEXT_V1_SCHEMA.to_owned(),
+        max_tokens: packed.max_tokens,
+        used_tokens: packed.used_tokens,
+        included_count: packed
+            .stable_prefix
+            .len()
+            .saturating_add(packed.dynamic_suffix.len()),
+        excluded_count: packed.excluded.len(),
+        top_included,
+        excluded_by_reason,
+    }
+}
+
 pub(super) fn runtime_context_item_json(
     item: &ContextItem,
     snippets: &BTreeMap<String, String>,

@@ -69,7 +69,7 @@ fn memory_loader_skips_empty_documents_and_applies_report_fingerprint() -> Resul
     assert_eq!(materialized.messages.len(), 1);
 
     let mut snapshot = PrefixSnapshot {
-        materialized_text: "prefix".to_owned(),
+        materialization: crate::PrefixSnapshotMaterialization::new("prefix".len(), 0, 0, None),
         sha256: "hash".to_owned(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),

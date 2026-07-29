@@ -1287,6 +1287,26 @@ fail-closed semantics。混用会把历史查询 cache变成第二套 live autho
 process restart一次 full rebuild已经由 RFC-0038 `10k` evidence约束。先消除 steady-state热扫描；只有
 startup replay有独立、测量确认的 SLO问题时，才另起 RFC设计 checksum-bound snapshot sidecar。
 
+### 17.10 Bound PrefixSnapshot instead of raising the event limit
+
+事件驱动 worker 落地后的同一现场 session 继续增长到 `12,920,344 bytes / 462 records` 时，下一轮
+request 在 provider I/O 前命中 `stored event exceeds maximum byte size`。根因不是 worker lock：
+旧 `PrefixSnapshotCaptured` 每次把完整 `messages + tools` 再复制进 control event，sequence 440 的
+单条 record 已达 `1,038,826 bytes`，仅比 1 MiB guard 少 `9,750 bytes`。
+
+修复固定为 PrefixSnapshot V2：
+
+- 完整 materialization 只用于 SHA-256 和实际 provider request；
+- durable event 只保存 byte/message/tool-schema count、fingerprints，以及最多 8 条无正文 Context
+  provenance；
+- TUI 直接消费 typed summary，不再反序列化完整 prompt；
+- 不提高 `MAX_EVENT_BYTES`；
+- 本次 alpha 格式断代不兼容旧 `materialized_text` session，缺少 V2 `materialization` 的日志允许
+  直接放弃。
+
+这使 prefix audit event 从 `O(session bytes)` 变成 `O(1)`；synthetic logical prefix 超过 1 MiB 时，
+provider request 保持完整，而最后一条 durable record 仍低于 event limit。
+
 ## 18. Acceptance criteria
 
 - production worker不再包含固定 `Duration::from_millis(50)` general scheduling poll。

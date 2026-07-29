@@ -103,19 +103,19 @@ Implementation progress:
 - 已新增 code-intel context adapter，将 symbols、diagnostics、references、repo file hits 和 current diff 转为 provenance-labeled context hits；secret hits without egress are represented as excluded context.
 - 已新增 deterministic token budget packer，输出 stable prefix、dynamic suffix 和 excluded context，保持 provider prefix cache 友好并记录 budget/secret exclusion reason。
 - 已新增 TUI provenance summary view model，展示 context budget、top included sources、excluded reason summary、untrusted/secret warning 和一个 recommended action。
-- 已完成 Context V0 runtime adoption：默认 agent request assembly 会在 stable memory prefix 之后注入动态 `Sigil Context V0` system message，来源包括 session archive BM25 hits 和 latest `TaskMemoryV1` context items；注入结果进入 `PrefixSnapshotCaptured.materialized_text`，可从 session audit 定位。
+- 已完成 Context V0 runtime adoption：默认 agent request assembly 会在 stable memory prefix 之后注入动态 `Sigil Context V0` system message，来源包括 session archive BM25 hits 和 latest `TaskMemoryV1` context items；request 使用完整注入结果，session audit 只保留完整 prefix hash 和 bounded typed provenance。
 - Runtime adoption 对 context engine failure 采用安全降级：无可用 source、空 BM25、无 task memory 或 task-memory adapter 失败时，不阻断普通 request。
 - Context V0 request rendering 会校验 snippet byte cap、declared token cost 和 inline body ref metadata；校验失败会记录 `ContextAssemblySkipped` control entry，并降级为不注入 Context V0，随后仍记录 `PrefixSnapshotCaptured`。
 - Context V0 request rendering 不会为被排除的 secret-like / external item 输出 snippet；未信任 workspace instruction 仍不能提升为 trusted workspace instruction。
 - 已完成 Context quality evidence pack：`ContextQualityEvidencePack` 记录 query、included/excluded context rows、token budget、source counts、exclusion reason counts、rank/score、trust/sensitivity/egress labels、truncation facts 和 recall/ranking/token-budget/safety findings。它用于判断 E06.6 是否真的需要打开，而不是直接实现 heavy repo graph 或 semantic retrieval。
 - 已完成 Context quality evidence sweep：`scripts/run-context-quality.sh` 可生成 `context-quality.jsonl`、`summary.md` 和 `manifest.json`，用于把 E06.6 trigger decision 绑定到可复核 artifact。
-- 已完成 runtime repo-file provider wiring：CLI 和 TUI primary chat 会通过 `RuntimeContextCandidates` 向 request assembly 提供 bounded repository candidates，并在 `PrefixSnapshotCaptured` 中保留 Context V0 materialization。
+- 已完成 runtime repo-file provider wiring：CLI 和 TUI primary chat 会通过 `RuntimeContextCandidates` 向 request assembly 提供 bounded repository candidates，并在 `PrefixSnapshotCaptured` 中保留无正文的 Context provenance summary。
 - 已完成 explicit-path precision polish：用户明确提到存在的 workspace-relative path 时，只注入该路径，不再被同名 README、RFC 或 lexical neighbor 干扰。
 - 已完成 source/symbol auto-context scheduling：对 Rust-like identifier、function/tool name、trait/type、runner handoff、TUI surface 和 source lookup prompt，runtime 会在 bounded `crates/**/*.rs` 范围内加入少量高置信源码候选；query term 会先分类为 intent hint、symbol-like、path-like、lexical hint 或 natural-language noise，显式反引号/引号包裹的单个代码 token 会优先保留为源码候选，避免把 `rust`、`source`、`which` 等自然语言或意图词当成 exact symbol evidence；exact symbol matches 标为 `exact_symbol_match`，source path/module matches 标为 `source_path_match`。
 
 2026-07-16 Context V1 更新：
 
-- [RFC-0032](0032-multilingual-repomap-context-v1.md) 把新请求 wire 升级为 `Sigil Context V1` / `sigil_context_v1`，同时保留 TUI 对旧 V0 durable prefix 的读取。
+- [RFC-0032](0032-multilingual-repomap-context-v1.md) 把新请求 wire 升级为 `Sigil Context V1` / `sigil_context_v1`；后续 PrefixSnapshot V2 格式断代不再要求 TUI 读取旧 V0 full-material snapshot。
 - request-local RepoMap 已覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用 ignore-aware bounded walk/read、编译期 grammar、deterministic cap 和 same-language unique-reference heuristic；不创建 persistent graph、vector index 或运行期下载。
 - production resolver 优先读取同一 code-intelligence service 的 query-relevant warm LSP cache；miss/disabled/timeout 才运行 Tree-sitter fallback。normal、plan、headless、queue 和 compaction preparation 使用同一选择契约，冻结后的 request 不在 dispatch 时重算。
 - ContextDigestV0、quality evidence schema 和历史 V0 fixture 名称仍是既有内部契约；它们不表示新 provider request 继续生成 V0 wire。

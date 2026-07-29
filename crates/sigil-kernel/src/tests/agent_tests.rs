@@ -4344,11 +4344,6 @@ async fn safe_persistence_user_url_is_exact_once_in_request_but_never_in_session
         })
         .collect::<Vec<_>>();
     assert!(!snapshots.is_empty());
-    assert!(
-        snapshots
-            .iter()
-            .all(|snapshot| !snapshot.materialized_text.contains("known-secret"))
-    );
     Ok(())
 }
 

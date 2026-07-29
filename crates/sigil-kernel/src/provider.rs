@@ -1012,11 +1012,76 @@ fn round_usage_cost(value: f64) -> f64 {
     (value * COST_DECIMAL_SCALE).round() / COST_DECIMAL_SCALE
 }
 
-/// Stable snapshot of the deterministic prefix materialization for auditing and resume.
+pub const PREFIX_SNAPSHOT_MATERIALIZATION_SCHEMA_VERSION: u16 = 2;
+pub const PREFIX_SNAPSHOT_CONTEXT_ITEM_LIMIT: usize = 8;
+
+/// Bounded metadata for one deterministic prefix materialization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PrefixSnapshotMaterialization {
+    pub schema_version: u16,
+    pub byte_len: usize,
+    pub message_count: usize,
+    pub tool_schema_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_context: Option<PrefixRuntimeContextSummary>,
+}
+
+impl PrefixSnapshotMaterialization {
+    #[must_use]
+    pub fn new(
+        byte_len: usize,
+        message_count: usize,
+        tool_schema_count: usize,
+        runtime_context: Option<PrefixRuntimeContextSummary>,
+    ) -> Self {
+        Self {
+            schema_version: PREFIX_SNAPSHOT_MATERIALIZATION_SCHEMA_VERSION,
+            byte_len,
+            message_count,
+            tool_schema_count,
+            runtime_context,
+        }
+    }
+}
+
+/// Bounded, content-free provenance for the runtime context included in one prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PrefixRuntimeContextSummary {
+    pub schema: String,
+    pub max_tokens: usize,
+    pub used_tokens: usize,
+    pub included_count: usize,
+    pub excluded_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_included: Vec<PrefixRuntimeContextItemSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_by_reason: Vec<PrefixRuntimeContextExclusionSummary>,
+}
+
+/// One content-free runtime-context row retained for the TUI provenance surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PrefixRuntimeContextItemSummary {
+    pub source: crate::ContextSource,
+    pub inclusion_reason: crate::ContextInclusionReason,
+    pub token_cost: usize,
+}
+
+/// Count of runtime-context candidates excluded for one normalized reason.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PrefixRuntimeContextExclusionSummary {
+    pub reason: crate::ContextInclusionReason,
+    pub count: usize,
+}
+
+/// Stable snapshot of deterministic prefix identity for auditing and resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PrefixSnapshot {
-    pub materialized_text: String,
+    pub materialization: PrefixSnapshotMaterialization,
     pub sha256: String,
     pub provider_name: String,
     pub model_name: String,

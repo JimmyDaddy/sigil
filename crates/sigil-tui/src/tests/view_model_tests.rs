@@ -8,11 +8,12 @@ use sigil_kernel::{
     AgentThreadId, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, ContextBodyRef,
     ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
     ControlEntry, EventHandler, JobIntentEntry, MemoryConfig, ModelMessage, PackedContext,
-    PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef,
-    StepLeaseEntry, StepLeaseStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall,
-    ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
-    WorkspaceConfig,
+    PermissionConfig, PrefixRuntimeContextExclusionSummary, PrefixRuntimeContextItemSummary,
+    PrefixRuntimeContextSummary, PrefixSnapshotMaterialization, RootConfig, RunEvent,
+    SessionConfig, SessionLogEntry, SessionRef, StepLeaseEntry, StepLeaseStatus, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall, ToolCategory, ToolEffect,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
@@ -523,99 +524,48 @@ fn context_provenance_summary_recommends_budget_adjustment_for_budget_only_exclu
     );
 }
 
-fn runtime_context_prefix_entries(schema: &str, header: &str) -> Vec<SessionLogEntry> {
-    let mut payload = json!({
-        "schema": schema,
-        "placement": "dynamic_suffix",
-        "budget": {
-            "max_tokens": 64,
-            "used_tokens": 11,
-        },
-        "included": [
-            context_item(
-                "task-memory",
-                ContextSource::TaskDigest,
-                7,
-                ContextInclusionReason::RetrievalHit,
-            ),
-            context_item(
-                "archive",
-                ContextSource::SessionArchive,
-                4,
-                ContextInclusionReason::RetrievalHit,
-            ),
-        ],
-        "excluded": [
-            context_item(
-                "secret",
-                ContextSource::RepositoryFile,
-                5,
-                ContextInclusionReason::ExcludedSecret,
-            ),
-        ],
-    });
-    if schema == "sigil_context_v1" {
-        payload["selection_policy"] = json!("warm_lsp_then_request_local_tree_sitter");
-    }
-    let messages = json!([
-        {
-            "role": "system",
-            "content": format!("{header}{payload}"),
-            "tool_calls": [],
-        }
-    ])
-    .to_string();
-    vec![SessionLogEntry::Control(
+#[test]
+fn detail_info_rail_projects_bounded_runtime_context_summary() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![SessionLogEntry::Control(
         ControlEntry::PrefixSnapshotCaptured(sigil_kernel::PrefixSnapshot {
-            materialized_text: format!("{messages}\n[]"),
-            sha256: "sha-context".to_owned(),
+            materialization: PrefixSnapshotMaterialization::new(
+                2_000_000,
+                128,
+                4,
+                Some(PrefixRuntimeContextSummary {
+                    schema: "sigil_context_v1".to_owned(),
+                    max_tokens: 64,
+                    used_tokens: 11,
+                    included_count: 2,
+                    excluded_count: 1,
+                    top_included: vec![
+                        PrefixRuntimeContextItemSummary {
+                            source: ContextSource::TaskDigest,
+                            inclusion_reason: ContextInclusionReason::RetrievalHit,
+                            token_cost: 7,
+                        },
+                        PrefixRuntimeContextItemSummary {
+                            source: ContextSource::SessionArchive,
+                            inclusion_reason: ContextInclusionReason::RetrievalHit,
+                            token_cost: 4,
+                        },
+                    ],
+                    excluded_by_reason: vec![PrefixRuntimeContextExclusionSummary {
+                        reason: ContextInclusionReason::ExcludedSecret,
+                        count: 1,
+                    }],
+                }),
+            ),
+            sha256: "sha-context-v2".to_owned(),
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
             memory_fingerprint: "memory".to_owned(),
             tool_schema_fingerprint: "tools".to_owned(),
             skill_index_fingerprint: "skills".to_owned(),
         }),
-    )]
-}
-
-#[test]
-fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
-    let session_log_path = app.session_log_path.clone();
-    let entries = runtime_context_prefix_entries("sigil_context_v0", RUNTIME_CONTEXT_V0_HEADER);
-
-    app.handle_worker_message(WorkerMessage::SessionSwitched {
-        session_log_path,
-        provider_name: "deepseek".to_owned(),
-        model_name: "deepseek-v4-flash".to_owned(),
-        entries,
-    })?;
-
-    let compact = UiViewModel::from_app(&app);
-    assert!(
-        compact
-            .info_rail
-            .usage_lines
-            .iter()
-            .all(|line| !line.starts_with("source:"))
-    );
-
-    app.toggle_info_rail_detail();
-    let detail = UiViewModel::from_app(&app);
-    let usage = detail.info_rail.usage_lines.join("\n");
-    assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
-    assert!(usage.contains("source: memory context · retrieval hit · 7 tokens"));
-    assert!(usage.contains("source: session archive · retrieval hit · 4 tokens"));
-    assert!(usage.contains("excluded: secret · 1 item(s)"));
-    assert!(usage.contains("action: review egress"));
-    Ok(())
-}
-
-#[test]
-fn detail_info_rail_projects_runtime_context_v1_from_prefix_snapshot() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
-    let session_log_path = app.session_log_path.clone();
-    let entries = runtime_context_prefix_entries("sigil_context_v1", RUNTIME_CONTEXT_V1_HEADER);
+    )];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
         session_log_path,
