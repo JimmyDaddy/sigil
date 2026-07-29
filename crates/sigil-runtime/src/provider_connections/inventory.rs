@@ -138,28 +138,37 @@ pub async fn connection_inventory_with_cancellation(
 /// Builds a stored-credential verified inventory from synchronous product surfaces.
 ///
 /// The verification owns a dedicated thread and current-thread runtime so callers are safe inside
-/// either Tokio runtime flavor and credential-store work never blocks an async executor thread.
+/// either Tokio runtime flavor. If native access does not complete promptly, the caller receives
+/// the offline inventory instead of waiting indefinitely.
 #[must_use]
 pub fn connection_inventory_native(root_config: &RootConfig) -> ConnectionInventory {
     let root_config = root_config.clone();
     let fallback = root_config.clone();
-    std::thread::Builder::new()
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
         .name("sigil-credential-doctor".to_owned())
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .ok()?;
-            let inventory = runtime.block_on(connection_inventory(
-                &root_config,
-                &super::ConfiguredProviderCredentialStore::from_root_config(&root_config),
-                &super::ProcessCredentialEnvironment,
-            ));
-            runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-            Some(inventory)
-        })
+                .ok();
+            let inventory = runtime.map(|runtime| {
+                let inventory = runtime.block_on(connection_inventory(
+                    &root_config,
+                    &super::ConfiguredProviderCredentialStore::from_root_config(&root_config),
+                    &super::ProcessCredentialEnvironment,
+                ));
+                runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+                inventory
+            });
+            let _ = sender.send(inventory);
+        });
+    if spawned.is_err() {
+        return connection_inventory_offline(&fallback, &super::ProcessCredentialEnvironment);
+    }
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
         .ok()
-        .and_then(|thread| thread.join().ok())
         .flatten()
         .unwrap_or_else(|| {
             connection_inventory_offline(&fallback, &super::ProcessCredentialEnvironment)

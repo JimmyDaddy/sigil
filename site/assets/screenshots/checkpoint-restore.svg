@@ -169,7 +169,7 @@
     <text x="1257" y="188" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1266" y="188" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1311" y="188" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
-    <text x="1320" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">62</text>
+    <text x="1320" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">7b</text>
     <text x="168" y="206" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="213" y="206" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="222" y="206" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
@@ -281,7 +281,7 @@
     <text x="1257" y="458" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1266" y="458" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1311" y="458" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
-    <text x="51" y="476" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Resumed fac76</text>
+    <text x="51" y="476" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Resumed b3ebe</text>
     <text x="168" y="476" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="213" y="476" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="222" y="476" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
@@ -329,6 +329,7 @@
     <text x="222" y="584" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
     <text x="1266" y="584" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1311" y="584" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">: copy reply</text>
     <text x="168" y="602" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="213" y="602" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="222" y="602" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">┌Actions───────────────────────────────────────────────────────────────────────────────────────────────────────────┐</text>

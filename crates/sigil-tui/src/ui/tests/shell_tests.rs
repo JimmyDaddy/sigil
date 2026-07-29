@@ -1970,6 +1970,13 @@ fn render_docs_screenshot_assets() -> anyhow::Result<()> {
     )?;
 
     write_terminal_svg(
+        &screenshot_dir.join("planned-task-execution.svg"),
+        "Sigil AI-planned task execution preview",
+        "Generated from the Sigil TUI renderer: an accepted multi-step plan with two independent steps running in parallel before verification.",
+        &mut docs_planned_task_execution_app()?,
+    )?;
+
+    write_terminal_svg(
         &screenshot_dir.join("checkpoint-restore.svg"),
         "Sigil checkpoint restore preview",
         "Generated from the Sigil TUI renderer: controlled checkpoint restore review with reverse diff and restore or fork choices.",
@@ -1979,11 +1986,140 @@ fn render_docs_screenshot_assets() -> anyhow::Result<()> {
     write_terminal_svg(
         &screenshot_dir.join("compaction-preview.svg"),
         "Sigil context compaction preview",
-        "Generated from the Sigil TUI renderer: read-only Context Compaction V2 review with apply unavailable while admission is frozen.",
+        "Generated from the Sigil TUI renderer: locally prepared context compaction review before one explicit semantic-summary request.",
         &mut docs_compaction_preview_app()?,
     )?;
 
     Ok(())
+}
+
+fn docs_planned_task_execution_app() -> anyhow::Result<AppState> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    app.composer.input =
+        "Prepare the release docs and site, then verify the published surface.".to_owned();
+    let _ = app.submit_input()?;
+    app.handle(RunEvent::ReasoningDelta(
+        "The accepted plan has four bounded steps; documentation and screenshots can run in parallel."
+            .to_owned(),
+    ))?;
+    app.handle(RunEvent::TextDelta(
+        "Two independent updates are running now. The repository check follows when both finish."
+            .to_owned(),
+    ))?;
+    app.runtime.is_busy = true;
+    app.session_browser.current_entries = docs_planned_task_execution_entries()?;
+    Ok(app)
+}
+
+fn docs_planned_task_execution_entries() -> anyhow::Result<Vec<SessionLogEntry>> {
+    let task_id = TaskId::new("release_refresh")?;
+    let inspect_id = TaskStepId::new("inspect")?;
+    let docs_id = TaskStepId::new("docs")?;
+    let screenshots_id = TaskStepId::new("screenshots")?;
+    let verify_id = TaskStepId::new("verify")?;
+    let steps = vec![
+        TaskStepSpec {
+            step_id: inspect_id.clone(),
+            title: "Confirm release scope and repository guidance".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        },
+        TaskStepSpec {
+            step_id: docs_id.clone(),
+            title: "Refresh English and Chinese release docs".to_owned(),
+            display_name: Some("Docs".to_owned()),
+            detail: None,
+            role: AgentRole::SubagentWrite,
+            depends_on: vec![inspect_id.clone()],
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        },
+        TaskStepSpec {
+            step_id: screenshots_id.clone(),
+            title: "Regenerate current TUI screenshots".to_owned(),
+            display_name: Some("Visuals".to_owned()),
+            detail: None,
+            role: AgentRole::SubagentWrite,
+            depends_on: vec![inspect_id.clone()],
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        },
+        TaskStepSpec {
+            step_id: verify_id.clone(),
+            title: "Run release documentation checks".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: vec![docs_id.clone(), screenshots_id.clone()],
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        },
+    ];
+    let step_entry = |step_id: TaskStepId, role: AgentRole, status: TaskStepStatus, title: &str| {
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id,
+            role,
+            status,
+            title: Some(title.to_owned()),
+            summary: None,
+            reason: None,
+        }))
+    };
+    Ok(vec![
+        SessionLogEntry::User(ModelMessage::user(
+            "Prepare the release docs and site, then verify the published surface.",
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "Prepare the release docs and site, then verify the published surface."
+                .to_owned(),
+            status: TaskRunStatus::Running,
+            reason: Some("accepted AI-generated plan".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        })),
+        step_entry(
+            inspect_id,
+            AgentRole::Executor,
+            TaskStepStatus::Completed,
+            "Confirm release scope and repository guidance",
+        ),
+        step_entry(
+            docs_id,
+            AgentRole::SubagentWrite,
+            TaskStepStatus::Running,
+            "Refresh English and Chinese release docs",
+        ),
+        step_entry(
+            screenshots_id,
+            AgentRole::SubagentWrite,
+            TaskStepStatus::Running,
+            "Regenerate current TUI screenshots",
+        ),
+        step_entry(
+            verify_id,
+            AgentRole::Executor,
+            TaskStepStatus::Pending,
+            "Run release documentation checks",
+        ),
+    ])
 }
 
 fn docs_verification_app() -> anyhow::Result<AppState> {
@@ -2186,9 +2322,8 @@ fn docs_compaction_preview_app() -> anyhow::Result<AppState> {
             request_id: 41,
             strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
             preview,
-            admission: V2CompactionAdmission::Unavailable {
-                reason: "apply is temporarily frozen while correctness fixes are in progress"
-                    .to_owned(),
+            admission: V2CompactionAdmission::Prepared {
+                standalone_tool_output_shrink_available: false,
             },
             tool_output_shrink_candidates: Vec::new(),
             continuity: None,

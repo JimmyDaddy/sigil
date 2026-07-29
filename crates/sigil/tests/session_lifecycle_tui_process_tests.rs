@@ -279,6 +279,40 @@ fn captured_text(output: &Arc<Mutex<Vec<u8>>>) -> String {
         .unwrap_or_else(|_| "<captured output unavailable>".to_owned())
 }
 
+fn captured_len(output: &Arc<Mutex<Vec<u8>>>) -> usize {
+    output.lock().map_or(0, |bytes| bytes.len())
+}
+
+fn wait_for_text_after(output: &Arc<Mutex<Vec<u8>>>, offset: usize, needle: &str) -> Result<()> {
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+    loop {
+        let captured = output
+            .lock()
+            .map(|bytes| {
+                let offset = offset.min(bytes.len());
+                String::from_utf8_lossy(&bytes[offset..]).into_owned()
+            })
+            .unwrap_or_else(|_| "<captured output unavailable>".to_owned());
+        if captured.contains(needle) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let tail = captured
+                .chars()
+                .rev()
+                .take(2_000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            return Err(anyhow!(
+                "timed out waiting for fresh {needle:?}; captured tail={tail:?}"
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn wait_for_text(output: &Arc<Mutex<Vec<u8>>>, needle: &str) -> Result<()> {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
     loop {
@@ -493,13 +527,21 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                 thread::sleep(Duration::from_millis(100));
                 write_input(writer, &[0x7f; 64])?;
                 write_input(writer, catalog_base_url.as_bytes())?;
+                let endpoint_apply_offset = captured_len(output);
                 write_input(writer, b"\r")?;
-                thread::sleep(Duration::from_millis(150));
+                wait_for_text_after(output, endpoint_apply_offset, "credential: <not staged>")?;
 
+                let authentication_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\x1b[C")?;
-                thread::sleep(Duration::from_millis(150));
+                wait_for_text_after(output, authentication_offset, "no authentication")?;
 
+                let catalog_loading_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\r")?;
+                wait_for_text_after(
+                    output,
+                    catalog_loading_offset,
+                    "loading remote provider models",
+                )?;
                 let deadline = Instant::now() + PROCESS_TIMEOUT;
                 while !catalog_responded.load(Ordering::Acquire) {
                     if Instant::now() >= deadline {

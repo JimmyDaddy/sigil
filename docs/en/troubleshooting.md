@@ -30,7 +30,7 @@ Sigil has no usable provider connection, credential, or saved model route. Open 
 
 ## Sigil Cannot Find The API Key
 
-Check that the environment-variable name belongs to the selected connection and that the terminal launching Sigil inherited it. Restart Sigil after changing shell variables. For a stored credential, reopen `/config` and repair that connection. The default `file` and non-interactive `auto` modes use owner-only `~/.sigil/credentials.json`. If an older `auto` record in macOS Keychain requires authentication, Sigil skips it without opening a password prompt; enter the key once in `/config` to create the file-backed record. Never put an API key in `sigil.toml` or an issue report.
+Check that the environment-variable name belongs to the selected connection and that the terminal launching Sigil inherited it. Restart Sigil after changing shell variables. For a stored credential, reopen `/config` and repair that connection. The default `file` and non-interactive `auto` modes use only owner-only `~/.sigil/credentials.json` and never query an older native-system record. If the file-backed record is missing, enter the key once in `/config`. Never put an API key in `sigil.toml` or an issue report.
 
 ### Provider Connection Or Model Catalog Is Not Ready
 

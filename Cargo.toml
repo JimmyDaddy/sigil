@@ -22,7 +22,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 
 [workspace.dependencies]
 aho-corasick = "1.1.4"
@@ -46,7 +46,6 @@ keyring = { version = "3.6.3", default-features = false, features = [
     "sync-secret-service",
     "vendored",
 ] }
-security-framework = "3.7.0"
 encoding_rs = "0.8.35"
 libc = "0.2.186"
 nix = { version = "0.29.0", features = ["signal"] }

@@ -13,3 +13,8 @@ in a disposable repository.
 The canonical prompt, recording constraints, timing, and acceptance checklist
 live in [`dev/docs/launch/45-second-demo-script.md`](../../dev/docs/launch/45-second-demo-script.md).
 Raw recordings remain local and are not published.
+
+The original launch video remains the focused edit, approval, verification, and
+resume demo. The separate real-run script for AI-generated plans, parallel Task
+steps, and final verification lives in
+[`dev/docs/launch/ai-planned-task-demo-script.md`](../../dev/docs/launch/ai-planned-task-demo-script.md).

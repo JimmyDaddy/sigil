@@ -252,7 +252,7 @@
     <text x="1068" y="188" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1113" y="188" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1131" y="188" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">state:</text>
-    <text x="1194" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">tool write_file · 8ae2c0f8</text>
+    <text x="1194" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">tool write_file · 97d57c4b</text>
     <text x="366" y="206" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="411" y="206" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="420" y="206" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
@@ -424,7 +424,7 @@
     <text x="1068" y="494" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1113" y="494" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1131" y="494" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">balance:</text>
-    <text x="1212" y="494" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">loading</text>
+    <text x="1212" y="494" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">n/a</text>
     <text x="33" y="512" fill="#c68e96" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">error</text>
     <text x="366" y="512" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="411" y="512" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
@@ -453,7 +453,7 @@
     <text x="1131" y="548" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">F1:</text>
     <text x="1167" y="548" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">keyboard help</text>
     <text x="33" y="566" fill="#c68e96" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
-    <text x="51" y="566" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">◓</text>
+    <text x="51" y="566" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">◒</text>
     <text x="69" y="566" fill="#c68e96" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Approval...</text>
     <text x="366" y="566" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="411" y="566" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
@@ -471,7 +471,7 @@
     <text x="1068" y="584" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1113" y="584" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="1131" y="584" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Ctrl-C:</text>
-    <text x="1203" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">quit</text>
+    <text x="1203" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">quit · Ctrl-L: copy reply</text>
     <text x="366" y="602" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="411" y="602" fill="#5eae7f" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="420" y="602" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>

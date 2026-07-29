@@ -4845,7 +4845,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigil"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4872,7 +4872,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-code-intel"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-desktop"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
@@ -4912,7 +4912,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-desktop-app"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -4928,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-http"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4949,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-kernel"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4979,7 +4979,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-mcp"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5006,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-process"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "nix 0.29.0",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-anthropic"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5033,7 +5033,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-deepseek"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5053,7 +5053,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-gemini"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5069,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-openai-compat"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5084,7 +5084,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-openai-responses"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5102,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-runtime"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5116,7 +5116,6 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
- "security-framework 3.7.0",
  "serde",
  "serde_json",
  "sha2",
@@ -5142,7 +5141,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tools-builtin"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -5176,7 +5175,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tui"
-version = "0.0.1-alpha.5"
+version = "0.0.1-alpha.6"
 dependencies = [
  "anyhow",
  "arboard",

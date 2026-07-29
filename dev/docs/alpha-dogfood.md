@@ -15,7 +15,7 @@ Select a standalone native Sigil executable explicitly, such as the binary from 
 ```bash
 python3 scripts/alpha-dogfood-campaign.py \
   --binary /path/to/sigil \
-  --expected-version 0.0.1-alpha.5 \
+  --expected-version 0.0.1-alpha.6 \
   --expected-commit 8d57b6dda05561b791f908d6a6a9a3f693cae121
 ```
 
@@ -47,7 +47,7 @@ sigil tokenizer install deepseek-v4-flash
 python3 scripts/tui-stateful-pty-acceptance.py \
   --binary /path/to/sigil \
   --tokenizer-json /path/printed/by/tokenizer-install/tokenizer.json \
-  --expected-version 0.0.1-alpha.5 \
+  --expected-version 0.0.1-alpha.6 \
   --expected-commit 8d57b6dda05561b791f908d6a6a9a3f693cae121 \
   --expected-binary-sha256 <sha256>
 ```

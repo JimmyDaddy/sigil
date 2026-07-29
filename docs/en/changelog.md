@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,8 +8,15 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+No user-facing changes have been added after `v0.0.1-alpha.6` yet.
+
+## v0.0.1-alpha.6 - 2026-07-30
+
+These changes are included in the packaged `v0.0.1-alpha.6` release.
+
 ### Added
 
+- Added AI-planned Task execution: Sigil can turn one repository goal into a visible, reviewable step plan, run independent steps in parallel, preserve normal tool approvals, and finish against repository-owned verification evidence.
 - Added an authenticated, restart-durable historical session catalog to `sigil serve` for future desktop clients, with bounded pagination, title search, provider/pin/state filters, and explicit stale-cursor recovery. Session logs remain the source of truth, and catalog failures do not stop runs or recording.
 - Added a desktop runtime bridge for trusted local clients: durable catalog entries can be reopened after restart, startup and server metadata have one versioned JSON shape, and an opt-in stdin owner pipe triggers graceful shutdown without PID polling.
 - Added a source-built desktop dogfood shell with native workspace selection, durable history, conversation runs, exact approval and cancellation controls, and verification evidence over the same authenticated local server used by automation. CI builds short-lived unsigned macOS, Linux, and Windows dogfood artifacts; these are not a public install channel.
@@ -18,7 +25,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ### Changed
 
-- Provider API-key storage now defaults to the owner-only credential file. Existing explicit `auto` configuration is non-interactive and file-backed; on macOS it can silently read an older Keychain record only when no authentication UI is required. Only explicit `keyring` mode may show a system password prompt.
+- Provider API-key storage now defaults to the owner-only credential file. Existing explicit `auto` configuration is non-interactive and strictly file-backed; it never queries an older native-system record. Only explicit `keyring` mode may show a system password prompt.
 - Context compaction now defaults to cache-aware V3: stable provider/tool prefixes, source-bound intent continuity across repeated compactions, complete-turn tails, and trusted cache-cost admission. Manual compaction first produces a local-only plan with separate keep-current, recoverable tool-output cleanup, and full-semantic choices; only the full-semantic choice sends a billed request. Normal semantic compaction makes one extra LLM request on the current route, retaining the old request as its cacheable prefix and appending only a strict summary instruction; model narrative cannot grant authority or verification, and observed cache/output cost is shown before final activation confirmation. Provider-native materialization remains fail-closed until exact-route resume is implemented, preventing a billed request whose result would not yet be reused. Legacy threshold/tail fields remain readable for rollback and migration.
 - Reworked the desktop dogfood shell around workspace/session navigation, one conversation task surface, and a verification inspector. It replays bounded saved messages, retains control of runs across navigation while the workspace service stays open, separates final replies from progress and tool output, and provides focused approval, diff, evidence, and draft-aware composer behavior.
 - Added one consistent desktop visual system, adaptive wide/two-pane/compact layouts, system light and dark themes, high-contrast and reduced-motion handling, keyboard focus capture/restore, terminal-only streaming announcements, and usable reflow down to 320 CSS pixels.
@@ -27,8 +34,10 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ### Fixed
 
+- Fixed non-interactive `auto` credential checks waiting indefinitely on macOS Keychain. `auto` no longer contacts native storage, and Doctor falls back to an offline status if an explicit native check does not finish promptly.
 - Fixed the packaged desktop app reading Tauri-managed state before its setup lifecycle ran, which previously made the macOS app exit before creating a window.
 - Fixed the event-driven TUI input loop stalling after the first key while idle.
+- Fixed background tool-artifact maintenance racing with session actions, which could surface a transient lock failure instead of completing the requested action.
 
 ## v0.0.1-alpha.5 - 2026-07-18
 

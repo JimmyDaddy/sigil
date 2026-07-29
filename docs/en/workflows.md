@@ -18,6 +18,10 @@ State the goal, allowed files, what must stay untouched, and how to verify the r
 
 Use `/plan <prompt>` when you want a read-only plan before committing to execution. Accept the Plan ready card only after the steps and boundaries look right. Use `/task <task>` when you already want a multi-step task, and `/task continue` when the latest task should proceed without new guidance.
 
+For an accepted Task, Sigil keeps the generated steps visible, can run independent work in parallel, and finishes at a verification checkpoint. Plan acceptance and tool permission are separate decisions: accepting the plan does not silently approve a later file change, command, network request, or external tool call.
+
+Ordinary chat can hand a larger goal to this Task flow only on a newly installed release whose exact model route is qualified. Other installations stay chat-first; `/plan` and `/task` remain available explicitly. Run `sigil doctor` to inspect the current route.
+
 Keep steering instructions concrete, for example:
 
 ```text

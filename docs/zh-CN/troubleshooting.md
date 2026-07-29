@@ -30,7 +30,7 @@ sigil doctor
 
 ## Sigil 找不到 API 密钥
 
-确认环境变量名属于当前 connection，并且启动 Sigil 的终端能够读取它。修改 Shell 环境变量后请重启 Sigil。使用 stored credential 时，在 `/config` 中修复当前 connection。默认 `file` 与非交互 `auto` 都使用 owner-only 的 `~/.sigil/credentials.json`。如果 macOS Keychain 中旧 `auto` 记录需要认证，Sigil 会跳过它且不弹密码框；在 `/config` 中重新输入一次 key 即可创建文件记录。不要把 API key 写进 `sigil.toml` 或问题单。
+确认环境变量名属于当前 connection，并且启动 Sigil 的终端能够读取它。修改 Shell 环境变量后请重启 Sigil。使用 stored credential 时，在 `/config` 中修复当前 connection。默认 `file` 与非交互 `auto` 都只使用 owner-only 的 `~/.sigil/credentials.json`，不会查询旧的原生系统记录。如果文件记录缺失，在 `/config` 中重新输入一次 key 即可。不要把 API key 写进 `sigil.toml` 或问题单。
 
 ### Provider connection 或模型目录未就绪
 

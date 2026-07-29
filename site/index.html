@@ -106,7 +106,7 @@
           <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first coding agent</p>
           <h1>Repository work,<br><span class="hero-accent">inside one terminal.</span></h1>
           <p class="lede">
-            Follow the task, inspect the proposed change, and decide what happens next without leaving your terminal.
+            Give Sigil a goal, review its plan, follow parallel work, and decide what happens next without leaving your terminal.
           </p>
           <div class="alpha-status" aria-label="Release status">
             <strong>Early preview</strong>
@@ -130,22 +130,22 @@
             </div>
             <ol class="session-timeline" aria-label="Task progress">
               <li class="session-phase session-phase-planner" data-phase="planner">
-                <span class="session-role">request</span>
-                <span class="session-description">Audit the release documentation</span>
+                <span class="session-role">goal</span>
+                <span class="session-description">Refresh release docs, site, and screenshots</span>
                 <span class="session-state session-state-complete">received</span>
               </li>
               <li class="session-phase session-phase-worker" data-phase="worker">
-                <span class="session-role">review</span>
-                <span class="session-description">Found outdated and repeated guidance</span>
-                <span class="session-state session-state-complete">done</span>
+                <span class="session-role">plan</span>
+                <span class="session-description">Four bounded steps with one final check</span>
+                <span class="session-state session-state-complete">accepted</span>
               </li>
               <li class="session-phase session-phase-tool" data-phase="tool">
-                <span class="session-role">change</span>
-                <span class="session-description">Prepared a focused documentation update</span>
-                <span class="session-state session-state-ready">review</span>
+                <span class="session-role">parallel</span>
+                <span class="session-description">Docs and TUI captures update independently</span>
+                <span class="session-state session-state-ready">2 active</span>
               </li>
               <li class="session-phase session-phase-verify" data-phase="verify">
-                <span class="session-role">checks</span>
+                <span class="session-role">verify</span>
                 <span class="session-description">Pages layout and links are healthy</span>
                 <span class="session-state session-state-passed">passed</span>
               </li>
@@ -157,7 +157,7 @@
             </ol>
             <div class="terminal-signals" aria-label="Task status">
               <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>work saved</span>
-              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>changes reviewed</span>
+              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>plan and changes reviewed</span>
               <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>checks passed</span>
             </div>
           </div>
@@ -231,9 +231,9 @@ sigil</code></pre>
           <h2>See the work and the decision points.</h2>
         </div>
         <div class="visual-grid terminal-deck">
-          <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/">
-            <img src="assets/screenshots/tui-session.svg" alt="Sigil main TUI session screenshot" loading="lazy" decoding="async">
-            <span>Main TUI session</span>
+          <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/#ai-planned-task-execution">
+            <img src="assets/screenshots/planned-task-execution.svg" alt="Sigil AI-planned task execution screenshot" loading="lazy" decoding="async">
+            <span>AI-planned task execution</span>
           </a>
           <a class="visual-card terminal-window-approval" href="docs/visual-tour/#approval-review">
             <img src="assets/screenshots/approval-review.svg" alt="Sigil approval review screenshot" loading="lazy" decoding="async">
@@ -253,18 +253,18 @@ sigil</code></pre>
         </div>
         <div class="feature-grid feature-showcase">
           <article class="feature-card">
-            <p class="feature-kicker">Stay oriented</p>
-            <h3>Know what is happening</h3>
-            <p>Conversation, tool activity, file changes, and the next decision live in one TUI, so you do not have to reconstruct the task from logs.</p>
+            <p class="feature-kicker">Plan before execution</p>
+            <h3>Turn a goal into reviewable work</h3>
+            <p>Sigil generates visible steps, runs independent work in parallel, and brings the result to a verification checkpoint without hiding the decisions in logs.</p>
             <ul class="feature-benefits">
-              <li>Live task state</li>
-              <li>Reviewable results</li>
+              <li>Accepted plan stays visible</li>
+              <li>Parallel steps remain inspectable</li>
             </ul>
             <div class="feature-visual feature-activity" aria-hidden="true">
-              <div class="feature-visual-bar"><span>current run</span><b>in progress</b></div>
-              <div class="feature-activity-row"><i class="is-complete"></i><span>Read repository guidance</span><small>done</small></div>
-              <div class="feature-activity-row"><i class="is-live"></i><span>Prepare focused change</span><small>working</small></div>
-              <div class="feature-activity-row"><i></i><span>Run targeted checks</span><small>next</small></div>
+              <div class="feature-visual-bar"><span>accepted plan · 4 steps</span><b>2 active</b></div>
+              <div class="feature-activity-row"><i class="is-complete"></i><span>Confirm repository guidance</span><small>done</small></div>
+              <div class="feature-activity-row"><i class="is-live"></i><span>Docs + screenshots</span><small>parallel</small></div>
+              <div class="feature-activity-row"><i></i><span>Run release checks</span><small>next</small></div>
             </div>
           </article>
           <article class="feature-card">

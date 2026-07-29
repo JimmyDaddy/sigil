@@ -103,17 +103,20 @@ if [[ ! -x "${binary_path}" ]]; then
   exit 1
 fi
 
+stage_dir="$(mktemp -d)"
+trap 'rm -rf "${stage_dir}"' EXIT
+
 if [[ "${run_smoke}" -eq 1 ]]; then
   echo "smoke: ${binary_path} --version"
   "${binary_path}" --version
   echo "smoke: ${binary_path} doctor"
-  "${binary_path}" doctor >/dev/null
+  smoke_config="${stage_dir}/smoke-sigil.toml"
+  printf '[workspace]\nroot = "."\n\n[storage]\ncredential_store = "file"\n' >"${smoke_config}"
+  "${binary_path}" --config "${smoke_config}" doctor >/dev/null
 fi
 
 archive_base="sigil-${version}-${target_triple}"
 mkdir -p "${out_dir}"
-stage_dir="$(mktemp -d)"
-trap 'rm -rf "${stage_dir}"' EXIT
 payload_dir="${stage_dir}/${archive_base}"
 mkdir -p "${payload_dir}"
 

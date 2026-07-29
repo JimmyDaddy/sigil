@@ -1,4 +1,4 @@
-<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: main-tui-session,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction-preview; cta: start-quickstart -->
+<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: main-tui-session,ai-planned-task-execution,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction-preview; cta: start-quickstart -->
 
 # Visual Tour
 
@@ -11,6 +11,12 @@ These captures show the main decision points in the TUI.
 ![Sigil TUI session preview](../../site/assets/screenshots/tui-session.svg)
 
 Write in the composer, follow tool activity in the transcript, and use the info rail for current session and permission status.
+
+## AI-Planned Task Execution
+
+![Sigil AI-planned task execution preview](../../site/assets/screenshots/planned-task-execution.svg)
+
+Give Sigil a larger goal and it can turn that goal into visible steps, run independent work in parallel, and finish at a verification checkpoint. Starting from `/plan` keeps the proposed steps read-only until you accept them; individual risky actions still follow their normal approvals.
 
 ## Approval Review
 

@@ -25,6 +25,8 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Copy selection, or latest assistant reply when no selection is active | `Ctrl-L`; info rail is excluded |
 | Cancel current run / close overlay | `Ctrl-C` with no selection / `Esc` |
 | Focus and move through activity | `Ctrl-G`, `Alt-J` / `Alt-K` |
+| Read the next bounded page from focused saved tool output | `Alt-N` |
+| Search a bounded literal in focused saved tool output | `Alt-F` |
 | Focus task verification | `Alt-V`; `Enter` runs, `I` inspects |
 | Pause the exact running task at a safe boundary | `Alt-P`; resume later with `/task continue` |
 | Open latest checkpoint restore | `Ctrl-R`; `Enter` restores, `F` forks, `Esc` closes |

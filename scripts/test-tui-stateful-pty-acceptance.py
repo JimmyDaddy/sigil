@@ -146,7 +146,7 @@ class AdmissionTests(unittest.TestCase):
             "release",
         )
         args = argparse.Namespace(
-            expected_version="0.0.1-alpha.5",
+            expected_version="0.0.1-alpha.6",
             expected_commit=None,
             expected_binary_sha256=None,
         )

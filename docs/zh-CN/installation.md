@@ -4,9 +4,9 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。`v0.0.1-alpha.5` 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
+本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。`v0.0.1-alpha.6` 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
 
-下方的包管理器命令和 Cargo 标签命令安装的是 `v0.0.1-alpha.5`。官网文档基于 `main` 分支，因此[尚未发布](changelog.md#尚未发布-main)的功能在下一个 alpha 版本发布前可能只能从源码体验。
+下方的包管理器命令和 Cargo 标签命令安装的是 `v0.0.1-alpha.6`。官网文档基于 `main` 分支，因此[尚未发布](changelog.md#尚未发布-main)的功能在下一个 alpha 版本发布前可能只能从源码体验。
 
 ## 前置条件
 
@@ -62,7 +62,7 @@ sigil doctor
 首个发布版本通过 Git tag 安装，不从 crates.io 分发：
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.5 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil
 ```
 
 这会把 `sigil` 可执行文件安装到 Cargo 的二进制目录。macOS 和 Linux 默认为 `~/.cargo/bin`，Windows 默认为 `%USERPROFILE%\.cargo\bin`。
@@ -117,7 +117,7 @@ sigil run "总结一下当前仓库"
 ```bash
 npm install -g @sigil-ai/sigil@alpha
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.5 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

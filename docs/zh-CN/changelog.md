@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -8,8 +8,15 @@
 
 ## 尚未发布 - main
 
+`v0.0.1-alpha.6` 发布后暂未增加用户可感知的变更。
+
+## v0.0.1-alpha.6 - 2026-07-30
+
+以下变更已包含在打包发布的 `v0.0.1-alpha.6` 中。
+
 ### 新增
 
+- 增加 AI 规划任务执行：Sigil 可以把一个仓库目标转换为可见、可审查的步骤计划，并行运行相互独立的步骤，继续遵守常规工具审批，最后以仓库自己的验证证据收口。
 - 为未来桌面客户端增加 `sigil serve` 的带认证、跨重启历史会话目录，支持有边界的分页、标题搜索、模型服务/固定/来源状态筛选，并在游标过期时明确要求重新查询。会话日志仍是事实来源，目录故障不会阻止运行或记录。
 - 增加供受信任本机客户端使用的桌面运行桥接：服务重启后可重新打开目录中的 durable session，启动信息与服务元数据共用一份版本化 JSON，并可通过显式启用的 stdin owner pipe 在不轮询 PID 的情况下触发优雅关闭。
 - 增加从源码构建的桌面 dogfood 壳：通过同一套带认证的本机服务完成原生工作区选择、durable 历史、对话运行、精确审批与取消以及验证证据查看。CI 会生成短期保留且未签名的 macOS、Linux 与 Windows dogfood artifact；它们不是公开安装渠道。
@@ -18,7 +25,7 @@
 
 ### 调整
 
-- Provider API key 存储现在默认使用 owner-only 凭据文件。已有显式 `auto` 配置改为非交互、文件落盘；在 macOS 上，仅当旧 Keychain 记录无需认证界面时才会静默读取。只有显式 `keyring` 模式可能显示系统密码框。
+- Provider API key 存储现在默认使用 owner-only 凭据文件。已有显式 `auto` 配置改为非交互、严格文件落盘；它不会查询旧的原生系统记录。只有显式 `keyring` 模式可能显示系统密码框。
 - 上下文精简默认切换到 cache-aware V3：保持 provider/tool 稳定前缀，多次精简后仍通过带来源的 checkpoint 延续有效意图，按完整回合保留 tail，并以可信 cache 成本做准入。手动压缩首先只生成本地方案，明确区分保持当前上下文、可恢复工具输出清理和完整语义压缩；只有完整语义压缩会发送计费请求。正常 semantic compact 会在当前 route 额外调用一次 LLM，把旧 request 作为可缓存前缀，只将严格摘要指令追加到末尾；模型叙事不具备授权或验证权，实际 cache/输出成本会在最终激活确认前显示。provider-native materialization 在精确 route resume 落地前保持 fail-closed，避免产生尚不能复用结果的计费请求。旧 threshold/tail 字段继续可读，供迁移和回滚使用。
 - 围绕工作区/会话导航、单一对话任务表面和验证检查器重构桌面 dogfood 壳。它能够回放有边界的已保存消息，在工作区服务保持打开时跨导航保留运行控制，将最终回复与进度/工具输出分开，并提供聚焦的审批、差异、证据和会话草稿交互。
 - 为桌面壳增加统一视觉系统、自适应宽屏/双栏/紧凑布局、跟随系统的亮色与暗色主题、高对比度与减少动画适配、键盘焦点捕获/恢复、只在结束时播报流式运行摘要，以及低至 320 CSS 像素的可用重排。
@@ -27,8 +34,10 @@
 
 ### 修复
 
+- 修复非交互 `auto` 凭据检查在 macOS Keychain 上无限等待的问题。`auto` 不再访问原生存储；显式原生检查未及时完成时，Doctor 会回退到离线状态。
 - 修复打包桌面应用在 Tauri setup 生命周期执行前读取托管状态的问题；该问题会让 macOS 应用在创建窗口前直接退出。
 - 修复事件驱动 TUI 在空闲状态下处理第一个按键后不再继续接收输入的问题。
+- 修复后台工具 artifact 维护与会话操作竞争的问题；此前该竞争可能返回瞬时锁失败，而不是完成用户请求。
 
 ## v0.0.1-alpha.5 - 2026-07-18
 

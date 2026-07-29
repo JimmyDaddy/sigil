@@ -22,8 +22,8 @@ support artifact。默认后端与启动时序调整如下：
 
 - 新配置默认 `credential_store = "file"`，使用独立、owner-only 的
   `~/.sigil/credentials.json`；`auto` 和 `keyring` 保留为显式选择。
-- 已持久化的显式 `auto` / `keyring` 配置继续按原语义读取，不把现有 native credential
-  静默复制到 file backend。
+- 已持久化的显式 `keyring` 配置继续按原语义读取，不把现有 native credential 静默复制到
+  file backend；`auto` 的最终边界由下方 7 月 30 日修订替代。
 - TUI 启动只生成 secret-free offline connection inventory；stored credential verification
   只在用户主动打开或保存配置等明确配置流程中运行，不与 agent worker 的必要 credential
   resolution 竞争。
@@ -33,26 +33,27 @@ support artifact。默认后端与启动时序调整如下：
 - worker 不再用固定 readiness deadline 丢弃等待系统认证的 prompt；provider build 在 ready 前
   明确失败时，TUI 直接退休该 worker 与尚未发送的 pending command，不再追加第二条泛化错误。
 
-### 2026-07-29 non-interactive auto amendment
+### 2026-07-30 file-only auto amendment
 
 7 月 28 日保留 `auto` 原生优先语义后，真实发布包仍会在 macOS 启动阶段触发 Keychain ACL
 认证。ad-hoc 或不同签名发布包的 code requirement 会变化，因此把 provider API key 的普通启动
-依赖原生记录会持续制造登录密码框。该体验与 CLI coding agent 的常见文件凭据行为不一致。
+依赖原生记录会持续制造登录密码框。随后尝试的 `kSecUseAuthenticationUISkip` 查询虽然不会主动
+显示认证 UI，但真实 release preflight 证明它仍可能在 `securityd` 中无限等待。因此“静默查询”
+也不能作为 non-interactive 启动路径。
 
-本修订替代上一修订中 `auto` 的 native-first 语义，但不改变 strict `keyring`：
+本修订替代此前 `auto` 的 native-first 和 no-auth-UI fallback 语义，但不改变 strict `keyring`：
 
 - `file` 仍是默认值，写入 owner-only `~/.sigil/credentials.json`。
-- `auto` 改为非交互文件策略：读取时 file-first，新 secret 只写 file，不主动写 native store。
-- macOS 上 file 缺少目标记录时，`auto` 可用 `kSecUseAuthenticationUISkip` 静默查询旧 native
-  记录；需要认证 UI、Keychain 不可用或记录不存在时均视为 missing，不打开系统密码框。
-- 静默可读的旧 native 记录只在内存中使用，不复制到 file。这不是一次性迁移；需要认证的旧记录
-  由用户在 `/config` 中重新输入一次后建立新的 file record。
-- `auto` 删除先清理 file，再以同样的 non-interactive 查询尝试清理旧 native 记录；无法验证旧
-  native cleanup 时返回 typed cleanup failure，不弹认证框，也不谎报完整清理。
+- `auto` 改为严格的非交互文件策略：读取、写入与删除都只访问 owner-only credential file。
+- `auto` 不查询、复制、迁移或清理任何旧 native record；file 缺少目标记录时明确视为 missing，
+  用户可以在 `/config` 中重新输入一次。
 - `keyring` 仍是用户显式选择的 native-only 策略；该模式可以触发平台认证 UI，并在 unavailable
   时 fail closed。
-- 非 macOS 平台的 `auto` 不探测 native backend；只有显式 `keyring` 使用 Windows Credential
-  Manager 或 Linux Secret Service。
+- 所有平台都遵守同一 `auto` file-only 边界；只有显式 `keyring` 使用 macOS Keychain、Windows
+  Credential Manager 或 Linux Secret Service。
+- 同步 Doctor inventory 只等待 native verification 两秒；超时返回 secret-free offline
+  inventory，不让诊断或发布 smoke 无限阻塞。实际 `keyring` provider resolution 仍保留平台
+  认证语义，不伪装为 file fallback。
 
 ## 1. Problem statement
 
@@ -117,8 +118,8 @@ V1 采用以下方案：
 6. remote catalog 只证明“该 ID 被当前 connection 暴露”；它不能授予 tool、image、reasoning、
    context window 或 hosted search 等安全/能力位。能力仍由 provider-owned exact matrix 保守解释。
 7. 新输入的 API key 默认进入独立、owner-only 的 `~/.sigil/credentials.json`。
-   `[storage].credential_store = "auto"` 保留为 non-interactive file 策略，并可在 macOS 静默
-   兼容读取旧 native record；`keyring` 是唯一显式 native system store 策略。
+   `[storage].credential_store = "auto"` 保留为严格的 non-interactive file-only 策略，不读取
+   或清理旧 native record；`keyring` 是唯一显式 native system store 策略。
    TOML connection 只保存 opaque credential reference；environment reference 和显式
    unauthenticated local connection 也是一等来源。这里不承诺“secret 在任何地方都不落盘”，
    而是承诺 secret 不进入主配置、workspace、session、catalog cache、log、snapshot 或
@@ -335,8 +336,8 @@ V1 支持三种用户可选来源：
    - 验证/保存后立即清空 draft secret carrier；
    - 新配置默认写入 owner-only credential file；
    - `auto` 与 `file` 都把 owner-only credential file 作为新记录的唯一写入位置；
-   - macOS `auto` 只在 file 缺失时 non-interactive 读取旧 native record，不显示认证 UI；
-   - 静默读取到的 native record 损坏或 mismatch 时 fail closed，不把它伪装为 missing；
+   - `auto` 与 `file` 都不探测旧 native record，file 缺失时明确要求用户重新输入；
+   - 只有显式 `keyring` 模式访问 native store，并允许平台显示认证 UI；
    - `keyring` 模式不可用时明确报错，任何模式都不得回退写入 `sigil.toml`。
 3. **No authentication**
    - 只对 provider template 显式声明允许的 local/custom connection 可选；
@@ -803,13 +804,13 @@ config 即使不再保存 secret，也保持 `0600`，因为它可能包含 priv
 
 | Mode | Behavior | Failure semantics |
 | --- | --- | --- |
-| `auto` | owner-only credential file 权威；macOS file miss 时只做禁止认证 UI 的旧 native read/cleanup | auth-required/unavailable native read 视为 missing；invalid、mismatch fail closed；未验证 cleanup 明确报错 |
+| `auto` | 只使用 owner-only credential file；不探测、复制或清理旧 native record | 与 `file` 相同；path、permission、lock、schema 或 atomic publish 异常时 fail closed |
 | `keyring` | 只使用 system credential store，并允许显式平台认证 UI | unavailable 时 fail closed |
 | `file` | 只使用 `~/.sigil/credentials.json` | path、permission、lock、schema 或 atomic publish 异常时 fail closed |
 
-新配置默认 `file`。`auto` / `keyring` 必须由用户显式配置。读取已有 `auto` 时不复制旧 native
-record；静默查询需要认证时按 missing 处理，用户可在 `/config` 重新输入一次。该行为是读取策略
-cutover，不是 credential migration。
+新配置默认 `file`。`auto` / `keyring` 必须由用户显式配置。读取已有 `auto` 时只查看 file；
+旧 native record 不参与 resolution 或 cleanup。file 记录缺失时，用户可在 `/config` 重新输入
+一次。该行为是存储策略 cutover，不是 credential migration。
 
 credential file 与 `sigil.toml` 分离，使用 versioned bounded JSON、advisory lock、same-parent atomic
 publish、Unix parent `0700`/file `0600` 和 Windows current-user ACL。其内容是 plaintext-equivalent
@@ -1302,8 +1303,8 @@ UI-facing error 使用 stable code + bounded message：
 ### R56.7 Completion and platform conformance
 
 - native macOS Keychain、Windows Credential Manager、Linux Secret Service round trip；
-- `auto` file-first write/read、macOS no-auth-UI legacy native read/cleanup 与 explicit `file`
-  round trip/permission/lock/atomic publish；
+- `auto` 与 explicit `file` 的 file-only round trip/permission/lock/atomic publish，并验证两者
+  不探测 native store；
 - real PTY first-run；
 - optional real-provider catalog acceptance；
 - legacy inline migration；

@@ -1,4 +1,4 @@
-<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: main-tui-session,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction-preview; cta: start-quickstart -->
+<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: main-tui-session,ai-planned-task-execution,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction-preview; cta: start-quickstart -->
 
 # 界面导览
 
@@ -11,6 +11,12 @@
 ![Sigil TUI 主会话预览](../../site/assets/screenshots/tui-session.svg)
 
 在输入框中提出任务，在会话记录中查看工具活动，再通过信息栏确认当前会话与权限状态。
+
+## AI 规划任务执行
+
+![Sigil AI 规划任务执行预览](../../site/assets/screenshots/planned-task-execution.svg)
+
+给出一个较大的目标后，Sigil 可以把目标拆成可见步骤，并行完成相互独立的工作，最后停在验证节点。使用 `/plan` 开始时，建议步骤在你接受之前保持只读；每项高风险操作仍然遵守原有审批规则。
 
 ## 审批检查
 
