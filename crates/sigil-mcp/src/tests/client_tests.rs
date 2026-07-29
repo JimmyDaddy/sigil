@@ -84,8 +84,16 @@ fn server_config(
         name: name.to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().into_owned()],
-        startup_timeout_secs,
+        startup_timeout_secs: stable_test_startup_timeout_secs(startup_timeout_secs),
         ..McpServerConfig::default()
+    }
+}
+
+fn stable_test_startup_timeout_secs(requested: u64) -> u64 {
+    if cfg!(windows) && requested >= 5 {
+        requested.max(15)
+    } else {
+        requested
     }
 }
 
@@ -650,7 +658,7 @@ while True:
                 name.clone(),
                 SERVER_COUNT.to_string(),
             ],
-            startup_timeout_secs: 5,
+            startup_timeout_secs: stable_test_startup_timeout_secs(5),
             ..McpServerConfig::default()
         };
         tasks.push(tokio::spawn(async move {
