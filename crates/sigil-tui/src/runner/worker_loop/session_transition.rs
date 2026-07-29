@@ -160,7 +160,10 @@ where
         target_agent_registry.clone(),
         target_agent_budget.clone(),
         provider_capabilities.clone(),
-    );
+    )
+    .with_event_sink(Arc::new(WorkerSupervisorEventSink {
+        wake_coalescer: state.wake_coalescer.clone(),
+    }));
     let mut target_tool_registry = agent.tool_registry().clone();
     sigil_runtime::agent_tools::register_agent_tools_with_registry_and_mode(
         &mut target_tool_registry,
@@ -184,14 +187,43 @@ where
     state.session.last_queued_pre_turn_block = None;
     state.session.last_task_guidance_block = None;
     state.session.pending_agent_result_continuations = pending_agent_result_continuations;
+    state.session.active_terminal_task_ids = session
+        .terminal_task_projection()
+        .active_task_ids
+        .into_iter()
+        .collect();
     state.session.detached_durable_controls.clear();
     if !same_logical_session {
         state.session.exact_prompts.clear();
     }
+    state.session.active_projection_subscription = None;
+    state.session.projection_reconciling = false;
+    state.session.projection_retry_at = None;
+    state.session.projection_reconciliation_error = None;
+    state.session.projection_reconciliation_attempts = 0;
+    state.session.projection_reconciliation_latched = false;
     state.session.current = Some(session);
     state.session.log_path = session_log_path.clone();
+    let _binding = state.wake_coalescer.switch_session_scope(
+        state
+            .session
+            .current
+            .as_ref()
+            .expect("transition installed the target session")
+            .session_scope_id()
+            .to_owned(),
+    );
+    state.session.task_guidance_dirty = true;
+    state.session.conversation_queue_dirty = true;
+    state.session.task_guidance_retry_at = None;
+    state.session.conversation_queue_retry_at = None;
+    state.session.task_guidance_retry_attempts = 0;
+    state.session.conversation_queue_retry_attempts = 0;
+    state.session.task_guidance_retry_latched = false;
+    state.session.conversation_queue_retry_latched = false;
     state.agent.supervisor = target_agent_supervisor;
     state.run.pending_task_handoffs = pending_task_handoffs;
+    register_worker_active_projection_observer(state)?;
 
     Ok(SessionTransitionOutcome {
         session_log_path,

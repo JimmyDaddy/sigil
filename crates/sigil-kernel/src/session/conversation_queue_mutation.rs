@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 
 use super::*;
 use crate::{
-    ConversationInputPromotedEntry, ConversationInputStatus, ConversationInputTerminalCommand,
-    ConversationInputTerminalExpectation, ConversationQueueMutationCommand,
-    ConversationQueueMutationReceipt, ConversationQueueRevision, DurableEventType,
-    event::canonical_json_content_hash,
+    ConversationInputTerminalCommand, ConversationInputTerminalExpectation,
+    ConversationQueueMutation, ConversationQueueMutationCommand, ConversationQueueMutationReceipt,
+    ConversationQueueRevision, event::canonical_json_content_hash,
 };
 
 impl JsonlSessionStore {
@@ -26,28 +25,51 @@ impl JsonlSessionStore {
         let entry = SessionLogEntry::Control(control);
         let event_type = session_entry_event_type(&entry);
         let payload = serde_json::json!({ "session_log_entry": entry });
-        let session_id = conversation_queue_mutation_session_id(self)?;
-        let identity_digest = canonical_json_content_hash(
-            &serde_json::to_value(&command)
-                .context("failed to encode conversation queue mutation command")?,
-        )?;
+        let session_id = self
+            .active_projection_snapshot()?
+            .frontier()
+            .session_id()
+            .to_owned();
+        let enqueue_uses_stable_identity =
+            matches!(&command.mutation, ConversationQueueMutation::Enqueue { .. });
+        let identity_digest = match &command.mutation {
+            // Queue ids are append-only identities. A stable enqueue event id preserves global
+            // uniqueness after terminal tombstones leave the bounded active projection.
+            ConversationQueueMutation::Enqueue { entry } => {
+                format!("enqueue:{}", entry.queue_id.as_str())
+            }
+            _ => canonical_json_content_hash(
+                &serde_json::to_value(&command)
+                    .context("failed to encode conversation queue mutation command")?,
+            )?,
+        };
         let event_id = stable_event_uuid(
             "sigil-conversation-queue-mutation",
             &format!("{session_id}:{identity_digest}"),
         );
 
-        let event = self.append_event_if_with_identity(
+        let event = self.append_event_if_active_projection(
             event_type,
             payload,
             event_id.clone(),
             Some(event_id),
             None,
-            |records| {
-                let projection = ConversationQueueDurableProjection::from_records(records)?;
-                projection.validate_mutation(&command)?;
+            None,
+            |projection| {
+                projection.queue().validate_mutation(&command)?;
                 Ok(true)
             },
-        )?;
+        );
+        let event = match event {
+            Ok(event) => event,
+            Err(error)
+                if enqueue_uses_stable_identity
+                    && format!("{error:#}").contains("already exists in the durable stream") =>
+            {
+                anyhow::bail!("conversation queue mutation queue id already exists")
+            }
+            Err(error) => return Err(error),
+        };
         let event = event.context("conversation queue mutation append was not attempted")?;
         let revision = ConversationQueueRevision {
             stream_sequence: event.stream_sequence,
@@ -79,7 +101,11 @@ impl JsonlSessionStore {
         ));
         let event_type = session_entry_event_type(&entry);
         let payload = serde_json::json!({ "session_log_entry": entry });
-        let session_id = conversation_queue_mutation_session_id(self)?;
+        let session_id = self
+            .active_projection_snapshot()?
+            .frontier()
+            .session_id()
+            .to_owned();
         let identity_digest = canonical_json_content_hash(
             &serde_json::to_value(&command)
                 .context("failed to encode conversation input terminal command")?,
@@ -89,79 +115,29 @@ impl JsonlSessionStore {
             &format!("{session_id}:{identity_digest}"),
         );
 
-        self.append_event_if_with_identity(
+        self.append_event_if_active_projection(
             event_type,
             payload,
             event_id.clone(),
             Some(event_id),
             None,
-            |records| conversation_input_terminal_predicate(records, &command),
+            None,
+            |projection| {
+                let promoted_frontier_matches = match &command.expectation {
+                    ConversationInputTerminalExpectation::Queued { .. } => true,
+                    ConversationInputTerminalExpectation::Promoted {
+                        expected_frontier, ..
+                    } => projection.frontier.cursor.as_ref().is_some_and(|cursor| {
+                        cursor.last_applied_stream_sequence == expected_frontier.stream_sequence
+                            && cursor.last_applied_event_id == expected_frontier.event_id
+                            && cursor.last_applied_record_checksum
+                                == expected_frontier.record_checksum
+                    }),
+                };
+                projection
+                    .queue()
+                    .validate_terminal(&command, promoted_frontier_matches)
+            },
         )
-    }
-}
-
-fn conversation_queue_mutation_session_id(store: &JsonlSessionStore) -> Result<String> {
-    let records = store.read_event_records_writer()?;
-    Ok(stream_session_id(&records).unwrap_or_else(|| session_id_for_path(store.path())))
-}
-
-fn conversation_input_terminal_predicate(
-    records: &[SessionStreamRecord],
-    command: &ConversationInputTerminalCommand,
-) -> Result<bool> {
-    let projection = ConversationQueueDurableProjection::from_records(records)?;
-    let item = projection
-        .queue
-        .items
-        .iter()
-        .find(|item| item.queued.queue_id == command.terminal.queue_id);
-    match &command.expectation {
-        ConversationInputTerminalExpectation::Queued {
-            expected_queue_revision,
-            queue_id,
-            expected_prompt_hash,
-        } => Ok(projection.current_revision() == *expected_queue_revision
-            && projection.queue.next_dispatchable.as_ref() == Some(queue_id)
-            && item.is_some_and(|item| {
-                item.status == ConversationInputStatus::Queued
-                    && item.queued.prompt_hash == *expected_prompt_hash
-            })),
-        ConversationInputTerminalExpectation::Promoted {
-            queue_id,
-            dispatch_run_id,
-            expected_frontier,
-        } => {
-            if !records
-                .last()
-                .is_some_and(|record| expected_frontier.matches_record(record))
-            {
-                return Ok(false);
-            }
-            if !item.is_some_and(|item| item.status == ConversationInputStatus::Dispatching) {
-                return Ok(false);
-            }
-            let promotions = records
-                .iter()
-                .filter(|record| {
-                    record.stored_event().event_kind()
-                        == Some(DurableEventType::ConversationInputPromoted)
-                })
-                .map(|record| {
-                    serde_json::from_value::<ConversationInputPromotedEntry>(
-                        record.stored_event().payload.clone(),
-                    )
-                    .context("failed to decode conversation input promoted payload")
-                })
-                .filter(|entry| {
-                    entry
-                        .as_ref()
-                        .is_ok_and(|promotion| promotion.queue_id == *queue_id)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(matches!(
-                promotions.as_slice(),
-                [promotion] if promotion.dispatch_run_id == *dispatch_run_id
-            ))
-        }
     }
 }

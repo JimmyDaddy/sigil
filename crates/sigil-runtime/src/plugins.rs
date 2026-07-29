@@ -23,8 +23,8 @@ use sigil_kernel::{
 use uuid::Uuid;
 
 use crate::mcp_declaration::{
-    McpConfigOrigin, McpExecutionBase, McpRegistrationError, McpRegistrationErrorCode,
-    PluginManifestAttestation, ResolvedMcpServerDeclaration,
+    MAX_MCP_SERVER_DECLARATIONS, McpConfigOrigin, McpExecutionBase, McpRegistrationError,
+    McpRegistrationErrorCode, PluginManifestAttestation, ResolvedMcpServerDeclaration,
 };
 use crate::plugin_manifest_io::{MAX_PLUGIN_MANIFEST_BYTES, read_bounded_plugin_manifest};
 use crate::skills::discover_plugin_skill_descriptors;
@@ -816,6 +816,16 @@ pub fn merge_mcp_server_declarations(
     base: &[ResolvedMcpServerDeclaration],
     plugin_servers: &[PluginMcpServerRegistration],
 ) -> std::result::Result<Vec<ResolvedMcpServerDeclaration>, McpRegistrationError> {
+    if base.len().saturating_add(plugin_servers.len()) > MAX_MCP_SERVER_DECLARATIONS {
+        return Err(McpRegistrationError {
+            code: McpRegistrationErrorCode::McpServerLimitExceeded,
+            declared_name: "<merged>".to_owned(),
+            reason: format!(
+                "merged MCP server count exceeds the runtime limit of {MAX_MCP_SERVER_DECLARATIONS}"
+            ),
+            safe_projection: None,
+        });
+    }
     let mut used_names = base
         .iter()
         .map(|declaration| declaration.effective_name().to_owned())

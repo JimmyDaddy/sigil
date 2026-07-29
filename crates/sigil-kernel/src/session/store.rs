@@ -1,6 +1,7 @@
+use super::active_projection::ActiveSessionProjection;
 #[cfg(test)]
 use super::writer::SessionWriterFault;
-use super::writer::{LinearSessionWriter, PendingStoredEvent, shared_session_writer};
+use super::writer::{PendingStoredEvent, SharedSessionCoordinator, shared_session_writer};
 use super::*;
 use crate::EventId;
 use thiserror::Error;
@@ -17,6 +18,66 @@ pub struct SessionStreamCompatibilityError {
     pub physical_line: usize,
     /// Stable name of the unsupported pre-release payload shape.
     pub format_name: &'static str,
+}
+
+/// Operation class whose bounded session-file lock acquisition was exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIoBusyKind {
+    Reader,
+    Writer,
+    Recovery,
+}
+
+/// Typed, provider-neutral indication that another process currently owns a session-file lock.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error("session {kind:?} I/O is busy for {path}")]
+pub struct SessionIoBusyError {
+    /// The operation that could not acquire ownership.
+    pub kind: SessionIoBusyKind,
+    /// Exact session or lease path whose lock remained contended.
+    pub path: PathBuf,
+}
+
+/// Privacy-safe process-local counters for operating-system session-file lock acquisition.
+///
+/// The counters contain no paths or session identifiers. Attempts include bounded retry attempts,
+/// while contention and failure count only actual lock outcomes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionIoLockMetricsSnapshot {
+    pub shared_lock_attempt_total: u64,
+    pub exclusive_lock_attempt_total: u64,
+    pub contention_total: u64,
+    pub failure_total: u64,
+}
+
+impl SessionIoLockMetricsSnapshot {
+    /// Computes a saturating delta suitable for scoped runtime evidence.
+    #[must_use]
+    pub fn saturating_delta(self, earlier: Self) -> Self {
+        Self {
+            shared_lock_attempt_total: self
+                .shared_lock_attempt_total
+                .saturating_sub(earlier.shared_lock_attempt_total),
+            exclusive_lock_attempt_total: self
+                .exclusive_lock_attempt_total
+                .saturating_sub(earlier.exclusive_lock_attempt_total),
+            contention_total: self
+                .contention_total
+                .saturating_sub(earlier.contention_total),
+            failure_total: self.failure_total.saturating_sub(earlier.failure_total),
+        }
+    }
+}
+
+/// Returns privacy-safe process-local session-file lock counters.
+#[must_use]
+pub fn session_io_lock_metrics() -> SessionIoLockMetricsSnapshot {
+    SessionIoLockMetricsSnapshot {
+        shared_lock_attempt_total: SESSION_SHARED_LOCK_ATTEMPT_TOTAL.load(Ordering::Relaxed),
+        exclusive_lock_attempt_total: SESSION_EXCLUSIVE_LOCK_ATTEMPT_TOTAL.load(Ordering::Relaxed),
+        contention_total: SESSION_LOCK_CONTENTION_TOTAL.load(Ordering::Relaxed),
+        failure_total: SESSION_LOCK_FAILURE_TOTAL.load(Ordering::Relaxed),
+    }
 }
 
 pub(super) fn unsupported_legacy_session_log_entry(
@@ -129,7 +190,7 @@ fn reject_legacy_compaction_record_payload(
 #[derive(Debug, Clone)]
 pub struct JsonlSessionStore {
     path: PathBuf,
-    writer: std::sync::Arc<Mutex<LinearSessionWriter>>,
+    writer: std::sync::Arc<SharedSessionCoordinator>,
 }
 
 impl JsonlSessionStore {
@@ -137,6 +198,33 @@ impl JsonlSessionStore {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let (path, writer) = shared_session_writer(path)?;
         Ok(Self { path, writer })
+    }
+
+    /// Returns a consistent scheduler-facing projection and its exact durable frontier.
+    ///
+    /// The first call may rebuild from the durable stream. Subsequent ordinary appends advance
+    /// the shared projection incrementally without rescanning the JSONL prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable stream cannot be recovered or fails projection
+    /// validation.
+    pub fn active_projection_snapshot(&self) -> Result<ActiveSessionProjectionSnapshot> {
+        self.writer.snapshot()
+    }
+
+    /// Returns privacy-safe process-local active projection counters.
+    #[must_use]
+    pub fn active_projection_metrics(&self) -> ActiveProjectionMetricsSnapshot {
+        self.writer.metrics()
+    }
+
+    /// Registers an observer shared by all store handles for this canonical session path.
+    pub fn register_active_projection_observer(
+        &self,
+        observer: std::sync::Arc<dyn ActiveProjectionObserver>,
+    ) -> ActiveProjectionSubscription {
+        self.writer.register_observer(observer)
     }
 
     /// Appends a single serialized session entry to the durable JSONL file.
@@ -151,11 +239,7 @@ impl JsonlSessionStore {
         event_class: EventClass,
         payload: serde_json::Value,
     ) -> Result<StoredEvent> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let (mut events, _) = writer.append_events(
+        let mut events = self.writer.append_events(
             vec![PendingStoredEvent {
                 event_type,
                 event_class,
@@ -209,12 +293,7 @@ impl JsonlSessionStore {
                 causation_id: None,
             }
         }));
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let (events, _) = writer.append_events(pending, false)?;
-        Ok(events)
+        self.writer.append_events(pending, false)
     }
 
     /// Conditionally appends one mixed direct-event/session-entry writer batch.
@@ -264,16 +343,8 @@ impl JsonlSessionStore {
                 causation_id: None,
             }
         }));
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let records = writer.read_records_writer()?;
-        if !should_append(&records)? {
-            return Ok(None);
-        }
-        let (events, _) = writer.append_events(pending, false)?;
-        Ok(Some(events))
+        self.writer
+            .append_events_if_records(pending, false, should_append)
     }
 
     pub(crate) fn append_event_if<F>(
@@ -286,26 +357,21 @@ impl JsonlSessionStore {
     where
         F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
     {
-        let mut writer = self
+        Ok(self
             .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let records = writer.read_records_writer()?;
-        if !should_append(&records)? {
-            return Ok(false);
-        }
-        writer.append_events(
-            vec![PendingStoredEvent {
-                event_type,
-                event_class,
-                payload,
-                event_id: None,
-                correlation_id: None,
-                causation_id: None,
-            }],
-            false,
-        )?;
-        Ok(true)
+            .append_events_if_records(
+                vec![PendingStoredEvent {
+                    event_type,
+                    event_class,
+                    payload,
+                    event_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                }],
+                false,
+                should_append,
+            )?
+            .is_some())
     }
 
     pub(super) fn append_event_if_with_identity<F>(
@@ -323,15 +389,7 @@ impl JsonlSessionStore {
         let event_class = event_type
             .expected_event_class()
             .context("identified durable event type has no event class")?;
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let records = writer.read_records_writer()?;
-        if !should_append(&records)? {
-            return Ok(None);
-        }
-        let (mut events, _) = writer.append_events(
+        let events = self.writer.append_events_if_records(
             vec![PendingStoredEvent {
                 event_type,
                 event_class,
@@ -341,11 +399,129 @@ impl JsonlSessionStore {
                 causation_id,
             }],
             true,
+            should_append,
         )?;
-        events
-            .pop()
-            .map(Some)
-            .context("session writer returned no event for a conditional append")
+        match events {
+            Some(mut events) => events
+                .pop()
+                .map(Some)
+                .context("session writer returned no event for a conditional append"),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn append_event_if_active_with_identity<F>(
+        &self,
+        event_type: DurableEventType,
+        payload: serde_json::Value,
+        event_id: EventId,
+        correlation_id: Option<EventId>,
+        causation_id: Option<EventId>,
+        expected_frontier: &ActiveProjectionFrontier,
+        should_append: F,
+    ) -> Result<Option<StoredEvent>>
+    where
+        F: FnOnce(&ActiveSessionProjection) -> Result<bool>,
+    {
+        let event_class = event_type
+            .expected_event_class()
+            .context("identified durable event type has no event class")?;
+        let events = self.writer.append_events_if_active(
+            vec![PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                event_id: Some(event_id),
+                correlation_id,
+                causation_id,
+            }],
+            true,
+            Some(expected_frontier),
+            should_append,
+        )?;
+        match events {
+            Some(mut events) => events
+                .pop()
+                .map(Some)
+                .context("session writer returned no event for an active conditional append"),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn append_event_if_records_at_active_frontier<F>(
+        &self,
+        event_type: DurableEventType,
+        payload: serde_json::Value,
+        event_id: EventId,
+        correlation_id: Option<EventId>,
+        causation_id: Option<EventId>,
+        expected_frontier: &ActiveProjectionFrontier,
+        should_append: F,
+    ) -> Result<Option<StoredEvent>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let event_class = event_type
+            .expected_event_class()
+            .context("identified durable event type has no event class")?;
+        let events = self.writer.append_events_if_records_at_frontier(
+            vec![PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                event_id: Some(event_id),
+                correlation_id,
+                causation_id,
+            }],
+            true,
+            expected_frontier,
+            should_append,
+        )?;
+        match events {
+            Some(mut events) => events
+                .pop()
+                .map(Some)
+                .context("session writer returned no event for a frontier-bound records append"),
+            None => Ok(None),
+        }
+    }
+
+    pub(super) fn append_event_if_active_projection<F>(
+        &self,
+        event_type: DurableEventType,
+        payload: serde_json::Value,
+        event_id: EventId,
+        correlation_id: Option<EventId>,
+        causation_id: Option<EventId>,
+        expected_frontier: Option<&ActiveProjectionFrontier>,
+        should_append: F,
+    ) -> Result<Option<StoredEvent>>
+    where
+        F: FnOnce(&super::active_projection::ActiveSessionProjection) -> Result<bool>,
+    {
+        let event_class = event_type
+            .expected_event_class()
+            .context("identified durable event type has no event class")?;
+        let events = self.writer.append_events_if_active(
+            vec![PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                event_id: Some(event_id),
+                correlation_id,
+                causation_id,
+            }],
+            true,
+            expected_frontier,
+            should_append,
+        )?;
+        match events {
+            Some(mut events) => events
+                .pop()
+                .map(Some)
+                .context("session writer returned no event for an active projection append"),
+            None => Ok(None),
+        }
     }
 
     /// Appends one ordered set of preallocated durable events while holding the single-writer
@@ -363,16 +539,8 @@ impl JsonlSessionStore {
         if pending.is_empty() {
             bail!("conditional durable append batch must not be empty");
         }
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let records = writer.read_records_writer()?;
-        if !should_append(&records)? {
-            return Ok(None);
-        }
-        let (events, _) = writer.append_events(pending, true)?;
-        Ok(Some(events))
+        self.writer
+            .append_events_if_records(pending, true, should_append)
     }
 
     /// Appends a provider-visible or control session entry as a v2 stored event.
@@ -420,12 +588,7 @@ impl JsonlSessionStore {
                 }
             })
             .collect();
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let (events, _) = writer.append_events(pending, false)?;
-        Ok(events)
+        self.writer.append_events(pending, false)
     }
 
     pub fn path(&self) -> &Path {
@@ -462,12 +625,17 @@ impl JsonlSessionStore {
         fallback_provider_name: String,
         fallback_model_name: String,
         fallback_route: Option<crate::ResolvedModelRoute>,
-    ) -> Result<(Vec<SessionLogEntry>, String, String)> {
+    ) -> Result<(
+        Vec<SessionLogEntry>,
+        Vec<SessionStreamRecord>,
+        String,
+        String,
+    )> {
         let mut writer = self
             .writer
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let records = writer.read_records_writer()?;
+        let mut records = writer.read_records_writer()?;
         ConversationQueueDurableProjection::from_records(&records)?;
         let mut entries = session_entries_from_records(&records)?;
         let (provider_name, model_name) = session_identity_from_entries(&entries)
@@ -556,10 +724,13 @@ impl JsonlSessionStore {
                     }
                 })
                 .collect();
-            writer.append_events(pending, false)?;
+            let (events, _) = writer.append_events(pending, false)?;
+            records.extend(events.into_iter().map(SessionStreamRecord::Stored));
         }
+        drop(writer);
+        self.writer.seed_records(&records)?;
 
-        Ok((entries, provider_name, model_name))
+        Ok((entries, records, provider_name, model_name))
     }
 
     /// Reads all valid JSONL entries from `path`.
@@ -602,11 +773,7 @@ impl JsonlSessionStore {
         &self,
         batch: DurableAuditBatch,
     ) -> Result<DurableAppendReceipt> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        writer.append_audit_batch(batch)
+        self.writer.append_audit_batch(batch)
     }
 
     pub(crate) fn append_audit_batch_if<F>(
@@ -617,16 +784,7 @@ impl JsonlSessionStore {
     where
         F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
     {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
-        let records = writer.read_records_writer()?;
-        if !should_append(&records)? {
-            return Ok(None);
-        }
-        writer.cache_event_links_for_audit_batch(&batch, &records);
-        writer.append_audit_batch(batch).map(Some)
+        self.writer.append_audit_batch_if(batch, should_append)
     }
 
     pub(super) fn validate_audit_receipt(
@@ -686,6 +844,11 @@ impl JsonlSessionStore {
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         writer.inject_fault(fault);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_active_projection_schema_mismatch(&self) -> Result<()> {
+        self.writer.inject_active_projection_schema_mismatch()
     }
 
     #[cfg(test)]
@@ -1073,9 +1236,11 @@ pub(crate) fn session_entry_from_domain_event(
 pub(super) fn lock_shared_with_retry(file: &File, path: &Path) -> Result<()> {
     let mut last_error = None;
     for attempt in 0..=SESSION_LOG_SHARED_LOCK_RETRIES {
+        SESSION_SHARED_LOCK_ATTEMPT_TOTAL.fetch_add(1, Ordering::Relaxed);
         match file.try_lock_shared() {
             Ok(()) => return Ok(()),
             Err(std::fs::TryLockError::WouldBlock) => {
+                SESSION_LOCK_CONTENTION_TOTAL.fetch_add(1, Ordering::Relaxed);
                 if attempt < SESSION_LOG_SHARED_LOCK_RETRIES {
                     thread::sleep(SESSION_LOG_SHARED_LOCK_RETRY_DELAY);
                     continue;
@@ -1087,24 +1252,33 @@ pub(super) fn lock_shared_with_retry(file: &File, path: &Path) -> Result<()> {
             }
         }
     }
+    SESSION_LOCK_FAILURE_TOTAL.fetch_add(1, Ordering::Relaxed);
     if let Some(error) = last_error {
         Err(error).with_context(|| format!("failed to lock {}", path.display()))
     } else {
-        bail!("failed to lock {}", path.display())
+        Err(SessionIoBusyError {
+            kind: SessionIoBusyKind::Reader,
+            path: path.to_path_buf(),
+        }
+        .into())
     }
 }
 
 pub(super) fn lock_exclusive_with_retry(file: &File, path: &Path) -> Result<()> {
     let mut last_error = None;
+    let mut exhausted_contention = false;
     for attempt in 0..=SESSION_LOG_SHARED_LOCK_RETRIES {
+        SESSION_EXCLUSIVE_LOCK_ATTEMPT_TOTAL.fetch_add(1, Ordering::Relaxed);
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(()),
             Err(error) if lock_is_contended(&error) => {
+                SESSION_LOCK_CONTENTION_TOTAL.fetch_add(1, Ordering::Relaxed);
                 last_error = Some(error);
                 if attempt < SESSION_LOG_SHARED_LOCK_RETRIES {
                     thread::sleep(SESSION_LOG_SHARED_LOCK_RETRY_DELAY);
                     continue;
                 }
+                exhausted_contention = true;
             }
             Err(error) => {
                 last_error = Some(error);
@@ -1112,7 +1286,14 @@ pub(super) fn lock_exclusive_with_retry(file: &File, path: &Path) -> Result<()> 
             }
         }
     }
-    if let Some(error) = last_error {
+    SESSION_LOCK_FAILURE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if exhausted_contention {
+        Err(SessionIoBusyError {
+            kind: SessionIoBusyKind::Writer,
+            path: path.to_path_buf(),
+        }
+        .into())
+    } else if let Some(error) = last_error {
         Err(error).with_context(|| format!("failed to lock {}", path.display()))
     } else {
         bail!("failed to lock {}", path.display())

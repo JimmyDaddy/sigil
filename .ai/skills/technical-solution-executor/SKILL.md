@@ -1,6 +1,6 @@
 ---
 name: technical-solution-executor
-description: Execute supplied technical solutions or execution plans with risk-scaled implementation, minimal necessary validation, and audits. Use when the user provides or points to a 技术方案, technical solution, execution plan, or task list and expects implementation without unapproved defers, mocks, stubs, hardcoded shortcuts, missing tests, or deceptive pass-only changes.
+description: Execute supplied technical solutions or execution plans with risk-scaled implementation, serial/parallel task decomposition, bounded sub-agent execution when useful and allowed, explicit user opt-out support, minimal necessary validation, and audits. Use when the user provides or points to a 技术方案, technical solution, execution plan, or task list and expects implementation without unapproved defers, mocks, stubs, hardcoded shortcuts, missing tests, or deceptive pass-only changes.
 ---
 
 # Technical Solution Executor
@@ -33,6 +33,35 @@ Before implementing, do enough research to make the execution grounded rather th
 - Do not use research as a reason to expand scope. Research should clarify the smallest correct implementation, expose blockers, or justify design choices.
 - If research shows the supplied solution conflicts with current facts or architecture constraints, stop before editing the affected area and report the conflict with evidence.
 
+## Decompose and Delegate
+
+Resolve delegation policy before decomposing the work. Treat an explicit user instruction such as
+"do not use sub-agents", "不要用子代理", or "由当前代理自己完成" as a hard opt-out for the entire
+run. Do not start, delegate to, hand off to, or use sub-agents during decomposition, implementation,
+review, audit, escalation, or validation. Continue normally in the primary agent: build the same task
+graph, execute it in dependency order, and preserve the required scope, implementation completeness,
+validation, and audit intensity. Do not ask the user to relax the opt-out or treat it as a blocker.
+
+Build a dependency-aware task graph before implementation when the solution is non-trivial:
+
+- Mark a task **serial** when it depends on an earlier design/API result, shares a mutable authority boundary, edits the same ownership-heavy files, or must consume earlier validation evidence.
+- Mark tasks **parallel** only when they are independently useful, have non-overlapping or explicitly coordinated write ownership, and can be integrated without guessing another task's unfinished contract.
+- Keep integration, shared-file conflict resolution, durable/public contract decisions, final gates, and completion claims with the primary agent.
+- Do not create sub-agents merely to appear busy. Delegate concrete bounded work that can make progress while the primary agent continues useful work.
+
+When sub-agent tooling is available and higher-priority policy permits it, use sub-agents for both
+implementation and review when parallelism materially helps. Give each sub-agent:
+
+- the exact source requirement or slice;
+- allowed files/modules and explicit write ownership;
+- relevant architecture invariants and forbidden scope;
+- the expected artifact or code result;
+- a targeted validation command and evidence to return.
+
+Assume sub-agents share the worktree unless the environment says otherwise. Inspect every returned
+diff/result before integration, reconcile conflicts deliberately, and never treat delegation as proof
+that the task is complete.
+
 ## Slice-Based Execution
 
 Use this mode when the supplied solution is split into RFC execution slices, roadmap items, or `.repo-local-dev/rfcs/*` task files.
@@ -53,7 +82,8 @@ Honor an explicit user mode when provided: `quick`, `standard`, or `full-audit`.
 Use for low-risk, localized work such as docs-only changes, renderer/layout tweaks, test-only fixes, or small implementation changes that do not affect durable state, permissions, tools, provider contracts, public APIs, migrations, release packaging, or cross-crate behavior.
 
 - Use a compact checklist of 2-5 items: requirement, edit surface, validation.
-- Do not start sub-agents by default.
+- Do not start sub-agents by default unless one clearly independent task would materially reduce
+  latency without increasing coordination risk.
 - Run the smallest useful validation for the touched area. For docs/config/text-only skill changes, static review plus a basic format/frontmatter check is enough. For code changes, prefer one targeted test or check plus formatting when applicable.
 - Do not run full workspace tests, clippy, coverage, or broad package gates unless the user asks or a concrete risk appears.
 - Finish with a short summary, changed files, validations, and any skipped heavier checks with reason.
@@ -63,6 +93,8 @@ Use for low-risk, localized work such as docs-only changes, renderer/layout twea
 Use by default for normal implementation work that touches several files or one crate boundary, changes tests/docs, or has moderate user-facing behavior but no high-risk durability, security, migration, or cross-crate contract change.
 
 - Decompose the work into tasks that include source requirement, likely files, tests/docs, and validation. Keep each task compact.
+- Execute independent tasks in parallel when ownership and dependencies are explicit; otherwise keep
+  them serial.
 - Use one independent review pass only when the decomposition is non-trivial, ambiguity remains, or the diff is large enough that a second pass is likely to catch real gaps.
 - Validate with narrow tests first, then at most the relevant package/crate/module gate needed for confidence. Avoid repeated full workspace gates unless the changed surface warrants them.
 - Default validation budget: one formatting check, targeted tests for changed behavior, and one relevant compile/check gate. Add clippy, coverage, docs-site, or full test suites only when required by acceptance criteria or risk.
@@ -79,8 +111,12 @@ Use when the user explicitly asks for sub-agent review/audit, or when the soluti
 Full-audit mode uses the original strict workflow:
 
 1. Build a full requirement-to-task decomposition with source section, files/modules, tests/docs, dependencies, acceptance criteria, and validation command for each task.
-2. Run a pre-implementation sub-agent decomposition review when tooling is available; otherwise perform a separate local decomposition audit and report that no sub-agent was available.
-3. Implement task by task. Mark a task done only after code, tests, docs, and its validation are complete.
+2. Classify the task graph into serial dependencies and parallel workstreams. When tooling and policy
+   permit, use a sub-agent to challenge the decomposition; otherwise perform a separate local
+   decomposition audit.
+3. Dispatch bounded independent implementation workstreams to sub-agents when that materially helps,
+   while the primary agent owns serial foundations and integration. Mark a task done only after code,
+   tests, docs, and its validation are complete.
 4. Run the strongest useful validation for the touched area. Before long gates such as full workspace tests, clippy, coverage, docs-site, or manual TUI checks, confirm they are required by the solution, repository standards, user request, or changed risk surface.
 5. Run two post-implementation independent passes when tooling is available: code/project standards review and completeness audit against solution, final task list, diff, and validation results.
 6. Fix every valid finding, rerun only the affected or previously failed validation, and record concrete reasons for any rejected findings.
@@ -104,7 +140,8 @@ Escalate to a higher intensity if implementation reveals unplanned public behavi
 
 1. Ingest the solution and extract goals, non-goals, required behavior, APIs/data/config, docs/tests, acceptance criteria, validation gates, approved defers, and blocking ambiguities.
 2. Complete the research pass required for the slice: local code/RFC inspection first, internet research when useful for volatile facts, product/security comparisons, external APIs, or standards.
-3. State the selected intensity and maintain a visible checklist sized to that intensity.
+3. State the selected intensity, identify serial and parallel work, and maintain a visible checklist
+   sized to that intensity.
 4. Read relevant existing code/tests before editing. Prefer repository helpers and patterns over new abstractions.
 5. Implement the smallest complete change. Add or update unit tests for new business logic, and update docs when public behavior, config, commands, TUI flow, safety/privacy, or architecture changes.
 6. Validate at the selected intensity using the smallest checks that prove the changed behavior. If a required full gate is too slow or blocked, run the best narrower gate and report exactly what was not run and why.

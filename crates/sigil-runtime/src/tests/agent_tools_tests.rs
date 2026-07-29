@@ -37,15 +37,153 @@ use sigil_kernel::{
 };
 
 use super::{
-    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundRuns,
-    AgentToolProviderFactory, AgentToolRuntime, BackgroundChatAgentHandle,
-    BackgroundChatAgentThreadRecord, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
-    LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
-    REQUEST_AGENT_DELEGATION_TOOL_NAME, SPAWN_AGENT_TOOL_NAME, SPAWN_AGENTS_TOOL_NAME,
-    WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call, hash_text, register_agent_tools,
-    register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace_and_entries,
-    tool_batch_allows_host_join,
+    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundEventSink,
+    AgentToolBackgroundRuns, AgentToolProviderFactory, AgentToolRuntime, BackgroundChatAgentHandle,
+    BackgroundChatAgentTask, BackgroundChatAgentThreadRecord, CANCEL_AGENT_TOOL_NAME,
+    CLOSE_AGENT_TOOL_NAME, LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
+    READ_AGENT_RESULT_TOOL_NAME, REQUEST_AGENT_DELEGATION_TOOL_NAME, SPAWN_AGENT_TOOL_NAME,
+    SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call, hash_text,
+    register_agent_tools, register_agent_tools_with_registry_and_mode,
+    register_agent_tools_with_workspace_and_entries, tool_batch_allows_host_join,
 };
+
+struct CompletionReadySink {
+    sender: tokio::sync::mpsc::UnboundedSender<(AgentThreadId, bool)>,
+    background_runs: Mutex<Option<AgentToolBackgroundRuns>>,
+}
+
+impl AgentToolBackgroundEventSink for CompletionReadySink {
+    fn handle_agent_event(&self, _thread_id: &AgentThreadId, _event: RunEvent) {}
+
+    fn handle_agent_completion_ready(&self, thread_id: &AgentThreadId) {
+        let visible = self
+            .background_runs
+            .lock()
+            .expect("completion sink background-run lock")
+            .as_ref()
+            .is_some_and(|runs| runs.contains(thread_id) && runs.has_finished());
+        let _ = self.sender.send((thread_id.clone(), visible));
+    }
+}
+
+fn completion_ready_background_handle(
+    thread_id: AgentThreadId,
+    task: BackgroundChatAgentTask,
+) -> Result<BackgroundChatAgentHandle> {
+    Ok(BackgroundChatAgentHandle {
+        thread: BackgroundChatAgentThreadRecord {
+            thread_id,
+            attempt_id: AgentRunAttemptId::new("attempt-completion-ready")?,
+            batch_id: None,
+            profile_id: AgentProfileId::new("explore")?,
+            parent_thread_id: AgentThreadId::new("main")?,
+            child_session_ref: SessionRef::new_relative("children/completion-ready.jsonl")?,
+            budget_scope_id: TaskId::new("completion_ready_budget")?,
+            isolation: TaskIsolationMode::SharedReadOnly,
+        },
+        handle: task,
+        cancellation_owner: RunCancellationOwner::new(),
+    })
+}
+
+#[tokio::test]
+async fn background_completion_is_visible_before_the_ready_notification() -> Result<()> {
+    let thread_id = AgentThreadId::new("agent-completion-ready")?;
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(CompletionReadySink {
+        sender,
+        background_runs: Mutex::new(None),
+    });
+    let background_runs = AgentToolBackgroundRuns::with_event_sink(sink.clone());
+    *sink
+        .background_runs
+        .lock()
+        .expect("completion sink background-run lock") = Some(background_runs.clone());
+    let task = BackgroundChatAgentTask::spawn(thread_id.clone(), Some(sink), async {
+        Err(anyhow!("expected background result"))
+    });
+    tokio::task::yield_now().await;
+    background_runs.insert(
+        thread_id.clone(),
+        completion_ready_background_handle(thread_id.clone(), task)?,
+    )?;
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await?
+            .expect("completion notification"),
+        (thread_id.clone(), true)
+    );
+    let background = background_runs
+        .remove_if_finished(&thread_id)
+        .expect("published background result");
+    let result = background.handle.finish().await?;
+    let error = match result {
+        Ok(_) => panic!("fixture must return an error"),
+        Err(error) => error,
+    };
+    assert_eq!(format!("{error:#}"), "expected background result");
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_panic_is_published_before_the_ready_notification() -> Result<()> {
+    let thread_id = AgentThreadId::new("agent-completion-panic")?;
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(CompletionReadySink {
+        sender,
+        background_runs: Mutex::new(None),
+    });
+    let mut task = BackgroundChatAgentTask::spawn(thread_id.clone(), Some(sink), async {
+        panic!("expected background panic");
+        #[allow(unreachable_code)]
+        Err(anyhow!("unreachable"))
+    });
+    task.mark_registered();
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await?
+            .expect("panic completion notification"),
+        (thread_id, false)
+    );
+    assert!(task.is_finished());
+    let error = match task.finish().await {
+        Ok(_) => panic!("child panic must return a join error"),
+        Err(error) => error,
+    };
+    assert!(error.is_panic());
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_abort_is_published_before_the_ready_notification() -> Result<()> {
+    let thread_id = AgentThreadId::new("agent-completion-abort")?;
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(CompletionReadySink {
+        sender,
+        background_runs: Mutex::new(None),
+    });
+    let mut task = BackgroundChatAgentTask::spawn(thread_id.clone(), Some(sink), async {
+        futures::future::pending::<Result<super::background::BackgroundChatAgentResult>>().await
+    });
+    task.mark_registered();
+    task.abort();
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await?
+            .expect("abort completion notification"),
+        (thread_id, false)
+    );
+    assert!(task.is_finished());
+    let error = match task.finish().await {
+        Ok(_) => panic!("child abort must return a join error"),
+        Err(error) => error,
+    };
+    assert!(error.is_cancelled());
+    Ok(())
+}
 
 /// Existing runtime tests directly exercise user-directed spawn calls. Keep that authority
 /// explicit while admission-specific tests construct `AgentToolRuntime` directly.
@@ -3380,16 +3518,20 @@ async fn spawn_agents_background_returns_immediately_and_collects_the_whole_batc
     tokio::time::timeout(Duration::from_secs(1), provider_barrier.wait())
         .await
         .expect("both background members should reach provider dispatch");
+    let mut collected = Vec::new();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while !background_runs.has_finished() {
+        while collected.len() < 2 {
+            collected.extend(
+                runtime
+                    .collect_finished_background_runs(&mut session, &mut handler)
+                    .await?,
+            );
             tokio::task::yield_now().await;
         }
+        Ok::<_, anyhow::Error>(())
     })
     .await
-    .expect("background batch should finish");
-    let mut collected = runtime
-        .collect_finished_background_runs(&mut session, &mut handler)
-        .await?;
+    .expect("background batch should finish")?;
     collected.sort();
 
     assert_eq!(collected.len(), 2);
@@ -3442,7 +3584,7 @@ async fn spawn_agents_background_registration_failure_dispatches_no_provider() -
         &AgentProfileId::new("explore")?,
     )?;
     let existing_cancellation = RunCancellationOwner::new();
-    let existing_handle = tokio::spawn(async {
+    let existing_handle = BackgroundChatAgentTask::spawn(existing_thread_id.clone(), None, async {
         futures::future::pending::<Result<super::background::BackgroundChatAgentResult>>().await
     });
     background_runs.insert(

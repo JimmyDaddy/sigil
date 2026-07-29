@@ -16,9 +16,10 @@ use crate::{
     ConversationQueueDurableProjection, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueRevision, DurableEventType, EventClass,
     JsonlSessionStore, ModelMessage, ReasoningEffort, Session, SessionLogEntry, SessionRef,
-    TaskGuidancePromotedEntry, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    ToolRestartPolicy, WebUrlCapabilityDescriptor, WebUrlProvenanceKind,
-    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
+    SessionStreamRecord, StoredEvent, TaskGuidancePromotedEntry, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, ToolRestartPolicy, WebUrlCapabilityDescriptor,
+    WebUrlProvenanceKind, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
 };
 
 #[test]
@@ -68,6 +69,57 @@ fn conversation_queue_projection_preserves_fifo_and_filters_terminal_items() -> 
     assert_eq!(projection.items[0].queued.queue_id, first);
     assert_eq!(projection.next_dispatchable, None);
     Ok(())
+}
+
+#[test]
+fn canonical_queue_replay_accepts_more_than_4096_terminal_identities() -> Result<()> {
+    const TERMINAL_QUEUE_COUNT: u64 = 4_097;
+
+    let mut records = Vec::with_capacity((TERMINAL_QUEUE_COUNT * 2) as usize);
+    for ordinal in 1..=TERMINAL_QUEUE_COUNT {
+        let queue_id = ConversationInputQueueId::new(format!("queue_{ordinal}"))?;
+        records.push(queue_control_record(
+            records.len() as u64 + 1,
+            ControlEntry::ConversationInputQueued(queue_entry(
+                queue_id.clone(),
+                "terminal history",
+            )),
+        )?);
+        records.push(queue_control_record(
+            records.len() as u64 + 1,
+            ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+                queue_id,
+                status: ConversationInputStatus::Delivered,
+                reason: None,
+                updated_at_ms: Some(ordinal),
+            }),
+        )?);
+    }
+
+    let projection = ConversationQueueDurableProjection::from_records(&records)?;
+    assert!(projection.queue.items.is_empty());
+    assert!(projection.queue.next_dispatchable.is_none());
+    assert!(projection.is_terminal_queue_id(&ConversationInputQueueId::new("queue_1")?));
+    assert!(projection.is_terminal_queue_id(&ConversationInputQueueId::new("queue_4097")?));
+    Ok(())
+}
+
+fn queue_control_record(
+    stream_sequence: u64,
+    control: ControlEntry,
+) -> Result<SessionStreamRecord> {
+    let entry = SessionLogEntry::Control(control);
+    let event_type = DurableEventType::SessionEntryRecorded;
+    Ok(SessionStreamRecord::Stored(StoredEvent::new(
+        event_type,
+        event_type
+            .expected_event_class()
+            .expect("known queue event has a class"),
+        format!("queue-history-{stream_sequence}"),
+        "queue-history-session".to_owned(),
+        stream_sequence,
+        serde_json::json!({ "session_log_entry": entry }),
+    )?))
 }
 
 #[test]
@@ -516,6 +568,18 @@ fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<
         guidance.prompt_hash,
         guidance.prompt,
     )?;
+
+    let stale_frontier = store.active_projection_snapshot()?.frontier().clone();
+    store.append(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "unrelated_frontier_advance".to_owned(),
+        data: serde_json::Value::Null,
+    }))?;
+    let before_stale_frontier = fs::read(&path)?;
+    let error = store
+        .append_task_guidance_promoted_at(promoted.clone(), &stale_frontier)
+        .expect_err("a stale active projection frontier must reject task guidance promotion");
+    assert!(format!("{error:#}").contains("frontier is stale"));
+    assert_eq!(fs::read(&path)?, before_stale_frontier);
 
     let event = store.append_task_guidance_promoted(promoted.clone())?;
     assert_eq!(event.event_type, "task_guidance_promoted");

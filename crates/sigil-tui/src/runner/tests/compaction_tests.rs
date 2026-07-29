@@ -20,9 +20,27 @@ use std::{
 use tempfile::tempdir;
 
 use super::{
-    super::{V2CompactionAdmission, V2CompactionPreviewState, WorkerCommand, WorkerMessage},
+    super::{
+        V2CompactionAdmission, V2CompactionPreviewState, WorkerCommand, WorkerMessage,
+        worker_event::{WorkerEvent, WorkerEventPayloadSender},
+    },
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
+
+fn compaction_result_channel() -> (
+    WorkerEventPayloadSender<CompactionPreparationTaskResult>,
+    std::sync::mpsc::Receiver<WorkerEvent>,
+) {
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    (WorkerEventPayloadSender::compaction(event_tx), event_rx)
+}
+
+fn compaction_result(event: WorkerEvent) -> CompactionPreparationTaskResult {
+    let WorkerEvent::CompactionPrepared(result) = event else {
+        panic!("expected compaction preparation event");
+    };
+    result
+}
 use crate::runner::worker_loop::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult,
     ExactConversationPromptStore, IdleAutoCompactionPreparation, IdleAutoCompactionState,
@@ -36,7 +54,7 @@ fn replacement_compaction_preparation_cancels_and_discards_the_old_result() -> R
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = compaction_result_channel();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let mut tasks = CompactionPreparationTaskManager::new();
@@ -57,7 +75,7 @@ fn replacement_compaction_preparation_cancels_and_discards_the_old_result() -> R
     tasks.start_manual(&runtime, 42, "session-a".to_owned(), result_tx, || {
         Err::<ManualV2CompactionPreparation, _>("current".to_owned())
     });
-    let current = result_rx.recv_timeout(Duration::from_secs(1))?;
+    let current = compaction_result(result_rx.recv_timeout(Duration::from_secs(1))?);
     assert!(matches!(
         current,
         CompactionPreparationTaskResult::Manual {
@@ -75,21 +93,25 @@ fn replacement_compaction_preparation_cancels_and_discards_the_old_result() -> R
 
 #[test]
 fn idle_compaction_preparation_has_one_owned_background_result() -> Result<()> {
+    let temp = tempdir()?;
+    let session = Session::new("test", "model")
+        .with_store(JsonlSessionStore::new(temp.path().join("session.jsonl"))?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = compaction_result_channel();
     let mut tasks = CompactionPreparationTaskManager::new();
 
     tasks.start_idle(&runtime, 43, "session-idle".to_owned(), result_tx, || {
         Ok(IdleV2CompactionPreparation {
             state: IdleAutoCompactionState::default(),
-            preparation: IdleAutoCompactionPreparation::NotRequested,
+            preparation: Ok(IdleAutoCompactionPreparation::NotRequested),
+            session,
         })
     });
     assert!(tasks.has_active());
-    let result = result_rx.recv_timeout(Duration::from_secs(1))?;
+    let result = compaction_result(result_rx.recv_timeout(Duration::from_secs(1))?);
     let CompactionPreparationTaskResult::Idle {
         request_id,
         session_scope_id,
@@ -103,7 +125,7 @@ fn idle_compaction_preparation_has_one_owned_background_result() -> Result<()> {
     let prepared = result.map_err(anyhow::Error::msg)?;
     assert!(matches!(
         prepared.preparation,
-        IdleAutoCompactionPreparation::NotRequested
+        Ok(IdleAutoCompactionPreparation::NotRequested)
     ));
     assert!(tasks.accept_result(43, "session-idle"));
     assert!(!tasks.has_active());
@@ -116,7 +138,7 @@ fn cancelled_overflow_preparation_finishes_without_publishing_a_stale_result() -
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = compaction_result_channel();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let mut tasks = CompactionPreparationTaskManager::new();

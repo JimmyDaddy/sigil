@@ -45,6 +45,61 @@ pub use thread_state::{
 
 type BoxedAgent = Agent<Box<dyn Provider>>;
 
+/// Process-local families whose observable supervisor snapshot changed.
+///
+/// Notifications are hints only. Consumers must read the latest snapshot from
+/// [`AgentSupervisor`] and must not treat a notification as durable authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSupervisorChange {
+    /// Provider-route concurrency, waiting, or cooldown diagnostics changed.
+    ProviderRouteDiagnostics,
+    /// Parallel task completion-arrival progress changed.
+    TaskCompletionProgress,
+}
+
+/// Receives process-local supervisor change notifications.
+///
+/// Notifications are delivered after the corresponding registry lock is released, so an
+/// implementation may read the latest supervisor snapshot. Implementations must return promptly
+/// and must not panic.
+pub trait AgentSupervisorEventSink: Send + Sync {
+    fn handle_supervisor_change(&self, change: AgentSupervisorChange);
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct AgentSupervisorChangeNotifier {
+    sink: Arc<Mutex<Option<Arc<dyn AgentSupervisorEventSink>>>>,
+}
+
+impl std::fmt::Debug for AgentSupervisorChangeNotifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let registered = self.sink.lock().map(|sink| sink.is_some()).unwrap_or(false);
+        formatter
+            .debug_struct("AgentSupervisorChangeNotifier")
+            .field("registered", &registered)
+            .finish()
+    }
+}
+
+impl AgentSupervisorChangeNotifier {
+    pub(crate) fn set_sink(&self, sink: Arc<dyn AgentSupervisorEventSink>) {
+        if let Ok(mut registered) = self.sink.lock() {
+            *registered = Some(sink);
+        }
+    }
+
+    pub(crate) fn notify(&self, change: AgentSupervisorChange) {
+        let sink = self
+            .sink
+            .lock()
+            .ok()
+            .and_then(|registered| registered.clone());
+        if let Some(sink) = sink {
+            sink.handle_supervisor_change(change);
+        }
+    }
+}
+
 /// Runtime-owned supervisor for agent thread lifecycle, budget, and durable control entries.
 #[derive(Debug, Clone)]
 pub struct AgentSupervisor {
@@ -71,6 +126,14 @@ impl AgentSupervisor {
             provider_pressure: TaskProviderPressure::default(),
             task_completion_progress: TaskCompletionProgressRegistry::default(),
         }
+    }
+
+    /// Installs a process-local change sink for event-driven observers.
+    #[must_use]
+    pub fn with_event_sink(self, sink: Arc<dyn AgentSupervisorEventSink>) -> Self {
+        self.provider_pressure.set_change_sink(Arc::clone(&sink));
+        self.task_completion_progress.set_change_sink(sink);
+        self
     }
 
     #[must_use]

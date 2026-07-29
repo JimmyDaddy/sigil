@@ -9,6 +9,7 @@ use sigil_kernel::{
 use std::sync::Arc;
 
 use super::{
+    super::worker_event::WorkerWakeCoalescer,
     super::{
         WorkerCommand,
         worker_loop::{
@@ -64,6 +65,8 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
         Some(session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
+        std::sync::mpsc::channel().0,
+        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
     );
 
     assert_eq!(state.session.log_path, session_log_path);
@@ -395,6 +398,8 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         Some(current_session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
+        std::sync::mpsc::channel().0,
+        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
     );
     let queue_id = ConversationInputQueueId::new("queue_1")?;
     state
@@ -439,6 +444,23 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     assert!(state.session.last_queued_pre_turn_block.is_none());
     assert!(state.session.pending_agent_result_continuations.is_empty());
     assert!(!state.compaction.idle_auto.is_requested());
+    assert!(
+        state.session.active_projection_subscription.is_some(),
+        "session transition must retain the new active-projection subscription"
+    );
+    let projection_binding = state
+        .wake_coalescer
+        .current_projection_binding()
+        .expect("session transition should install a projection binding");
+    assert_eq!(
+        projection_binding.session_scope_id,
+        state
+            .session
+            .current
+            .as_ref()
+            .expect("transition keeps the target session")
+            .session_scope_id()
+    );
 
     let same_scope_queue_id = ConversationInputQueueId::new("queue_same_scope")?;
     state.session.exact_prompts.insert(
@@ -463,6 +485,19 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
             .exact_prompts
             .contains_key(&same_scope_queue_id)
     );
+    let rebound_projection = state
+        .wake_coalescer
+        .current_projection_binding()
+        .expect("same-scope transition should rebind the projection observer");
+    assert_eq!(
+        rebound_projection.session_scope_id,
+        projection_binding.session_scope_id
+    );
+    assert!(
+        rebound_projection.observer_id > projection_binding.observer_id,
+        "every session transition must fence the previous observer generation"
+    );
+    assert!(state.session.active_projection_subscription.is_some());
 
     let retained_block = Some((same_scope_queue_id, "retain on failure".to_owned()));
     state.session.last_queued_pre_turn_block = retained_block.clone();
@@ -525,6 +560,8 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
         Some(current_session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
+        std::sync::mpsc::channel().0,
+        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
     );
     let queue_id = ConversationInputQueueId::new("fork_queue")?;
     state
@@ -648,6 +685,8 @@ allowed_tools = ["grep"]
         Some(current_session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
+        std::sync::mpsc::channel().0,
+        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
     );
     let (message_tx, _message_rx) = std::sync::mpsc::channel();
 

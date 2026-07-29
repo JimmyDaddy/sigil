@@ -22,6 +22,11 @@ use crate::plugin_manifest_io::{BoundedPluginManifestReadError, read_bounded_plu
 const BUILTIN_MCP_NAMESPACE_PREFIX: &str = "builtin:";
 const MAX_SAFE_DECLARATION_LABEL_CHARS: usize = 256;
 const REDACTED_DECLARATION_LABEL: &str = "[redacted]";
+/// Maximum number of MCP declarations that one runtime can activate.
+///
+/// Worker-side ListChanged coalescing uses the same bound, so declaration admission must reject
+/// excess identities instead of silently losing an overflow refresh.
+pub const MAX_MCP_SERVER_DECLARATIONS: usize = 4_096;
 
 /// Stable classification for an MCP declaration admission failure.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +34,7 @@ const REDACTED_DECLARATION_LABEL: &str = "[redacted]";
 pub enum McpRegistrationErrorCode {
     ReservedMcpNamespace,
     DuplicateMcpServerName,
+    McpServerLimitExceeded,
     PluginMcpEnvironmentGrantNotSupported,
     PluginRemoteMcpNotSupported,
     PluginOriginAttestationMismatch,
@@ -45,6 +51,7 @@ impl McpRegistrationErrorCode {
         match self {
             Self::ReservedMcpNamespace => "reserved_mcp_namespace",
             Self::DuplicateMcpServerName => "duplicate_mcp_server_name",
+            Self::McpServerLimitExceeded => "mcp_server_limit_exceeded",
             Self::PluginMcpEnvironmentGrantNotSupported => {
                 "plugin_mcp_environment_grant_not_supported"
             }
@@ -816,6 +823,15 @@ pub fn resolve_user_root_mcp_declarations(
     servers: &[McpServerConfig],
     workspace_root: impl AsRef<Path>,
 ) -> Result<Vec<ResolvedMcpServerDeclaration>, McpRegistrationError> {
+    if servers.len() > MAX_MCP_SERVER_DECLARATIONS {
+        return Err(McpRegistrationError::new(
+            McpRegistrationErrorCode::McpServerLimitExceeded,
+            "<root>",
+            format!(
+                "root MCP server count exceeds the runtime limit of {MAX_MCP_SERVER_DECLARATIONS}"
+            ),
+        ));
+    }
     let mut declarations = Vec::with_capacity(servers.len());
     let mut names = BTreeSet::new();
     for server in servers {

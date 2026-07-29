@@ -130,9 +130,10 @@ pub use agent_profile_registry::{
 };
 pub use agent_supervisor::{
     AgentBudgetPolicy, AgentChatChildStart, AgentChatChildThread, AgentInterruptedThread,
-    AgentMailboxMessage, AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart,
-    AgentTaskChildThread, ForegroundCancelImpact, MAX_TASK_DISCOVERY_PROBES,
-    REQUEST_TASK_DISCOVERY_TOOL_NAME, chat_agent_thread_id_for_call,
+    AgentMailboxMessage, AgentSupervisor, AgentSupervisorChange, AgentSupervisorEventSink,
+    AgentSupervisorTaskChildRunner, AgentTaskChildStart, AgentTaskChildThread,
+    ForegroundCancelImpact, MAX_TASK_DISCOVERY_PROBES, REQUEST_TASK_DISCOVERY_TOOL_NAME,
+    chat_agent_thread_id_for_call,
 };
 pub use agent_tools::{
     AgentToolBackgroundEventSink, AgentToolBackgroundRuns, AgentToolProviderFactory,
@@ -174,10 +175,10 @@ pub use egress_ordering::{
 pub use hosted_finalizer::{HostedEvidenceFinalizer, hosted_terminal_status};
 pub use image_attachment::{ControlledImageAttachmentCache, image_path_from_pasted_text};
 pub use mcp_declaration::{
-    McpConfigOrigin, McpConfigOriginKind, McpExecutionBase, McpExecutionBaseKind,
-    McpRegistrationError, McpRegistrationErrorCode, McpServerDeclarationProjection,
-    PluginManifestAttestation, ResolvedMcpServerDeclaration, ResolvedMcpStdioLaunch,
-    resolve_user_root_mcp_declarations,
+    MAX_MCP_SERVER_DECLARATIONS, McpConfigOrigin, McpConfigOriginKind, McpExecutionBase,
+    McpExecutionBaseKind, McpRegistrationError, McpRegistrationErrorCode,
+    McpServerDeclarationProjection, PluginManifestAttestation, ResolvedMcpServerDeclaration,
+    ResolvedMcpStdioLaunch, resolve_user_root_mcp_declarations,
 };
 pub use mcp_oauth::{McpOAuthCredentialManager, RuntimeMcpOAuthBearerProvider};
 pub use mcp_oauth_flow::{

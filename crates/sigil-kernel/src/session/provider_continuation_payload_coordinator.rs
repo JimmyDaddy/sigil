@@ -110,6 +110,13 @@ impl ProviderContinuationPayloadCoordinator {
         self.inner.recover()
     }
 
+    pub(crate) fn recover_from_records(
+        &self,
+        records: &[SessionStreamRecord],
+    ) -> Result<ProviderContinuationPayloadRecoveryReport> {
+        self.inner.recover_from_records(records)
+    }
+
     /// Durably invalidates one payload and removes its encrypted local bytes.
     ///
     /// # Errors
@@ -219,6 +226,21 @@ where
     /// lifecycle, or session scope cannot be proven.
     pub fn recover(&self) -> Result<ProviderContinuationPayloadRecoveryReport> {
         let projection = self.payload_projection()?;
+        self.recover_projection(projection)
+    }
+
+    fn recover_from_records(
+        &self,
+        records: &[SessionStreamRecord],
+    ) -> Result<ProviderContinuationPayloadRecoveryReport> {
+        self.ensure_store_session_scope(records)?;
+        self.recover_projection(ProviderContinuationProjection::from_records(records)?)
+    }
+
+    fn recover_projection(
+        &self,
+        projection: ProviderContinuationProjection,
+    ) -> Result<ProviderContinuationPayloadRecoveryReport> {
         let payload_states = projection.payload_states().cloned().collect::<Vec<_>>();
         let committed_payload_ids = payload_states
             .iter()

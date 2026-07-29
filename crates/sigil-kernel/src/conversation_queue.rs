@@ -237,12 +237,6 @@ impl ConversationInputTerminalFrontier {
         }
         Ok(())
     }
-
-    pub(crate) fn matches_record(&self, record: &SessionStreamRecord) -> bool {
-        self.stream_sequence == record.stream_sequence()
-            && self.event_id == record.event_id()
-            && self.record_checksum == record.record_checksum()
-    }
 }
 
 /// Durable predicate that must still hold when one queue item reaches a terminal state.
@@ -596,6 +590,7 @@ pub struct ConversationQueueDurableProjection {
     pub queue: ConversationQueueProjection,
     pub revision: Option<ConversationQueueRevision>,
     seen_queue_ids: BTreeSet<ConversationInputQueueId>,
+    active_promotions: BTreeMap<ConversationInputQueueId, String>,
     cursor: Option<ProjectionCursor>,
 }
 
@@ -636,6 +631,22 @@ impl ConversationQueueDurableProjection {
                 .items
                 .iter()
                 .any(|item| item.queued.queue_id == *queue_id)
+    }
+
+    /// Drops terminal identity tombstones when this durable projection is embedded in the
+    /// scheduler-facing active projection.
+    ///
+    /// Canonical replay retains every identity so it can diagnose a reused id exactly. The active
+    /// projection only authorizes mutations of currently live queue items; enqueue uniqueness is
+    /// revalidated from canonical records under the writer lease.
+    pub(crate) fn retain_active_queue_ids(&mut self) {
+        let active_ids = self
+            .queue
+            .items
+            .iter()
+            .map(|item| item.queued.queue_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.seen_queue_ids = active_ids;
     }
 
     /// Validates one not-yet-appended mutation against the exact durable queue state.
@@ -748,7 +759,43 @@ impl ConversationQueueDurableProjection {
         Ok(())
     }
 
-    fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
+    /// Validates a terminal transition against the current bounded queue state.
+    ///
+    /// The caller separately binds the active projection frontier. This projection retains the
+    /// logical dispatch id only while its queue item is dispatching, so terminal history does not
+    /// grow with session length.
+    pub(crate) fn validate_terminal(
+        &self,
+        command: &ConversationInputTerminalCommand,
+        promoted_frontier_matches: bool,
+    ) -> Result<bool> {
+        let item = self
+            .queue
+            .items
+            .iter()
+            .find(|item| item.queued.queue_id == command.terminal.queue_id);
+        match &command.expectation {
+            ConversationInputTerminalExpectation::Queued {
+                expected_queue_revision,
+                queue_id,
+                expected_prompt_hash,
+            } => Ok(self.current_revision() == *expected_queue_revision
+                && self.queue.next_dispatchable.as_ref() == Some(queue_id)
+                && item.is_some_and(|item| {
+                    item.status == ConversationInputStatus::Queued
+                        && item.queued.prompt_hash == *expected_prompt_hash
+                })),
+            ConversationInputTerminalExpectation::Promoted {
+                queue_id,
+                dispatch_run_id,
+                ..
+            } => Ok(promoted_frontier_matches
+                && item.is_some_and(|item| item.status == ConversationInputStatus::Dispatching)
+                && self.active_promotions.get(queue_id) == Some(dispatch_run_id)),
+        }
+    }
+
+    pub(crate) fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         let decision = projection_apply_decision(self.cursor.as_ref(), event)?;
         if decision == ProjectionApplyDecision::IgnoreAlreadyApplied {
@@ -765,6 +812,8 @@ impl ConversationQueueDurableProjection {
                         .context("failed to decode conversation input promoted payload")?;
                 entry.validate_for_session(&event.session_id)?;
                 self.validate_promotion(&entry)?;
+                self.active_promotions
+                    .insert(entry.queue_id.clone(), entry.dispatch_run_id.clone());
                 self.queue
                     .apply_control_entry(&ControlEntry::ConversationInputPromoted(entry));
                 self.revision = Some(ConversationQueueRevision::from_record(record));
@@ -785,6 +834,11 @@ impl ConversationQueueDurableProjection {
                         }
                         if let ControlEntry::ConversationInputQueued(queued) = &control {
                             self.seen_queue_ids.insert(queued.queue_id.clone());
+                        }
+                        if let ControlEntry::ConversationInputStatusChanged(status) = &control
+                            && status.status.is_terminal()
+                        {
+                            self.active_promotions.remove(&status.queue_id);
                         }
                         self.queue.apply_control_entry(&control);
                         self.revision = Some(ConversationQueueRevision::from_record(record));

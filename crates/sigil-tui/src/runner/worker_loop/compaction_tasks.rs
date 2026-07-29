@@ -1,7 +1,6 @@
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
 
 use tokio::{runtime::Runtime, task::JoinHandle};
@@ -11,7 +10,8 @@ use super::{
     PendingV2Compaction, QueuedConversationPreTurnAdmission,
 };
 use crate::runner::V2CompactionReview;
-use sigil_kernel::ConversationInputQueueId;
+use crate::runner::worker_event::WorkerEventPayloadSender;
+use sigil_kernel::{ConversationInputQueueId, Session, session::ActiveProjectionFrontier};
 
 pub(in crate::runner) struct ManualV2CompactionPreparation {
     pub(in crate::runner) review: V2CompactionReview,
@@ -21,12 +21,15 @@ pub(in crate::runner) struct ManualV2CompactionPreparation {
 
 pub(in crate::runner) struct IdleV2CompactionPreparation {
     pub(in crate::runner) state: IdleAutoCompactionState,
-    pub(in crate::runner) preparation: IdleAutoCompactionPreparation,
+    pub(in crate::runner) preparation: Result<IdleAutoCompactionPreparation, String>,
+    pub(in crate::runner) session: sigil_kernel::Session,
 }
 
 pub(in crate::runner) struct PreTurnV2CompactionPreparation {
     pub(in crate::runner) queue_id: ConversationInputQueueId,
     pub(in crate::runner) admission: QueuedConversationPreTurnAdmission,
+    pub(in crate::runner) session: Option<Session>,
+    pub(in crate::runner) prepared_frontier: ActiveProjectionFrontier,
 }
 
 pub(in crate::runner) struct OverflowV2CompactionPreparation {
@@ -81,7 +84,7 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
-        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
     ) where
         F: FnOnce() -> Result<ManualV2CompactionPreparation, String> + Send + 'static,
@@ -117,7 +120,7 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
-        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
     ) where
         F: FnOnce() -> Result<IdleV2CompactionPreparation, String> + Send + 'static,
@@ -153,7 +156,7 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
-        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
     ) where
         F: FnOnce() -> Result<PreTurnV2CompactionPreparation, String> + Send + 'static,
@@ -189,7 +192,7 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
-        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
     ) where
         F: FnOnce() -> Result<OverflowV2CompactionPreparation, String> + Send + 'static,

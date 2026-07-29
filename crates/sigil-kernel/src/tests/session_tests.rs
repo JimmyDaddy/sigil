@@ -41,8 +41,9 @@ use crate::{
 };
 
 use super::{
-    ControlEntry, JsonlSessionStore, PrefixSnapshot, Session, SessionLogEntry,
-    SessionStreamCompatibilityError, session_stats_from_entries,
+    ControlEntry, JsonlSessionStore, PrefixSnapshot, Session, SessionIoBusyError,
+    SessionIoBusyKind, SessionLogEntry, SessionStreamCompatibilityError,
+    session_stats_from_entries,
 };
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
@@ -1419,7 +1420,10 @@ fn append_event_fails_when_session_file_is_locked() -> Result<()> {
         .expect_err("second writer should fail while file lock is held");
 
     locked_file.unlock()?;
-    assert!(error.to_string().contains("failed to lock"));
+    let busy = error
+        .downcast_ref::<SessionIoBusyError>()
+        .expect("writer lock exhaustion should remain typed");
+    assert_eq!(busy.kind, SessionIoBusyKind::Writer);
     Ok(())
 }
 
@@ -1435,7 +1439,10 @@ fn read_event_records_fails_when_session_file_is_exclusively_locked() -> Result<
         .expect_err("shared reader should fail while exclusive file lock is held");
 
     locked_file.unlock()?;
-    assert!(error.to_string().contains("failed to lock"));
+    let busy = error
+        .downcast_ref::<SessionIoBusyError>()
+        .expect("reader lock exhaustion should remain typed");
+    assert_eq!(busy.kind, SessionIoBusyKind::Reader);
     Ok(())
 }
 
@@ -1472,7 +1479,10 @@ fn writer_mode_loader_fails_when_session_file_is_locked() -> Result<()> {
         .expect_err("writer-mode reader should fail while file lock is held");
 
     locked_file.unlock()?;
-    assert!(error.to_string().contains("failed to lock"));
+    let busy = error
+        .downcast_ref::<SessionIoBusyError>()
+        .expect("writer-mode lock exhaustion should remain typed");
+    assert_eq!(busy.kind, SessionIoBusyKind::Writer);
     Ok(())
 }
 

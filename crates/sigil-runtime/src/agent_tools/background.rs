@@ -18,13 +18,114 @@ pub trait AgentToolBackgroundEventSink: Send + Sync {
         _reason: Option<String>,
     ) {
     }
+
+    /// Signals that the detached result is visible to [`AgentToolBackgroundRuns`].
+    ///
+    /// This callback is delivered only after the result slot is published and the run has been
+    /// registered. Consumers may therefore collect the named run without polling a `JoinHandle`.
+    fn handle_agent_completion_ready(&self, _thread_id: &AgentThreadId) {}
 }
 
 /// Join handle and durable identity for a detached background chat agent.
 pub(super) struct BackgroundChatAgentHandle {
     pub(super) thread: BackgroundChatAgentThreadRecord,
-    pub(super) handle: tokio::task::JoinHandle<Result<BackgroundChatAgentResult>>,
+    pub(super) handle: BackgroundChatAgentTask,
     pub(super) cancellation_owner: RunCancellationOwner,
+}
+
+type BackgroundChatAgentOutcome =
+    std::result::Result<Result<BackgroundChatAgentResult>, tokio::task::JoinError>;
+type BackgroundChatAgentResultSlot = Arc<Mutex<Option<BackgroundChatAgentOutcome>>>;
+
+pub(super) struct BackgroundChatAgentTask {
+    join: tokio::task::JoinHandle<()>,
+    abort: tokio::task::AbortHandle,
+    result: BackgroundChatAgentResultSlot,
+    completion_registration: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl BackgroundChatAgentTask {
+    pub(super) fn spawn<F>(
+        thread_id: AgentThreadId,
+        event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
+        future: F,
+    ) -> Self
+    where
+        F: Future<Output = Result<BackgroundChatAgentResult>> + Send + 'static,
+    {
+        let result = Arc::new(Mutex::new(None));
+        let published_result = Arc::clone(&result);
+        let (completion_registration, completion_registration_rx) = if event_sink.is_some() {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let inner = tokio::spawn(future);
+        let abort = inner.abort_handle();
+        let join = tokio::spawn(async move {
+            let outcome = inner.await;
+            let result_published = if let Ok(mut slot) = published_result.lock() {
+                *slot = Some(outcome);
+                true
+            } else {
+                false
+            };
+            if result_published
+                && let Some(sink) = event_sink
+                && completion_registration_rx
+                    .expect("completion registration exists when an event sink is configured")
+                    .await
+                    .is_ok()
+            {
+                sink.handle_agent_completion_ready(&thread_id);
+            }
+        });
+        Self {
+            join,
+            abort,
+            result,
+            completion_registration,
+        }
+    }
+
+    pub(super) fn mark_registered(&mut self) {
+        if let Some(registration) = self.completion_registration.take() {
+            let _ = registration.send(());
+        }
+    }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.result
+            .lock()
+            .map(|result| result.is_some())
+            .unwrap_or(false)
+    }
+
+    pub(super) fn abort(&self) {
+        self.abort.abort();
+    }
+
+    pub(super) async fn wait_for_exit(
+        &mut self,
+    ) -> std::result::Result<(), tokio::task::JoinError> {
+        (&mut self.join).await
+    }
+
+    pub(super) async fn finish(
+        mut self,
+    ) -> std::result::Result<Result<BackgroundChatAgentResult>, tokio::task::JoinError> {
+        (&mut self.join).await?;
+        self.result
+            .lock()
+            .ok()
+            .and_then(|mut result| result.take())
+            .unwrap_or_else(|| {
+                Ok(Err(anyhow!(
+                    "background child agent result slot is unavailable"
+                )))
+            })
+    }
 }
 
 /// One join-before-final child owned by the current root run.
@@ -146,12 +247,19 @@ impl AgentToolBackgroundRuns {
     pub(super) fn insert(
         &self,
         thread_id: AgentThreadId,
-        handle: BackgroundChatAgentHandle,
+        mut handle: BackgroundChatAgentHandle,
     ) -> Result<()> {
         let mut handles = self
             .handles
             .lock()
             .map_err(|_| anyhow!("agent background run lock poisoned"))?;
+        if handles.contains_key(&thread_id) {
+            bail!(
+                "agent background run {} is already registered",
+                thread_id.as_str()
+            );
+        }
+        handle.handle.mark_registered();
         handles.insert(thread_id, handle);
         Ok(())
     }
@@ -183,7 +291,8 @@ impl AgentToolBackgroundRuns {
                 );
             }
         }
-        for (thread_id, handle) in registrations.drain(..) {
+        for (thread_id, mut handle) in registrations.drain(..) {
+            handle.handle.mark_registered();
             handles.insert(thread_id, handle);
         }
         Ok(())
@@ -276,8 +385,8 @@ impl AgentToolBackgroundRuns {
             "reserved background cancellation must activate once"
         );
         let joined = matches!(
-            tokio::time::timeout(timeout, &mut background.handle).await,
-            Ok(Ok(_))
+            tokio::time::timeout(timeout, background.handle.wait_for_exit()).await,
+            Ok(Ok(()))
         );
         let quiescence = if joined {
             background
@@ -286,7 +395,7 @@ impl AgentToolBackgroundRuns {
                 .await
         } else {
             background.handle.abort();
-            let _ = background.handle.await;
+            let _ = background.handle.wait_for_exit().await;
             RunQuiescenceOutcome::TimedOut {
                 active_effects: background.cancellation_owner.handle().active_effects(),
                 active_tasks: background.cancellation_owner.handle().active_tasks(),

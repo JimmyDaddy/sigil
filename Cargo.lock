@@ -5180,6 +5180,7 @@ dependencies = [
  "async-trait",
  "clap",
  "crossterm",
+ "fs2",
  "futures",
  "image",
  "ratatui",

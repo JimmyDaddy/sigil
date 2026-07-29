@@ -110,8 +110,8 @@ type JoinedChatAgentFuture =
     Pin<Box<dyn Future<Output = Result<background::BackgroundChatAgentResult>> + Send>>;
 
 use background::{
-    AgentBatchMemberContext, BackgroundChatAgentHandle, BackgroundChatAgentThreadRecord,
-    JoinedChatAgentHandle, run_background_chat_agent,
+    AgentBatchMemberContext, BackgroundChatAgentHandle, BackgroundChatAgentTask,
+    BackgroundChatAgentThreadRecord, JoinedChatAgentHandle, run_background_chat_agent,
 };
 use chat::close_agent_from_args;
 #[cfg(test)]

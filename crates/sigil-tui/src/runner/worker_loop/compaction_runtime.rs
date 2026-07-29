@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
+use sigil_kernel::session::StableCompactionSnapshot;
 use sigil_kernel::{
     CompactionCircuitBreakerDecisionV1, CompactionCircuitBreakerInputV1, CompactionCircuitScopeV1,
-    CompactionEmergencyBlockingLayerV1, CompactionForecastConfidenceV1, CompactionForecastSourceV1,
-    CompactionInitiation, CompactionLifecycleProjection, CompactionRolloutModeV1,
-    CompactionStrategy, CompactionThresholdStatus, ControlEntry, DurableEventType,
-    ExpectedRemainingTurnsV1, FrozenProviderRequestMaterial, PortableSemanticCompactionOutcome,
+    CompactionConfig, CompactionEmergencyBlockingLayerV1, CompactionForecastConfidenceV1,
+    CompactionForecastSourceV1, CompactionInitiation, CompactionRolloutModeV1, CompactionStrategy,
+    CompactionThresholdStatus, ControlEntry, ExpectedRemainingTurnsV1,
+    FrozenProviderRequestMaterial, PortableSemanticCompactionOutcome,
     PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
-    PortableTargetRequestMaterial, ProviderNonGeneratingAttempt,
+    PortableTargetRequestMaterial, ProviderContextCapabilities, ProviderNonGeneratingAttempt,
     ProviderNonGeneratingAttemptReceipt, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptPurpose, ProviderRequestRejection, RuntimeContextCandidates,
     ToolOutputProjectionPolicy, V2CompactionPreview,
@@ -24,6 +25,158 @@ use crate::runner::protocol::{
 };
 
 const IDLE_AUTO_COMPACTION_COOLDOWN_MS: u64 = 60_000;
+const IDLE_AUTO_COMPACTION_PREFLIGHT_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+
+/// Scheduler-owned state required to decide whether idle automatic compaction may be considered.
+///
+/// This snapshot deliberately contains no path, transcript, prompt, store or task-manager handle.
+/// It lets the worker reject an ineligible request before it creates a background preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runner) struct IdleAutoCompactionSchedulerEligibility {
+    pub(in crate::runner) run_active: bool,
+    pub(in crate::runner) conversation_queue_idle: bool,
+    pub(in crate::runner) pending_agent_result_continuation: bool,
+    pub(in crate::runner) pending_compaction: bool,
+    pub(in crate::runner) preparation_active: bool,
+}
+
+impl IdleAutoCompactionSchedulerEligibility {
+    #[cfg(test)]
+    fn idle() -> Self {
+        Self {
+            run_active: false,
+            conversation_queue_idle: true,
+            pending_agent_result_continuation: false,
+            pending_compaction: false,
+            preparation_active: false,
+        }
+    }
+
+    fn blocked_reason(self) -> Option<IdleAutoCompactionSchedulerBlockReason> {
+        if self.run_active {
+            Some(IdleAutoCompactionSchedulerBlockReason::ActiveRun)
+        } else if !self.conversation_queue_idle {
+            Some(IdleAutoCompactionSchedulerBlockReason::ConversationQueue)
+        } else if self.pending_agent_result_continuation {
+            Some(IdleAutoCompactionSchedulerBlockReason::AgentResultContinuation)
+        } else if self.pending_compaction {
+            Some(IdleAutoCompactionSchedulerBlockReason::PendingCompaction)
+        } else if self.preparation_active {
+            Some(IdleAutoCompactionSchedulerBlockReason::PreparationActive)
+        } else {
+            None
+        }
+    }
+}
+
+/// Why the worker cannot yet evaluate one requested idle automatic compaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runner) enum IdleAutoCompactionSchedulerBlockReason {
+    ActiveRun,
+    ConversationQueue,
+    AgentResultContinuation,
+    PendingCompaction,
+    PreparationActive,
+    SessionUnavailable,
+}
+
+/// A pure-memory reason that consumes the current post-run request without starting preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runner) enum IdleAutoCompactionNotEligibleReason {
+    CompactionDisabled,
+    ContextWindowUnavailable,
+    BelowPreparationThreshold,
+    NotFitRequired,
+}
+
+/// Cheap decision made before any path load or background preparation is created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runner) enum IdleAutoCompactionPreflightDecision {
+    NotRequested,
+    SchedulerBlocked(IdleAutoCompactionSchedulerBlockReason),
+    NotEligible(IdleAutoCompactionNotEligibleReason),
+    ProceedToDetailedPreparation {
+        effective_strategy: CompactionStrategy,
+    },
+}
+
+/// Per-evaluation evidence delta for cheap idle-compaction preflight.
+///
+/// These counters describe only this pure decision. They intentionally do not claim durable reads,
+/// file-lock attempts, worker wakes, projection rebuilds or preparation starts, because those
+/// operations are outside this function and require their own integration instrumentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runner) struct IdleAutoCompactionPreflightEvidenceV1 {
+    pub(in crate::runner) schema_version: u32,
+    pub(in crate::runner) evaluation_count: u64,
+    pub(in crate::runner) not_requested_count: u64,
+    pub(in crate::runner) scheduler_blocked_count: u64,
+    pub(in crate::runner) not_eligible_count: u64,
+    pub(in crate::runner) detailed_preparation_candidate_count: u64,
+    pub(in crate::runner) prompt_tokens: Option<u64>,
+    pub(in crate::runner) context_window_tokens: Option<u64>,
+    pub(in crate::runner) threshold_status: Option<CompactionThresholdStatus>,
+    pub(in crate::runner) configured_strategy: CompactionStrategy,
+    pub(in crate::runner) effective_strategy: Option<CompactionStrategy>,
+    pub(in crate::runner) cache_aware_v3_supported: Option<bool>,
+}
+
+/// Pure-memory result returned before idle automatic compaction can load or spawn anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runner) struct IdleAutoCompactionPreflight {
+    pub(in crate::runner) decision: IdleAutoCompactionPreflightDecision,
+    pub(in crate::runner) evidence: IdleAutoCompactionPreflightEvidenceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdleAutoCompactionDurableAdmission {
+    failure_latched: bool,
+    circuit_decision: CompactionCircuitBreakerDecisionV1,
+}
+
+/// Captures the live session projection for idle compaction only when it still exactly matches
+/// the current durable session-entry frontier.
+///
+/// The first active-projection read selects the frontier; `stable_compaction_snapshot` performs
+/// the compare-and-snapshot check against that exact frontier. Durable lifecycle-only records may
+/// advance later, but an externally appended session entry invalidates this snapshot.
+pub(in crate::runner) fn capture_stable_idle_compaction_snapshot(
+    session: &Session,
+) -> Result<Option<StableCompactionSnapshot>> {
+    let Some(active) = session.active_projection_snapshot()? else {
+        return Ok(None);
+    };
+    session.stable_compaction_snapshot(active.frontier())
+}
+
+fn idle_auto_compaction_durable_admission(
+    session: &Session,
+    scope_fingerprint: &str,
+    circuit_scope: CompactionCircuitScopeV1,
+    emergency: bool,
+    emergency_blocking_layer: CompactionEmergencyBlockingLayerV1,
+) -> Result<IdleAutoCompactionDurableAdmission> {
+    let active = session
+        .active_projection_snapshot()?
+        .context("eligible automatic compaction requires a durable active projection")?;
+    let compaction = active.compaction();
+    let post_activation_emergency_layer = (compaction.latest_applied_stream_sequence().is_some()
+        && compaction.completed_real_turns_since_latest_applied() == 1
+        && emergency)
+        .then_some(emergency_blocking_layer);
+    let circuit_decision =
+        compaction.circuit_breaker_decision(&CompactionCircuitBreakerInputV1 {
+            scope: circuit_scope,
+            latest_completed_real_turn_sequence: compaction.latest_completed_real_turn_sequence(),
+            emergency,
+            post_activation_emergency_layer,
+            manual_retry: false,
+        })?;
+    Ok(IdleAutoCompactionDurableAdmission {
+        failure_latched: compaction.has_failed_idle_automatic_scope(scope_fingerprint),
+        circuit_decision,
+    })
+}
 
 /// Process-local post-run policy state for the deliberately narrow K25.11 automation path.
 ///
@@ -72,6 +225,129 @@ impl IdleAutoCompactionState {
             retry_after_unix_ms: now_unix_ms.saturating_add(IDLE_AUTO_COMPACTION_COOLDOWN_MS),
         });
     }
+}
+
+/// Performs the first idle automatic-compaction gate using process-local state only.
+///
+/// The result is not final compaction admission. `ProceedToDetailedPreparation` means only that
+/// the caller may create the existing detailed preparation, which still owns foldability,
+/// fit/economics, circuit-breaker and exact-target validation. Every `NotEligible` result consumes
+/// the current post-run request at the caller and must not load the session path or start a task.
+#[must_use]
+pub(in crate::runner) fn idle_auto_compaction_preflight(
+    state: &IdleAutoCompactionState,
+    session: Option<&Session>,
+    configured_compaction: &CompactionConfig,
+    provider_context_capabilities: &ProviderContextCapabilities,
+    scheduler: IdleAutoCompactionSchedulerEligibility,
+) -> IdleAutoCompactionPreflight {
+    let mut evidence = IdleAutoCompactionPreflightEvidenceV1 {
+        schema_version: IDLE_AUTO_COMPACTION_PREFLIGHT_EVIDENCE_SCHEMA_VERSION,
+        evaluation_count: 1,
+        not_requested_count: 0,
+        scheduler_blocked_count: 0,
+        not_eligible_count: 0,
+        detailed_preparation_candidate_count: 0,
+        prompt_tokens: None,
+        context_window_tokens: None,
+        threshold_status: None,
+        configured_strategy: configured_compaction.strategy,
+        effective_strategy: None,
+        cache_aware_v3_supported: None,
+    };
+
+    if !state.is_requested() {
+        return idle_auto_compaction_preflight_result(
+            IdleAutoCompactionPreflightDecision::NotRequested,
+            evidence,
+        );
+    }
+    if let Some(reason) = scheduler.blocked_reason() {
+        return idle_auto_compaction_preflight_result(
+            IdleAutoCompactionPreflightDecision::SchedulerBlocked(reason),
+            evidence,
+        );
+    }
+    let Some(session) = session else {
+        return idle_auto_compaction_preflight_result(
+            IdleAutoCompactionPreflightDecision::SchedulerBlocked(
+                IdleAutoCompactionSchedulerBlockReason::SessionUnavailable,
+            ),
+            evidence,
+        );
+    };
+
+    let cache_aware_v3_supported =
+        (configured_compaction.strategy == CompactionStrategy::CacheAwareV3).then(|| {
+            sigil_runtime::cache_aware_v3_automatic_supported(
+                session.provider_name(),
+                session.model_name(),
+                provider_context_capabilities,
+            )
+        });
+    let mut effective_compaction = sigil_runtime::effective_compaction_config(
+        session.provider_name(),
+        session.model_name(),
+        configured_compaction,
+    );
+    if cache_aware_v3_supported == Some(false) {
+        effective_compaction.strategy = CompactionStrategy::LegacyV2;
+    }
+    let prompt_tokens = session.stats().last_prompt_tokens;
+    let threshold_status = effective_compaction.threshold_status(prompt_tokens);
+    evidence.prompt_tokens = Some(prompt_tokens);
+    evidence.context_window_tokens = effective_compaction.context_window_tokens.map(u64::from);
+    evidence.threshold_status = Some(threshold_status);
+    evidence.effective_strategy = Some(effective_compaction.strategy);
+    evidence.cache_aware_v3_supported = cache_aware_v3_supported;
+
+    let decision = match threshold_status {
+        CompactionThresholdStatus::Off => IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::CompactionDisabled,
+        ),
+        CompactionThresholdStatus::NotAvailable => {
+            IdleAutoCompactionPreflightDecision::NotEligible(
+                IdleAutoCompactionNotEligibleReason::ContextWindowUnavailable,
+            )
+        }
+        CompactionThresholdStatus::Ready | CompactionThresholdStatus::Soft
+            if effective_compaction.strategy == CompactionStrategy::LegacyV2 =>
+        {
+            IdleAutoCompactionPreflightDecision::NotEligible(
+                IdleAutoCompactionNotEligibleReason::BelowPreparationThreshold,
+            )
+        }
+        CompactionThresholdStatus::Ready => IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::NotFitRequired,
+        ),
+        CompactionThresholdStatus::Soft | CompactionThresholdStatus::Hard => {
+            IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation {
+                effective_strategy: effective_compaction.strategy,
+            }
+        }
+    };
+    idle_auto_compaction_preflight_result(decision, evidence)
+}
+
+fn idle_auto_compaction_preflight_result(
+    decision: IdleAutoCompactionPreflightDecision,
+    mut evidence: IdleAutoCompactionPreflightEvidenceV1,
+) -> IdleAutoCompactionPreflight {
+    match decision {
+        IdleAutoCompactionPreflightDecision::NotRequested => {
+            evidence.not_requested_count = 1;
+        }
+        IdleAutoCompactionPreflightDecision::SchedulerBlocked(_) => {
+            evidence.scheduler_blocked_count = 1;
+        }
+        IdleAutoCompactionPreflightDecision::NotEligible(_) => {
+            evidence.not_eligible_count = 1;
+        }
+        IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation { .. } => {
+            evidence.detailed_preparation_candidate_count = 1;
+        }
+    }
+    IdleAutoCompactionPreflight { decision, evidence }
 }
 
 /// Result of checking the idle-only automatic compaction policy after a completed chat run.
@@ -647,7 +923,7 @@ pub(in crate::runner) fn prepare_v2_compaction_review(
             started_at_unix_ms: now,
             completed_at_unix_ms: now,
         })?;
-    let records = JsonlSessionStore::read_event_records(session_log_path)?;
+    let records = session.read_durable_event_records()?;
     let active_standalone_sources =
         sigil_kernel::ToolOutputProjectionSidecarProjection::from_records(&records)?
             .active_standalone_source_event_ids();
@@ -800,43 +1076,27 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         });
     }
 
-    if has_failed_idle_automatic_scope(session_log_path, &scope_fingerprint)? {
-        state.consume_request();
-        return Ok(IdleAutoCompactionPreparation::FailureLatched);
-    }
-
-    let records = JsonlSessionStore::read_event_records(session_log_path)?;
-    let lifecycle = CompactionLifecycleProjection::from_records(&records)?;
-    let latest_applied_sequence = lifecycle.latest_applied_stream_sequence();
-    let completed_turn_sequences = records
-        .iter()
-        .filter(|record| {
-            record.stored_event().event_kind() == Some(DurableEventType::AssistantMessageRecorded)
-        })
-        .map(|record| record.stream_sequence())
-        .filter(|sequence| latest_applied_sequence.is_none_or(|applied| *sequence > applied))
-        .collect::<Vec<_>>();
     let emergency = effective_config
         .context_window_tokens
         .is_some_and(|context_window| {
             session.stats().last_prompt_tokens.saturating_mul(10)
                 >= u64::from(context_window).saturating_mul(9)
         });
-    let post_activation_emergency_layer =
-        (latest_applied_sequence.is_some() && completed_turn_sequences.len() == 1 && emergency)
-            .then(|| emergency_blocking_layer(&preview, session.stats().last_prompt_tokens));
-    let circuit_decision =
-        lifecycle.circuit_breaker_decision(&CompactionCircuitBreakerInputV1 {
-            scope: circuit_scope.clone(),
-            latest_completed_real_turn_sequence: completed_turn_sequences.into_iter().max(),
-            emergency,
-            post_activation_emergency_layer,
-            manual_retry: false,
-        })?;
-    if circuit_decision != CompactionCircuitBreakerDecisionV1::Allowed {
+    let durable_admission = idle_auto_compaction_durable_admission(
+        session,
+        &scope_fingerprint,
+        circuit_scope.clone(),
+        emergency,
+        emergency_blocking_layer(&preview, session.stats().last_prompt_tokens),
+    )?;
+    if durable_admission.failure_latched {
+        state.consume_request();
+        return Ok(IdleAutoCompactionPreparation::FailureLatched);
+    }
+    if durable_admission.circuit_decision != CompactionCircuitBreakerDecisionV1::Allowed {
         state.consume_request();
         return Ok(IdleAutoCompactionPreparation::CircuitOpen {
-            decision: circuit_decision,
+            decision: durable_admission.circuit_decision,
         });
     }
 
@@ -1681,8 +1941,9 @@ pub(in crate::runner) fn has_failed_idle_automatic_scope(
     session_log_path: &std::path::Path,
     scope_fingerprint: &str,
 ) -> Result<bool> {
-    let records = JsonlSessionStore::read_event_records(session_log_path)?;
-    Ok(CompactionLifecycleProjection::from_records(&records)?
+    let active = JsonlSessionStore::new(session_log_path)?.active_projection_snapshot()?;
+    Ok(active
+        .compaction()
         .has_failed_idle_automatic_scope(scope_fingerprint))
 }
 

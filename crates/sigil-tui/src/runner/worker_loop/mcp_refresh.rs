@@ -1,9 +1,10 @@
 use super::*;
 
+const MAX_MCP_REFRESHES_PER_PASS: usize = 8;
+
 pub(in crate::runner) struct WorkerLoopMcpHandlers {
     pub(in crate::runner) elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     pub(in crate::runner) event_handler: Arc<ChannelMcpRuntimeEventHandler>,
-    pub(in crate::runner) event_rx: mpsc::Receiver<McpRuntimeEvent>,
     pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) context_resolver: sigil_runtime::RequestContextResolver,
 }
@@ -25,7 +26,7 @@ pub(in crate::runner) fn refresh_pending_mcp_servers<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
-    let servers = std::mem::take(pending_mcp_refreshes);
+    let servers = take_pending_mcp_refresh_batch(pending_mcp_refreshes);
     let mut shared_registry_blocked = false;
     for server_name in servers {
         let Some(agent) = Arc::get_mut(agent) else {
@@ -105,3 +106,19 @@ where
     }
     shared_registry_blocked
 }
+
+fn take_pending_mcp_refresh_batch(pending_mcp_refreshes: &mut BTreeSet<String>) -> Vec<String> {
+    let servers = pending_mcp_refreshes
+        .iter()
+        .take(MAX_MCP_REFRESHES_PER_PASS)
+        .cloned()
+        .collect::<Vec<_>>();
+    for server_name in &servers {
+        pending_mcp_refreshes.remove(server_name);
+    }
+    servers
+}
+
+#[cfg(test)]
+#[path = "../tests/mcp_refresh_tests.rs"]
+mod tests;

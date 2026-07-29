@@ -1,9 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::SystemTime,
 };
 
@@ -12,13 +15,514 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::active_projection::ActiveSessionProjection;
 use super::*;
 
 const DURABLE_IDENTITY_MAX_BYTES: usize = 512;
 
-static SESSION_WRITER_REGISTRY: OnceLock<
-    Mutex<HashMap<PathBuf, Weak<Mutex<LinearSessionWriter>>>>,
-> = OnceLock::new();
+static SESSION_WRITER_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<SharedSessionCoordinator>>>> =
+    OnceLock::new();
+
+enum ActiveProjectionState {
+    Uninitialized,
+    Ready(Arc<ActiveSessionProjection>),
+    Invalid {
+        frontier: ActiveProjectionFrontier,
+        reason: String,
+    },
+}
+
+pub(super) struct SharedSessionCoordinator {
+    pub(super) writer: Mutex<LinearSessionWriter>,
+    projection: Mutex<ActiveProjectionState>,
+    observers: Mutex<Vec<(u64, Weak<dyn ActiveProjectionObserver>)>>,
+    next_observer_id: AtomicU64,
+    snapshot_total: AtomicU64,
+    full_rebuild_total: AtomicU64,
+    incremental_apply_total: AtomicU64,
+    invalidation_total: AtomicU64,
+    writer_lock_attempt_total: AtomicU64,
+    publication_total: AtomicU64,
+}
+
+impl std::fmt::Debug for SharedSessionCoordinator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SharedSessionCoordinator")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for SharedSessionCoordinator {
+    type Target = Mutex<LinearSessionWriter>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl SharedSessionCoordinator {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            writer: Mutex::new(LinearSessionWriter::new(path)),
+            projection: Mutex::new(ActiveProjectionState::Uninitialized),
+            observers: Mutex::new(Vec::new()),
+            next_observer_id: AtomicU64::new(1),
+            snapshot_total: AtomicU64::new(0),
+            full_rebuild_total: AtomicU64::new(0),
+            incremental_apply_total: AtomicU64::new(0),
+            invalidation_total: AtomicU64::new(0),
+            writer_lock_attempt_total: AtomicU64::new(0),
+            publication_total: AtomicU64::new(0),
+        }
+    }
+
+    fn lock_writer(&self) -> Result<std::sync::MutexGuard<'_, LinearSessionWriter>> {
+        self.writer_lock_attempt_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))
+    }
+
+    pub(super) fn metrics(&self) -> ActiveProjectionMetricsSnapshot {
+        ActiveProjectionMetricsSnapshot {
+            snapshot_total: self.snapshot_total.load(Ordering::Relaxed),
+            full_rebuild_total: self.full_rebuild_total.load(Ordering::Relaxed),
+            incremental_apply_total: self.incremental_apply_total.load(Ordering::Relaxed),
+            invalidation_total: self.invalidation_total.load(Ordering::Relaxed),
+            writer_lock_attempt_total: self.writer_lock_attempt_total.load(Ordering::Relaxed),
+            publication_total: self.publication_total.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(super) fn append_events(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        force_sync: bool,
+    ) -> Result<Vec<StoredEvent>> {
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            let (events, _) = writer.append_events(pending, force_sync)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(events)
+    }
+
+    pub(super) fn append_events_if_active<F>(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        force_sync: bool,
+        expected_frontier: Option<&ActiveProjectionFrontier>,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&ActiveSessionProjection) -> Result<bool>,
+    {
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            let projection = self.current_projection_locked(&mut writer)?;
+            if expected_frontier.is_some_and(|expected| expected != &projection.frontier) {
+                return Ok(None);
+            }
+            if !should_append(&projection)? {
+                return Ok(None);
+            }
+            let (events, _) = writer.append_events(pending, force_sync)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(Some(events))
+    }
+
+    pub(super) fn append_events_if_records<F>(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        force_sync: bool,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            let records = writer.read_records_writer()?;
+            if !should_append(&records)? {
+                return Ok(None);
+            }
+            let (events, _) = writer.append_events(pending, force_sync)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(Some(events))
+    }
+
+    pub(super) fn append_events_if_records_at_frontier<F>(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        force_sync: bool,
+        expected_frontier: &ActiveProjectionFrontier,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            let records = writer.read_records_writer()?;
+            if &writer.frontier_from_tail()? != expected_frontier {
+                return Ok(None);
+            }
+            if !should_append(&records)? {
+                return Ok(None);
+            }
+            let (events, _) = writer.append_events(pending, force_sync)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(Some(events))
+    }
+
+    pub(super) fn append_audit_batch(
+        &self,
+        batch: DurableAuditBatch,
+    ) -> Result<DurableAppendReceipt> {
+        let (receipt, notice) = {
+            let mut writer = self.lock_writer()?;
+            let (receipt, events) = writer.append_audit_batch_with_events(batch)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (receipt, notice)
+        };
+        self.notify(notice);
+        Ok(receipt)
+    }
+
+    pub(super) fn append_audit_batch_if<F>(
+        &self,
+        batch: DurableAuditBatch,
+        should_append: F,
+    ) -> Result<Option<DurableAppendReceipt>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let (receipt, notice) = {
+            let mut writer = self.lock_writer()?;
+            let records = writer.read_records_writer()?;
+            if !should_append(&records)? {
+                return Ok(None);
+            }
+            writer.cache_event_links_for_audit_batch(&batch, &records);
+            let (receipt, events) = writer.append_audit_batch_with_events(batch)?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (receipt, notice)
+        };
+        self.notify(notice);
+        Ok(Some(receipt))
+    }
+
+    pub(super) fn snapshot(&self) -> Result<ActiveSessionProjectionSnapshot> {
+        self.snapshot_total.fetch_add(1, Ordering::Relaxed);
+        {
+            let state = self
+                .projection
+                .lock()
+                .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+            if let ActiveProjectionState::Ready(projection) = &*state {
+                return Ok(ActiveSessionProjectionSnapshot {
+                    projection: Arc::clone(projection),
+                });
+            }
+        }
+        let projection = {
+            let mut writer = self.lock_writer()?;
+            self.current_projection_locked(&mut writer)?
+        };
+        Ok(ActiveSessionProjectionSnapshot { projection })
+    }
+
+    pub(super) fn seed_records(&self, records: &[SessionStreamRecord]) -> Result<()> {
+        let notice = {
+            let mut writer = self.lock_writer()?;
+            let frontier = writer
+                .frontier_from_tail()
+                .or_else(|_| writer.current_frontier())?;
+            let projection = ActiveSessionProjection::from_records(records, frontier.clone())?;
+            // Session loading already paid for the canonical replay. Reuse the same validated
+            // prefix for preallocated event-id uniqueness instead of rereading the JSONL on the
+            // first active-projection CAS append.
+            writer.event_links = Some(DurableEventLinkIndex::from_records(records));
+            let mut state = self
+                .projection
+                .lock()
+                .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+            *state = ActiveProjectionState::Ready(Arc::new(projection));
+            ActiveProjectionNotice {
+                frontier,
+                valid: true,
+                changed_families: ActiveProjectionFamily::all(),
+            }
+        };
+        self.notify(notice);
+        Ok(())
+    }
+
+    pub(super) fn register_observer(
+        self: &Arc<Self>,
+        observer: Arc<dyn ActiveProjectionObserver>,
+    ) -> ActiveProjectionSubscription {
+        let observer_id = self.next_observer_id.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.retain(|(_, observer)| observer.strong_count() > 0);
+            observers.push((observer_id, Arc::downgrade(&observer)));
+        }
+        ActiveProjectionSubscription {
+            coordinator: Arc::downgrade(self),
+            observer_id,
+            _observer: observer,
+        }
+    }
+
+    pub(super) fn unregister_observer(&self, observer_id: u64) {
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.retain(|(id, observer)| *id != observer_id && observer.strong_count() > 0);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_active_projection_schema_mismatch(&self) -> Result<()> {
+        let mut state = self
+            .projection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+        let ActiveProjectionState::Ready(projection) = &mut *state else {
+            bail!("active projection must be ready before injecting a schema mismatch");
+        };
+        Arc::make_mut(projection).inject_schema_mismatch();
+        Ok(())
+    }
+
+    fn current_projection_locked(
+        &self,
+        writer: &mut LinearSessionWriter,
+    ) -> Result<Arc<ActiveSessionProjection>> {
+        if let Ok(frontier) = writer.frontier_from_tail() {
+            let state = self
+                .projection
+                .lock()
+                .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+            if let ActiveProjectionState::Ready(projection) = &*state
+                && projection.frontier == frontier
+            {
+                return Ok(Arc::clone(projection));
+            }
+        }
+
+        self.full_rebuild_total.fetch_add(1, Ordering::Relaxed);
+        let records = writer.read_records_writer()?;
+        writer.event_links = Some(DurableEventLinkIndex::from_records(&records));
+        let frontier = writer.frontier_from_tail()?;
+        let projection = match ActiveSessionProjection::from_records(&records, frontier.clone()) {
+            Ok(projection) => Arc::new(projection),
+            Err(error) => {
+                let mut state = self
+                    .projection
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+                *state = ActiveProjectionState::Invalid {
+                    frontier,
+                    reason: format!("{error:#}"),
+                };
+                return Err(error.context("failed to rebuild active session projection"));
+            }
+        };
+        let mut state = self
+            .projection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active projection lock poisoned"))?;
+        *state = ActiveProjectionState::Ready(Arc::clone(&projection));
+        Ok(projection)
+    }
+
+    fn commit_delta_locked(
+        &self,
+        writer: &mut LinearSessionWriter,
+        events: &[StoredEvent],
+    ) -> ActiveProjectionNotice {
+        let frontier = writer.frontier_from_tail().unwrap_or_else(|_| {
+            let last = events
+                .last()
+                .expect("a successful append always has at least one event");
+            ActiveProjectionFrontier {
+                writer_generation: writer.generation.clone(),
+                session_id: last.session_id.clone(),
+                durable_end_offset: writer.tail.as_ref().map_or(0, |tail| tail.durable_offset),
+                cursor: Some(ProjectionCursor {
+                    session_id: last.session_id.clone(),
+                    projection_schema_version: ACTIVE_SESSION_PROJECTION_SCHEMA_VERSION,
+                    last_applied_stream_sequence: last.stream_sequence,
+                    last_applied_event_id: last.event_id.clone(),
+                    last_applied_record_checksum: last.record_checksum.clone(),
+                }),
+            }
+        });
+        let changed_families = active_projection_families(events);
+        let Ok(mut state) = self.projection.lock() else {
+            return ActiveProjectionNotice {
+                frontier,
+                valid: false,
+                changed_families,
+            };
+        };
+        let valid = match &*state {
+            ActiveProjectionState::Ready(current) => {
+                let mut next = current.as_ref().clone();
+                let records = events
+                    .iter()
+                    .cloned()
+                    .map(SessionStreamRecord::Stored)
+                    .collect::<Vec<_>>();
+                let apply_result = next
+                    .apply_records(&records, frontier.clone())
+                    .and_then(|()| {
+                        if !next.compaction_canonical_validation_required() {
+                            return Ok(());
+                        }
+                        let canonical_records = writer.read_records_writer()?;
+                        next.validate_compaction_canonical_records(&canonical_records)
+                    });
+                match apply_result {
+                    Ok(()) => {
+                        self.incremental_apply_total.fetch_add(
+                            u64::try_from(events.len()).unwrap_or(u64::MAX),
+                            Ordering::Relaxed,
+                        );
+                        *state = ActiveProjectionState::Ready(Arc::new(next));
+                        true
+                    }
+                    Err(error) => {
+                        self.invalidation_total.fetch_add(1, Ordering::Relaxed);
+                        *state = ActiveProjectionState::Invalid {
+                            frontier: frontier.clone(),
+                            reason: format!("{error:#}"),
+                        };
+                        false
+                    }
+                }
+            }
+            ActiveProjectionState::Uninitialized => {
+                let records = events
+                    .iter()
+                    .cloned()
+                    .map(SessionStreamRecord::Stored)
+                    .collect::<Vec<_>>();
+                match ActiveSessionProjection::from_records(&records, frontier.clone()) {
+                    Ok(next) => {
+                        *state = ActiveProjectionState::Ready(Arc::new(next));
+                        true
+                    }
+                    Err(error) => {
+                        self.invalidation_total.fetch_add(1, Ordering::Relaxed);
+                        *state = ActiveProjectionState::Invalid {
+                            frontier: frontier.clone(),
+                            reason: format!("{error:#}"),
+                        };
+                        false
+                    }
+                }
+            }
+            ActiveProjectionState::Invalid { frontier, reason } => {
+                let _ = (frontier, reason);
+                false
+            }
+        };
+        ActiveProjectionNotice {
+            frontier,
+            valid,
+            changed_families,
+        }
+    }
+
+    fn notify(&self, notice: ActiveProjectionNotice) {
+        self.publication_total.fetch_add(1, Ordering::Relaxed);
+        let observers = match self.observers.lock() {
+            Ok(mut observers) => {
+                let live = observers
+                    .iter()
+                    .filter_map(|(_, observer)| Weak::upgrade(observer))
+                    .collect::<Vec<_>>();
+                observers.retain(|(_, observer)| observer.strong_count() > 0);
+                live
+            }
+            Err(_) => return,
+        };
+        for observer in observers {
+            observer.active_projection_changed(notice.clone());
+        }
+    }
+}
+
+fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjectionFamily> {
+    let mut families = BTreeSet::new();
+    for event in events {
+        match event.event_kind() {
+            Some(DurableEventType::ConversationInputPromoted) => {
+                families.insert(ActiveProjectionFamily::Queue);
+            }
+            Some(
+                DurableEventType::CompactionStarted
+                | DurableEventType::CompactionAppliedV2
+                | DurableEventType::CompactionFailed,
+            ) => {
+                families.insert(ActiveProjectionFamily::Compaction);
+            }
+            Some(_) | None => {}
+        }
+        let Some(value) = event.payload.get("session_log_entry") else {
+            continue;
+        };
+        let Ok(SessionLogEntry::Control(control)) =
+            serde_json::from_value::<SessionLogEntry>(value.clone())
+        else {
+            continue;
+        };
+        match control {
+            ControlEntry::ConversationInputQueued(_)
+            | ControlEntry::ConversationInputQueueControl(_)
+            | ControlEntry::ConversationInputEdited(_)
+            | ControlEntry::ConversationInputReordered(_)
+            | ControlEntry::ConversationInputStatusChanged(_)
+            | ControlEntry::ConversationInputPromoted(_) => {
+                families.insert(ActiveProjectionFamily::Queue);
+            }
+            ControlEntry::TaskGuidancePromoted(_) => {
+                families.insert(ActiveProjectionFamily::Queue);
+                families.insert(ActiveProjectionFamily::Task);
+            }
+            ControlEntry::TaskRun(_) | ControlEntry::TaskPlan(_) => {
+                families.insert(ActiveProjectionFamily::Task);
+            }
+            ControlEntry::AgentResultContinuation(_) => {
+                families.insert(ActiveProjectionFamily::AgentContinuation);
+            }
+            ControlEntry::TerminalTask(_) => {
+                families.insert(ActiveProjectionFamily::TerminalTask);
+            }
+            ControlEntry::UsageSnapshot(_) | ControlEntry::SemanticCompactionUsageSnapshot(_) => {
+                families.insert(ActiveProjectionFamily::Usage);
+            }
+            ControlEntry::ReadinessEvaluated(_) => {
+                families.insert(ActiveProjectionFamily::Readiness);
+            }
+            _ => {}
+        }
+    }
+    families
+}
 
 /// One recovery-critical durable event to append before a protected effect.
 #[derive(Debug)]
@@ -1207,10 +1711,10 @@ impl LinearSessionWriter {
         Ok((events, offsets))
     }
 
-    pub(super) fn append_audit_batch(
+    fn append_audit_batch_with_events(
         &mut self,
         batch: DurableAuditBatch,
-    ) -> Result<DurableAppendReceipt> {
+    ) -> Result<(DurableAppendReceipt, Vec<StoredEvent>)> {
         let DurableAuditBatch { batch_id, records } = batch;
         let identities = records
             .iter()
@@ -1244,6 +1748,7 @@ impl LinearSessionWriter {
             .tail
             .as_ref()
             .context("session writer tail is unavailable after durable audit append")?;
+        let appended_events = events.clone();
         let records = events
             .into_iter()
             .zip(offsets)
@@ -1283,13 +1788,16 @@ impl LinearSessionWriter {
                 },
             )
             .collect::<Vec<_>>();
-        Ok(DurableAppendReceipt {
-            writer_generation: self.generation.clone(),
-            session_id: tail.session_id.clone(),
-            batch_id,
-            records,
-            durable_end_offset: tail.durable_offset,
-        })
+        Ok((
+            DurableAppendReceipt {
+                writer_generation: self.generation.clone(),
+                session_id: tail.session_id.clone(),
+                batch_id,
+                records,
+                durable_end_offset: tail.durable_offset,
+            },
+            appended_events,
+        ))
     }
 
     pub(super) fn validate_audit_receipt(
@@ -1456,6 +1964,41 @@ impl LinearSessionWriter {
             .next_sequence)
     }
 
+    fn current_frontier(&mut self) -> Result<ActiveProjectionFrontier> {
+        self.ensure_writer_lease()?;
+        let mut file = self.open_locked_data_file()?;
+        self.ensure_current_tail(&mut file)?;
+        self.frontier_from_tail()
+    }
+
+    fn frontier_from_tail(&self) -> Result<ActiveProjectionFrontier> {
+        let tail = self
+            .tail
+            .as_ref()
+            .context("session writer tail is unavailable")?;
+        let cursor = match (
+            tail.last_sequence,
+            tail.last_event_id.as_ref(),
+            tail.last_record_checksum.as_ref(),
+        ) {
+            (Some(sequence), Some(event_id), Some(record_checksum)) => Some(ProjectionCursor {
+                session_id: tail.session_id.clone(),
+                projection_schema_version: ACTIVE_SESSION_PROJECTION_SCHEMA_VERSION,
+                last_applied_stream_sequence: sequence,
+                last_applied_event_id: event_id.clone(),
+                last_applied_record_checksum: record_checksum.clone(),
+            }),
+            (None, None, None) => None,
+            _ => bail!("session writer tail frontier is incomplete"),
+        };
+        Ok(ActiveProjectionFrontier {
+            writer_generation: self.generation.clone(),
+            session_id: tail.session_id.clone(),
+            durable_end_offset: tail.durable_offset,
+            cursor,
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn full_scan_count(&self) -> u64 {
         self.full_scan_count
@@ -1500,7 +2043,7 @@ mod tests;
 
 pub(super) fn shared_session_writer(
     path: impl Into<PathBuf>,
-) -> Result<(PathBuf, Arc<Mutex<LinearSessionWriter>>)> {
+) -> Result<(PathBuf, Arc<SharedSessionCoordinator>)> {
     let path = canonical_session_path(path.into())?;
     let registry = SESSION_WRITER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
     let mut registry = registry
@@ -1510,9 +2053,9 @@ pub(super) fn shared_session_writer(
     if let Some(writer) = registry.get(&path).and_then(Weak::upgrade) {
         return Ok((path, writer));
     }
-    let writer = Arc::new(Mutex::new(LinearSessionWriter::new(path.clone())));
-    registry.insert(path.clone(), Arc::downgrade(&writer));
-    Ok((path, writer))
+    let coordinator = Arc::new(SharedSessionCoordinator::new(path.clone()));
+    registry.insert(path.clone(), Arc::downgrade(&coordinator));
+    Ok((path, coordinator))
 }
 
 fn canonical_session_path(path: PathBuf) -> Result<PathBuf> {

@@ -1,11 +1,13 @@
 use super::*;
 
 pub(in crate::runner) fn drain_provider_status_results(
-    provider_status_rx: &mpsc::Receiver<ProviderStatusTaskResult>,
+    provider_status_results: &mut VecDeque<ProviderStatusTaskResult>,
     provider_status_tasks: &mut ProviderStatusTaskManager,
     message_tx: &mpsc::Sender<WorkerMessage>,
-) {
-    while let Ok(status_result) = provider_status_rx.try_recv() {
+) -> bool {
+    let mut advanced = false;
+    while let Some(status_result) = provider_status_results.pop_front() {
+        advanced = true;
         match status_result {
             ProviderStatusTaskResult::Balance {
                 request_id,
@@ -38,4 +40,22 @@ pub(in crate::runner) fn drain_provider_status_results(
             }
         }
     }
+    advanced
+}
+
+/// The runtime provider-status task manager currently accepts a standard sender. Its tasks are
+/// one-shot, so a blocking one-shot adapter can forward completion into the unified inbox without
+/// adding another polled receiver to the worker.
+pub(in crate::runner) fn provider_status_result_sender(
+    runtime: &tokio::runtime::Runtime,
+    event_tx: &mpsc::Sender<WorkerEvent>,
+) -> mpsc::Sender<ProviderStatusTaskResult> {
+    let (result_tx, result_rx) = mpsc::channel();
+    let event_tx = event_tx.clone();
+    runtime.spawn_blocking(move || {
+        if let Ok(result) = result_rx.recv() {
+            let _ = event_tx.send(WorkerEvent::ProviderStatusResolved(result));
+        }
+    });
+    result_tx
 }

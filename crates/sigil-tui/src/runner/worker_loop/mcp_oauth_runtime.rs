@@ -267,7 +267,7 @@ pub(in crate::runner) fn advance_mcp_oauth_results(
     state: &mut WorkerLoopState,
 ) -> bool {
     let mut advanced = false;
-    while let Ok(result) = state.mcp_oauth.result_rx.try_recv() {
+    while let Some(result) = state.readiness.mcp_oauth_results.pop_front() {
         advanced = true;
         state.mcp_oauth.active.remove(&result.server_name);
         let _ = message_tx.send(WorkerMessage::McpOAuthStatus {

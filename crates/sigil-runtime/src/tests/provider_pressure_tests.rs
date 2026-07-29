@@ -1,5 +1,29 @@
 use super::*;
 use futures::StreamExt as _;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct CountingProviderPressureSink {
+    notifications: AtomicUsize,
+    pressure: Mutex<Option<TaskProviderPressure>>,
+}
+
+impl crate::AgentSupervisorEventSink for CountingProviderPressureSink {
+    fn handle_supervisor_change(&self, change: AgentSupervisorChange) {
+        assert_eq!(change, AgentSupervisorChange::ProviderRouteDiagnostics);
+        let pressure = self
+            .pressure
+            .lock()
+            .expect("sink pressure lock")
+            .clone()
+            .expect("sink pressure");
+        assert!(
+            pressure.state.try_lock().is_ok(),
+            "provider-pressure callbacks must run outside the state lock"
+        );
+        let _ = pressure.diagnostics();
+        self.notifications.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 struct ManualProviderPressureClock {
     now: Mutex<Instant>,
@@ -29,7 +53,36 @@ fn pressure_with_clock(clock: Arc<ManualProviderPressureClock>) -> TaskProviderP
         state: Arc::new(Mutex::new(ProviderPressureState::default())),
         clock,
         notify: Arc::new(Notify::new()),
+        change_notifier: AgentSupervisorChangeNotifier::default(),
     }
+}
+
+#[tokio::test]
+async fn provider_pressure_changes_emit_observation_hints() -> Result<()> {
+    let clock = Arc::new(ManualProviderPressureClock::new(Instant::now()));
+    let sink = Arc::new(CountingProviderPressureSink {
+        notifications: AtomicUsize::new(0),
+        pressure: Mutex::new(None),
+    });
+    let pressure = pressure_with_clock(clock);
+    let observer_pressure = pressure.clone();
+    *sink.pressure.lock().expect("sink pressure lock") = Some(pressure.clone());
+    pressure.set_change_sink(sink.clone());
+
+    observer_pressure.set_max_concurrency(2);
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 1);
+
+    let (_admission, lease) = observer_pressure
+        .acquire(
+            "deepseek",
+            "deepseek-v4-flash",
+            TaskProviderRouteConsumer::Executor,
+        )
+        .await?;
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 2);
+    drop(lease);
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 3);
+    Ok(())
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -43,6 +43,10 @@ use sigil_kernel::{
     task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 
+use sigil_kernel::session::{
+    ActiveProjectionFamily, ActiveProjectionFrontier, ActiveProjectionObserver,
+    ActiveProjectionSubscription,
+};
 use sigil_runtime::{
     ConversationCoordinator, ConversationSourceTurn, ProviderStatusTaskManager,
     ProviderStatusTaskResult, append_session_control_entries,
@@ -61,9 +65,12 @@ use super::{
         WorkerApprovalCommand, WorkerCommand, WorkerMessage,
     },
     session_flow::{
-        CapturedSessionRuntimeAttachments, load_routed_session_with_runtime_attachments,
-        load_session, load_session_with_captured_runtime_attachments,
+        load_routed_session_with_runtime_attachments, load_session,
         load_session_with_runtime_attachments,
+    },
+    worker_event::{
+        WorkerActiveProjectionObserver, WorkerEvent, WorkerEventInbox, WorkerEventPayloadSender,
+        WorkerReadiness, WorkerWakeCoalescer,
     },
 };
 
@@ -96,16 +103,16 @@ pub(in crate::runner) use advancement::{
 #[cfg(test)]
 pub(in crate::runner) use advancement::{
     changed_task_completion_progress, changed_task_provider_route_diagnostics,
-    task_completion_progress_for_active_task,
+    pending_agent_continuations_from_active_projection, task_completion_progress_for_active_task,
 };
 #[cfg(test)]
 pub(in crate::runner) use agent_runtime::agent_result_continuation_run_result;
 pub(in crate::runner) use agent_runtime::{
-    WorkerAgentEventSink, agent_result_continuation_new_thread_ids, cancel_agent_thread,
-    close_agent_thread, collect_finished_background_agent_runs, extend_agent_thread_ids_unique,
-    manual_agent_invocation_result, manual_agent_parent_summary, message_agent_thread,
-    start_agent_result_continuation_run, start_portable_overflow_recovery_run,
-    start_queued_conversation_run,
+    WorkerAgentEventSink, WorkerSupervisorEventSink, agent_result_continuation_new_thread_ids,
+    cancel_agent_thread, close_agent_thread, collect_finished_background_agent_runs,
+    extend_agent_thread_ids_unique, manual_agent_invocation_result, manual_agent_parent_summary,
+    message_agent_thread, start_agent_result_continuation_run,
+    start_portable_overflow_recovery_run, start_queued_conversation_run,
 };
 pub(in crate::runner) use checkpoint_runtime::{
     execute_current_checkpoint_restore, fork_current_conversation,
@@ -119,9 +126,11 @@ pub(in crate::runner) use command_dispatch::{
     WorkerCommandDomain, classify_worker_command, validate_task_pause_request,
 };
 pub(in crate::runner) use compaction_runtime::{
-    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingLocalV2Compaction,
-    PendingV2Compaction, QueuedConversationPreTurnAdmission, exact_context_window_rejection_source,
-    has_failed_idle_automatic_scope, prepare_idle_auto_compaction,
+    IdleAutoCompactionPreflightDecision, IdleAutoCompactionPreparation,
+    IdleAutoCompactionSchedulerEligibility, IdleAutoCompactionState, PendingLocalV2Compaction,
+    PendingV2Compaction, QueuedConversationPreTurnAdmission,
+    capture_stable_idle_compaction_snapshot, exact_context_window_rejection_source,
+    has_failed_idle_automatic_scope, idle_auto_compaction_preflight, prepare_idle_auto_compaction,
     prepare_next_queued_conversation_pre_turn_admission, prepare_overflow_recovery_compaction,
     prepare_v2_compaction_review, prepare_v2_compaction_summary_review,
 };
@@ -135,7 +144,9 @@ pub(in crate::runner) use mcp_oauth_runtime::{
 };
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;
-pub(in crate::runner) use provider_status::drain_provider_status_results;
+pub(in crate::runner) use provider_status::{
+    drain_provider_status_results, provider_status_result_sender,
+};
 pub(in crate::runner) use queue_driver::{
     AdmittedQueuedConversationCandidate, ExactConversationPromptStore,
     PreparedQueuedConversationCandidate, QueuedConversationPressureAdmission,
@@ -157,6 +168,7 @@ pub(in crate::runner) use queue_driver::{
     QueuedConversationCandidatePreparation, prepare_next_queued_conversation_candidate,
     prepare_next_queued_conversation_pressure_admission, queue_conversation_input,
 };
+pub use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
 pub(in crate::runner) use scheduler::{finish_idle_auto_compaction, run_worker_loop};
 pub(in crate::runner) use session_lifecycle_runtime::{
     apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
@@ -166,7 +178,7 @@ pub(in crate::runner) use session_lifecycle_runtime::{
 pub(in crate::runner) use session_transition::{
     SessionTransitionKind, ensure_session_transition_allowed, transition_session,
 };
-pub(in crate::runner) use state::WorkerLoopState;
+pub(in crate::runner) use state::{WorkerLoopState, register_worker_active_projection_observer};
 pub(in crate::runner) use task_runtime::{
     AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, PlanApprovalRequest,
     RejectPlanRequest, SkillChildRunSpawn, TaskContinueSpawn, TaskRunSpawn,

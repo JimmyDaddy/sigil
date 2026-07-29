@@ -6,11 +6,11 @@ pub(in crate::runner) fn refresh_terminal_task_statuses(
     options: &AgentRunOptions,
     current_session_log_path: &Path,
     current_session: &mut Option<Session>,
+    active_task_ids: &BTreeSet<TerminalTaskId>,
 ) -> std::result::Result<Vec<(TerminalTaskEntry, Vec<SessionLogEntry>)>, String> {
     let Some(session) = current_session.as_mut() else {
         return Ok(Vec::new());
     };
-    let active_task_ids = session.terminal_task_projection().active_task_ids;
     if active_task_ids.is_empty() {
         return Ok(Vec::new());
     }

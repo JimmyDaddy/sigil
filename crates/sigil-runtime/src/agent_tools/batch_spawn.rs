@@ -587,23 +587,24 @@ impl AgentToolRuntime {
             let child_session_ref = child_thread.child_session_ref.clone();
             let event_sink = self.background_runs.event_sink();
             let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-            let handle = tokio::spawn(async move {
-                let _cancellation_task_guard = cancellation_task_guard;
-                start_rx
+            let handle =
+                BackgroundChatAgentTask::spawn(thread_id.clone(), event_sink.clone(), async move {
+                    let _cancellation_task_guard = cancellation_task_guard;
+                    start_rx
+                        .await
+                        .map_err(|_| anyhow!("background batch start gate was cancelled"))?;
+                    run_background_chat_agent(
+                        run_thread,
+                        child_agent,
+                        child_session,
+                        child_session_ref,
+                        child_input,
+                        child_options,
+                        mailbox_rx,
+                        event_sink,
+                    )
                     .await
-                    .map_err(|_| anyhow!("background batch start gate was cancelled"))?;
-                run_background_chat_agent(
-                    run_thread,
-                    child_agent,
-                    child_session,
-                    child_session_ref,
-                    child_input,
-                    child_options,
-                    mailbox_rx,
-                    event_sink,
-                )
-                .await
-            });
+                });
             registrations.push((
                 thread_id.clone(),
                 BackgroundChatAgentHandle {

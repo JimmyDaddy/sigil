@@ -269,6 +269,21 @@ fn mcp_declaration_rejects_root_reserved_namespace_and_duplicate_names() {
 }
 
 #[test]
+fn mcp_declaration_rejects_server_count_above_worker_coalescing_bound() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let servers = (0..=MAX_MCP_SERVER_DECLARATIONS)
+        .map(|index| McpServerConfig {
+            name: format!("server-{index}"),
+            ..McpServerConfig::default()
+        })
+        .collect::<Vec<_>>();
+
+    let error = resolve_user_root_mcp_declarations(&servers, workspace.path())
+        .expect_err("server identities above the coalescing bound must fail admission");
+    assert_eq!(error.code(), "mcp_server_limit_exceeded");
+}
+
+#[test]
 fn mcp_declaration_constructor_enforces_plugin_attestation_one_to_one() {
     let (_workspace, plugin, _trust) = plugin_declaration_fixture("fixture-command", &[]);
     let missing = ResolvedMcpServerDeclaration::new(

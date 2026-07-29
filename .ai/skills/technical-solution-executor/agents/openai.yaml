@@ -1,4 +1,4 @@
 interface:
   display_name: "Technical Solution Executor"
-  short_description: "Execute plans with risk-scaled validation"
-  default_prompt: "Use $technical-solution-executor in the lowest safe mode to implement the referenced technical solution with targeted validation."
+  short_description: "Execute plans with safe parallel delegation"
+  default_prompt: "Use $technical-solution-executor to decompose the referenced plan into serial and parallel work, delegate bounded independent tasks when useful and allowed unless I explicitly opt out, and implement it with risk-scaled validation."

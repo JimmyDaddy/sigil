@@ -5,7 +5,7 @@ use std::{
 use crate::{
     app::{AppAction, AppState},
     mouse::HitTarget,
-    runner::{WorkerCommand, WorkerMessage},
+    runner::{WorkerCommand, WorkerCommandSender, WorkerMessage},
 };
 use anyhow::{Result, anyhow};
 use ratatui::{
@@ -525,7 +525,7 @@ fn render_scrollback_rows_does_not_split_cjk_into_adjacent_cells() {
 #[test]
 fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -554,7 +554,7 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
 fn process_app_action_queues_worker_command_until_runtime_is_ready() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let _ = app.drain_pending_worker_commands();
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -589,7 +589,7 @@ fn process_app_action_queues_worker_command_until_runtime_is_ready() -> anyhow::
 #[test]
 fn process_app_action_restarts_closed_worker_and_retries_command() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (closed_tx, closed_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = WorkerCommandSender::test_channel();
     drop(closed_rx);
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
@@ -654,7 +654,7 @@ fn process_app_action_starts_missing_worker_and_sends_command() -> Result<()> {
 #[test]
 fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (closed_tx, closed_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = WorkerCommandSender::test_channel();
     drop(closed_rx);
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
@@ -668,7 +668,7 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
         &mut worker,
         AppAction::SubmitTask("review workspace".to_owned()),
         |_root_config, _app| {
-            let (retry_tx, retry_rx) = mpsc::channel();
+            let (retry_tx, retry_rx) = WorkerCommandSender::test_channel();
             drop(retry_rx);
             let (_message_tx, worker_rx) = mpsc::channel();
             Ok(WorkerRuntime {
@@ -751,7 +751,7 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -779,7 +779,7 @@ fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
     let mut root_config = test_config();
     root_config.terminal.osc52_clipboard = false;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &root_config);
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -859,7 +859,7 @@ fn process_app_action_handles_feedback_handoff_locally() -> anyhow::Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -912,7 +912,7 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
     assert!(!flush_pending_worker_commands(&mut app, &mut worker)?);
     assert!(app.has_pending_worker_commands());
 
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     worker = Some(WorkerRuntime {
         worker_tx,
@@ -944,7 +944,7 @@ fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result
     );
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     assert!(app.has_pending_worker_commands());
-    let (worker_tx, command_rx) = mpsc::channel();
+    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     drop(command_rx);
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
@@ -965,7 +965,7 @@ fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result
 }
 
 fn fake_worker_runtime() -> (WorkerRuntime, mpsc::Receiver<WorkerCommand>) {
-    let (worker_tx, worker_rx) = mpsc::channel();
+    let (worker_tx, worker_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, message_rx) = mpsc::channel::<WorkerMessage>();
     (
         WorkerRuntime {
@@ -1519,7 +1519,7 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
 #[test]
 fn drain_worker_messages_marks_dirty_when_messages_arrive() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (worker_tx, _command_rx) = mpsc::channel();
+    let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -1537,7 +1537,7 @@ fn drain_worker_messages_marks_dirty_when_messages_arrive() -> Result<()> {
 #[test]
 fn drain_worker_messages_marks_runtime_ready() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let (worker_tx, _command_rx) = mpsc::channel();
+    let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,
@@ -1558,7 +1558,7 @@ fn drain_worker_messages_retires_an_unready_worker_after_startup_failure() -> Re
         prompt: "queued while starting".to_owned(),
         reasoning_effort: sigil_kernel::ReasoningEffort::Max,
     });
-    let (worker_tx, _command_rx) = mpsc::channel();
+    let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
         worker_tx,

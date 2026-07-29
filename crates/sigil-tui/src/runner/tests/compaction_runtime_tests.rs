@@ -2,15 +2,18 @@ use std::pin::Pin;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fs2::FileExt;
 use futures::{Stream, stream};
 use sigil_kernel::{
-    AgentConfig, ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
-    DurableAuditRecord, DurableAuditWriter, DurableEventType, MemoryConfig, ModelMessage,
+    AgentConfig, CompactionCircuitScopeV1, CompactionFailureEntry, CompactionFailureReason,
+    CompactionFallbackParent, CompactionInitiation, CompactionStartedEntry, ControlEntry,
+    ConversationInputKind, ConversationInputQueueId, ConversationInputTarget, DurableAuditRecord,
+    DurableAuditWriter, DurableEventType, MemoryConfig, ModelMessage,
     PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, Provider, ProviderCapabilities, ProviderChunk,
     ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptPurpose,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
-    ProviderRequestRejection, ReasoningEffort, RootConfig, SessionConfig, StorageRoot,
-    WorkspaceConfig,
+    ProviderRequestRejection, ReasoningEffort, RootConfig, SessionConfig, SessionLogEntry,
+    StorageRoot, WorkspaceConfig,
 };
 
 use crate::runner::worker_loop::queue_conversation_input;
@@ -21,6 +24,260 @@ use crate::runner::worker_loop::queue_driver::{
 use super::*;
 
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
+
+fn idle_auto_session(prompt_tokens: u64) -> Session {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.stats_mut().last_prompt_tokens = prompt_tokens;
+    session
+}
+
+fn requested_idle_auto_state() -> IdleAutoCompactionState {
+    let mut state = IdleAutoCompactionState::default();
+    state.request_after_successful_chat_run();
+    state
+}
+
+fn cache_aware_compaction_config() -> sigil_kernel::CompactionConfig {
+    sigil_kernel::CompactionConfig {
+        context_window_tokens: Some(1_000_000),
+        ..sigil_kernel::CompactionConfig::default()
+    }
+}
+
+fn trusted_cache_context_capabilities() -> sigil_kernel::ProviderContextCapabilities {
+    sigil_kernel::ProviderContextCapabilities {
+        cache_mode: sigil_kernel::CacheMode::ImplicitPrefix,
+        ..sigil_kernel::ProviderContextCapabilities::default()
+    }
+}
+
+#[test]
+fn idle_auto_preflight_rejects_22_percent_without_a_store_or_preparation_handle() {
+    let state = requested_idle_auto_state();
+    let session = idle_auto_session(216_803);
+
+    let result = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &trusted_cache_context_capabilities(),
+        IdleAutoCompactionSchedulerEligibility::idle(),
+    );
+
+    assert_eq!(
+        result.decision,
+        IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::NotFitRequired,
+        )
+    );
+    assert_eq!(
+        result.evidence,
+        IdleAutoCompactionPreflightEvidenceV1 {
+            schema_version: 1,
+            evaluation_count: 1,
+            not_requested_count: 0,
+            scheduler_blocked_count: 0,
+            not_eligible_count: 1,
+            detailed_preparation_candidate_count: 0,
+            prompt_tokens: Some(216_803),
+            context_window_tokens: Some(1_000_000),
+            threshold_status: Some(sigil_kernel::CompactionThresholdStatus::Ready),
+            configured_strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
+            effective_strategy: Some(sigil_kernel::CompactionStrategy::CacheAwareV3),
+            cache_aware_v3_supported: Some(true),
+        }
+    );
+    assert!(
+        state.is_requested(),
+        "the pure preflight leaves request consumption to the worker integration"
+    );
+}
+
+#[test]
+fn idle_auto_preflight_keeps_a_requested_run_blocked_at_the_scheduler_boundary() {
+    let state = requested_idle_auto_state();
+    let session = idle_auto_session(900_000);
+    let mut scheduler = IdleAutoCompactionSchedulerEligibility::idle();
+    scheduler.run_active = true;
+
+    let result = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &trusted_cache_context_capabilities(),
+        scheduler,
+    );
+
+    assert_eq!(
+        result.decision,
+        IdleAutoCompactionPreflightDecision::SchedulerBlocked(
+            IdleAutoCompactionSchedulerBlockReason::ActiveRun,
+        )
+    );
+    assert_eq!(result.evidence.scheduler_blocked_count, 1);
+    assert_eq!(result.evidence.prompt_tokens, None);
+    assert_eq!(result.evidence.detailed_preparation_candidate_count, 0);
+}
+
+#[test]
+fn idle_auto_preflight_falls_back_to_legacy_before_admitting_soft_pressure() {
+    let state = requested_idle_auto_state();
+    let session = idle_auto_session(600_000);
+
+    let result = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &sigil_kernel::ProviderContextCapabilities::unknown(),
+        IdleAutoCompactionSchedulerEligibility::idle(),
+    );
+
+    assert_eq!(
+        result.decision,
+        IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::BelowPreparationThreshold,
+        )
+    );
+    assert_eq!(
+        result.evidence.threshold_status,
+        Some(sigil_kernel::CompactionThresholdStatus::Soft)
+    );
+    assert_eq!(
+        result.evidence.effective_strategy,
+        Some(sigil_kernel::CompactionStrategy::LegacyV2)
+    );
+    assert_eq!(result.evidence.cache_aware_v3_supported, Some(false));
+}
+
+#[test]
+fn idle_auto_preflight_admits_soft_pressure_only_to_detailed_preparation() {
+    let state = requested_idle_auto_state();
+    let session = idle_auto_session(600_000);
+
+    let result = idle_auto_compaction_preflight(
+        &state,
+        Some(&session),
+        &cache_aware_compaction_config(),
+        &trusted_cache_context_capabilities(),
+        IdleAutoCompactionSchedulerEligibility::idle(),
+    );
+
+    assert_eq!(
+        result.decision,
+        IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation {
+            effective_strategy: sigil_kernel::CompactionStrategy::CacheAwareV3,
+        }
+    );
+    assert_eq!(result.evidence.detailed_preparation_candidate_count, 1);
+    assert_eq!(result.evidence.not_eligible_count, 0);
+}
+
+#[test]
+fn stable_idle_compaction_snapshot_ignores_durable_lifecycle_but_rejects_new_session_entries()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let stable = capture_stable_idle_compaction_snapshot(&session)?
+        .expect("empty store-backed session has a stable entry frontier");
+    let prepared = stable
+        .materialize_compaction_session()?
+        .expect("unchanged stable snapshot materializes");
+
+    append_context_window_rejection(
+        &store,
+        "durable-only-attempt",
+        "durable-only-run",
+        ProviderPhysicalAttemptPurpose::ConversationGeneration,
+        Some(ProviderRequestRejection::ContextWindowExceeded),
+    )?;
+    assert!(
+        capture_stable_idle_compaction_snapshot(&prepared)?.is_some(),
+        "provider-attempt lifecycle records do not invalidate session-entry material"
+    );
+
+    store.append(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "external-session-entry".to_owned(),
+        data: serde_json::Value::Null,
+    }))?;
+    assert!(
+        capture_stable_idle_compaction_snapshot(&prepared)?.is_none(),
+        "an externally appended session entry invalidates prepared compaction material"
+    );
+    Ok(())
+}
+
+#[test]
+fn eligible_idle_durable_admission_uses_ready_projection_while_data_file_is_locked() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let circuit_scope = CompactionCircuitScopeV1 {
+        source_cursor_event_id: "source-cursor".to_owned(),
+        layout_hash: "layout-hash".to_owned(),
+        route_fingerprint: "route-fingerprint".to_owned(),
+    };
+    let started = store.append_compaction_started(CompactionStartedEntry {
+        attempt_id: "idle-failure".to_owned(),
+        fallback_parent: CompactionFallbackParent::Root,
+        initiation: CompactionInitiation::IdleAutomatic {
+            scope_fingerprint: "failed-scope".to_owned(),
+            circuit_scope: Some(circuit_scope.clone()),
+        },
+        base_projection_revision: "projection-r1".to_owned(),
+        started_at_unix_ms: 1,
+    })?;
+    store.append_compaction_failed(CompactionFailureEntry {
+        attempt_id: "idle-failure".to_owned(),
+        reason: CompactionFailureReason::ValidationFailed,
+        failed_at_unix_ms: 2,
+    })?;
+    let ready = session
+        .active_projection_snapshot()?
+        .expect("store-backed session keeps its active projection ready");
+    assert!(
+        ready
+            .compaction()
+            .has_failed_idle_automatic_scope("failed-scope")
+    );
+    let owner = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    owner.lock_exclusive()?;
+
+    let admission = idle_auto_compaction_durable_admission(
+        &session,
+        "failed-scope",
+        circuit_scope,
+        false,
+        CompactionEmergencyBlockingLayerV1::Unknown,
+    )?;
+    owner.unlock()?;
+
+    assert!(!started.event_id.is_empty());
+    assert!(admission.failure_latched);
+    assert_eq!(
+        admission.circuit_decision,
+        CompactionCircuitBreakerDecisionV1::SameCursorAndLayoutFailed
+    );
+    Ok(())
+}
+
+#[test]
+fn eligible_idle_preparation_has_no_path_static_record_reader() {
+    let source = include_str!("../worker_loop/compaction_runtime.rs");
+    let prepare = source
+        .split_once("pub(in crate::runner) fn prepare_idle_auto_compaction")
+        .expect("idle preparation function remains present")
+        .1
+        .split_once("async fn prepare_v2_compaction")
+        .expect("portable preparation remains after idle preparation")
+        .0;
+    assert!(!prepare.contains("JsonlSessionStore::read_event_records"));
+    assert!(!prepare.contains("has_failed_idle_automatic_scope("));
+}
 
 struct NoopProvider;
 

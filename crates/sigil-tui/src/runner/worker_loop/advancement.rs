@@ -7,6 +7,63 @@ pub(in crate::runner) enum WorkerAdvancementControl {
     SkipCommandPoll,
 }
 
+const PROJECTION_RECONCILIATION_BASE_BACKOFF: Duration = Duration::from_millis(250);
+const PROJECTION_RECONCILIATION_MAX_BACKOFF: Duration = Duration::from_secs(8);
+const PROJECTION_RECONCILIATION_MAX_ATTEMPTS: u8 = 6;
+const AUTHORITY_CAS_RETRY_MAX_ATTEMPTS: u8 = 6;
+
+fn arm_authority_cas_retry(
+    retry_at: &mut Option<Instant>,
+    attempts: &mut u8,
+    latched: &mut bool,
+    now: Instant,
+) -> bool {
+    *attempts = attempts.saturating_add(1);
+    if *attempts >= AUTHORITY_CAS_RETRY_MAX_ATTEMPTS {
+        *retry_at = None;
+        *latched = true;
+        return false;
+    }
+    *retry_at = Some(now + projection_reconciliation_backoff(*attempts));
+    true
+}
+
+fn reset_authority_cas_retry(
+    retry_at: &mut Option<Instant>,
+    attempts: &mut u8,
+    latched: &mut bool,
+) {
+    *retry_at = None;
+    *attempts = 0;
+    *latched = false;
+}
+
+fn release_due_authority_cas_retry(
+    retry_at: &mut Option<Instant>,
+    dirty: &mut bool,
+    now: Instant,
+) -> bool {
+    if !retry_at.is_some_and(|deadline| deadline <= now) {
+        return false;
+    }
+    *retry_at = None;
+    *dirty = true;
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionReconciliationControl {
+    Ready,
+    Reconciled,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionReconciliationFailureDisposition {
+    RetryAfter(Duration),
+    Latched,
+}
+
 pub(in crate::runner) struct WorkerAdvancementContext<'a, P> {
     pub(in crate::runner) runtime: &'a tokio::runtime::Runtime,
     pub(in crate::runner) agent: &'a mut Arc<Agent<P>>,
@@ -15,7 +72,6 @@ pub(in crate::runner) struct WorkerAdvancementContext<'a, P> {
     pub(in crate::runner) workspace_root: &'a PathBuf,
     pub(in crate::runner) options: &'a AgentRunOptions,
     pub(in crate::runner) message_tx: &'a mpsc::Sender<WorkerMessage>,
-    pub(in crate::runner) mcp_event_rx: &'a mpsc::Receiver<McpRuntimeEvent>,
     pub(in crate::runner) elicitation_handler: &'a Arc<ChannelMcpElicitationHandler>,
     pub(in crate::runner) mcp_event_handler: &'a Arc<ChannelMcpRuntimeEventHandler>,
     pub(in crate::runner) role_provider_builder: &'a Arc<dyn TaskRoleProviderBuilder>,
@@ -33,7 +89,6 @@ impl<'a, P> WorkerAdvancementContext<'a, P> {
             workspace_root: self.workspace_root,
             options: self.options,
             message_tx: self.message_tx,
-            mcp_event_rx: self.mcp_event_rx,
             elicitation_handler: self.elicitation_handler,
             mcp_event_handler: self.mcp_event_handler,
             role_provider_builder: self.role_provider_builder,
@@ -49,8 +104,22 @@ pub(in crate::runner) fn advance_worker_loop<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    let allow_observational_refresh = !context.state.readiness.has_priority_ready_work();
+    let run_active = context.state.run.active.is_some();
+    if run_active != context.state.last_observed_run_active {
+        context.state.last_observed_run_active = run_active;
+        context.state.session.task_guidance_dirty = true;
+        context.state.session.conversation_queue_dirty = true;
+    }
+    // Terminal run/OAuth completions may still settle while projection authority is reconciling.
+    let run_advanced = matches!(
+        advance_run_results(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    );
+    // Consume coalesced projection readiness after the P1 active-run terminal. A projection
+    // invalidation becomes a persistent fail-closed state before any new authority work starts.
     let refresh_advanced = matches!(
-        advance_refreshes(context.reborrow()),
+        advance_refreshes(context.reborrow(), allow_observational_refresh),
         WorkerAdvancementControl::SkipCommandPoll
     );
     let oauth_advanced = advance_mcp_oauth_results(context.message_tx, context.state);
@@ -58,46 +127,139 @@ where
         advance_task_provider_route_diagnostics(context.message_tx, context.state);
     let task_completion_progress_advanced =
         advance_task_completion_progress(context.message_tx, context.state);
-    if refresh_advanced
+
+    match advance_projection_reconciliation(context.message_tx, context.state) {
+        ProjectionReconciliationControl::Blocked => {
+            return if run_advanced
+                || refresh_advanced
+                || oauth_advanced
+                || task_route_diagnostics_advanced
+                || task_completion_progress_advanced
+            {
+                WorkerAdvancementControl::SkipCommandPoll
+            } else {
+                WorkerAdvancementControl::PollCommand
+            };
+        }
+        ProjectionReconciliationControl::Reconciled => {
+            // Reconciliation rehydrates every authority family below in the same safe-point pass;
+            // returning here would let an already queued ordinary command overtake that work.
+        }
+        ProjectionReconciliationControl::Ready => {}
+    }
+
+    // Safe-point priority after terminal settlement:
+    // compaction result -> blocking child continuation -> task guidance -> recovered handoff
+    // -> queued user work -> opportunistic idle compaction.
+    if matches!(
+        advance_compaction_results(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_background_agents(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_pending_agent_continuations(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_task_guidance(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_pending_task_handoffs(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_conversation_queue(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || matches!(
+        advance_idle_compaction(context.reborrow()),
+        WorkerAdvancementControl::SkipCommandPoll
+    ) || run_advanced
+        || refresh_advanced
         || oauth_advanced
         || task_route_diagnostics_advanced
         || task_completion_progress_advanced
-        || matches!(
-            advance_compaction_results(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_run_results(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_task_guidance(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_pending_task_handoffs(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_idle_compaction(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_background_agents(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_pending_agent_continuations(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
-        || matches!(
-            advance_conversation_queue(context.reborrow()),
-            WorkerAdvancementControl::SkipCommandPoll
-        )
     {
         WorkerAdvancementControl::SkipCommandPoll
     } else {
         WorkerAdvancementControl::PollCommand
+    }
+}
+
+fn advance_projection_reconciliation(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    state: &mut WorkerLoopState,
+) -> ProjectionReconciliationControl {
+    if !state.session.projection_reconciling {
+        return ProjectionReconciliationControl::Ready;
+    }
+    if state.session.projection_reconciliation_latched {
+        return ProjectionReconciliationControl::Blocked;
+    }
+
+    let now = Instant::now();
+    if state
+        .session
+        .projection_retry_at
+        .is_some_and(|retry_at| retry_at > now)
+    {
+        return ProjectionReconciliationControl::Blocked;
+    }
+
+    let reconciliation = state
+        .session
+        .current
+        .as_ref()
+        .ok_or_else(|| "active session is unavailable".to_owned())
+        .and_then(|session| {
+            let snapshot = session
+                .active_projection_snapshot()
+                .map_err(|error| format!("{error:#}"))?
+                .ok_or_else(|| "active session has no durable projection".to_owned())?;
+            let pending_agent_continuations =
+                pending_agent_continuations_from_snapshot(session, &snapshot)?;
+            let active_terminal_task_ids =
+                active_terminal_task_ids_from_snapshot(session, &snapshot)?;
+            Ok((pending_agent_continuations, active_terminal_task_ids))
+        });
+    match reconciliation {
+        Ok((pending_agent_continuations, active_terminal_task_ids)) => {
+            state.session.projection_reconciling = false;
+            state.session.projection_retry_at = None;
+            state.session.projection_reconciliation_error = None;
+            state.session.projection_reconciliation_attempts = 0;
+            state.session.projection_reconciliation_latched = false;
+            state.session.task_guidance_dirty = true;
+            state.session.conversation_queue_dirty = true;
+            state.session.pending_agent_result_continuations = pending_agent_continuations;
+            state.session.active_terminal_task_ids = active_terminal_task_ids;
+            let _ = message_tx.send(WorkerMessage::Notice(
+                "active session projection reconciled; scheduler authority restored".to_owned(),
+            ));
+            ProjectionReconciliationControl::Reconciled
+        }
+        Err(error) => {
+            match record_projection_reconciliation_failure(
+                &mut state.session.projection_reconciliation_attempts,
+            ) {
+                ProjectionReconciliationFailureDisposition::RetryAfter(delay) => {
+                    state.session.projection_retry_at = Some(now + delay);
+                }
+                ProjectionReconciliationFailureDisposition::Latched => {
+                    state.session.projection_reconciliation_latched = true;
+                    state.session.projection_retry_at = None;
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "active session projection reconciliation latched after {} failed attempts; authority-bearing work remains disabled until the session is reloaded: {error}",
+                        state.session.projection_reconciliation_attempts
+                    )));
+                }
+            }
+            if state.session.projection_reconciliation_error.as_deref() != Some(&error) {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "active session projection is reconciling; authority-bearing work remains disabled: {error}"
+                )));
+                state.session.projection_reconciliation_error = Some(error);
+            }
+            ProjectionReconciliationControl::Blocked
+        }
     }
 }
 
@@ -110,6 +272,101 @@ fn active_task_id(state: &WorkerLoopState) -> Option<&str> {
     {
         Some(RunCancellationTarget::Task { task_id }) => Some(task_id),
         Some(RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. }) | None => None,
+    }
+}
+
+fn active_conversation_queue_is_idle(session: &Session) -> anyhow::Result<bool> {
+    match session.active_projection_snapshot()? {
+        Some(snapshot) => Ok(snapshot
+            .conversation_queue()
+            .queue
+            .items
+            .iter()
+            .all(|item| item.status.is_terminal())),
+        None => Ok(session
+            .conversation_queue_projection()
+            .items
+            .iter()
+            .all(|item| item.status.is_terminal())),
+    }
+}
+
+fn active_next_dispatchable_queue_id(
+    session: &Session,
+) -> anyhow::Result<Option<ConversationInputQueueId>> {
+    match session.active_projection_snapshot()? {
+        Some(snapshot) => Ok(snapshot
+            .conversation_queue()
+            .queue
+            .next_dispatchable
+            .clone()),
+        None => Ok(session.conversation_queue_projection().next_dispatchable),
+    }
+}
+
+fn enter_projection_reconciliation(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    state: &mut WorkerLoopState,
+    error: impl std::fmt::Display,
+) {
+    let error = error.to_string();
+    schedule_projection_reconciliation_after_invalidation(
+        &mut state.session.projection_reconciling,
+        &mut state.session.projection_retry_at,
+        &mut state.session.projection_reconciliation_attempts,
+        &mut state.session.projection_reconciliation_latched,
+        Instant::now(),
+    );
+    if state.session.projection_reconciliation_error.as_deref() != Some(&error) {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "active session projection requires reconciliation; authority-bearing work was disabled: {error}"
+        )));
+        state.session.projection_reconciliation_error = Some(error);
+    }
+}
+
+fn schedule_projection_reconciliation_after_invalidation(
+    reconciling: &mut bool,
+    retry_at: &mut Option<Instant>,
+    attempts: &mut u8,
+    latched: &mut bool,
+    now: Instant,
+) {
+    if !*reconciling {
+        *attempts = 0;
+        *latched = false;
+        *retry_at = Some(now);
+    } else if retry_at.is_none() && !*latched {
+        *retry_at = Some(now);
+    }
+    *reconciling = true;
+}
+
+fn projection_reconciliation_backoff(attempt: u8) -> Duration {
+    let exponent = u32::from(attempt.saturating_sub(1).min(5));
+    let base = PROJECTION_RECONCILIATION_BASE_BACKOFF
+        .saturating_mul(1_u32 << exponent)
+        .min(PROJECTION_RECONCILIATION_MAX_BACKOFF);
+    let jitter_ceiling_ms = u64::try_from((base.as_millis() / 5).max(1)).unwrap_or(u64::MAX);
+    let jitter_ms = u64::from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos(),
+    ) % (jitter_ceiling_ms + 1);
+    base.saturating_add(Duration::from_millis(jitter_ms))
+}
+
+fn record_projection_reconciliation_failure(
+    attempts: &mut u8,
+) -> ProjectionReconciliationFailureDisposition {
+    *attempts = attempts.saturating_add(1);
+    if *attempts >= PROJECTION_RECONCILIATION_MAX_ATTEMPTS {
+        ProjectionReconciliationFailureDisposition::Latched
+    } else {
+        ProjectionReconciliationFailureDisposition::RetryAfter(projection_reconciliation_backoff(
+            *attempts,
+        ))
     }
 }
 
@@ -317,6 +574,11 @@ where
     if state.run.active.is_some() {
         return WorkerAdvancementControl::PollCommand;
     }
+    if !state.session.task_guidance_dirty {
+        return WorkerAdvancementControl::PollCommand;
+    }
+    state.session.task_guidance_dirty = false;
+    state.session.task_guidance_retry_at = None;
     let preparation = match state.session.current.as_ref() {
         Some(session) => {
             prepare_next_task_guidance_candidate(session, &state.session.exact_prompts)
@@ -327,6 +589,16 @@ where
         Ok(preparation) => preparation,
         Err(error) => {
             let _ = message_tx.send(WorkerMessage::Notice(error));
+            if !arm_authority_cas_retry(
+                &mut state.session.task_guidance_retry_at,
+                &mut state.session.task_guidance_retry_attempts,
+                &mut state.session.task_guidance_retry_latched,
+                Instant::now(),
+            ) {
+                let _ = message_tx.send(WorkerMessage::Notice(
+                    "task guidance authority retry latched after 6 failures; a new relevant durable event or session reload is required".to_owned(),
+                ));
+            }
             return WorkerAdvancementControl::PollCommand;
         }
     };
@@ -346,6 +618,8 @@ where
         } => {
             state.session.last_task_guidance_block = None;
             state.session.exact_prompts.remove(&queue_id);
+            state.session.task_guidance_dirty = true;
+            state.session.conversation_queue_dirty = true;
             append_queue_status_and_notify(
                 &mut state.session.current,
                 message_tx,
@@ -359,6 +633,8 @@ where
             if !root_config.task.enabled {
                 let queue_id = candidate.promotion.queue_id;
                 state.session.exact_prompts.remove(&queue_id);
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
                 append_queue_status_and_notify(
                     &mut state.session.current,
                     message_tx,
@@ -383,21 +659,22 @@ where
                 state.session.current = Some(run_session);
                 return WorkerAdvancementControl::PollCommand;
             };
-            let cancellation =
-                match prepare_task_run_cancellation(&mut run_session, &candidate.promotion.task_id)
-                {
-                    Ok(cancellation) => cancellation,
-                    Err(error) => {
-                        state.session.current = Some(run_session);
-                        notify_task_guidance_block_once(
-                            message_tx,
-                            state,
-                            candidate.promotion.queue_id,
-                            error,
-                        );
-                        return WorkerAdvancementControl::PollCommand;
-                    }
-                };
+            // Creating the cancellation scope must remain no-write until the frontier-bound
+            // guidance promotion succeeds. Persisting the Task binding first would advance the
+            // same durable frontier and make this candidate reject itself as stale.
+            let cancellation = match prepare_run_cancellation(&run_session) {
+                Ok(cancellation) => cancellation,
+                Err(error) => {
+                    state.session.current = Some(run_session);
+                    notify_task_guidance_block_once(
+                        message_tx,
+                        state,
+                        candidate.promotion.queue_id,
+                        error,
+                    );
+                    return WorkerAdvancementControl::PollCommand;
+                }
+            };
             let store = match JsonlSessionStore::new(&state.session.log_path) {
                 Ok(store) => store,
                 Err(error) => {
@@ -411,8 +688,21 @@ where
                     return WorkerAdvancementControl::PollCommand;
                 }
             };
-            if let Err(error) = store.append_task_guidance_promoted(candidate.promotion.clone()) {
+            if let Err(error) = store.append_task_guidance_promoted_at(
+                candidate.promotion.clone(),
+                &candidate.source_frontier,
+            ) {
                 state.session.current = Some(run_session);
+                if !arm_authority_cas_retry(
+                    &mut state.session.task_guidance_retry_at,
+                    &mut state.session.task_guidance_retry_attempts,
+                    &mut state.session.task_guidance_retry_latched,
+                    Instant::now(),
+                ) {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "task guidance authority retry latched after 6 failures; a new relevant durable event or session reload is required".to_owned(),
+                    ));
+                }
                 notify_task_guidance_block_once(
                     message_tx,
                     state,
@@ -421,10 +711,27 @@ where
                 );
                 return WorkerAdvancementControl::PollCommand;
             }
-            run_session.record_durably_appended_controls([ControlEntry::TaskGuidancePromoted(
-                candidate.promotion.clone(),
-            )]);
+            if let Err(error) = run_session
+                .record_durably_appended_task_guidance_promotion(candidate.promotion.clone())
+            {
+                state.session.current = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "task guidance promotion was durable but live adoption failed: {error:#}"
+                )));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
             send_conversation_queue_update(message_tx, run_session.entries());
+            if let Err(error) = bind_task_run_cancellation_scope(
+                &mut run_session,
+                &candidate.promotion.task_id,
+                &cancellation.2,
+            ) {
+                state.session.current = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "task guidance was promoted but cancellation binding could not be committed: {error}"
+                )));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
             let delivered = ConversationInputStatusEntry {
                 queue_id: candidate.promotion.queue_id.clone(),
                 status: ConversationInputStatus::Delivered,
@@ -446,6 +753,8 @@ where
                 .session
                 .exact_prompts
                 .remove(&candidate.promotion.queue_id);
+            state.session.task_guidance_dirty = true;
+            state.session.conversation_queue_dirty = true;
 
             let task_id = candidate.promotion.task_id.clone();
             let task_id_value = task_id.as_str().to_owned();
@@ -527,7 +836,10 @@ fn notify_task_guidance_block_once(
     state.session.last_task_guidance_block = Some(block);
 }
 
-fn advance_refreshes<P>(context: WorkerAdvancementContext<'_, P>) -> WorkerAdvancementControl
+fn advance_refreshes<P>(
+    context: WorkerAdvancementContext<'_, P>,
+    allow_observational_refresh: bool,
+) -> WorkerAdvancementControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
@@ -538,28 +850,118 @@ where
         provider_capabilities,
         options,
         message_tx,
-        mcp_event_rx,
         elicitation_handler,
         mcp_event_handler,
         state,
         ..
     } = context;
-    while let Ok(event) = mcp_event_rx.try_recv() {
-        match event {
-            McpRuntimeEvent::Progress(notification) => {
-                let _ = message_tx.send(WorkerMessage::McpProgress { notification });
+    let wake_readiness = state.readiness.take_wake_readiness(&state.wake_coalescer);
+    if wake_readiness.projection_invalid {
+        schedule_projection_reconciliation_after_invalidation(
+            &mut state.session.projection_reconciling,
+            &mut state.session.projection_retry_at,
+            &mut state.session.projection_reconciliation_attempts,
+            &mut state.session.projection_reconciliation_latched,
+            Instant::now(),
+        );
+    }
+    if wake_readiness.task_guidance_dirty() {
+        state.session.task_guidance_dirty = true;
+        reset_authority_cas_retry(
+            &mut state.session.task_guidance_retry_at,
+            &mut state.session.task_guidance_retry_attempts,
+            &mut state.session.task_guidance_retry_latched,
+        );
+    }
+    if wake_readiness.conversation_queue_dirty() {
+        state.session.conversation_queue_dirty = true;
+        reset_authority_cas_retry(
+            &mut state.session.conversation_queue_retry_at,
+            &mut state.session.conversation_queue_retry_attempts,
+            &mut state.session.conversation_queue_retry_latched,
+        );
+    }
+    if wake_readiness
+        .projection_families
+        .contains(&ActiveProjectionFamily::AgentContinuation)
+    {
+        let pending = state
+            .session
+            .current
+            .as_ref()
+            .map(pending_agent_continuations_from_active_projection)
+            .transpose();
+        match pending {
+            Ok(Some(pending)) => state.session.pending_agent_result_continuations = pending,
+            Ok(None) => state.session.pending_agent_result_continuations.clear(),
+            Err(error) => {
+                enter_projection_reconciliation(message_tx, state, error);
+                return WorkerAdvancementControl::SkipCommandPoll;
             }
-            McpRuntimeEvent::ListChanged(notification) => {
-                state
-                    .refresh
-                    .pending_mcp_servers
-                    .insert(notification.server_name.clone());
-                let _ = message_tx.send(WorkerMessage::McpListChanged { notification });
+        }
+    }
+    if wake_readiness
+        .projection_families
+        .contains(&ActiveProjectionFamily::TerminalTask)
+    {
+        let active = state
+            .session
+            .current
+            .as_ref()
+            .map(active_terminal_task_ids_from_active_projection)
+            .transpose();
+        match active {
+            Ok(Some(active)) => state.session.active_terminal_task_ids = active,
+            Ok(None) => state.session.active_terminal_task_ids.clear(),
+            Err(error) => {
+                enter_projection_reconciliation(message_tx, state, error);
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+        }
+    }
+    let now = Instant::now();
+    let timer_due = state.readiness.take_timer_due();
+    let mut advanced = timer_due || wake_readiness.any;
+    if release_due_authority_cas_retry(
+        &mut state.session.task_guidance_retry_at,
+        &mut state.session.task_guidance_dirty,
+        now,
+    ) {
+        advanced = true;
+    }
+    if release_due_authority_cas_retry(
+        &mut state.session.conversation_queue_retry_at,
+        &mut state.session.conversation_queue_dirty,
+        now,
+    ) {
+        advanced = true;
+    }
+    if allow_observational_refresh {
+        let resync_servers = std::mem::take(&mut state.readiness.mcp_resync_servers);
+        if !resync_servers.is_empty() {
+            state.refresh.pending_mcp_servers.extend(resync_servers);
+            state.refresh.next_mcp_retry_at = Instant::now();
+            advanced = true;
+        }
+        while let Some(event) = state.readiness.mcp_runtime_events.pop_front() {
+            advanced = true;
+            match event {
+                McpRuntimeEvent::Progress(notification) => {
+                    let _ = message_tx.send(WorkerMessage::McpProgress { notification });
+                }
+                McpRuntimeEvent::ListChanged(notification) => {
+                    state
+                        .refresh
+                        .pending_mcp_servers
+                        .insert(notification.server_name.clone());
+                    let _ = message_tx.send(WorkerMessage::McpListChanged { notification });
+                }
             }
         }
     }
 
-    if state.run.active.is_none()
+    if allow_observational_refresh
+        && state.run.active.is_none()
         && !state.refresh.pending_mcp_servers.is_empty()
         && Instant::now() >= state.refresh.next_mcp_retry_at
     {
@@ -589,14 +991,71 @@ where
         } else {
             Instant::now()
         };
+        advanced = true;
     }
 
-    drain_provider_status_results(
-        &state.refresh.provider_status_rx,
+    advanced |= drain_provider_status_results(
+        &mut state.readiness.provider_status_results,
         &mut state.refresh.provider_status_tasks,
         message_tx,
     );
-    WorkerAdvancementControl::PollCommand
+    if advanced {
+        WorkerAdvancementControl::SkipCommandPoll
+    } else {
+        WorkerAdvancementControl::PollCommand
+    }
+}
+
+pub(in crate::runner) fn pending_agent_continuations_from_active_projection(
+    session: &Session,
+) -> std::result::Result<Vec<AgentThreadId>, String> {
+    let snapshot = session
+        .active_projection_snapshot()
+        .map_err(|error| format!("{error:#}"))?
+        .ok_or_else(|| "agent continuation refresh requires a durable projection".to_owned())?;
+    pending_agent_continuations_from_snapshot(session, &snapshot)
+}
+
+fn pending_agent_continuations_from_snapshot(
+    session: &Session,
+    snapshot: &sigil_kernel::session::ActiveSessionProjectionSnapshot,
+) -> std::result::Result<Vec<AgentThreadId>, String> {
+    if snapshot.pending_agent_continuations_may_be_incomplete() {
+        return session
+            .try_agent_result_continuation_projection_from_durable()
+            .map_err(|error| format!("{error:#}"))?
+            .map(|projection| projection.pending_thread_ids)
+            .ok_or_else(|| "agent continuation fallback requires a durable session".to_owned());
+    }
+    Ok(snapshot
+        .pending_agent_continuations()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>())
+}
+
+fn active_terminal_task_ids_from_active_projection(
+    session: &Session,
+) -> std::result::Result<BTreeSet<TerminalTaskId>, String> {
+    let snapshot = session
+        .active_projection_snapshot()
+        .map_err(|error| format!("{error:#}"))?
+        .ok_or_else(|| "terminal task refresh requires a durable projection".to_owned())?;
+    active_terminal_task_ids_from_snapshot(session, &snapshot)
+}
+
+fn active_terminal_task_ids_from_snapshot(
+    session: &Session,
+    snapshot: &sigil_kernel::session::ActiveSessionProjectionSnapshot,
+) -> std::result::Result<BTreeSet<TerminalTaskId>, String> {
+    if snapshot.active_terminal_tasks_may_be_incomplete() {
+        return session
+            .try_terminal_task_projection_from_durable()
+            .map_err(|error| format!("{error:#}"))?
+            .map(|projection| projection.active_task_ids.into_iter().collect())
+            .ok_or_else(|| "terminal task fallback requires a durable session".to_owned());
+    }
+    Ok(snapshot.active_terminal_tasks().clone())
 }
 
 fn advance_compaction_results<P>(
@@ -617,7 +1076,9 @@ where
         state,
         ..
     } = context;
-    while let Ok(preparation_result) = state.compaction.preparation_rx.try_recv() {
+    let mut advanced = false;
+    while let Some(preparation_result) = state.readiness.compaction_results.pop_front() {
+        advanced = true;
         match preparation_result {
             CompactionPreparationTaskResult::Manual {
                 request_id,
@@ -686,17 +1147,25 @@ where
                 {
                     continue;
                 }
-                let idle_frontier_is_current =
-                    state.session.current.as_ref().is_some_and(|session| {
-                        session.session_scope_id() == session_scope_id
-                            && session
-                                .conversation_queue_projection()
-                                .items
-                                .iter()
-                                .all(|item| item.status.is_terminal())
-                    }) && state.run.active.is_none()
-                        && state.session.pending_agent_result_continuations.is_empty()
-                        && state.compaction.pending.is_none();
+                let queue_idle = state
+                    .session
+                    .current
+                    .as_ref()
+                    .filter(|session| session.session_scope_id() == session_scope_id)
+                    .map(active_conversation_queue_is_idle)
+                    .transpose();
+                let queue_idle = match queue_idle {
+                    Ok(Some(queue_idle)) => queue_idle,
+                    Ok(None) => false,
+                    Err(error) => {
+                        enter_projection_reconciliation(message_tx, state, error);
+                        continue;
+                    }
+                };
+                let idle_frontier_is_current = queue_idle
+                    && state.run.active.is_none()
+                    && state.session.pending_agent_result_continuations.is_empty()
+                    && state.compaction.pending.is_none();
                 if !idle_frontier_is_current {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "discarded stale automatic compaction preparation".to_owned(),
@@ -708,6 +1177,7 @@ where
                         state.compaction.idle_auto = prepared.state;
                         finish_idle_auto_compaction(
                             prepared.preparation,
+                            prepared.session,
                             &mut state.session.current,
                             &state.session.log_path,
                             message_tx,
@@ -744,13 +1214,29 @@ where
                     ));
                     continue;
                 }
+                let active_snapshot = match session.active_projection_snapshot() {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "discarded queued pre-turn preparation without a durable active projection"
+                                .to_owned(),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        enter_projection_reconciliation(message_tx, state, error);
+                        continue;
+                    }
+                };
                 match result {
                     Ok(prepared)
-                        if session
-                            .conversation_queue_projection()
-                            .next_dispatchable
-                            .as_ref()
-                            == Some(&prepared.queue_id) =>
+                        if active_snapshot.frontier() == &prepared.prepared_frontier
+                            && active_snapshot
+                                .conversation_queue()
+                                .queue
+                                .next_dispatchable
+                                .as_ref()
+                                == Some(&prepared.queue_id) =>
                     {
                         state.session.pending_queued_pre_turn_preparation = Some(*prepared);
                     }
@@ -861,51 +1347,34 @@ where
                     ));
                     continue;
                 };
-                match load_session_with_runtime_attachments(
-                    session.provider_name(),
-                    session.model_name(),
-                    &state.session.log_path,
-                    Some(session),
+                let entries = session.entries().to_vec();
+                let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                    request_id: compaction_request_id,
+                    source: V2CompactionApplySource::OverflowRecovery,
+                    compaction_id: outcome.compaction_id,
+                    folded_event_count,
+                    entries,
+                });
+                match start_portable_overflow_recovery_run(
+                    runtime,
+                    Arc::clone(agent),
+                    &state.agent.supervisor,
+                    root_config,
+                    agent.tool_registry(),
+                    options,
+                    &state.agent.background_runs,
+                    &mut state.session.current,
+                    &state.run.result_tx,
+                    message_tx,
+                    Arc::clone(elicitation_handler),
+                    &mut state.run.next_id,
+                    frozen_request,
+                    format!("overflow-recovery-{}", prepared.source_physical_attempt_id),
                 ) {
-                    Ok(reloaded) => {
-                        let entries = reloaded.entries().to_vec();
-                        state.session.current = Some(reloaded);
-                        let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
-                            request_id: compaction_request_id,
-                            source: V2CompactionApplySource::OverflowRecovery,
-                            compaction_id: outcome.compaction_id,
-                            folded_event_count,
-                            entries,
-                        });
-                        match start_portable_overflow_recovery_run(
-                            runtime,
-                            Arc::clone(agent),
-                            &state.agent.supervisor,
-                            root_config,
-                            agent.tool_registry(),
-                            options,
-                            &state.agent.background_runs,
-                            &mut state.session.current,
-                            &state.run.result_tx,
-                            message_tx,
-                            Arc::clone(elicitation_handler),
-                            &mut state.run.next_id,
-                            frozen_request,
-                            format!("overflow-recovery-{}", prepared.source_physical_attempt_id),
-                        ) {
-                            Ok(recovery_run) => state.run.active = Some(recovery_run),
-                            Err(start_error) => {
-                                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                        "overflow recovery was applied but its one-shot retry could not start: {start_error:#}"
-                                    )));
-                                let _ = message_tx
-                                    .send(WorkerMessage::RunFailed(prepared.original_run_error));
-                            }
-                        }
-                    }
-                    Err(reload_error) => {
+                    Ok(recovery_run) => state.run.active = Some(recovery_run),
+                    Err(start_error) => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "failed to reload applied overflow recovery: {reload_error:#}"
+                            "overflow recovery was applied but its one-shot retry could not start: {start_error:#}"
                         )));
                         let _ =
                             message_tx.send(WorkerMessage::RunFailed(prepared.original_run_error));
@@ -914,7 +1383,11 @@ where
             }
         }
     }
-    WorkerAdvancementControl::PollCommand
+    if advanced {
+        WorkerAdvancementControl::SkipCommandPoll
+    } else {
+        WorkerAdvancementControl::PollCommand
+    }
 }
 
 fn advance_run_results<P>(context: WorkerAdvancementContext<'_, P>) -> WorkerAdvancementControl
@@ -933,8 +1406,22 @@ where
         state,
         ..
     } = context;
-    while let Ok(mut task_result) = state.run.result_rx.try_recv() {
+    let mut advanced = false;
+    while let Some(mut task_result) = state.readiness.run_results.pop_front() {
+        advanced = true;
         if state.run.discarded_ids.remove(&task_result.run_id) {
+            continue;
+        }
+        if state
+            .run
+            .active
+            .as_ref()
+            .is_none_or(|active| active.run_id != task_result.run_id)
+        {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "discarded stale run completion {}",
+                task_result.run_id
+            )));
             continue;
         }
         elicitation_handler.set_audit_buffer(None);
@@ -1126,8 +1613,25 @@ where
                         state.compaction.next_request_id =
                             state.compaction.next_request_id.saturating_add(1);
                         let expected_session_scope_id = session.session_scope_id().to_owned();
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
+                        let stable_snapshot = match capture_stable_idle_compaction_snapshot(session)
+                        {
+                            Ok(Some(snapshot)) => snapshot,
+                            Ok(None) => {
+                                let _ = message_tx.send(WorkerMessage::Notice(
+                                    "overflow recovery requires a stable active-session frontier"
+                                        .to_owned(),
+                                ));
+                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                continue;
+                            }
+                            Err(snapshot_error) => {
+                                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                    "overflow recovery source could not be captured: {snapshot_error:#}"
+                                )));
+                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                continue;
+                            }
+                        };
                         let root_config = root_config.clone();
                         let workspace_root = workspace_root.clone();
                         let session_log_path = state.session.log_path.clone();
@@ -1135,8 +1639,6 @@ where
                         let tools = agent.tool_registry().specs();
                         let runtime_handle = runtime.handle().clone();
                         let overflow_context_resolver = context_resolver.clone();
-                        let runtime_attachments =
-                            CapturedSessionRuntimeAttachments::from_session(Some(session));
                         let preparation_agent = Arc::clone(agent);
                         let source_logical_run_id = logical_run_id.to_owned();
                         let original_run_error = error.clone();
@@ -1147,14 +1649,15 @@ where
                                 state.compaction.preparation_tx.clone(),
                                 move || {
                                     let preparation = (|| {
-                                        let mut session =
-                                            load_session_with_captured_runtime_attachments(
-                                                &provider_name,
-                                                &model_name,
-                                                &session_log_path,
-                                                &runtime_attachments,
-                                            )
-                                            .map_err(|error| format!("{error:#}"))?;
+                                        let Some(mut session) = stable_snapshot
+                                            .materialize_compaction_session()
+                                            .map_err(|error| format!("{error:#}"))?
+                                        else {
+                                            return Err(
+                                                "overflow recovery source changed before preparation"
+                                                    .to_owned(),
+                                            );
+                                        };
                                         if session.session_scope_id() != expected_session_scope_id {
                                             return Err(
                                                 "overflow recovery preparation loaded a different session scope"
@@ -1267,7 +1770,11 @@ where
             }
         }
     }
-    WorkerAdvancementControl::PollCommand
+    if advanced {
+        WorkerAdvancementControl::SkipCommandPoll
+    } else {
+        WorkerAdvancementControl::PollCommand
+    }
 }
 
 fn advance_idle_compaction<P>(context: WorkerAdvancementContext<'_, P>) -> WorkerAdvancementControl
@@ -1280,50 +1787,96 @@ where
         root_config,
         workspace_root,
         options,
+        message_tx,
         context_resolver,
         state,
         ..
     } = context;
-    let conversation_queue_is_idle = state.session.current.as_ref().is_some_and(|session| {
-        session
-            .conversation_queue_projection()
-            .items
-            .iter()
-            .all(|item| item.status.is_terminal())
-    });
-    if state.run.active.is_none()
-        && conversation_queue_is_idle
-        && state.session.pending_agent_result_continuations.is_empty()
-        && state.compaction.pending.is_none()
-        && !state.compaction.preparation_tasks.has_active()
-        && state.compaction.idle_auto.is_requested()
-        && let Some(session) = state.session.current.as_ref()
+    if !state.compaction.idle_auto.is_requested() {
+        return WorkerAdvancementControl::PollCommand;
+    }
+    let conversation_queue_is_idle = match state
+        .session
+        .current
+        .as_ref()
+        .map(active_conversation_queue_is_idle)
+        .transpose()
     {
+        Ok(Some(queue_idle)) => queue_idle,
+        Ok(None) => true,
+        Err(error) => {
+            enter_projection_reconciliation(message_tx, state, error);
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    let scheduler_eligibility = IdleAutoCompactionSchedulerEligibility {
+        run_active: state.run.active.is_some(),
+        conversation_queue_idle: conversation_queue_is_idle,
+        pending_agent_result_continuation: !state
+            .session
+            .pending_agent_result_continuations
+            .is_empty(),
+        pending_compaction: state.compaction.pending.is_some(),
+        preparation_active: state.compaction.preparation_tasks.has_active(),
+    };
+    let context_capabilities = state
+        .session
+        .current
+        .as_ref()
+        .map(|session| agent.provider().context_capabilities(session.model_name()))
+        .unwrap_or_else(sigil_kernel::ProviderContextCapabilities::unknown);
+    let effective_strategy = match idle_auto_compaction_preflight(
+        &state.compaction.idle_auto,
+        state.session.current.as_ref(),
+        &options.compaction_config,
+        &context_capabilities,
+        scheduler_eligibility,
+    )
+    .decision
+    {
+        IdleAutoCompactionPreflightDecision::NotRequested
+        | IdleAutoCompactionPreflightDecision::SchedulerBlocked(_) => {
+            return WorkerAdvancementControl::PollCommand;
+        }
+        IdleAutoCompactionPreflightDecision::NotEligible(_) => {
+            state.compaction.idle_auto.cancel_requested_run();
+            return WorkerAdvancementControl::PollCommand;
+        }
+        IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation {
+            effective_strategy,
+        } => effective_strategy,
+    };
+    if let Some(session) = state.session.current.as_ref() {
+        let stable_snapshot = match capture_stable_idle_compaction_snapshot(session) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                state.compaction.idle_auto.cancel_requested_run();
+                let _ = message_tx.send(WorkerMessage::Notice(
+                    "automatic compaction preparation was skipped because the live session-entry projection was not stable"
+                        .to_owned(),
+                ));
+                return WorkerAdvancementControl::PollCommand;
+            }
+            Err(error) => {
+                state.compaction.idle_auto.cancel_requested_run();
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "automatic compaction preparation could not capture a stable session snapshot: {error:#}"
+                )));
+                return WorkerAdvancementControl::PollCommand;
+            }
+        };
         let request_id = state.compaction.next_request_id;
         state.compaction.next_request_id = state.compaction.next_request_id.saturating_add(1);
         let expected_session_scope_id = session.session_scope_id().to_owned();
-        let provider_name = session.provider_name().to_owned();
-        let model_name = session.model_name().to_owned();
-        let context_capabilities = agent.provider().context_capabilities(&model_name);
-        let cache_aware_v3_supported = sigil_runtime::cache_aware_v3_automatic_supported(
-            &provider_name,
-            &model_name,
-            &context_capabilities,
-        );
         let mut root_config = root_config.clone();
         let workspace_root = workspace_root.clone();
         let session_log_path = state.session.log_path.clone();
         let mut options = options.clone();
-        if root_config.compaction.strategy == sigil_kernel::CompactionStrategy::CacheAwareV3
-            && !cache_aware_v3_supported
-        {
-            root_config.compaction.strategy = sigil_kernel::CompactionStrategy::LegacyV2;
-            options.compaction_config.strategy = sigil_kernel::CompactionStrategy::LegacyV2;
-        }
+        root_config.compaction.strategy = effective_strategy;
+        options.compaction_config.strategy = effective_strategy;
         let tools = agent.tool_registry().specs();
         let runtime_handle = runtime.handle().clone();
         let idle_context_resolver = context_resolver.clone();
-        let runtime_attachments = CapturedSessionRuntimeAttachments::from_session(Some(session));
         let preparation_agent = Arc::clone(agent);
         let mut idle_auto_state = state.compaction.idle_auto.clone();
         state.compaction.idle_auto.cancel_requested_run();
@@ -1333,16 +1886,18 @@ where
             expected_session_scope_id.clone(),
             state.compaction.preparation_tx.clone(),
             move || {
-                let mut session = load_session_with_captured_runtime_attachments(
-                    &provider_name,
-                    &model_name,
-                    &session_log_path,
-                    &runtime_attachments,
-                )
-                .map_err(|error| format!("{error:#}"))?;
+                let Some(mut session) = stable_snapshot
+                    .materialize_compaction_session()
+                    .map_err(|error| format!("{error:#}"))?
+                else {
+                    return Err(
+                        "automatic compaction source snapshot changed before preparation"
+                            .to_owned(),
+                    );
+                };
                 if session.session_scope_id() != expected_session_scope_id {
                     return Err(
-                        "automatic compaction preparation loaded a different session scope"
+                        "automatic compaction preparation materialized a different session scope"
                             .to_owned(),
                     );
                 }
@@ -1358,10 +1913,23 @@ where
                     &idle_context_resolver,
                     &runtime_handle,
                 )
-                .map_err(|error| format!("{error:#}"))?;
+                .map_err(|error| format!("{error:#}"));
+                if preparation.is_err() {
+                    idle_auto_state.cancel_requested_run();
+                }
+                if capture_stable_idle_compaction_snapshot(&session)
+                    .map_err(|error| format!("{error:#}"))?
+                    .is_none()
+                {
+                    return Err(
+                        "automatic compaction prepared session no longer matches the durable session-entry projection"
+                            .to_owned(),
+                    );
+                }
                 Ok(IdleV2CompactionPreparation {
                     state: idle_auto_state,
                     preparation,
+                    session,
                 })
             },
         );
@@ -1386,18 +1954,26 @@ where
         ..
     } = context;
     if state.run.active.is_none() {
-        if Instant::now() >= state.refresh.next_terminal_task_refresh_at {
+        if !state.session.active_terminal_task_ids.is_empty()
+            && Instant::now() >= state.refresh.next_terminal_task_refresh_at
+        {
             state.refresh.next_terminal_task_refresh_at =
                 Instant::now() + TERMINAL_TASK_REFRESH_INTERVAL;
+            let active_terminal_task_ids = state.session.active_terminal_task_ids.clone();
             match refresh_terminal_task_statuses(
                 runtime,
                 agent.tool_registry(),
                 options,
                 &state.session.log_path,
                 &mut state.session.current,
+                &active_terminal_task_ids,
             ) {
                 Ok(updates) => {
                     for (entry, entries) in updates {
+                        state
+                            .session
+                            .active_terminal_task_ids
+                            .remove(&entry.handle.task_id);
                         let _ =
                             message_tx.send(WorkerMessage::TerminalTaskUpdated { entry, entries });
                     }
@@ -1442,12 +2018,19 @@ where
                 &mut state.session.pending_agent_result_continuations,
                 non_blocking,
             );
-            let queued_input_ready = state
+            let queued_input_ready = match state
                 .session
                 .current
                 .as_ref()
-                .and_then(|session| session.conversation_queue_projection().next_dispatchable)
-                .is_some();
+                .map(active_next_dispatchable_queue_id)
+                .transpose()
+            {
+                Ok(queue_id) => queue_id.flatten().is_some(),
+                Err(error) => {
+                    enter_projection_reconciliation(message_tx, state, error);
+                    return WorkerAdvancementControl::SkipCommandPoll;
+                }
+            };
             let mut continuation_threads = blocking;
             if !queued_input_ready {
                 continuation_threads.append(&mut state.session.pending_agent_result_continuations);
@@ -1497,12 +2080,19 @@ where
         ..
     } = context;
     if state.run.active.is_none() {
-        let queued_input_ready = state
+        let queued_input_ready = match state
             .session
             .current
             .as_ref()
-            .and_then(|session| session.conversation_queue_projection().next_dispatchable)
-            .is_some();
+            .map(active_next_dispatchable_queue_id)
+            .transpose()
+        {
+            Ok(queue_id) => queue_id.flatten().is_some(),
+            Err(error) => {
+                enter_projection_reconciliation(message_tx, state, error);
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+        };
         if !queued_input_ready && !state.session.pending_agent_result_continuations.is_empty() {
             let continuation_threads =
                 std::mem::take(&mut state.session.pending_agent_result_continuations);
@@ -1551,21 +2141,54 @@ where
         ..
     } = context;
     if state.run.active.is_none() {
-        let next_queue_id = state
-            .session
-            .current
-            .as_ref()
-            .and_then(|session| session.conversation_queue_projection().next_dispatchable);
+        if !state.session.conversation_queue_dirty
+            && state.session.pending_queued_pre_turn_preparation.is_none()
+        {
+            return WorkerAdvancementControl::PollCommand;
+        }
+        let next_queue_id = if state.session.conversation_queue_dirty {
+            state.session.conversation_queue_dirty = false;
+            state.session.conversation_queue_retry_at = None;
+            match state.session.current.as_ref() {
+                Some(session) => match session.active_projection_snapshot() {
+                    Ok(Some(snapshot)) => snapshot
+                        .conversation_queue()
+                        .queue
+                        .next_dispatchable
+                        .clone(),
+                    Ok(None) => None,
+                    Err(error) => {
+                        enter_projection_reconciliation(message_tx, state, error);
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
         if state.session.pending_queued_pre_turn_preparation.is_none()
             && !state.compaction.preparation_tasks.has_active()
             && let Some(queue_id) = next_queue_id.clone()
             && let Some(session) = state.session.current.as_ref()
         {
+            let stable_snapshot = match capture_stable_idle_compaction_snapshot(session) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "queued pre-turn preparation requires a stable durable session projection"
+                            .to_owned(),
+                    ));
+                    return WorkerAdvancementControl::PollCommand;
+                }
+                Err(error) => {
+                    enter_projection_reconciliation(message_tx, state, error);
+                    return WorkerAdvancementControl::SkipCommandPoll;
+                }
+            };
             let request_id = state.compaction.next_request_id;
             state.compaction.next_request_id = state.compaction.next_request_id.saturating_add(1);
             let expected_session_scope_id = session.session_scope_id().to_owned();
-            let provider_name = session.provider_name().to_owned();
-            let model_name = session.model_name().to_owned();
             let root_config = root_config.clone();
             let workspace_root = workspace_root.clone();
             let session_log_path = state.session.log_path.clone();
@@ -1580,8 +2203,6 @@ where
             }
             let runtime_handle = runtime.handle().clone();
             let queue_context_resolver = context_resolver.clone();
-            let runtime_attachments =
-                CapturedSessionRuntimeAttachments::from_session(Some(session));
             let preparation_agent = Arc::clone(agent);
             state.compaction.preparation_tasks.start_pre_turn(
                 runtime,
@@ -1589,21 +2210,32 @@ where
                 expected_session_scope_id.clone(),
                 state.compaction.preparation_tx.clone(),
                 move || {
-                    let mut session = load_session_with_captured_runtime_attachments(
-                        &provider_name,
-                        &model_name,
-                        &session_log_path,
-                        &runtime_attachments,
-                    )
-                    .map_err(|error| format!("{error:#}"))?;
+                    let Some(mut session) = stable_snapshot
+                        .materialize_compaction_session()
+                        .map_err(|error| format!("{error:#}"))?
+                    else {
+                        return Err(
+                            "queued pre-turn source snapshot changed before preparation".to_owned()
+                        );
+                    };
                     if session.session_scope_id() != expected_session_scope_id {
                         return Err(
-                            "queued pre-turn preparation loaded a different session scope"
+                            "queued pre-turn preparation materialized a different session scope"
                                 .to_owned(),
                         );
                     }
-                    if session
-                        .conversation_queue_projection()
+                    let snapshot = session
+                        .active_projection_snapshot()
+                        .map_err(|error| {
+                            format!("failed to read queued pre-turn active projection: {error:#}")
+                        })?
+                        .ok_or_else(|| {
+                            "queued pre-turn preparation requires a durable active projection"
+                                .to_owned()
+                        })?;
+                    if snapshot
+                        .conversation_queue()
+                        .queue
                         .next_dispatchable
                         .as_ref()
                         != Some(&queue_id)
@@ -1628,15 +2260,38 @@ where
                         &runtime_handle,
                     )
                     .map_err(|error| format!("{error:#}"))?;
+                    let prepared_frontier = session
+                        .active_projection_snapshot()
+                        .map_err(|error| {
+                            format!("failed to read prepared queued pre-turn projection: {error:#}")
+                        })?
+                        .ok_or_else(|| {
+                            "queued pre-turn preparation lost its durable active projection"
+                                .to_owned()
+                        })?
+                        .frontier()
+                        .clone();
                     Ok(PreTurnV2CompactionPreparation {
                         queue_id,
                         admission,
+                        session: Some(session),
+                        prepared_frontier,
                     })
                 },
             );
         }
 
-        let candidate = match state.session.pending_queued_pre_turn_preparation.take() {
+        let mut pending_preparation = state.session.pending_queued_pre_turn_preparation.take();
+        if let Some(prepared) = pending_preparation.as_mut() {
+            let Some(prepared_session) = prepared.session.take() else {
+                let _ = message_tx.send(WorkerMessage::Notice(
+                    "queued pre-turn preparation lost its stable session projection".to_owned(),
+                ));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            };
+            state.session.current = Some(prepared_session);
+        }
+        let candidate = match pending_preparation {
             None => {
                 if next_queue_id.is_none() {
                     state.session.last_queued_pre_turn_block = None;
@@ -1708,32 +2363,16 @@ where
                         if let Some(notice) = native_notice {
                             let _ = message_tx.send(WorkerMessage::Notice(notice));
                         }
-                        match load_session_with_runtime_attachments(
-                            session.provider_name(),
-                            session.model_name(),
-                            &state.session.log_path,
-                            state.session.current.as_ref(),
-                        ) {
-                            Ok(reloaded) => {
-                                let entries = reloaded.entries().to_vec();
-                                state.session.current = Some(reloaded);
-                                state.session.last_queued_pre_turn_block = None;
-                                let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
-                                    request_id: 0,
-                                    source: V2CompactionApplySource::PreTurnPressure,
-                                    compaction_id: outcome.compaction_id,
-                                    folded_event_count,
-                                    entries,
-                                });
-                                Some(candidate)
-                            }
-                            Err(error) => {
-                                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                        "queued pre-turn compaction completed but session reload failed; queued input was not sent: {error:#}"
-                                    )));
-                                None
-                            }
-                        }
+                        let entries = session.entries().to_vec();
+                        state.session.last_queued_pre_turn_block = None;
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                            request_id: 0,
+                            source: V2CompactionApplySource::PreTurnPressure,
+                            compaction_id: outcome.compaction_id,
+                            folded_event_count,
+                            entries,
+                        });
+                        Some(candidate)
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
@@ -1756,67 +2395,41 @@ where
             };
             match committed {
                 Ok(candidate) => {
-                    let provider_name = state
-                        .session
-                        .current
-                        .as_ref()
-                        .map(|session| session.provider_name().to_owned());
-                    let model_name = state
-                        .session
-                        .current
-                        .as_ref()
-                        .map(|session| session.model_name().to_owned());
-                    match (provider_name, model_name) {
-                        (Some(provider_name), Some(model_name)) => {
-                            match load_session_with_runtime_attachments(
-                                &provider_name,
-                                &model_name,
-                                &state.session.log_path,
-                                state.session.current.as_ref(),
-                            ) {
-                                Ok(reloaded) => {
-                                    state.session.current = Some(reloaded);
-                                    state.session.exact_prompts.remove(&queue_id);
-                                    if let Some(session) = state.session.current.as_ref() {
-                                        send_conversation_queue_update(
-                                            message_tx,
-                                            session.entries(),
-                                        );
-                                    }
-                                    state.run.active = start_queued_conversation_run(
-                                        runtime,
-                                        Arc::clone(agent),
-                                        &state.agent.supervisor,
-                                        root_config,
-                                        agent.tool_registry(),
-                                        options,
-                                        &state.agent.background_runs,
-                                        &mut state.session.current,
-                                        &state.run.result_tx,
-                                        message_tx,
-                                        Arc::clone(elicitation_handler),
-                                        Arc::clone(role_provider_builder),
-                                        &state.session.log_path,
-                                        &mut state.run.next_id,
-                                        candidate,
-                                    );
-                                }
-                                Err(error) => {
-                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                            "queued promotion committed but session reload failed; provider dispatch was refused: {error:#}"
-                                        )));
-                                }
-                            }
-                        }
-                        _ => {
-                            let _ = message_tx.send(WorkerMessage::Notice(
-                                    "queued promotion committed but session state was unavailable; provider dispatch was refused"
-                                        .to_owned(),
-                                ));
-                        }
+                    state.session.exact_prompts.remove(&queue_id);
+                    state.session.task_guidance_dirty = true;
+                    state.session.conversation_queue_dirty = true;
+                    if let Some(session) = state.session.current.as_ref() {
+                        send_conversation_queue_update(message_tx, session.entries());
                     }
+                    state.run.active = start_queued_conversation_run(
+                        runtime,
+                        Arc::clone(agent),
+                        &state.agent.supervisor,
+                        root_config,
+                        agent.tool_registry(),
+                        options,
+                        &state.agent.background_runs,
+                        &mut state.session.current,
+                        &state.run.result_tx,
+                        message_tx,
+                        Arc::clone(elicitation_handler),
+                        Arc::clone(role_provider_builder),
+                        &state.session.log_path,
+                        &mut state.run.next_id,
+                        candidate,
+                    );
                 }
                 Err(error) => {
+                    if !arm_authority_cas_retry(
+                        &mut state.session.conversation_queue_retry_at,
+                        &mut state.session.conversation_queue_retry_attempts,
+                        &mut state.session.conversation_queue_retry_latched,
+                        Instant::now(),
+                    ) {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "conversation queue authority retry latched after 6 failures; a new relevant durable event or session reload is required".to_owned(),
+                        ));
+                    }
                     let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "queued promotion was not dispatched: {error}"
                     )));
@@ -1828,4 +2441,177 @@ where
         }
     }
     WorkerAdvancementControl::PollCommand
+}
+
+#[cfg(test)]
+mod authority_retry_tests {
+    use super::*;
+
+    #[test]
+    fn transient_authority_failure_rearms_only_after_the_deadline() {
+        let now = Instant::now();
+        let mut retry_at = None;
+        let mut attempts = 0;
+        let mut latched = false;
+        let mut dirty = false;
+        assert!(arm_authority_cas_retry(
+            &mut retry_at,
+            &mut attempts,
+            &mut latched,
+            now
+        ));
+        let first_deadline = retry_at.expect("first retry is armed");
+
+        assert!(!release_due_authority_cas_retry(
+            &mut retry_at,
+            &mut dirty,
+            now
+        ));
+        assert!(!dirty, "retry must not form an immediate tight loop");
+        assert!(release_due_authority_cas_retry(
+            &mut retry_at,
+            &mut dirty,
+            first_deadline
+        ));
+        assert!(dirty, "fresh preparation is rearmed at the event deadline");
+        assert!(retry_at.is_none());
+        assert_eq!(attempts, 1);
+        assert!(!latched);
+    }
+
+    #[test]
+    fn repeated_authority_failures_back_off_and_latch() {
+        let now = Instant::now();
+        let mut retry_at = None;
+        let mut attempts = 0;
+        let mut latched = false;
+        let mut delays = Vec::new();
+        for _ in 1..AUTHORITY_CAS_RETRY_MAX_ATTEMPTS {
+            assert!(arm_authority_cas_retry(
+                &mut retry_at,
+                &mut attempts,
+                &mut latched,
+                now
+            ));
+            delays.push(
+                retry_at
+                    .expect("bounded retry is armed")
+                    .saturating_duration_since(now),
+            );
+        }
+        assert!(delays.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(!arm_authority_cas_retry(
+            &mut retry_at,
+            &mut attempts,
+            &mut latched,
+            now
+        ));
+        assert!(latched);
+        assert!(retry_at.is_none());
+
+        reset_authority_cas_retry(&mut retry_at, &mut attempts, &mut latched);
+        assert_eq!(attempts, 0);
+        assert!(!latched);
+    }
+}
+
+#[cfg(test)]
+mod projection_reconciliation_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_invalid_notice_preserves_future_reconciliation_deadline() {
+        let now = Instant::now();
+        let future = now + PROJECTION_RECONCILIATION_BASE_BACKOFF;
+        let mut reconciling = true;
+        let mut retry_at = Some(future);
+        let mut attempts = 2;
+        let mut latched = false;
+
+        schedule_projection_reconciliation_after_invalidation(
+            &mut reconciling,
+            &mut retry_at,
+            &mut attempts,
+            &mut latched,
+            now,
+        );
+
+        assert!(reconciling);
+        assert_eq!(retry_at, Some(future));
+        assert_eq!(attempts, 2);
+        assert!(!latched);
+    }
+
+    #[test]
+    fn first_invalid_notice_schedules_immediate_reconciliation() {
+        let now = Instant::now();
+        let mut reconciling = false;
+        let mut retry_at = None;
+        let mut attempts = 5;
+        let mut latched = true;
+
+        schedule_projection_reconciliation_after_invalidation(
+            &mut reconciling,
+            &mut retry_at,
+            &mut attempts,
+            &mut latched,
+            now,
+        );
+
+        assert!(reconciling);
+        assert_eq!(retry_at, Some(now));
+        assert_eq!(attempts, 0);
+        assert!(!latched);
+    }
+
+    #[test]
+    fn invalid_notice_does_not_unlatch_exhausted_reconciliation() {
+        let now = Instant::now();
+        let mut reconciling = true;
+        let mut retry_at = None;
+        let mut attempts = PROJECTION_RECONCILIATION_MAX_ATTEMPTS;
+        let mut latched = true;
+
+        schedule_projection_reconciliation_after_invalidation(
+            &mut reconciling,
+            &mut retry_at,
+            &mut attempts,
+            &mut latched,
+            now,
+        );
+
+        assert!(reconciling);
+        assert_eq!(retry_at, None);
+        assert_eq!(attempts, PROJECTION_RECONCILIATION_MAX_ATTEMPTS);
+        assert!(latched);
+    }
+
+    #[test]
+    fn reconciliation_backoff_is_exponential_and_bounded_with_jitter() {
+        for attempt in 1..PROJECTION_RECONCILIATION_MAX_ATTEMPTS {
+            let delay = projection_reconciliation_backoff(attempt);
+            let exponent = u32::from(attempt.saturating_sub(1).min(5));
+            let base = PROJECTION_RECONCILIATION_BASE_BACKOFF
+                .saturating_mul(1_u32 << exponent)
+                .min(PROJECTION_RECONCILIATION_MAX_BACKOFF);
+            assert!(delay >= base);
+            assert!(delay <= base + base / 5 + Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn reconciliation_failure_budget_latches_without_another_deadline() {
+        let mut attempts = 0;
+        for _ in 1..PROJECTION_RECONCILIATION_MAX_ATTEMPTS {
+            assert!(matches!(
+                record_projection_reconciliation_failure(&mut attempts),
+                ProjectionReconciliationFailureDisposition::RetryAfter(_)
+            ));
+        }
+        assert_eq!(
+            record_projection_reconciliation_failure(&mut attempts),
+            ProjectionReconciliationFailureDisposition::Latched
+        );
+        assert_eq!(attempts, PROJECTION_RECONCILIATION_MAX_ATTEMPTS);
+    }
 }

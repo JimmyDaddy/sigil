@@ -17,24 +17,35 @@ impl JsonlSessionStore {
         &self,
         entry: ConversationInputPromotedEntry,
     ) -> Result<StoredEvent> {
-        let session_id = conversation_queue_session_id(self)?;
+        let snapshot = self.active_projection_snapshot()?;
+        let frontier = snapshot.frontier().clone();
+        self.append_conversation_input_promoted_at(entry, &frontier)
+    }
+
+    /// Appends a main-thread promotion only if `expected_frontier` remains current.
+    pub fn append_conversation_input_promoted_at(
+        &self,
+        entry: ConversationInputPromotedEntry,
+        expected_frontier: &ActiveProjectionFrontier,
+    ) -> Result<StoredEvent> {
+        let session_id = expected_frontier.session_id().to_owned();
         entry.validate_for_session(&session_id)?;
         let event_id = conversation_input_promotion_event_id(&session_id, &entry);
         let payload = serde_json::to_value(&entry)
             .context("failed to encode conversation input promoted event")?;
-        let event = self.append_event_if_with_identity(
+        let event = self.append_event_if_active_projection(
             DurableEventType::ConversationInputPromoted,
             payload,
             event_id.clone(),
             Some(event_id),
             None,
-            |records| {
-                let projection = ConversationQueueDurableProjection::from_records(records)?;
-                projection.validate_promotion(&entry)?;
+            Some(expected_frontier),
+            |projection| {
+                projection.queue().validate_promotion(&entry)?;
                 Ok(true)
             },
         )?;
-        event.context("conversation input promotion append was not attempted")
+        event.context("conversation input promotion frontier is stale")
     }
 
     /// Atomically binds one queued task-guidance item to an accepted task plan version.
@@ -46,32 +57,60 @@ impl JsonlSessionStore {
         &self,
         entry: TaskGuidancePromotedEntry,
     ) -> Result<StoredEvent> {
-        let session_id = conversation_queue_session_id(self)?;
+        let snapshot = self.active_projection_snapshot()?;
+        let frontier = snapshot.frontier().clone();
+        self.append_task_guidance_promoted_at(entry, &frontier)
+    }
+
+    /// Appends task guidance only if `expected_frontier` and task-plan eligibility remain current.
+    pub fn append_task_guidance_promoted_at(
+        &self,
+        entry: TaskGuidancePromotedEntry,
+        expected_frontier: &ActiveProjectionFrontier,
+    ) -> Result<StoredEvent> {
+        let session_id = expected_frontier.session_id().to_owned();
         entry.validate_for_session(&session_id)?;
         let event_id = task_guidance_promotion_event_id(&session_id, &entry);
         let session_entry =
             SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(entry.clone()));
         let payload = serde_json::json!({ "session_log_entry": session_entry });
-        let event = self.append_event_if_with_identity(
-            DurableEventType::TaskGuidancePromoted,
-            payload,
-            event_id.clone(),
-            Some(event_id),
-            None,
-            |records| {
-                let queue = ConversationQueueDurableProjection::from_records(records)?;
-                queue.validate_task_guidance_promotion(&entry)?;
-                validate_task_guidance_plan(records, &entry)?;
-                Ok(true)
-            },
-        )?;
-        event.context("task guidance promotion append was not attempted")
+        let snapshot = self.active_projection_snapshot()?;
+        let event = if snapshot.frontier() != expected_frontier {
+            None
+        } else if snapshot
+            .projection
+            .task_guidance_requires_canonical_validation()
+        {
+            self.append_event_if_records_at_active_frontier(
+                DurableEventType::TaskGuidancePromoted,
+                payload,
+                event_id.clone(),
+                Some(event_id),
+                None,
+                expected_frontier,
+                |records| {
+                    let queue = ConversationQueueDurableProjection::from_records(records)?;
+                    queue.validate_task_guidance_promotion(&entry)?;
+                    validate_task_guidance_plan(records, &entry)?;
+                    Ok(true)
+                },
+            )?
+        } else {
+            self.append_event_if_active_projection(
+                DurableEventType::TaskGuidancePromoted,
+                payload,
+                event_id.clone(),
+                Some(event_id),
+                None,
+                Some(expected_frontier),
+                |projection| {
+                    projection.validate_task_guidance_promotion(&entry)?;
+                    Ok(true)
+                },
+            )?
+        };
+        event.context("task guidance promotion frontier is stale")
     }
-}
-
-fn conversation_queue_session_id(store: &JsonlSessionStore) -> Result<String> {
-    let records = store.read_event_records_writer()?;
-    Ok(stream_session_id(&records).unwrap_or_else(|| session_id_for_path(store.path())))
 }
 
 fn conversation_input_promotion_event_id(

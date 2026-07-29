@@ -314,20 +314,25 @@ impl AgentToolRuntime {
             let run_thread = thread_record.clone();
             let child_session_ref = child_thread.child_session_ref.clone();
             let event_sink = self.background_runs.event_sink();
-            let handle = tokio::spawn(async move {
-                let _cancellation_task_guard = cancellation_task_guard;
-                run_background_chat_agent(
-                    run_thread,
-                    child_agent,
-                    child_session,
-                    child_session_ref,
-                    child_input,
-                    child_options,
-                    mailbox_rx,
-                    event_sink,
-                )
-                .await
-            });
+            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+            let handle =
+                BackgroundChatAgentTask::spawn(thread_id.clone(), event_sink.clone(), async move {
+                    let _cancellation_task_guard = cancellation_task_guard;
+                    start_rx
+                        .await
+                        .map_err(|_| anyhow!("background agent start gate was cancelled"))?;
+                    run_background_chat_agent(
+                        run_thread,
+                        child_agent,
+                        child_session,
+                        child_session_ref,
+                        child_input,
+                        child_options,
+                        mailbox_rx,
+                        event_sink,
+                    )
+                    .await
+                });
             if let Err(error) = self.background_runs.insert(
                 thread_id.clone(),
                 BackgroundChatAgentHandle {
@@ -336,6 +341,7 @@ impl AgentToolRuntime {
                     cancellation_owner,
                 },
             ) {
+                drop(start_tx);
                 let _ = self.supervisor.record_chat_child_failure(
                     session,
                     handler,
@@ -349,6 +355,7 @@ impl AgentToolRuntime {
                     error.to_string(),
                 );
             }
+            let _ = start_tx.send(());
             let projection = session.agent_thread_state_projection();
             if let Some(thread) = projection.threads.get(&thread_id) {
                 return agent_status_tool_result(call, thread);
@@ -733,20 +740,25 @@ impl AgentToolRuntime {
         let run_thread = thread_record.clone();
         let child_session_ref = child_thread.child_session_ref.clone();
         let event_sink = self.background_runs.event_sink();
-        let handle = tokio::spawn(async move {
-            let _cancellation_task_guard = cancellation_task_guard;
-            run_background_chat_agent(
-                run_thread,
-                child_agent,
-                child_session,
-                child_session_ref,
-                child_input,
-                child_options,
-                mailbox_rx,
-                event_sink,
-            )
-            .await
-        });
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let handle =
+            BackgroundChatAgentTask::spawn(thread_id.clone(), event_sink.clone(), async move {
+                let _cancellation_task_guard = cancellation_task_guard;
+                start_rx
+                    .await
+                    .map_err(|_| anyhow!("background agent start gate was cancelled"))?;
+                run_background_chat_agent(
+                    run_thread,
+                    child_agent,
+                    child_session,
+                    child_session_ref,
+                    child_input,
+                    child_options,
+                    mailbox_rx,
+                    event_sink,
+                )
+                .await
+            });
         if let Err(error) = self.background_runs.insert(
             thread_id.clone(),
             BackgroundChatAgentHandle {
@@ -755,6 +767,7 @@ impl AgentToolRuntime {
                 cancellation_owner,
             },
         ) {
+            drop(start_tx);
             let _ = self.supervisor.record_chat_child_failure(
                 session,
                 handler,
@@ -768,6 +781,7 @@ impl AgentToolRuntime {
                 error.to_string(),
             );
         }
+        let _ = start_tx.send(());
         let projection = session.agent_thread_state_projection();
         if let Some(thread) = projection.threads.get(&thread_id) {
             return agent_status_tool_result(call, thread);

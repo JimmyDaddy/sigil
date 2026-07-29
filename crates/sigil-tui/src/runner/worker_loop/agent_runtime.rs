@@ -16,6 +16,7 @@ pub(in crate::runner) fn effective_orchestration_root_config(
 
 pub(in crate::runner) struct WorkerAgentEventSink {
     pub(in crate::runner) sender: mpsc::Sender<WorkerMessage>,
+    pub(in crate::runner) wake_coalescer: WorkerWakeCoalescer,
 }
 
 impl sigil_runtime::AgentToolBackgroundEventSink for WorkerAgentEventSink {
@@ -40,6 +41,20 @@ impl sigil_runtime::AgentToolBackgroundEventSink for WorkerAgentEventSink {
                 updated_at_ms: Some(current_unix_time_ms()),
             },
         });
+    }
+
+    fn handle_agent_completion_ready(&self, thread_id: &AgentThreadId) {
+        self.wake_coalescer.notify_background_agent(thread_id);
+    }
+}
+
+pub(in crate::runner) struct WorkerSupervisorEventSink {
+    pub(in crate::runner) wake_coalescer: WorkerWakeCoalescer,
+}
+
+impl sigil_runtime::AgentSupervisorEventSink for WorkerSupervisorEventSink {
+    fn handle_supervisor_change(&self, change: sigil_runtime::AgentSupervisorChange) {
+        self.wake_coalescer.notify_supervisor(change);
     }
 }
 
@@ -220,7 +235,7 @@ pub(in crate::runner) fn start_agent_result_continuation_run<P>(
     options: &AgentRunOptions,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,
     current_session: &mut Option<Session>,
-    task_result_tx: &mpsc::Sender<RunTaskResult>,
+    task_result_tx: &WorkerEventPayloadSender<RunTaskResult>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     next_run_id: &mut u64,
@@ -376,7 +391,7 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     options: &AgentRunOptions,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,
     current_session: &mut Option<Session>,
-    task_result_tx: &mpsc::Sender<RunTaskResult>,
+    task_result_tx: &WorkerEventPayloadSender<RunTaskResult>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
@@ -667,7 +682,7 @@ pub(in crate::runner) fn start_portable_overflow_recovery_run<P>(
     options: &AgentRunOptions,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,
     current_session: &mut Option<Session>,
-    task_result_tx: &mpsc::Sender<RunTaskResult>,
+    task_result_tx: &WorkerEventPayloadSender<RunTaskResult>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     next_run_id: &mut u64,

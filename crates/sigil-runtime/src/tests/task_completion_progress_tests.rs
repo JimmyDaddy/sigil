@@ -1,9 +1,38 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use anyhow::Result;
 use sigil_kernel::{TaskId, TaskStepId};
 
 use super::{
     TaskCompletionOutcome, TaskCompletionProgressRegistration, TaskCompletionProgressRegistry,
 };
+use crate::{AgentSupervisorChange, AgentSupervisorEventSink};
+
+struct CountingSupervisorSink {
+    notifications: AtomicUsize,
+    registry: std::sync::Mutex<Option<TaskCompletionProgressRegistry>>,
+}
+
+impl AgentSupervisorEventSink for CountingSupervisorSink {
+    fn handle_supervisor_change(&self, change: AgentSupervisorChange) {
+        assert_eq!(change, AgentSupervisorChange::TaskCompletionProgress);
+        let registry = self
+            .registry
+            .lock()
+            .expect("sink registry lock")
+            .clone()
+            .expect("sink registry");
+        assert!(
+            registry.state.try_lock().is_ok(),
+            "completion callbacks must run outside the state lock"
+        );
+        let _ = registry.snapshot();
+        self.notifications.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 fn registration(step_id: &str, title: &str) -> Result<TaskCompletionProgressRegistration> {
     Ok(TaskCompletionProgressRegistration {
@@ -75,5 +104,39 @@ fn stale_and_duplicate_arrivals_do_not_corrupt_the_current_batch() -> Result<()>
         batch.members[0].outcome,
         Some(TaskCompletionOutcome::Succeeded)
     );
+    Ok(())
+}
+
+#[test]
+fn progress_changes_notify_after_the_snapshot_is_updated() -> Result<()> {
+    let sink = Arc::new(CountingSupervisorSink {
+        notifications: AtomicUsize::new(0),
+        registry: std::sync::Mutex::new(None),
+    });
+    let registry = TaskCompletionProgressRegistry::default();
+    let observer_registry = registry.clone();
+    *sink.registry.lock().expect("sink registry lock") = Some(registry.clone());
+    registry.set_change_sink(sink.clone());
+
+    let generation = observer_registry.begin(
+        &TaskId::new("task_notify")?,
+        1,
+        vec![registration("step_notify", "Notify")?],
+    );
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        observer_registry.snapshot().batch.expect("batch").arrived,
+        0
+    );
+
+    observer_registry.record_arrival(generation, 0, 0, TaskCompletionOutcome::Succeeded);
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        observer_registry.snapshot().batch.expect("batch").arrived,
+        1
+    );
+
+    observer_registry.record_arrival(generation, 0, 1, TaskCompletionOutcome::Failed);
+    assert_eq!(sink.notifications.load(Ordering::SeqCst), 2);
     Ok(())
 }

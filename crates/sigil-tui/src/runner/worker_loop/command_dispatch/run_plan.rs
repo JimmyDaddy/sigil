@@ -62,6 +62,8 @@ where
                             let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         }
                     }
+                    state.session.task_guidance_dirty = true;
+                    state.session.conversation_queue_dirty = true;
                     continue;
                 }
 

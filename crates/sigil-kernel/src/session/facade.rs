@@ -1,5 +1,5 @@
 use super::*;
-use crate::ResolvedModelRoute;
+use crate::{ResolvedModelRoute, TaskGuidancePromotedEntry};
 
 /// In-memory session state backed by an optional append-only JSONL store.
 #[derive(Debug)]
@@ -12,12 +12,108 @@ pub struct Session {
     pub(super) store: Option<JsonlSessionStore>,
     pub(super) stats: SessionStats,
     pub(super) runtime_attachments: SessionRuntimeAttachments,
+    durable_session_entry_count: Option<u64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct SessionRuntimeAttachments {
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn crate::ImageAttachmentResolver>>,
+}
+
+/// Immutable live-session material proven to correspond to one durable projection frontier.
+#[derive(Clone)]
+pub struct StableCompactionSnapshot {
+    frontier: ActiveProjectionFrontier,
+    store: JsonlSessionStore,
+    session_scope_id: String,
+    provider_name: String,
+    model_name: String,
+    resolved_model_route: Option<ResolvedModelRoute>,
+    entries: Vec<SessionLogEntry>,
+    stats: SessionStats,
+    runtime_attachments: SessionRuntimeAttachments,
+    durable_session_entry_count: u64,
+}
+
+impl std::fmt::Debug for StableCompactionSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StableCompactionSnapshot")
+            .field("frontier", &self.frontier)
+            .field("session_scope_id", &self.session_scope_id)
+            .field("provider_name", &self.provider_name)
+            .field("model_name", &self.model_name)
+            .field("resolved_model_route", &self.resolved_model_route)
+            .field("entry_count", &self.entries.len())
+            .field("stats", &self.stats)
+            .field("runtime_attachments", &self.runtime_attachments)
+            .finish()
+    }
+}
+
+impl StableCompactionSnapshot {
+    /// Returns the exact durable frontier proven by this snapshot.
+    #[must_use]
+    pub fn frontier(&self) -> &ActiveProjectionFrontier {
+        &self.frontier
+    }
+
+    /// Returns the immutable live entry projection at the frontier.
+    #[must_use]
+    pub fn entries(&self) -> &[SessionLogEntry] {
+        &self.entries
+    }
+
+    /// Returns the immutable usage snapshot captured with the entries.
+    #[must_use]
+    pub fn stats(&self) -> &SessionStats {
+        &self.stats
+    }
+
+    /// Materializes a store-backed compaction session only while the durable frontier is unchanged.
+    ///
+    /// The returned session is bound to the same shared coordinator and may append compaction
+    /// lifecycle, provider-attempt and usage records without reconstructing the store from a path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backing projection cannot be read safely.
+    pub fn materialize_compaction_session(&self) -> Result<Option<Session>> {
+        let active = self.store.active_projection_snapshot()?;
+        if active.frontier() != &self.frontier
+            || active.durable_session_entry_count() != self.durable_session_entry_count
+        {
+            return Ok(None);
+        }
+        Ok(Some(Session {
+            session_scope_id: self.session_scope_id.clone(),
+            provider_name: self.provider_name.clone(),
+            model_name: self.model_name.clone(),
+            resolved_model_route: self.resolved_model_route.clone(),
+            entries: self.entries.clone(),
+            store: Some(self.store.clone()),
+            stats: self.stats.clone(),
+            runtime_attachments: self.runtime_attachments.clone(),
+            durable_session_entry_count: Some(self.durable_session_entry_count),
+        }))
+    }
+
+    /// Returns the captured process-local URL capability registrar.
+    #[must_use]
+    pub fn user_url_capability_registrar(
+        &self,
+    ) -> Option<Arc<dyn crate::UserUrlCapabilityRegistrar>> {
+        self.runtime_attachments
+            .user_url_capability_registrar
+            .clone()
+    }
+
+    /// Returns the captured process-local image attachment resolver.
+    #[must_use]
+    pub fn image_attachment_resolver(&self) -> Option<Arc<dyn crate::ImageAttachmentResolver>> {
+        self.runtime_attachments.image_attachment_resolver.clone()
+    }
 }
 
 impl std::fmt::Debug for SessionRuntimeAttachments {
@@ -59,6 +155,7 @@ impl Session {
             store: None,
             stats: SessionStats::default(),
             runtime_attachments: SessionRuntimeAttachments::default(),
+            durable_session_entry_count: None,
         }
     }
 
@@ -73,14 +170,86 @@ impl Session {
             store: None,
             stats: SessionStats::default(),
             runtime_attachments: SessionRuntimeAttachments::default(),
+            durable_session_entry_count: None,
         }
     }
 
     /// Attaches a durable JSONL store to the session.
     pub fn with_store(mut self, store: JsonlSessionStore) -> Self {
         self.session_scope_id = session_id_for_path(store.path());
+        let store_is_empty = std::fs::metadata(store.path())
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or_else(|_| !store.path().exists());
+        self.durable_session_entry_count = (self.entries.is_empty() && store_is_empty).then_some(0);
         self.store = Some(store);
         self
+    }
+
+    /// Returns the scheduler-facing durable projection for a store-backed session.
+    ///
+    /// In-memory sessions return `Ok(None)` because they have no durable frontier to prove.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the attached durable stream cannot be recovered or projected.
+    pub fn active_projection_snapshot(&self) -> Result<Option<ActiveSessionProjectionSnapshot>> {
+        self.store
+            .as_ref()
+            .map(JsonlSessionStore::active_projection_snapshot)
+            .transpose()
+    }
+
+    /// Registers a durable projection observer without exposing the underlying store or writer.
+    ///
+    /// In-memory sessions return `Ok(None)`. Dropping the returned subscription unregisters the
+    /// observer from all store handles sharing this canonical session.
+    pub fn register_active_projection_observer(
+        &self,
+        observer: Arc<dyn ActiveProjectionObserver>,
+    ) -> Result<Option<ActiveProjectionSubscription>> {
+        Ok(self
+            .store
+            .as_ref()
+            .map(|store| store.register_active_projection_observer(observer)))
+    }
+
+    /// Captures immutable compaction material only when the live entry projection is proven to
+    /// have consumed every durable session-entry event through `expected_frontier`.
+    ///
+    /// Returns `Ok(None)` for in-memory sessions, a stale expected frontier, or a live session
+    /// whose entry frontier was invalidated by an externally persisted adoption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the active durable projection cannot be read safely.
+    pub fn stable_compaction_snapshot(
+        &self,
+        expected_frontier: &ActiveProjectionFrontier,
+    ) -> Result<Option<StableCompactionSnapshot>> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let active = store.active_projection_snapshot()?;
+        let Some(live_entry_count) = self.durable_session_entry_count else {
+            return Ok(None);
+        };
+        if active.frontier() != expected_frontier
+            || active.durable_session_entry_count() != live_entry_count
+        {
+            return Ok(None);
+        }
+        Ok(Some(StableCompactionSnapshot {
+            frontier: expected_frontier.clone(),
+            store: store.clone(),
+            session_scope_id: self.session_scope_id.clone(),
+            provider_name: self.provider_name.clone(),
+            model_name: self.model_name.clone(),
+            resolved_model_route: self.resolved_model_route.clone(),
+            entries: self.entries.clone(),
+            stats: self.stats.clone(),
+            runtime_attachments: self.runtime_attachments.clone(),
+            durable_session_entry_count: live_entry_count,
+        }))
     }
 
     /// Rehydrates a session from a preloaded list of entries.
@@ -104,6 +273,7 @@ impl Session {
             store: None,
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
+            durable_session_entry_count: None,
         }
     }
 
@@ -128,15 +298,21 @@ impl Session {
         // Establish the V2 session envelope (including tail repair and identity) before the
         // continuation coordinator reads the stream. Otherwise coordinator recovery can expose
         // a repaired-but-not-yet-initialized file to concurrent readers during startup.
-        let (entries, provider_name, model_name) = store.load_entries_writer_reconciled(
+        let (entries, records, provider_name, model_name) = store.load_entries_writer_reconciled(
             fallback_provider_name,
             fallback_model_name,
             fallback_route,
         )?;
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
-            .recover()
+            .recover_from_records(&records)
             .context("failed to recover provider continuation payload lifecycle")?;
-        crate::EgressAuditRecorder::new(store.clone()).reconcile_interrupted()?;
+        crate::EgressAuditRecorder::new(store.clone())
+            .reconcile_interrupted_from_records(&records)?;
+        let durable_session_entry_count = Some(
+            store
+                .active_projection_snapshot()?
+                .durable_session_entry_count(),
+        );
         let session_scope_id = session_id_for_path(store.path());
         let (entries, audit_needed) = validated_recovered_entries(&session_scope_id, entries);
         let stats = session_stats_from_entries(&entries);
@@ -149,6 +325,7 @@ impl Session {
             store: Some(store),
             stats,
             runtime_attachments: SessionRuntimeAttachments::default(),
+            durable_session_entry_count,
         };
         if audit_needed {
             session.append_control(unsafe_external_recovery_audit_control())?;
@@ -163,11 +340,64 @@ impl Session {
 
     /// Appends a single entry to the in-memory log and durable store when present.
     pub fn append(&mut self, entry: SessionLogEntry) -> Result<()> {
-        if let Some(store) = &self.store {
-            store.append(&entry)?;
-        }
+        let event = self
+            .store
+            .as_ref()
+            .map(|store| store.append_session_entry_event(&entry))
+            .transpose()?;
         self.entries.push(entry);
+        if let Some(event) = event {
+            self.advance_durable_session_entry_count(&[event]);
+        }
         Ok(())
+    }
+
+    fn advance_durable_session_entry_count(&mut self, events: &[StoredEvent]) {
+        let Some(previous) = self.durable_session_entry_count else {
+            return;
+        };
+        let appended_entry_count = events
+            .iter()
+            .map(|event| {
+                SessionStreamRecord::Stored(event.clone())
+                    .session_log_entry()
+                    .map(|entry| u64::from(entry.is_some()))
+            })
+            .collect::<Result<Vec<_>>>();
+        let Ok(appended_entry_count) = appended_entry_count else {
+            self.durable_session_entry_count = None;
+            return;
+        };
+        let Some(store) = self.store.as_ref() else {
+            self.durable_session_entry_count = None;
+            return;
+        };
+        let Ok(snapshot) = store.active_projection_snapshot() else {
+            self.durable_session_entry_count = None;
+            return;
+        };
+        let expected = appended_entry_count
+            .into_iter()
+            .try_fold(previous, u64::checked_add);
+        // A detached control path may append a session entry while an active run owns this
+        // `Session`. Preserve the exact number of entries consumed by this live projection while
+        // it is behind the durable projection; `record_durably_appended_controls` can then close
+        // that known gap at the run boundary. A stable snapshot still requires equality.
+        self.durable_session_entry_count =
+            expected.filter(|expected| snapshot.durable_session_entry_count() >= *expected);
+    }
+
+    fn advance_durable_only_events(&mut self, events: &[StoredEvent]) {
+        let all_durable_only = events.iter().all(|event| {
+            SessionStreamRecord::Stored(event.clone())
+                .session_log_entry()
+                .is_ok_and(|entry| entry.is_none())
+        });
+        if all_durable_only {
+            self.advance_durable_session_entry_count(events);
+        } else if self.store.is_some() {
+            self.durable_session_entry_count = None;
+        }
     }
 
     pub fn append_user_message(&mut self, message: ModelMessage) -> Result<()> {
@@ -212,10 +442,15 @@ impl Session {
         let mut entries = Vec::with_capacity(controls.len() + 1);
         entries.push(SessionLogEntry::ToolResult(message));
         entries.extend(controls.into_iter().map(SessionLogEntry::Control));
-        if let Some(store) = &self.store {
-            store.append_session_entry_events(&entries)?;
-        }
+        let events = self
+            .store
+            .as_ref()
+            .map(|store| store.append_session_entry_events(&entries))
+            .transpose()?;
         self.entries.extend(entries);
+        if let Some(events) = events {
+            self.advance_durable_session_entry_count(&events);
+        }
         Ok(())
     }
 
@@ -240,10 +475,15 @@ impl Session {
             .into_iter()
             .map(SessionLogEntry::Control)
             .collect::<Vec<_>>();
-        if let Some(store) = &self.store {
-            store.append_session_entry_events(&entries)?;
-        }
+        let events = self
+            .store
+            .as_ref()
+            .map(|store| store.append_session_entry_events(&entries))
+            .transpose()?;
         self.entries.extend(entries);
+        if let Some(events) = events {
+            self.advance_durable_session_entry_count(&events);
+        }
         Ok(())
     }
 
@@ -259,6 +499,9 @@ impl Session {
             .map(|store| store.append_session_entry_event(&entry))
             .transpose()?;
         self.entries.push(entry);
+        if let Some(event) = event.as_ref() {
+            self.advance_durable_session_entry_count(std::slice::from_ref(event));
+        }
         Ok(event)
     }
 
@@ -271,7 +514,38 @@ impl Session {
     ///
     /// The blocking append must have completed successfully before this method is called.
     pub(crate) fn record_durably_appended_control(&mut self, control: ControlEntry) {
-        self.entries.push(SessionLogEntry::Control(control));
+        if let (Some(previous), Some(store)) =
+            (self.durable_session_entry_count, self.store.as_ref())
+            && let Ok(active) = store.active_projection_snapshot()
+            && active.durable_session_entry_count() == previous.saturating_add(1)
+        {
+            let promoted_user = match &control {
+                ControlEntry::ConversationInputPromoted(promotion) => {
+                    Some(promotion.durable_user_message.clone())
+                }
+                _ => None,
+            };
+            self.entries.push(SessionLogEntry::Control(control));
+            if let Some(message) = promoted_user {
+                self.entries.push(SessionLogEntry::User(message));
+            }
+            self.durable_session_entry_count = Some(active.durable_session_entry_count());
+            return;
+        }
+        let serialized = serde_json::to_value(&control).ok();
+        if serialized.as_ref().is_some_and(|expected| {
+            self.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(existing)
+                        if serde_json::to_value(existing)
+                            .is_ok_and(|value| &value == expected)
+                )
+            })
+        }) {
+            return;
+        }
+        self.record_durably_appended_controls([control]);
     }
 
     /// Merges controls that an adapter has already appended to this session's durable store.
@@ -283,8 +557,77 @@ impl Session {
         &mut self,
         controls: impl IntoIterator<Item = ControlEntry>,
     ) {
+        let controls = controls.into_iter().collect::<Vec<_>>();
+        if controls.is_empty() {
+            return;
+        }
+        if self.reconcile_durably_appended_controls(&controls) {
+            return;
+        }
+
+        // Preserve the caller-visible controls if durable reconciliation is unavailable, but fail
+        // closed for stable compaction. Count-only adoption cannot prove order when a detached
+        // writer interleaves with appends owned by the live Session.
         self.entries
             .extend(controls.into_iter().map(SessionLogEntry::Control));
+        self.durable_session_entry_count = None;
+    }
+
+    fn reconcile_durably_appended_controls(&mut self, controls: &[ControlEntry]) -> bool {
+        let Some(store) = self.store.as_ref() else {
+            return false;
+        };
+        let Ok(records) = store.read_event_records_writer() else {
+            return false;
+        };
+        let Ok(canonical_entries) = session_entries_from_records(&records) else {
+            return false;
+        };
+
+        // The supplied controls must occur in the claimed order. This rejects reversed or repeated
+        // adoption while still allowing unrelated live-session appends to have interleaved in the
+        // durable stream.
+        let mut search_from = 0;
+        for control in controls {
+            let Ok(expected) = serde_json::to_value(control) else {
+                return false;
+            };
+            let Some(offset) = canonical_entries[search_from..].iter().position(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::Control(existing)
+                        if serde_json::to_value(existing).is_ok_and(|value| value == expected)
+                )
+            }) else {
+                return false;
+            };
+            search_from = search_from.saturating_add(offset).saturating_add(1);
+        }
+
+        let Ok(active) = store.active_projection_snapshot() else {
+            return false;
+        };
+        if active.durable_session_entry_count() != canonical_entries.len() as u64 {
+            return false;
+        }
+
+        let mut live_entries = Vec::with_capacity(canonical_entries.len());
+        for entry in canonical_entries {
+            let promoted_user = match &entry {
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
+                    Some(promotion.durable_user_message.clone())
+                }
+                _ => None,
+            };
+            live_entries.push(entry);
+            if let Some(message) = promoted_user {
+                live_entries.push(SessionLogEntry::User(message));
+            }
+        }
+        self.stats = session_stats_from_entries(&live_entries);
+        self.entries = live_entries;
+        self.durable_session_entry_count = Some(active.durable_session_entry_count());
+        true
     }
 
     /// Adopts one already-durable queue promotion into the active process projection.
@@ -312,12 +655,18 @@ impl Session {
         }) {
             bail!("conversation input promotion is already present in the live session");
         }
-        let durable_user_message = promotion.durable_user_message.clone();
-        self.entries.push(SessionLogEntry::Control(
-            ControlEntry::ConversationInputPromoted(promotion),
-        ));
-        self.entries
-            .push(SessionLogEntry::User(durable_user_message));
+        self.record_durably_appended_control(ControlEntry::ConversationInputPromoted(promotion));
+        Ok(())
+    }
+
+    /// Adopts one already-durable task-guidance promotion without replaying the session when it is
+    /// the sole new session entry at the active projection frontier.
+    pub fn record_durably_appended_task_guidance_promotion(
+        &mut self,
+        promotion: TaskGuidancePromotedEntry,
+    ) -> Result<()> {
+        promotion.validate_for_session(&self.session_scope_id)?;
+        self.record_durably_appended_control(ControlEntry::TaskGuidancePromoted(promotion));
         Ok(())
     }
 
@@ -422,10 +771,15 @@ impl Session {
         event_class: EventClass,
         payload: serde_json::Value,
     ) -> Result<Option<StoredEvent>> {
-        self.store
+        let event = self
+            .store
             .as_ref()
             .map(|store| store.append_event(event_type, event_class, payload))
-            .transpose()
+            .transpose()?;
+        if let Some(event) = event.as_ref() {
+            self.advance_durable_session_entry_count(std::slice::from_ref(event));
+        }
+        Ok(event)
     }
 
     pub(crate) fn append_durable_events_with_controls(
@@ -438,10 +792,15 @@ impl Session {
             .cloned()
             .map(SessionLogEntry::Control)
             .collect::<Vec<_>>();
-        if let Some(store) = self.store.as_ref() {
-            store.append_events_and_session_entries(durable_events, &entries)?;
-        }
+        let events = self
+            .store
+            .as_ref()
+            .map(|store| store.append_events_and_session_entries(durable_events, &entries))
+            .transpose()?;
         self.entries.extend(entries);
+        if let Some(events) = events {
+            self.advance_durable_session_entry_count(&events);
+        }
         Ok(())
     }
 
@@ -509,7 +868,11 @@ impl Session {
         let Some(recorder) = self.mutation_event_recorder() else {
             return Ok(Vec::new());
         };
-        recorder.reconcile_prepared_mutations(workspace_root)
+        let events = recorder.reconcile_prepared_mutations(workspace_root)?;
+        if !events.is_empty() {
+            self.advance_durable_only_events(&events);
+        }
+        Ok(events)
     }
 
     /// Reconciles interrupted write-capable tool executions with persisted mutation profiles.
@@ -532,6 +895,9 @@ impl Session {
             {
                 events.push(event);
             }
+        }
+        if !events.is_empty() {
+            self.advance_durable_only_events(&events);
         }
         Ok(events)
     }
@@ -596,8 +962,20 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_writer()?;
         SessionContextProjection::from_durable_records(&self.entries, &records, None).map(Some)
+    }
+
+    /// Reads the current validated durable stream through this session's shared coordinator.
+    ///
+    /// Expensive projections such as manual compaction may use this at an explicit safe point.
+    /// Active-session callers should prefer the bounded active projection for scheduler queries.
+    pub fn read_durable_event_records(&self) -> Result<Vec<SessionStreamRecord>> {
+        let store = self
+            .store
+            .as_ref()
+            .context("durable event records require a durable session store")?;
+        store.read_event_records_writer()
     }
 
     /// Rebuilds a V2 fold preview from this session's durable stream without mutating it.
@@ -645,7 +1023,7 @@ impl Session {
             .store
             .as_ref()
             .context("provider physical-attempt projection requires a durable session store")?;
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_writer()?;
         crate::ProviderPhysicalAttemptProjection::from_records(&records)
     }
 
@@ -739,7 +1117,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_writer()?;
         let mut projection = PlanArtifactProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -822,7 +1200,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_writer()?;
         let mut projection = TaskStateProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -1066,7 +1444,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_writer()?;
         let mut projection = TerminalTaskProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -1112,7 +1490,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_writer()?;
         let mut projection = AgentResultContinuationProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {

@@ -700,19 +700,22 @@ impl JsonlSessionStore {
     /// append fails.
     pub fn append_compaction_started(&self, entry: CompactionStartedEntry) -> Result<StoredEvent> {
         entry.validate_shape()?;
-        let session_id = compaction_session_id(self)?;
+        let snapshot = self.active_projection_snapshot()?;
+        let session_id = snapshot.frontier().session_id().to_owned();
+        let expected_frontier = snapshot.frontier().clone();
         let event_id = compaction_lifecycle_event_id(&session_id, &entry.attempt_id, "started");
         let payload = serde_json::to_value(&entry).context("failed to encode compaction start")?;
-        let event = self.append_event_if_with_identity(
+        let event = self.append_event_if_active_with_identity(
             DurableEventType::CompactionStarted,
             payload,
             event_id.clone(),
             Some(event_id),
             None,
-            |records| {
-                let projection = CompactionLifecycleProjection::from_records(records)?;
-                projection.validate_started(&entry)?;
-                Ok(true)
+            &expected_frontier,
+            |projection| {
+                Ok(projection
+                    .compaction_summary()
+                    .can_start_attempt(&entry.attempt_id))
             },
         )?;
         event.context("compaction start append was not attempted")
@@ -725,17 +728,21 @@ impl JsonlSessionStore {
     /// Returns an error when the attempt is missing, already terminal, stale, or the durable
     /// append fails.
     pub fn append_compaction_applied_v2(&self, entry: CompactionAppliedV2) -> Result<StoredEvent> {
-        let session_id = compaction_session_id(self)?;
-        let started_event_id = compaction_started_event_id(self, &entry.attempt_id)?;
+        let snapshot = self.active_projection_snapshot()?;
+        let session_id = snapshot.frontier().session_id().to_owned();
+        let expected_frontier = snapshot.frontier().clone();
+        let started_event_id =
+            compaction_lifecycle_event_id(&session_id, &entry.attempt_id, "started");
         let event_id = compaction_lifecycle_event_id(&session_id, &entry.attempt_id, "applied");
         let payload =
             serde_json::to_value(&entry).context("failed to encode compaction applied")?;
-        let event = self.append_event_if_with_identity(
+        let event = self.append_event_if_records_at_active_frontier(
             DurableEventType::CompactionAppliedV2,
             payload,
             event_id,
             Some(started_event_id.clone()),
             Some(started_event_id),
+            &expected_frontier,
             |records| {
                 let projection = CompactionLifecycleProjection::from_records(records)?;
                 projection.validate_terminal_attempt(
@@ -775,17 +782,41 @@ impl JsonlSessionStore {
         entry: CompactionFailureEntry,
     ) -> Result<Option<StoredEvent>> {
         entry.validate_shape()?;
-        let session_id = compaction_session_id(self)?;
-        let started_event_id = compaction_started_event_id(self, &entry.attempt_id)?;
+        let snapshot = self.active_projection_snapshot()?;
+        let session_id = snapshot.frontier().session_id().to_owned();
+        let expected_frontier = snapshot.frontier().clone();
+        let started_event_id =
+            compaction_lifecycle_event_id(&session_id, &entry.attempt_id, "started");
         let event_id = compaction_lifecycle_event_id(&session_id, &entry.attempt_id, "failed");
         let payload =
             serde_json::to_value(&entry).context("failed to encode compaction failure")?;
-        self.append_event_if_with_identity(
+        if snapshot
+            .compaction()
+            .started_event_id(&entry.attempt_id)
+            .is_some()
+        {
+            return self.append_event_if_active_with_identity(
+                DurableEventType::CompactionFailed,
+                payload,
+                event_id,
+                Some(started_event_id.clone()),
+                Some(started_event_id),
+                &expected_frontier,
+                |projection| {
+                    Ok(projection
+                        .compaction_summary()
+                        .started_event_id(&entry.attempt_id)
+                        .is_some())
+                },
+            );
+        }
+        self.append_event_if_records_at_active_frontier(
             DurableEventType::CompactionFailed,
             payload,
             event_id,
             Some(started_event_id.clone()),
             Some(started_event_id),
+            &expected_frontier,
             |records| {
                 let projection = CompactionLifecycleProjection::from_records(records)?;
                 let attempt = projection.attempt(&entry.attempt_id).with_context(|| {
@@ -825,8 +856,11 @@ impl JsonlSessionStore {
 }
 
 pub(super) fn compaction_session_id(store: &JsonlSessionStore) -> Result<SessionId> {
-    let records = store.read_event_records_writer()?;
-    Ok(stream_session_id(&records).unwrap_or_else(|| session_id_for_path(store.path())))
+    Ok(store
+        .active_projection_snapshot()?
+        .frontier()
+        .session_id()
+        .to_owned())
 }
 
 pub(super) fn compaction_lifecycle_event_id(
@@ -844,6 +878,10 @@ pub(super) fn compaction_started_event_id(
     store: &JsonlSessionStore,
     attempt_id: &str,
 ) -> Result<EventId> {
+    let active = store.active_projection_snapshot()?;
+    if let Some(event_id) = active.compaction().started_event_id(attempt_id) {
+        return Ok(event_id.to_owned());
+    }
     let records = store.read_event_records_writer()?;
     let projection = CompactionLifecycleProjection::from_records(&records)?;
     projection

@@ -19,6 +19,8 @@ use sigil_kernel::{
 };
 use tokio::sync::Notify;
 
+use crate::{AgentSupervisorChange, agent_supervisor::AgentSupervisorChangeNotifier};
+
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(1);
 const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 const MAX_FALLBACK_COOLDOWN: Duration = Duration::from_secs(30);
@@ -88,6 +90,7 @@ pub(crate) struct TaskProviderPressure {
     state: Arc<Mutex<ProviderPressureState>>,
     clock: Arc<dyn ProviderPressureClock>,
     notify: Arc<Notify>,
+    change_notifier: AgentSupervisorChangeNotifier,
 }
 
 impl Default for TaskProviderPressure {
@@ -96,6 +99,7 @@ impl Default for TaskProviderPressure {
             state: Arc::new(Mutex::new(ProviderPressureState::default())),
             clock: Arc::new(SystemProviderPressureClock),
             notify: Arc::new(Notify::new()),
+            change_notifier: AgentSupervisorChangeNotifier::default(),
         }
     }
 }
@@ -188,11 +192,21 @@ impl ProviderPressureClock for SystemProviderPressureClock {
 }
 
 impl TaskProviderPressure {
+    pub(crate) fn set_change_sink(&self, sink: Arc<dyn crate::AgentSupervisorEventSink>) {
+        self.change_notifier.set_sink(sink);
+    }
+
+    fn notify_diagnostics_changed(&self) {
+        self.change_notifier
+            .notify(AgentSupervisorChange::ProviderRouteDiagnostics);
+    }
+
     pub(crate) fn set_max_concurrency(&self, max_concurrency: usize) {
         let max_concurrency = max_concurrency.max(1);
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let diagnostics_changed = state.max_concurrency != max_concurrency;
         state.max_concurrency = max_concurrency;
         for route in state.routes.values_mut() {
             route.concurrency_window = route.concurrency_window.clamp(1, max_concurrency);
@@ -202,6 +216,9 @@ impl TaskProviderPressure {
         }
         drop(state);
         self.notify.notify_waiters();
+        if diagnostics_changed {
+            self.notify_diagnostics_changed();
+        }
     }
 
     pub(crate) fn check(&self, provider_name: &str, model_name: &str) -> Result<()> {
@@ -301,12 +318,15 @@ impl TaskProviderPressure {
         route.in_flight = route.in_flight.saturating_add(1);
         let consumer_in_flight = route.in_flight_by_consumer.entry(consumer).or_default();
         *consumer_in_flight = consumer_in_flight.saturating_add(1);
-        Ok(Some(ProviderRouteAdmission {
+        let admission = ProviderRouteAdmission {
             fingerprint: fingerprint.to_owned(),
             provider_name: route.provider_name.clone(),
             model_name: route.model_name.clone(),
             epoch: route.epoch,
-        }))
+        };
+        drop(state);
+        self.notify_diagnostics_changed();
+        Ok(Some(admission))
     }
 
     fn admit(&self, provider_name: &str, model_name: &str) -> Result<ProviderRouteAdmission> {
@@ -370,6 +390,8 @@ impl TaskProviderPressure {
         );
         let candidate = now.checked_add(delay).unwrap_or(now);
         route.cooldown_until = route.cooldown_until.max(candidate);
+        drop(state);
+        self.notify_diagnostics_changed();
     }
 
     fn record_success(&self, admission: &ProviderRouteAdmission) {
@@ -378,9 +400,12 @@ impl TaskProviderPressure {
             return;
         };
         let max_concurrency = state.max_concurrency;
+        let mut diagnostics_changed = false;
         if let Some(route) = state.routes.get_mut(&admission.fingerprint)
             && route.epoch == admission.epoch
         {
+            diagnostics_changed = route.cooldown_until > now || route.consecutive_rate_limits > 0;
+            let previous_window = route.concurrency_window;
             route.cooldown_until = now;
             route.consecutive_rate_limits = 0;
             route.successful_completions = route.successful_completions.saturating_add(1);
@@ -390,6 +415,11 @@ impl TaskProviderPressure {
                 route.concurrency_window = route.concurrency_window.saturating_add(1);
                 route.successful_completions = 0;
             }
+            diagnostics_changed |= route.concurrency_window != previous_window;
+        }
+        drop(state);
+        if diagnostics_changed {
+            self.notify_diagnostics_changed();
         }
     }
 
@@ -397,7 +427,9 @@ impl TaskProviderPressure {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let mut diagnostics_changed = false;
         if let Some(route) = state.routes.get_mut(fingerprint) {
+            diagnostics_changed = route.in_flight > 0;
             route.in_flight = route.in_flight.saturating_sub(1);
             if let Some(in_flight) = route.in_flight_by_consumer.get_mut(&consumer) {
                 *in_flight = in_flight.saturating_sub(1);
@@ -408,6 +440,9 @@ impl TaskProviderPressure {
         }
         drop(state);
         self.notify.notify_one();
+        if diagnostics_changed {
+            self.notify_diagnostics_changed();
+        }
     }
 
     fn register_waiter(
@@ -426,6 +461,8 @@ impl TaskProviderPressure {
         route.waiting = route.waiting.saturating_add(1);
         let consumer_waiting = route.waiting_by_consumer.entry(consumer).or_default();
         *consumer_waiting = consumer_waiting.saturating_add(1);
+        drop(state);
+        self.notify_diagnostics_changed();
         Ok(ProviderRouteWaiterGuard {
             pressure: self.clone(),
             fingerprint: fingerprint.to_owned(),
@@ -447,6 +484,8 @@ impl TaskProviderPressure {
                 route.waiting_by_consumer.remove(&consumer);
             }
         }
+        drop(state);
+        self.notify_diagnostics_changed();
     }
 
     pub(crate) fn diagnostics(&self) -> TaskProviderRouteDiagnosticsSnapshot {

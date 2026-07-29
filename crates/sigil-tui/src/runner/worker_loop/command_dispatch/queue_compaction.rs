@@ -51,6 +51,8 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
             }
             QueueCompactionCommand::CancelQueuedConversationInput { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
@@ -67,6 +69,8 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
             }
             QueueCompactionCommand::EditQueuedConversationInput {
                 queue_id,
@@ -89,6 +93,8 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
             }
             QueueCompactionCommand::MoveQueuedConversationInput {
                 queue_id,
@@ -207,26 +213,39 @@ where
                         state.compaction.next_request_id =
                             state.compaction.next_request_id.saturating_add(1);
                         let expected_session_scope_id = session.session_scope_id().to_owned();
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
+                        let stable_snapshot = match capture_stable_idle_compaction_snapshot(session)
+                        {
+                            Ok(Some(snapshot)) => snapshot,
+                            Ok(None) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(
+                                    "V2 compaction preview requires a stable active-session frontier"
+                                        .to_owned(),
+                                ));
+                                continue;
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                    "failed to capture V2 compaction source: {error:#}"
+                                )));
+                                continue;
+                            }
+                        };
                         let root_config = root_config.clone();
                         let workspace_root = workspace_root.clone();
                         let session_log_path = state.session.log_path.clone();
-                        let runtime_attachments =
-                            CapturedSessionRuntimeAttachments::from_session(Some(session));
                         state.compaction.preparation_tasks.start_manual(
                             runtime,
                             request_id,
                             expected_session_scope_id.clone(),
                             state.compaction.preparation_tx.clone(),
                             move || {
-                                let session = load_session_with_captured_runtime_attachments(
-                                    &provider_name,
-                                    &model_name,
-                                    &session_log_path,
-                                    &runtime_attachments,
-                                )
-                                .map_err(|error| format!("{error:#}"))?;
+                                let Some(session) = stable_snapshot
+                                    .materialize_compaction_session()
+                                    .map_err(|error| format!("{error:#}"))?
+                                else {
+                                    return Err("V2 compaction source changed before preparation"
+                                        .to_owned());
+                                };
                                 if session.session_scope_id() != expected_session_scope_id {
                                     return Err(
                                         "V2 compaction preparation loaded a different session scope"
@@ -314,8 +333,29 @@ where
                         continue;
                     }
                     let expected_session_scope_id = session.session_scope_id().to_owned();
-                    let provider_name = session.provider_name().to_owned();
-                    let model_name = session.model_name().to_owned();
+                    let stable_snapshot = match capture_stable_idle_compaction_snapshot(session) {
+                        Ok(Some(snapshot)) => snapshot,
+                        Ok(None) => {
+                            state.compaction.local_preview = Some(local_preview);
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                                request_id,
+                                error:
+                                    "semantic compaction requires a stable active-session frontier"
+                                        .to_owned(),
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            state.compaction.local_preview = Some(local_preview);
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                                request_id,
+                                error: format!(
+                                    "failed to capture semantic compaction source: {error:#}"
+                                ),
+                            });
+                            continue;
+                        }
+                    };
                     let root_config = root_config.clone();
                     let workspace_root = workspace_root.clone();
                     let session_log_path = state.session.log_path.clone();
@@ -323,8 +363,6 @@ where
                     let tools = agent.tool_registry().specs();
                     let runtime_handle = runtime.handle().clone();
                     let manual_context_resolver = context_resolver.clone();
-                    let runtime_attachments =
-                        CapturedSessionRuntimeAttachments::from_session(Some(session));
                     let preparation_agent = std::sync::Arc::clone(agent);
                     let preview = local_preview.preview().clone();
                     state.compaction.preparation_tasks.start_manual(
@@ -333,13 +371,15 @@ where
                         expected_session_scope_id.clone(),
                         state.compaction.preparation_tx.clone(),
                         move || {
-                            let mut session = load_session_with_captured_runtime_attachments(
-                                &provider_name,
-                                &model_name,
-                                &session_log_path,
-                                &runtime_attachments,
-                            )
-                            .map_err(|error| format!("{error:#}"))?;
+                            let Some(mut session) = stable_snapshot
+                                .materialize_compaction_session()
+                                .map_err(|error| format!("{error:#}"))?
+                            else {
+                                return Err(
+                                    "semantic compaction source changed before preparation"
+                                        .to_owned(),
+                                );
+                            };
                             if session.session_scope_id() != expected_session_scope_id {
                                 return Err(
                                     "semantic compaction preparation loaded a different session scope"
@@ -397,8 +437,6 @@ where
                     });
                     continue;
                 };
-                let provider_name = session.provider_name().to_owned();
-                let model_name = session.model_name().to_owned();
                 let folded_event_count = pending.folded_event_count();
                 let applied = pending.apply_with_optional_native(
                     session,
@@ -412,30 +450,12 @@ where
                         if let Some(notice) = native_notice {
                             let _ = message_tx.send(WorkerMessage::Notice(notice));
                         }
-                        let reloaded = load_session_with_runtime_attachments(
-                            &provider_name,
-                            &model_name,
-                            &state.session.log_path,
-                            state.session.current.as_ref(),
-                        );
-                        let entries = match reloaded {
-                            Ok(session) => {
-                                let entries = session.entries().to_vec();
-                                state.session.current = Some(session);
-                                entries
-                            }
-                            Err(error) => {
-                                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                    "compaction applied, but session reload was deferred: {error:#}"
-                                )));
-                                state
-                                    .session
-                                    .current
-                                    .as_ref()
-                                    .map(|current| current.entries().to_vec())
-                                    .unwrap_or_default()
-                            }
-                        };
+                        let entries = state
+                            .session
+                            .current
+                            .as_ref()
+                            .map(|current| current.entries().to_vec())
+                            .unwrap_or_default();
                         let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
                             request_id,
                             source: V2CompactionApplySource::ManualConfirmation,
@@ -494,7 +514,7 @@ where
                     });
                     continue;
                 }
-                let records = match JsonlSessionStore::read_event_records(&state.session.log_path) {
+                let records = match session.read_durable_event_records() {
                     Ok(records) => records,
                     Err(error) => {
                         state.compaction.local_preview = Some(local_preview);
@@ -595,32 +615,18 @@ where
                     sigil_kernel::ToolOutputProjectionPolicy::default(),
                 ) {
                     Ok(Some(_)) => {
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
-                        match load_session_with_runtime_attachments(
-                            &provider_name,
-                            &model_name,
-                            &state.session.log_path,
-                            state.session.current.as_ref(),
-                        ) {
-                            Ok(reloaded) => {
-                                let entries = reloaded.entries().to_vec();
-                                state.session.current = Some(reloaded);
-                                let _ = message_tx.send(
-                                    WorkerMessage::StandaloneToolOutputShrinkApplied {
-                                        request_id,
-                                        context_epoch_id,
-                                        projected_output_count,
-                                        entries,
-                                    },
-                                );
-                            }
-                            Err(error) => {
-                                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                    "tool-output cleanup applied, but session reload was deferred: {error:#}"
-                                )));
-                            }
-                        }
+                        let entries = state
+                            .session
+                            .current
+                            .as_ref()
+                            .map(|current| current.entries().to_vec())
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::StandaloneToolOutputShrinkApplied {
+                            request_id,
+                            context_epoch_id,
+                            projected_output_count,
+                            entries,
+                        });
                     }
                     Ok(None) => {
                         let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {

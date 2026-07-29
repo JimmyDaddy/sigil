@@ -14,11 +14,86 @@ from typing import Any
 MARKER = "SIGIL_LONG_SESSION_EVIDENCE "
 SCHEMA_VERSION = 1
 EXPECTED_SCENARIOS = {
+    "active_projection_10k",
     "session_writer_10k",
     "portable_compaction_1k_turns",
     "timeline_render_5k",
+    "worker_reactor_idle_10mib_30s",
+}
+REQUIRED_FACTS = {
+    "active_projection_10k": {
+        "startup_full_scan_count",
+        "steady_state_full_scan_count",
+        "incremental_append_count",
+        "projection_notice_count",
+        "changed_family_count",
+        "durable_session_entry_count",
+        "durable_bytes",
+        "projection_estimated_bytes",
+        "snapshot_count",
+        "full_rebuild_count",
+        "incremental_apply_count",
+        "invalidation_count",
+        "coordinator_writer_lock_attempt_count",
+        "os_shared_lock_attempt_count",
+        "os_exclusive_lock_attempt_count",
+        "os_lock_contention_count",
+        "os_lock_failure_count",
+        "forced_invalidation_rebuild_count",
+    },
+    "session_writer_10k": {
+        "append_elapsed_ms",
+        "replay_elapsed_ms",
+        "full_scan_count",
+        "record_count",
+        "file_bytes",
+    },
+    "portable_compaction_1k_turns": {
+        "source_record_count",
+        "folded_event_count",
+        "raw_file_bytes_before",
+        "raw_file_bytes_after",
+    },
+    "timeline_render_5k": {
+        "full_rebuild_ms",
+        "sequential_append_ms",
+        "tail_rerender_count",
+        "tail_rerender_ms",
+        "total_lines",
+        "prefix_hash_count",
+    },
+    "worker_reactor_idle_10mib_30s": {
+        "durable_bytes",
+        "durable_entry_count",
+        "prompt_tokens",
+        "context_window_tokens",
+        "context_utilization_percent",
+        "idle_event_wake_count",
+        "idle_deadline_count",
+        "idle_advancement_count",
+        "idle_shared_lock_attempt_count",
+        "idle_exclusive_lock_attempt_count",
+        "idle_lock_contention_count",
+        "idle_lock_failure_count",
+        "teardown_event_count",
+    },
 }
 COMMANDS = (
+    (
+        "active_projection_10k",
+        (
+            "cargo",
+            "test",
+            "--locked",
+            "--release",
+            "-p",
+            "sigil-kernel",
+            "active_projection_long_session_evidence",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ),
+    ),
     (
         "session_writer_10k",
         (
@@ -59,6 +134,21 @@ COMMANDS = (
             "-p",
             "sigil-tui",
             "timeline_render_store_long_session_evidence",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ),
+    ),
+    (
+        "worker_reactor_idle_10mib_30s",
+        (
+            "cargo",
+            "test",
+            "--locked",
+            "--release",
+            "-p",
+            "sigil-tui",
+            "worker_reactor_idle_long_session_evidence",
             "--",
             "--ignored",
             "--nocapture",
@@ -105,6 +195,11 @@ def validate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for value in facts.values()
         ):
             raise ValueError(f"{scenario} facts must contain non-negative integers")
+        missing_facts = REQUIRED_FACTS.get(scenario, set()).difference(facts)
+        if missing_facts:
+            raise ValueError(
+                f"{scenario} facts missing required fields: {sorted(missing_facts)}"
+            )
         by_scenario[scenario] = record
 
     actual = set(by_scenario)
@@ -113,7 +208,88 @@ def validate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "evidence scenarios differ: "
             f"expected={sorted(EXPECTED_SCENARIOS)} actual={sorted(actual)}"
         )
+    validate_acceptance_facts(by_scenario)
     return [by_scenario[scenario] for scenario in sorted(by_scenario)]
+
+
+def validate_acceptance_facts(records: dict[str, dict[str, Any]]) -> None:
+    """Reject complete-looking evidence that does not prove the release invariants."""
+    active = records["active_projection_10k"]
+    active_facts = active["facts"]
+    if (
+        active["scale"] < 10_000
+        or active_facts["startup_full_scan_count"] != 1
+        or active_facts["steady_state_full_scan_count"] != 0
+        or active_facts["incremental_append_count"] != active["scale"]
+        or active_facts["projection_notice_count"] != active["scale"]
+        or active_facts["changed_family_count"] < active["scale"]
+        or active_facts["durable_session_entry_count"] != active["scale"]
+        or active_facts["durable_bytes"] <= active_facts["projection_estimated_bytes"]
+        or active_facts["full_rebuild_count"] != 1
+        or active_facts["incremental_apply_count"] != active["scale"]
+        or active_facts["invalidation_count"] != 0
+        or active_facts["coordinator_writer_lock_attempt_count"] < active["scale"]
+        or active_facts["os_shared_lock_attempt_count"] != 0
+        or active_facts["os_exclusive_lock_attempt_count"] < active["scale"]
+        or active_facts["os_lock_contention_count"] != 0
+        or active_facts["os_lock_failure_count"] != 0
+        or active_facts["forced_invalidation_rebuild_count"] != 1
+    ):
+        raise ValueError("active_projection_10k acceptance facts failed")
+
+    writer = records["session_writer_10k"]
+    writer_facts = writer["facts"]
+    if (
+        writer["scale"] < 10_000
+        or writer_facts["full_scan_count"] != 1
+        or writer_facts["record_count"] != writer["scale"]
+        or writer_facts["file_bytes"] <= 0
+    ):
+        raise ValueError("session_writer_10k acceptance facts failed")
+
+    compaction = records["portable_compaction_1k_turns"]
+    compaction_facts = compaction["facts"]
+    if (
+        compaction["scale"] < 1_000
+        or not (
+            0
+            < compaction_facts["folded_event_count"]
+            < compaction_facts["source_record_count"]
+        )
+        or compaction_facts["raw_file_bytes_before"]
+        != compaction_facts["raw_file_bytes_after"]
+    ):
+        raise ValueError("portable_compaction_1k_turns acceptance facts failed")
+
+    timeline = records["timeline_render_5k"]
+    timeline_facts = timeline["facts"]
+    if (
+        timeline["scale"] < 5_000
+        or timeline_facts["tail_rerender_count"] <= 0
+        or timeline_facts["total_lines"] <= 0
+        or timeline_facts["prefix_hash_count"] <= 0
+    ):
+        raise ValueError("timeline_render_5k acceptance facts failed")
+
+    idle = records["worker_reactor_idle_10mib_30s"]
+    idle_facts = idle["facts"]
+    if (
+        idle["scale"] < 10 * 1024 * 1024
+        or idle_facts["durable_bytes"] != idle["scale"]
+        or idle_facts["durable_entry_count"] < 400
+        or idle_facts["prompt_tokens"] != 216_803
+        or idle_facts["context_utilization_percent"] != 22
+        or idle["elapsed_ms"] < 29_000
+        or idle_facts["idle_event_wake_count"] != 0
+        or idle_facts["idle_deadline_count"] != 0
+        or idle_facts["idle_advancement_count"] != 0
+        or idle_facts["idle_shared_lock_attempt_count"] != 0
+        or idle_facts["idle_exclusive_lock_attempt_count"] != 0
+        or idle_facts["idle_lock_contention_count"] != 0
+        or idle_facts["idle_lock_failure_count"] != 0
+        or idle_facts["teardown_event_count"] != 1
+    ):
+        raise ValueError("worker_reactor_idle_10mib_30s acceptance facts failed")
 
 
 def collect(root: Path) -> list[dict[str, Any]]:

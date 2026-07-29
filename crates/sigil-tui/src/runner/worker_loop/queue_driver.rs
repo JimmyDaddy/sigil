@@ -24,6 +24,7 @@ pub(in crate::runner) enum TaskGuidancePreparation {
 /// Process-local exact guidance paired with its safe durable promotion binding.
 pub(in crate::runner) struct PreparedTaskGuidanceCandidate {
     pub(in crate::runner) promotion: TaskGuidancePromotedEntry,
+    pub(in crate::runner) source_frontier: ActiveProjectionFrontier,
     pub(in crate::runner) exact_guidance: String,
 }
 
@@ -35,6 +36,7 @@ impl std::fmt::Debug for PreparedTaskGuidanceCandidate {
             .field("task_id", &self.promotion.task_id)
             .field("plan_version", &self.promotion.plan_version)
             .field("dispatch_run_id", &self.promotion.dispatch_run_id)
+            .field("source_frontier", &self.source_frontier)
             .field("exact_guidance", &"<process-local>")
             .finish()
     }
@@ -48,11 +50,12 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
     session: &Session,
     exact_prompts: &ExactConversationPromptStore,
 ) -> std::result::Result<TaskGuidancePreparation, String> {
-    let durable = session
-        .try_conversation_queue_durable_projection_from_durable()
-        .map_err(|error| format!("failed to load durable task guidance queue: {error:#}"))?
+    let snapshot = session
+        .active_projection_snapshot()
+        .map_err(|error| format!("failed to read active task guidance projection: {error:#}"))?
         .ok_or_else(|| "task guidance requires a durable session store".to_owned())?;
-    let Some(item) = durable.queue.items.iter().find(|item| {
+    let durable_queue = snapshot.conversation_queue();
+    let Some(item) = durable_queue.queue.items.iter().find(|item| {
         item.status == ConversationInputStatus::Queued
             && item.queued.kind == ConversationInputKind::TaskGuidance
     }) else {
@@ -67,8 +70,45 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
         });
     };
 
-    let tasks = session.task_state_projection();
-    let Some(task) = tasks.tasks.get(task_id) else {
+    if let Some(status) = snapshot.recent_terminal_task_status(task_id) {
+        return Ok(TaskGuidancePreparation::Terminal {
+            queue_id,
+            status: ConversationInputStatus::Rejected,
+            reason: format!(
+                "task guidance cannot revive a {} task",
+                match status {
+                    TaskRunStatus::Completed => "completed",
+                    TaskRunStatus::Cancelled => "cancelled",
+                    _ => unreachable!("recent terminal task status is final"),
+                }
+            ),
+        });
+    }
+    let task_facts = if let Some(task) = snapshot.task_guidance_state(task_id) {
+        Some((
+            task.status(),
+            task.latest_plan_version(),
+            task.accepted_plan_version(),
+        ))
+    } else if snapshot.task_guidance_may_be_incomplete() {
+        let canonical = session
+            .try_task_state_projection_from_durable()
+            .map_err(|error| format!("failed to resolve saturated task guidance cache: {error:#}"))?
+            .ok_or_else(|| {
+                "task guidance canonical fallback requires a durable session store".to_owned()
+            })?;
+        canonical.tasks.get(task_id).map(|task| {
+            let accepted_plan_version = task.latest_plan_version.filter(|plan_version| {
+                task.plans
+                    .get(plan_version)
+                    .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
+            });
+            (task.status, task.latest_plan_version, accepted_plan_version)
+        })
+    } else {
+        None
+    };
+    let Some((task_status, latest_plan_version, accepted_plan_version)) = task_facts else {
         return Ok(TaskGuidancePreparation::Terminal {
             queue_id,
             status: ConversationInputStatus::Rejected,
@@ -77,7 +117,7 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
         });
     };
     if matches!(
-        task.status,
+        task_status,
         TaskRunStatus::Completed | TaskRunStatus::Cancelled
     ) {
         return Ok(TaskGuidancePreparation::Terminal {
@@ -85,7 +125,7 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
             status: ConversationInputStatus::Rejected,
             reason: format!(
                 "task guidance cannot revive a {} task",
-                match task.status {
+                match task_status {
                     TaskRunStatus::Completed => "completed",
                     TaskRunStatus::Cancelled => "cancelled",
                     _ => unreachable!("terminal task match is exhaustive"),
@@ -93,17 +133,13 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
             ),
         });
     }
-    let Some(plan_version) = task.latest_plan_version else {
+    let Some(plan_version) = latest_plan_version else {
         return Ok(TaskGuidancePreparation::Waiting {
             queue_id,
             reason: "task guidance is waiting for an accepted task plan".to_owned(),
         });
     };
-    if !task
-        .plans
-        .get(&plan_version)
-        .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-    {
+    if accepted_plan_version != Some(plan_version) {
         return Ok(TaskGuidancePreparation::Waiting {
             queue_id,
             reason: "task guidance is waiting for the latest plan review".to_owned(),
@@ -137,7 +173,7 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
         });
     }
 
-    let revision = durable.current_revision();
+    let revision = durable_queue.current_revision();
     let seed = format!(
         "{}:{}:{}:{}",
         session.session_scope_id(),
@@ -171,6 +207,7 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
     Ok(TaskGuidancePreparation::Prepared(Box::new(
         PreparedTaskGuidanceCandidate {
             promotion,
+            source_frontier: snapshot.frontier().clone(),
             exact_guidance,
         },
     )))
@@ -195,6 +232,7 @@ pub(in crate::runner) enum QueuedConversationTerminalClassification {
 #[derive(Clone)]
 pub(in crate::runner) struct PreparedQueuedConversationCandidate {
     pub(in crate::runner) promotion: sigil_kernel::ConversationInputPromotedEntry,
+    pub(in crate::runner) source_frontier: ActiveProjectionFrontier,
     pub(in crate::runner) frozen_request: sigil_kernel::FrozenProviderRequestMaterial,
     pub(in crate::runner) reasoning_effort: Option<ReasoningEffort>,
     pub(in crate::runner) background_ready_context: Vec<ModelMessage>,
@@ -209,6 +247,7 @@ impl std::fmt::Debug for PreparedQueuedConversationCandidate {
             .debug_struct("PreparedQueuedConversationCandidate")
             .field("queue_id", &self.promotion.queue_id)
             .field("queue_revision", &self.promotion.expected_queue_revision)
+            .field("source_frontier", &self.source_frontier)
             .field("dispatch_run_id", &self.promotion.dispatch_run_id)
             .field("frozen_request", &self.frozen_request)
             .field("reasoning_effort", &self.reasoning_effort)
@@ -381,27 +420,15 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens<F>(
 where
     F: FnOnce(&str) -> RuntimeContextCandidates,
 {
-    let Some(durable_queue) = session
-        .try_conversation_queue_durable_projection_from_durable()
+    let snapshot = session
+        .active_projection_snapshot()
         .map_err(|error| format!("failed to read durable conversation queue state: {error:#}"))?
-    else {
-        let Some(queue_id) = session.conversation_queue_projection().next_dispatchable else {
-            return Ok(QueuedConversationCandidatePreparation::NoQueuedInput);
-        };
-        return Ok(QueuedConversationCandidatePreparation::Blocked {
-            queue_id,
-            reason: "queued pre-turn admission requires a durable session store".to_owned(),
-        });
-    };
+        .ok_or_else(|| "queued pre-turn admission requires a durable session store".to_owned())?;
+    let durable_queue = snapshot.conversation_queue();
     let Some(queue_id) = durable_queue.queue.next_dispatchable.clone() else {
         return Ok(QueuedConversationCandidatePreparation::NoQueuedInput);
     };
-    let Some(queue_revision) = durable_queue.revision.clone() else {
-        return Ok(QueuedConversationCandidatePreparation::Blocked {
-            queue_id,
-            reason: "queued pre-turn admission requires a durable queue revision".to_owned(),
-        });
-    };
+    let queue_revision = durable_queue.current_revision();
     let Some(queued) = durable_queue
         .queue
         .items
@@ -525,6 +552,7 @@ where
     Ok(QueuedConversationCandidatePreparation::Prepared(Box::new(
         PreparedQueuedConversationCandidate {
             promotion,
+            source_frontier: snapshot.frontier().clone(),
             frozen_request,
             reasoning_effort: queued.reasoning_effort,
             background_ready_context,
@@ -1355,7 +1383,10 @@ pub(in crate::runner) fn commit_prepared_queued_conversation_candidate(
 
     let store = JsonlSessionStore::new(session_log_path)
         .map_err(|error| format!("failed to open queued promotion store: {error:#}"))?;
-    if let Err(error) = store.append_conversation_input_promoted(candidate.promotion.clone()) {
+    if let Err(error) = store.append_conversation_input_promoted_at(
+        candidate.promotion.clone(),
+        &candidate.source_frontier,
+    ) {
         if let Some(registrar) = registrar.as_ref() {
             let _ = registrar.rollback_message(&durable_message_id);
         }
@@ -1365,13 +1396,13 @@ pub(in crate::runner) fn commit_prepared_queued_conversation_candidate(
     }
 
     if let Err(error) =
-        session.append_user_message(candidate.promotion.durable_user_message.clone())
+        session.record_durably_appended_conversation_input_promotion(candidate.promotion.clone())
     {
         if let Some(registrar) = registrar.as_ref() {
             let _ = registrar.rollback_message(&durable_message_id);
         }
         return Err(format!(
-            "queued promotion was recorded but its safe user message could not be appended: {error:#}"
+            "queued promotion was recorded but its live projection could not be adopted: {error:#}"
         ));
     }
     for descriptor in &candidate.promotion.capability_descriptors {

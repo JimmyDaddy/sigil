@@ -29,22 +29,24 @@ where
                 request_id,
                 provider_config,
             } => {
+                let result_tx = provider_status_result_sender(runtime, &state.event_tx);
                 state.refresh.provider_status_tasks.refresh_balance(
                     runtime,
                     request_id,
                     provider_config,
-                    state.refresh.provider_status_tx.clone(),
+                    result_tx,
                 );
             }
             ProviderMcpCommand::RefreshProviderModels {
                 request_id,
                 provider_config,
             } => {
+                let result_tx = provider_status_result_sender(runtime, &state.event_tx);
                 state.refresh.provider_status_tasks.refresh_models(
                     runtime,
                     request_id,
                     provider_config,
-                    state.refresh.provider_status_tx.clone(),
+                    result_tx,
                 );
             }
             ProviderMcpCommand::RefreshConnectionModels {
@@ -53,6 +55,7 @@ where
                 request,
                 prepared_credential,
             } => {
+                let result_tx = provider_status_result_sender(runtime, &state.event_tx);
                 state
                     .refresh
                     .provider_status_tasks
@@ -62,7 +65,7 @@ where
                         *root_config,
                         request,
                         prepared_credential,
-                        state.refresh.provider_status_tx.clone(),
+                        result_tx,
                     );
             }
             ProviderMcpCommand::CancelProviderModelsRefresh { request_id } => {

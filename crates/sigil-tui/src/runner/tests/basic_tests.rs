@@ -1,6 +1,6 @@
 use std::{fs, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sigil_kernel::{
     Agent, AgentRole, ControlEntry, ConversationInputKind, ConversationInputQueueId,
     ConversationInputQueuedEntry, ConversationInputStatus, ConversationInputStatusEntry,
@@ -1489,10 +1489,12 @@ fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()
     })?;
 
     gate.notify_one();
-    let first_finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::RunFinished { result, .. }
+    let first_finished = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(message, WorkerMessage::RunFinished { result, .. }
             if result.final_text == "first done")
-    })?;
+        })
+        .context("first queued-follow-up run did not finish")?;
     assert!(matches!(
         first_finished,
         WorkerMessage::RunFinished { ref entries, .. }
@@ -1503,14 +1505,18 @@ fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()
             ))
     ));
 
-    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
-            if prompt == "second")
-    })?;
-    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::RunFinished { result, .. }
+    let _ = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(message, WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                if prompt == "second")
+        })
+        .context("queued follow-up did not start dispatch")?;
+    let _ = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(message, WorkerMessage::RunFinished { result, .. }
             if result.final_text == "second done")
-    })?;
+        })
+        .context("queued follow-up run did not finish")?;
 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(

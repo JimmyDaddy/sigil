@@ -559,7 +559,7 @@ fn validate_covers_through(
     if covers_through.session_id != session_scope_id {
         bail!("native provider compaction cursor belongs to a different session scope");
     }
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_writer()?;
     let exact_record = records.iter().find(|record| {
         let event = record.stored_event();
         event.session_id == session_scope_id

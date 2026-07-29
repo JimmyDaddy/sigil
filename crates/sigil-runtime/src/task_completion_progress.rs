@@ -2,6 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use sigil_kernel::{TaskId, TaskStepId};
 
+use crate::{AgentSupervisorChange, agent_supervisor::AgentSupervisorChangeNotifier};
+
 /// Terminal outcome observed before the parent single writer commits the child result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskCompletionOutcome {
@@ -54,12 +56,14 @@ pub struct TaskCompletionProgressSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct TaskCompletionProgressRegistry {
     state: Arc<Mutex<TaskCompletionProgressState>>,
+    change_notifier: AgentSupervisorChangeNotifier,
 }
 
 impl Default for TaskCompletionProgressRegistry {
     fn default() -> Self {
         Self {
             state: Arc::new(Mutex::new(TaskCompletionProgressState::default())),
+            change_notifier: AgentSupervisorChangeNotifier::default(),
         }
     }
 }
@@ -76,6 +80,10 @@ pub(crate) struct TaskCompletionProgressRegistration {
 }
 
 impl TaskCompletionProgressRegistry {
+    pub(crate) fn set_change_sink(&self, sink: Arc<dyn crate::AgentSupervisorEventSink>) {
+        self.change_notifier.set_sink(sink);
+    }
+
     pub(crate) fn begin(
         &self,
         task_id: &TaskId,
@@ -108,6 +116,9 @@ impl TaskCompletionProgressRegistry {
             total: members.len(),
             members,
         });
+        drop(state);
+        self.change_notifier
+            .notify(AgentSupervisorChange::TaskCompletionProgress);
         generation
     }
 
@@ -137,6 +148,9 @@ impl TaskCompletionProgressRegistry {
         member.arrival_order = Some(completion_index.saturating_add(1));
         member.outcome = Some(outcome);
         batch.arrived = batch.arrived.saturating_add(1).min(batch.total);
+        drop(state);
+        self.change_notifier
+            .notify(AgentSupervisorChange::TaskCompletionProgress);
     }
 
     pub(crate) fn snapshot(&self) -> TaskCompletionProgressSnapshot {

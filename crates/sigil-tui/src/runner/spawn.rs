@@ -17,7 +17,8 @@ use tokio::runtime::Runtime;
 use super::{
     elicitation_bridge::ChannelMcpElicitationHandler,
     mcp_event_bridge::ChannelMcpRuntimeEventHandler,
-    protocol::{McpActivationStatus, WorkerCommand, WorkerMessage},
+    protocol::{McpActivationStatus, WorkerCommandSender, WorkerMessage},
+    worker_event::WorkerMcpRuntimeEventSender,
     worker_loop::{RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers, run_worker_loop},
 };
 
@@ -26,8 +27,10 @@ pub fn spawn_agent_worker(
     session_log_path: PathBuf,
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
-) -> Result<(mpsc::Sender<WorkerCommand>, mpsc::Receiver<WorkerMessage>)> {
-    let (command_tx, command_rx) = mpsc::channel();
+) -> Result<(WorkerCommandSender, mpsc::Receiver<WorkerMessage>)> {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (urgent_tx, urgent_rx) = mpsc::channel();
+    let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
     let (message_tx, message_rx) = mpsc::channel();
 
     thread::Builder::new()
@@ -67,8 +70,9 @@ pub fn spawn_agent_worker(
             let provider_capabilities = provider.capabilities();
             let elicitation_handler =
                 Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
-            let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
-            let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+            let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(
+                WorkerMcpRuntimeEventSender::new(event_tx.clone()),
+            ));
             let (session_entries, workspace_trust) =
                 match load_session_entries_with_workspace_trust(&session_log_path, &workspace_root)
                 {
@@ -161,12 +165,11 @@ pub fn spawn_agent_worker(
                 workspace_root,
                 session_log_path,
                 options,
-                command_rx,
+                (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {
                     elicitation_handler,
                     event_handler: mcp_event_handler,
-                    event_rx: mcp_event_rx,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                 },

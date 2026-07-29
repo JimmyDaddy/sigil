@@ -1061,7 +1061,7 @@ where
             Ok(()) => return Ok(()),
             Err(error) => {
                 *worker = None;
-                error.0
+                *error.0
             }
         }
     } else {
@@ -1495,7 +1495,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 struct WorkerRuntime {
-    worker_tx: std::sync::mpsc::Sender<runner::WorkerCommand>,
+    worker_tx: runner::WorkerCommandSender,
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     ready: bool,
 }

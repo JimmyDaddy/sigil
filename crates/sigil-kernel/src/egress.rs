@@ -703,7 +703,14 @@ impl EgressAuditRecorder {
     /// Repeated recovery is idempotent and never replays a provider request or query.
     pub fn reconcile_interrupted(&self) -> Result<usize, EgressAuditError> {
         let records = self.store.read_event_records_writer()?;
-        let lifecycle = egress_records_from_stream(&records)?;
+        self.reconcile_interrupted_from_records(&records)
+    }
+
+    pub(crate) fn reconcile_interrupted_from_records(
+        &self,
+        records: &[SessionStreamRecord],
+    ) -> Result<usize, EgressAuditError> {
+        let lifecycle = egress_records_from_stream(records)?;
         let mut appended = 0usize;
         for authorization in lifecycle.hosted_authorizations.values() {
             if !lifecycle

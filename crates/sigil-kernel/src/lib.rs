@@ -554,8 +554,8 @@ pub use session::{
     RecoverableToolOutputShrinkCandidateV1, ResolvedCompactionSidecar, RetainedTurnGroupV3,
     SESSION_ANCHOR_V1_SCHEMA_VERSION, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION,
     SemanticCompactionGeneration, Session, SessionAnchorRefV1, SessionAnchorV1,
-    SessionContextProjection, SessionLogEntry, SessionProjectionEntry,
-    SessionStreamCompatibilityError, SessionStreamRecord, SourceSpanRefV1,
+    SessionContextProjection, SessionIoLockMetricsSnapshot, SessionLogEntry,
+    SessionProjectionEntry, SessionStreamCompatibilityError, SessionStreamRecord, SourceSpanRefV1,
     TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_OUTPUT_CONTEXT_EPOCH_TRANSITION_SCHEMA_VERSION,
     TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION,
     TOOL_OUTPUT_PROJECTION_SIDECAR_PROJECTION_SCHEMA_VERSION,
@@ -579,7 +579,7 @@ pub use session::{
     provider_continuation_payload_id, provider_continuation_payload_lifecycle_event_id,
     provider_continuation_route_fingerprint, provider_continuation_tool_closure_recorded_event_id,
     provider_observed_resolution_plan_id, provider_observed_resolution_plan_recorded_event_id,
-    session_stats_from_entries,
+    session_io_lock_metrics, session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

@@ -149,7 +149,7 @@ impl AgentToolRuntime {
     ) -> Result<AgentThreadId> {
         let thread = background.thread.to_runtime_thread();
         let thread_id = thread.thread_id.clone();
-        match background.handle.await {
+        match background.handle.finish().await {
             Ok(Ok(output)) => {
                 let budget_warning = self
                     .supervisor

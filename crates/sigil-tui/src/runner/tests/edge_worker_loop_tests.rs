@@ -21,35 +21,38 @@ use sigil_kernel::{
     TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
     TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
     TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolEffect, ToolExecutionEntry,
-    ToolExecutionStatus, ToolRegistry, ToolResultMeta, UserUrlCapabilityRegistrar,
+    ToolExecutionStatus, ToolRegistry, ToolResultMeta, UsageStats, UserUrlCapabilityRegistrar,
     VerificationScope, WorkspaceMutationDetected, WorkspaceRootSnapshot, plan_draft_created_entry,
-    plan_task_input_from_draft, project_user_message_for_persistence, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    plan_task_input_from_draft, project_user_message_for_persistence, session_io_lock_metrics,
+    task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
 
 use super::{
     super::{
-        McpActivationStatus, WorkerCommand, WorkerMessage,
+        McpActivationStatus, WorkerCommand, WorkerCommandSender, WorkerMessage,
         elicitation_bridge::ChannelMcpElicitationHandler,
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
+        worker_event::WorkerMcpRuntimeEventSender,
         worker_loop::{
             CreateTaskFromPlanRequest, PlanApprovalRequest, RuntimeTaskRoleProviderBuilder,
             WorkerLoopMcpHandlers, agent_result_continuation_run_result,
             append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
             create_task_from_plan, next_task_id, partition_agent_result_continuations,
+            pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
             queued_background_ready_transient_context, refresh_terminal_task_statuses,
             resolve_continue_task, run_worker_loop, session_ref_for_log_path,
+            worker_reactor_metrics,
         },
         worker_loop::{append_cancelled_task_state, append_paused_task_state},
     },
-    common::{PlannedProvider, StreamPlan, test_root_config},
+    common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
 
 struct ManualLoopWorker {
-    command_tx: mpsc::Sender<WorkerCommand>,
+    command_tx: WorkerCommandSender,
     message_rx: mpsc::Receiver<WorkerMessage>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -609,6 +612,127 @@ fn pending_agent_result_continuations_restore_started_statuses() -> Result<()> {
 }
 
 #[test]
+fn detached_durable_continuation_is_visible_through_active_projection() -> Result<()> {
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("continuation-projection.jsonl"))?;
+    let session = Session::new("planned", "planned-model").with_store(store.clone());
+    let thread_id = AgentThreadId::new("detached_pending")?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread_id.clone(),
+            status: AgentResultContinuationStatus::Pending,
+            reason: None,
+            updated_at_ms: Some(1),
+        }),
+    ))?;
+
+    assert_eq!(
+        pending_agent_continuations_from_active_projection(&session).map_err(anyhow::Error::msg)?,
+        vec![thread_id]
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "release-profile long-session evidence"]
+fn worker_reactor_idle_long_session_evidence() -> Result<()> {
+    const IDLE_SECONDS: u64 = 30;
+    const TARGET_DURABLE_BYTES: u64 = 10 * 1024 * 1024;
+    const PROMPT_TOKENS: u64 = 216_803;
+    const CONTEXT_WINDOW_TOKENS: u64 = 985_468;
+
+    let temp = tempdir()?;
+    let session_path = temp.path().join("idle-session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let note_payload = "long-session-evidence ".repeat(1_100);
+    let mut ordinal = 0_u64;
+    while std::fs::metadata(&session_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or_default()
+        < TARGET_DURABLE_BYTES
+    {
+        store.append(&SessionLogEntry::Control(ControlEntry::Note {
+            kind: format!("long_session_fixture_{ordinal}"),
+            data: serde_json::Value::String(note_payload.clone()),
+        }))?;
+        ordinal = ordinal.saturating_add(1);
+    }
+    store.append(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+        UsageStats {
+            prompt_tokens: PROMPT_TOKENS,
+            ..UsageStats::default()
+        },
+    )))?;
+    let durable_bytes = std::fs::metadata(&session_path)?.len();
+    drop(store);
+
+    let mut root_config = test_root_config(temp.path(), "planned", "planned-model");
+    root_config.compaction.context_window_tokens = Some(u32::try_from(CONTEXT_WINDOW_TOKENS)?);
+    let worker = spawn_test_worker(
+        root_config,
+        session_path,
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        temp.path().to_path_buf(),
+    )?;
+    assert!(matches!(
+        worker.recv_with_timeout(Duration::from_secs(60))?,
+        WorkerMessage::WorkerReady
+    ));
+    assert!(
+        worker
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "idle worker emitted output while settling onto its blocking receive"
+    );
+    let reactor_before = worker_reactor_metrics();
+    let locks_before = session_io_lock_metrics();
+    let started = Instant::now();
+    assert!(
+        worker
+            .recv_with_timeout(Duration::from_secs(IDLE_SECONDS))
+            .is_err(),
+        "idle worker emitted output without an external event or armed deadline"
+    );
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let reactor_idle = worker_reactor_metrics().saturating_delta(reactor_before);
+    let locks_idle = session_io_lock_metrics().saturating_delta(locks_before);
+    assert_eq!(reactor_idle.event_wake_total, 0);
+    assert_eq!(reactor_idle.deadline_total, 0);
+    assert_eq!(reactor_idle.advancement_total, 0);
+    assert_eq!(locks_idle.shared_lock_attempt_total, 0);
+    assert_eq!(locks_idle.exclusive_lock_attempt_total, 0);
+    assert_eq!(locks_idle.contention_total, 0);
+    assert_eq!(locks_idle.failure_total, 0);
+    worker.shutdown()?;
+    let reactor_with_teardown = worker_reactor_metrics().saturating_delta(reactor_before);
+    println!(
+        "SIGIL_LONG_SESSION_EVIDENCE {}",
+        serde_json::json!({
+            "schema_version": 1,
+            "scenario": "worker_reactor_idle_10mib_30s",
+            "scale": durable_bytes,
+            "elapsed_ms": elapsed_ms,
+            "facts": {
+                "durable_bytes": durable_bytes,
+                "durable_entry_count": ordinal.saturating_add(1),
+                "prompt_tokens": PROMPT_TOKENS,
+                "context_window_tokens": CONTEXT_WINDOW_TOKENS,
+                "context_utilization_percent": PROMPT_TOKENS.saturating_mul(100) / CONTEXT_WINDOW_TOKENS,
+                "idle_event_wake_count": reactor_idle.event_wake_total,
+                "idle_deadline_count": reactor_idle.deadline_total,
+                "idle_advancement_count": reactor_idle.advancement_total,
+                "idle_shared_lock_attempt_count": locks_idle.shared_lock_attempt_total,
+                "idle_exclusive_lock_attempt_count": locks_idle.exclusive_lock_attempt_total,
+                "idle_lock_contention_count": locks_idle.contention_total,
+                "idle_lock_failure_count": locks_idle.failure_total,
+                "teardown_event_count": reactor_with_teardown.event_wake_total,
+            }
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_result_continuation_requires_final_answer_disposition() {
     let result = AgentRunResult {
         final_text: String::new(),
@@ -1159,7 +1283,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     let (message_tx, _message_rx) = mpsc::channel();
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
     let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
     let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
         &root_config,
         &provider.capabilities(),
@@ -1323,7 +1447,7 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
     let (message_tx, _message_rx) = mpsc::channel();
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
     let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
     let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
         &root_config,
         &provider.capabilities(),
@@ -1408,6 +1532,13 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
         sigil_kernel::InteractionMode::Interactive,
     );
     let mut current_session = Some(session);
+    let active_task_ids = current_session
+        .as_ref()
+        .expect("terminal session should exist")
+        .terminal_task_projection()
+        .active_task_ids
+        .into_iter()
+        .collect();
     let mut updates = Vec::new();
     for _ in 0..40 {
         updates = refresh_terminal_task_statuses(
@@ -1416,6 +1547,7 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
             &options,
             &session_log_path,
             &mut current_session,
+            &active_task_ids,
         )
         .map_err(anyhow::Error::msg)?;
         if !updates.is_empty() {
@@ -1467,7 +1599,7 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
     let (message_tx, _message_rx) = mpsc::channel();
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
     let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
     let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
         &root_config,
         &provider.capabilities(),
@@ -1811,7 +1943,9 @@ fn spawn_loop_with_shared_agent(
     workspace_root: PathBuf,
     agent: Arc<Agent<PlannedProvider>>,
 ) -> Result<ManualLoopWorker> {
-    let (command_tx, command_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let (urgent_tx, urgent_rx) = mpsc::channel();
+    let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
     let (message_tx, message_rx) = mpsc::channel();
     let options = sigil_runtime::build_run_options(
         &root_config,
@@ -1821,8 +1955,9 @@ fn spawn_loop_with_shared_agent(
     let provider_capabilities = agent.provider_capabilities();
     let agent_for_loop = Arc::clone(&agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
-    let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(
+        WorkerMcpRuntimeEventSender::new(event_tx.clone()),
+    ));
 
     let handle = thread::Builder::new()
         .name("sigil-edge-worker-loop-test".to_owned())
@@ -1842,12 +1977,11 @@ fn spawn_loop_with_shared_agent(
                 workspace_root,
                 session_log_path,
                 options,
-                command_rx,
+                (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {
                     elicitation_handler,
                     event_handler: mcp_event_handler,
-                    event_rx: mcp_event_rx,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                 },
@@ -1924,7 +2058,7 @@ fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<Term
 #[test]
 fn mcp_runtime_event_handler_forwards_channel_events() -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel();
-    let handler = ChannelMcpRuntimeEventHandler::new(event_tx);
+    let handler = ChannelMcpRuntimeEventHandler::new_test(event_tx);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

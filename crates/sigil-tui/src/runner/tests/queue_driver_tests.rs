@@ -182,6 +182,74 @@ fn task_guidance_preparation_binds_exact_task_plan_without_writing() -> Result<(
 }
 
 #[test]
+fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let mut controls = (0..1_024)
+        .map(|ordinal| {
+            Ok(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: TaskId::new(format!("cached_guidance_task_{ordinal}"))?,
+                parent_session_ref: parent_session_ref.clone(),
+                objective: "fill the bounded guidance cache".to_owned(),
+                status: TaskRunStatus::Paused,
+                reason: None,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let overflow_task_id = TaskId::new("canonical_fallback_guidance_task")?;
+    controls.extend([
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: overflow_task_id.clone(),
+            parent_session_ref,
+            objective: "resolve this task through canonical fallback".to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: None,
+        }),
+        ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: overflow_task_id.clone(),
+            plan_version: 7,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        }),
+    ]);
+    session.append_controls(controls)?;
+    assert!(
+        session
+            .active_projection_snapshot()?
+            .expect("store-backed session has an active projection")
+            .task_guidance_may_be_incomplete()
+    );
+
+    let mut session = Some(session);
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        "use the canonical accepted plan".to_owned(),
+        ConversationInputKind::TaskGuidance,
+        ConversationInputTarget::Task {
+            task_id: overflow_task_id.clone(),
+        },
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let session = session.expect("store-backed session should remain available");
+
+    let preparation = prepare_next_task_guidance_candidate(&session, &exact_prompts)
+        .map_err(anyhow::Error::msg)?;
+    let TaskGuidancePreparation::Prepared(candidate) = preparation else {
+        panic!("a cache miss after saturation must use canonical task state");
+    };
+    assert_eq!(candidate.promotion.task_id, overflow_task_id);
+    assert_eq!(candidate.promotion.plan_version, 7);
+    Ok(())
+}
+
+#[test]
 fn restarted_sensitive_task_guidance_expires_without_replay() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
@@ -491,7 +559,36 @@ fn queued_candidate_commit_promotes_once_and_persists_only_safe_user_material() 
                 SessionLogEntry::User(message) if message.id == promoted_message_id
             ))
             .count(),
+        0,
+        "the promotion is the only durable record for its embedded user message"
+    );
+    assert_eq!(
+        restored
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                    if promotion.durable_user_message.id == promoted_message_id
+            ))
+            .count(),
         1
+    );
+    let transcript_entries = JsonlSessionStore::read_event_records(store.path())?
+        .iter()
+        .map(sigil_kernel::conversation_transcript_entry_from_record)
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(
+        transcript_entries
+            .iter()
+            .flatten()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::User(message) if message.id == promoted_message_id
+            ))
+            .count(),
+        1,
+        "transcript consumers materialize the promotion's embedded user exactly once"
     );
     assert_eq!(
         restored
@@ -509,7 +606,7 @@ fn queued_candidate_commit_promotes_once_and_persists_only_safe_user_material() 
 }
 
 #[test]
-fn queued_candidate_commit_rejects_a_stale_queue_revision_before_promotion() -> Result<()> {
+fn queued_candidate_commit_rejects_a_stale_source_frontier_before_promotion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut current_session = Some(Session::new("test", "model").with_store(store.clone()));
@@ -557,9 +654,9 @@ fn queued_candidate_commit_rejects_a_stale_queue_revision_before_promotion() -> 
             .expect("queued fixture keeps a session"),
         *candidate,
     )
-    .expect_err("a changed queue revision must reject the prepared candidate");
+    .expect_err("a changed source frontier must reject the prepared candidate");
     assert!(
-        error.contains("queue revision"),
+        error.contains("frontier is stale"),
         "unexpected error: {error}"
     );
 

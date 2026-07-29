@@ -19,9 +19,10 @@ use sigil_kernel::{
 };
 
 use super::super::{
-    WorkerCommand, WorkerMessage,
+    WorkerCommand, WorkerCommandSender, WorkerMessage,
     elicitation_bridge::ChannelMcpElicitationHandler,
     mcp_event_bridge::ChannelMcpRuntimeEventHandler,
+    worker_event::WorkerMcpRuntimeEventSender,
     worker_loop::{
         RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, WorkerLoopMcpHandlers,
         run_worker_loop,
@@ -106,7 +107,7 @@ pub(super) fn routed_session_identity(
 }
 
 pub(super) struct TestWorker {
-    command_tx: mpsc::Sender<WorkerCommand>,
+    command_tx: WorkerCommandSender,
     message_rx: mpsc::Receiver<WorkerMessage>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -204,7 +205,9 @@ pub(super) fn spawn_test_worker_with_role_provider_builder<P>(
 where
     P: Provider + Send + Sync + 'static,
 {
-    let (command_tx, command_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let (urgent_tx, urgent_rx) = mpsc::channel();
+    let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
     let (message_tx, message_rx) = mpsc::channel();
     let options = sigil_runtime::build_run_options(
         &root_config,
@@ -214,8 +217,9 @@ where
     let provider_capabilities = agent.provider_capabilities();
     let agent = Arc::new(agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
-    let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(
+        WorkerMcpRuntimeEventSender::new(event_tx.clone()),
+    ));
     let handle = thread::Builder::new()
         .name("sigil-test-agent-worker".to_owned())
         .spawn(move || {
@@ -234,12 +238,11 @@ where
                 workspace_root,
                 session_log_path,
                 options,
-                command_rx,
+                (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {
                     elicitation_handler,
                     event_handler: mcp_event_handler,
-                    event_rx: mcp_event_rx,
                     role_provider_builder,
                     context_resolver,
                 },

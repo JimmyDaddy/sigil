@@ -3,7 +3,10 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -99,6 +102,10 @@ use crate::{
 };
 
 static SESSION_LOG_IO_LOCK: Mutex<()> = Mutex::new(());
+static SESSION_SHARED_LOCK_ATTEMPT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SESSION_EXCLUSIVE_LOCK_ATTEMPT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SESSION_LOCK_CONTENTION_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SESSION_LOCK_FAILURE_TOTAL: AtomicU64 = AtomicU64::new(0);
 const SESSION_LOG_SHARED_LOCK_RETRIES: usize = 50;
 const SESSION_LOG_SHARED_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const REQUEST_CONTEXT_V0_MAX_TOKENS: usize = 512;
@@ -109,6 +116,7 @@ const REQUEST_CONTEXT_V0_ENTRY_OVERLAP_BYTES: usize = 256;
 const UNSAFE_EXTERNAL_RECOVERY_AUDIT_REASON: &str =
     "recovery skipped unsafe external persistence control";
 
+mod active_projection;
 mod compaction_plan;
 mod compaction_shrink_sidecar;
 mod compaction_sidecar;
@@ -138,6 +146,12 @@ mod store;
 mod tool_output_projection;
 mod writer;
 
+pub use active_projection::{
+    ACTIVE_SESSION_PROJECTION_SCHEMA_VERSION, ActiveCompactionSummary, ActiveProjectionFamily,
+    ActiveProjectionFrontier, ActiveProjectionMetricsSnapshot, ActiveProjectionNotice,
+    ActiveProjectionObserver, ActiveProjectionSubscription, ActiveSessionProjectionSnapshot,
+    ActiveTaskGuidanceState,
+};
 pub use compaction_plan::{
     ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION, AdaptiveTailPolicyV3, AdaptiveTailSelectionV3,
     COMPACTION_FOLD_PLAN_SCHEMA_VERSION, CompactionEventRef, CompactionFoldPlan,
@@ -187,7 +201,7 @@ pub use continuity_v2::{
 };
 pub use conversation_promotion_projection::conversation_transcript_entry_from_record;
 pub use entry::*;
-pub use facade::Session;
+pub use facade::{Session, StableCompactionSnapshot};
 pub use portable_compaction::{
     PortableSemanticCompactionOutcome, PortableSemanticCompactionPreflight,
     PortableSemanticCompactionRequest, PortableTargetRequestMaterial,
@@ -273,7 +287,10 @@ pub use provider_native_compaction::{
 };
 pub use stats::session_stats_from_entries;
 pub(crate) use store::session_entry_from_domain_event;
-pub use store::{JsonlSessionStore, SessionStreamCompatibilityError};
+pub use store::{
+    JsonlSessionStore, SessionIoBusyError, SessionIoBusyKind, SessionIoLockMetricsSnapshot,
+    SessionStreamCompatibilityError, session_io_lock_metrics,
+};
 pub use tool_output_projection::{
     MAX_TOOL_OUTPUT_PROJECTION_SHRINKS, ProjectedToolOutput,
     RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,

@@ -1,4 +1,8 @@
-use std::path::PathBuf;
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::{Arc, mpsc},
+};
 
 use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionEconomicsV2,
@@ -20,6 +24,8 @@ use sigil_runtime::{
     provider_connections::{ModelCatalogRequest, ModelCatalogResult, PreparedCredential},
 };
 use tokio::sync::oneshot;
+
+use super::worker_event::WorkerEvent;
 
 pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
 pub(crate) type EgressDisclosureReceiptTx =
@@ -416,6 +422,135 @@ pub enum WorkerCommand {
     },
     Shutdown,
 }
+
+pub(in crate::runner) fn is_urgent_worker_command(command: &WorkerCommand) -> bool {
+    matches!(
+        command,
+        WorkerCommand::ApprovalDecision { .. }
+            | WorkerCommand::ApprovalSessionDecision { .. }
+            | WorkerCommand::ApprovalDecisionWithArgs { .. }
+            | WorkerCommand::ApprovalCommand(_)
+            | WorkerCommand::PauseTask { .. }
+            | WorkerCommand::CancelRun
+            | WorkerCommand::CancelTerminalTask { .. }
+            | WorkerCommand::CloseAgent { .. }
+            | WorkerCommand::CancelAgent { .. }
+            | WorkerCommand::Shutdown
+    )
+}
+
+/// Cloneable public command handle backed by the worker's unified event inbox.
+#[derive(Clone)]
+pub struct WorkerCommandSender {
+    inner: Arc<WorkerCommandSenderInner>,
+}
+
+struct WorkerCommandSenderInner {
+    sink: WorkerCommandSink,
+}
+
+enum WorkerCommandSink {
+    Event {
+        event_tx: mpsc::Sender<WorkerEvent>,
+        urgent_tx: mpsc::Sender<WorkerCommand>,
+    },
+    #[cfg(test)]
+    Direct(mpsc::Sender<WorkerCommand>),
+}
+
+impl WorkerCommandSender {
+    pub(in crate::runner) fn new(
+        event_tx: mpsc::Sender<WorkerEvent>,
+        urgent_tx: mpsc::Sender<WorkerCommand>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(WorkerCommandSenderInner {
+                sink: WorkerCommandSink::Event {
+                    event_tx,
+                    urgent_tx,
+                },
+            }),
+        }
+    }
+
+    pub fn send(&self, command: WorkerCommand) -> Result<(), WorkerCommandSendError> {
+        match &self.inner.sink {
+            WorkerCommandSink::Event {
+                event_tx,
+                urgent_tx,
+            } if is_urgent_worker_command(&command) => {
+                urgent_tx
+                    .send(command)
+                    .map_err(|error| WorkerCommandSendError(Box::new(error.0)))?;
+                // The control command is already durably owned by the independent lane. This
+                // token only releases an idle worker blocked on the ordinary event inbox.
+                let _ = event_tx.send(WorkerEvent::ControlWake);
+                Ok(())
+            }
+            WorkerCommandSink::Event { event_tx, .. } => {
+                match event_tx.send(WorkerEvent::Command(command)) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::SendError(WorkerEvent::Command(command))) => {
+                        Err(WorkerCommandSendError(Box::new(command)))
+                    }
+                    Err(_) => unreachable!("command sender only publishes command events"),
+                }
+            }
+            #[cfg(test)]
+            WorkerCommandSink::Direct(command_tx) => command_tx
+                .send(command)
+                .map_err(|error| WorkerCommandSendError(Box::new(error.0))),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, mpsc::Receiver<WorkerCommand>) {
+        let (command_tx, command_rx) = mpsc::channel();
+        (
+            Self {
+                inner: Arc::new(WorkerCommandSenderInner {
+                    sink: WorkerCommandSink::Direct(command_tx),
+                }),
+            },
+            command_rx,
+        )
+    }
+}
+
+impl fmt::Debug for WorkerCommandSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerCommandSender")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for WorkerCommandSenderInner {
+    fn drop(&mut self) {
+        match &self.sink {
+            WorkerCommandSink::Event {
+                event_tx,
+                urgent_tx,
+            } => {
+                let _ = urgent_tx.send(WorkerCommand::Shutdown);
+                let _ = event_tx.send(WorkerEvent::ControlWake);
+            }
+            #[cfg(test)]
+            WorkerCommandSink::Direct(_) => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkerCommandSendError(pub Box<WorkerCommand>);
+
+impl fmt::Display for WorkerCommandSendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("worker command receiver is disconnected")
+    }
+}
+
+impl std::error::Error for WorkerCommandSendError {}
 
 #[derive(Debug)]
 pub enum WorkerMessage {
