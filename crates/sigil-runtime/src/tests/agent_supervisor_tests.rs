@@ -6118,6 +6118,7 @@ fn initialize_worktree_test_repository(repository_root: &Path) -> Result<()> {
             "sigil-runtime-tests@example.invalid",
         ],
     )?;
+    run_worktree_test_git(repository_root, &["config", "core.autocrlf", "false"])?;
     fs::write(repository_root.join("base.txt"), "base\n")?;
     run_worktree_test_git(repository_root, &["add", "base.txt"])?;
     run_worktree_test_git(repository_root, &["commit", "--quiet", "-m", "base"])?;

@@ -2278,6 +2278,7 @@ fn initialize_repository(root: &Path, files: &[(&str, &str)]) -> Result<()> {
     git(root, &["init", "--quiet"])?;
     git(root, &["config", "user.name", "Sigil Test"])?;
     git(root, &["config", "user.email", "sigil-test@localhost"])?;
+    git(root, &["config", "core.autocrlf", "false"])?;
     for (path, content) in files {
         std::fs::write(root.join(path), content)?;
     }

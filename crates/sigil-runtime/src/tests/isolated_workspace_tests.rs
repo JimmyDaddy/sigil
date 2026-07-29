@@ -676,6 +676,7 @@ impl TestRepository {
             &root,
             &["config", "user.email", "sigil-tests@example.invalid"],
         )?;
+        run_git(&root, &["config", "core.autocrlf", "false"])?;
         fs::write(root.join("base.txt"), "base\n")?;
         run_git(&root, &["add", "base.txt"])?;
         run_git(&root, &["commit", "--quiet", "-m", "base"])?;

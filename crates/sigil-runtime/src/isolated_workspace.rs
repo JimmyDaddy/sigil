@@ -1946,6 +1946,7 @@ async fn read_changed_file(
                 relative_path.display()
             )
         })?;
+    let canonical = dunce::simplified(&canonical);
     if !canonical.starts_with(workspace_root) {
         bail!(
             "isolated changeset path escaped its workspace: {}",

@@ -2,6 +2,12 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## Windows canonical path interoperability
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `dunce` | `1.0.5`；默认 feature | `sigil-runtime/isolated_workspace` | 只在已由操作系统 canonicalize 的路径上移除 Windows verbatim `\\?\` 前缀，使 Git for Windows 可消费 worktree destination，并让 confinement 比较使用同一表示；不解析用户输入、不放宽 symlink 或 workspace 边界 | MIT OR Apache-2.0；khuey/dunce | workspace 依赖图已包含同一锁定版本，本次仅由 runtime 直接复用；所有路径仍先经过 `symlink_metadata` 与 `canonicalize`，简化结果不得替代安全 canonicalization |
+
 ## Desktop shell and checked frontend contract（RFC-0044 R44.2）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

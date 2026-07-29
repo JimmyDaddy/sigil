@@ -1191,7 +1191,7 @@ impl LocalSessionLifecycleService {
             let Some(_artifact_read_leases) = acquire_tombstone_artifact_locks(&path)? else {
                 continue;
             };
-            let (_, bytes) = hash_directory_tree_bounded(&path)?;
+            let bytes = measure_directory_tree_bounded(&path)?;
             fs::remove_dir_all(&path)
                 .with_context(|| format!("failed to prune {}", path.display()))?;
             removed_tombstones = removed_tombstones.saturating_add(1);
@@ -1975,6 +1975,58 @@ fn hash_directory_tree_bounded(path: &Path) -> Result<(String, u64)> {
     if !path.exists() {
         return Ok((format!("{:x}", Sha256::digest(b"empty-directory-tree")), 0));
     }
+    let files = collect_directory_tree_files_bounded(path)?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    for file_path in files {
+        let relative = file_path
+            .strip_prefix(path)
+            .context("session resource escaped its root")?;
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| anyhow!("session resource path is not UTF-8"))?;
+        hasher.update((relative.len() as u64).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        let mut file = File::open(&file_path)
+            .with_context(|| format!("failed to open {}", file_path.display()))?;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("failed to read {}", file_path.display()))?;
+            if read == 0 {
+                break;
+            }
+            total = total.saturating_add(read as u64);
+            if total > SESSION_RESOURCE_MAX_BYTES {
+                bail!("session resource tree exceeds its byte limit");
+            }
+            hasher.update(&buffer[..read]);
+        }
+    }
+    Ok((format!("{:x}", hasher.finalize()), total))
+}
+
+fn measure_directory_tree_bounded(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for file_path in collect_directory_tree_files_bounded(path)? {
+        let metadata = fs::symlink_metadata(&file_path)
+            .with_context(|| format!("failed to inspect {}", file_path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("session resource tree contains an unsafe file");
+        }
+        total = total.saturating_add(metadata.len());
+        if total > SESSION_RESOURCE_MAX_BYTES {
+            bail!("session resource tree exceeds its byte limit");
+        }
+    }
+    Ok(total)
+}
+
+fn collect_directory_tree_files_bounded(path: &Path) -> Result<Vec<PathBuf>> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -2008,35 +2060,7 @@ fn hash_directory_tree_bounded(path: &Path) -> Result<(String, u64)> {
         }
     }
     files.sort();
-    let mut hasher = Sha256::new();
-    let mut total = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    for file_path in files {
-        let relative = file_path
-            .strip_prefix(path)
-            .context("session resource escaped its root")?;
-        let relative = relative
-            .to_str()
-            .ok_or_else(|| anyhow!("session resource path is not UTF-8"))?;
-        hasher.update((relative.len() as u64).to_le_bytes());
-        hasher.update(relative.as_bytes());
-        let mut file = File::open(&file_path)
-            .with_context(|| format!("failed to open {}", file_path.display()))?;
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .with_context(|| format!("failed to read {}", file_path.display()))?;
-            if read == 0 {
-                break;
-            }
-            total = total.saturating_add(read as u64);
-            if total > SESSION_RESOURCE_MAX_BYTES {
-                bail!("session resource tree exceeds its byte limit");
-            }
-            hasher.update(&buffer[..read]);
-        }
-    }
-    Ok((format!("{:x}", hasher.finalize()), total))
+    Ok(files)
 }
 
 fn move_session_to_tombstone(source_path: &Path, tombstone_id: &str) -> Result<()> {

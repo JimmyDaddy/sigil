@@ -759,6 +759,10 @@ fn session_delete_tombstones_artifacts_before_grace_prune() -> Result<()> {
     drop(active_read);
     let pruned = service.prune_delete_tombstones(u64::MAX)?;
     assert_eq!(pruned.removed_tombstones, 1);
+    assert_eq!(
+        pruned.removed_bytes,
+        preview.source_bytes + preview.resource_bytes
+    );
     assert!(!tombstone.exists());
     Ok(())
 }
