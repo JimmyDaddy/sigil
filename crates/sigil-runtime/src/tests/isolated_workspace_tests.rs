@@ -36,12 +36,13 @@ async fn git_worktree_materialization_is_snapshot_bound_confined_and_consumably_
     .await?;
 
     let git_dir = fs::canonicalize(repository.root().join(".git"))?;
+    let git_dir = dunce::simplified(&git_dir);
     assert_eq!(
         materialized
             .workspace_root()
             .parent()
             .and_then(Path::parent),
-        Some(git_dir.as_path())
+        Some(git_dir)
     );
     assert_eq!(
         materialized

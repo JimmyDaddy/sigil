@@ -5372,7 +5372,9 @@ async fn task_worktree_batch_overlaps_providers_and_preserves_parent_workspace()
     let mut approval = AutoApproveHandler;
 
     let outputs = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        // Hosted Windows runners may need several seconds to materialize both worktrees before
+        // the providers reach their shared barrier.
+        std::time::Duration::from_secs(15),
         runner.run_child_session_batch(&mut session, requests, &mut handler, &mut approval),
     )
     .await
@@ -5721,7 +5723,8 @@ async fn worktree_child_writes_only_inside_bound_workspace_and_returns_review_ar
         .as_ref()
         .map(|context| context.workspace_root.as_str())
         .expect("child run context should bind a workspace");
-    assert!(child_workspace.contains("/.git/sigil-isolated-worktrees/worktree-"));
+    let normalized_child_workspace = child_workspace.replace('\\', "/");
+    assert!(normalized_child_workspace.contains("/.git/sigil-isolated-worktrees/worktree-"));
     assert_ne!(child_workspace, repository_root.display().to_string());
     assert!(!Path::new(child_workspace).exists());
     Ok(())
@@ -5998,7 +6001,9 @@ async fn task_runner_persists_acknowledged_integration_lane_lifecycle() -> Resul
     assert_eq!(output.lanes.len(), 1);
     assert_eq!(
         output.lanes[0].status,
-        sigil_kernel::IntegrationLaneStatus::Ready
+        sigil_kernel::IntegrationLaneStatus::Ready,
+        "unexpected integration lane result: {:#?}",
+        output.lanes[0]
     );
     let preview = output
         .promotion_preview

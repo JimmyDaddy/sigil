@@ -6708,6 +6708,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         }),
     );
     let temp = tempfile::tempdir()?;
+    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("parent", "model", parent_store)?;
     let mut handler = RecordingEventHandler::default();
@@ -6728,7 +6729,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         .handle_agent_tool_call(
             &mut session,
             &spawn_call,
-            &run_options(temp.path().to_path_buf()),
+            &run_options(workspace.clone()),
             &mut handler,
             &mut approval,
         )
@@ -6755,7 +6756,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
                     })
                     .to_string(),
                 },
-                &run_options(temp.path().to_path_buf()),
+                &run_options(workspace.clone()),
                 &mut handler,
                 &mut approval,
             )
@@ -7016,11 +7017,12 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         }),
     );
     let temp = tempfile::tempdir()?;
+    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("parent", "model", parent_store)?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
-    let options = run_options(temp.path().to_path_buf());
+    let options = run_options(workspace);
     let spawn_call = ToolCall {
         id: "call-long-artifact".to_owned(),
         name: SPAWN_AGENT_TOOL_NAME.to_owned(),
@@ -7144,11 +7146,12 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         }),
     );
     let temp = tempfile::tempdir()?;
+    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("parent", "model", parent_store)?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
-    let options = run_options(temp.path().to_path_buf());
+    let options = run_options(workspace);
     let spawn_call = ToolCall {
         id: "call-repeat-page".to_owned(),
         name: SPAWN_AGENT_TOOL_NAME.to_owned(),
@@ -7302,6 +7305,7 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
         }),
     );
     let temp = tempfile::tempdir()?;
+    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("parent", "model", parent_store)?;
     let mut handler = RecordingEventHandler::default();
@@ -7317,7 +7321,7 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
         })
         .to_string(),
     };
-    let options = run_options(temp.path().to_path_buf());
+    let options = run_options(workspace);
     let _ = runtime
         .handle_agent_tool_call(
             &mut session,
@@ -7413,6 +7417,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         }),
     );
     let temp = tempfile::tempdir()?;
+    let workspace = isolated_agent_tool_test_workspace(temp.path())?;
     let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("parent", "model", parent_store)?;
     let mut handler = RecordingEventHandler::default();
@@ -7428,7 +7433,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         })
         .to_string(),
     };
-    let options = run_options(temp.path().to_path_buf());
+    let options = run_options(workspace);
     let _ = agent_delegate
         .handle_agent_tool_call(
             &mut session,
@@ -7913,6 +7918,13 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         memory_config: MemoryConfig { enabled: false },
         compaction_config: CompactionConfig::default(),
     }
+}
+
+fn isolated_agent_tool_test_workspace(root: &std::path::Path) -> Result<PathBuf> {
+    let workspace = root.join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("README.md"), "test workspace\n")?;
+    Ok(workspace)
 }
 
 fn provider_capabilities() -> ProviderCapabilities {

@@ -131,7 +131,9 @@ async fn disjoint_git_integration_lanes_overlap_and_preserve_parent() -> Result<
         output
             .lanes
             .iter()
-            .all(|lane| lane.status == IntegrationLaneStatus::Ready)
+            .all(|lane| lane.status == IntegrationLaneStatus::Ready),
+        "unexpected integration lane results: {:#?}",
+        output.lanes
     );
     assert!(output.lanes.iter().all(|lane| lane.cleanup_error.is_none()));
     let latest_start = output
@@ -237,7 +239,12 @@ async fn dependent_lane_applies_members_in_stable_plan_order() -> Result<()> {
     .await?;
     drop(event_tx);
     let events = collector.await?;
-    assert_eq!(output.lanes[0].status, IntegrationLaneStatus::Ready);
+    assert_eq!(
+        output.lanes[0].status,
+        IntegrationLaneStatus::Ready,
+        "unexpected integration lane result: {:#?}",
+        output.lanes[0]
+    );
     let applied = events
         .iter()
         .filter_map(|event| match event {
@@ -294,7 +301,12 @@ async fn conflicting_lane_retains_partial_private_ref_without_parent_mutation() 
     .await?;
 
     assert_eq!(output.lanes.len(), 1);
-    assert_eq!(output.lanes[0].status, IntegrationLaneStatus::Conflict);
+    assert_eq!(
+        output.lanes[0].status,
+        IntegrationLaneStatus::Conflict,
+        "unexpected integration lane result: {:#?}",
+        output.lanes[0]
+    );
     assert!(output.lanes[0].candidate.is_none());
     assert_eq!(std::fs::read_to_string(root.join("shared.txt"))?, "old\n");
     assert!(git_ref_exists(
@@ -504,7 +516,9 @@ async fn snapshot_workspace_lanes_overlap_preserve_overlay_and_emit_recovery_fac
         output
             .lanes
             .iter()
-            .all(|lane| lane.status == IntegrationLaneStatus::Ready)
+            .all(|lane| lane.status == IntegrationLaneStatus::Ready),
+        "unexpected integration lane results: {:#?}",
+        output.lanes
     );
     let latest_start = output
         .lanes
@@ -2060,7 +2074,9 @@ async fn ready_lane_session(
         output
             .lanes
             .iter()
-            .all(|lane| lane.status == IntegrationLaneStatus::Ready)
+            .all(|lane| lane.status == IntegrationLaneStatus::Ready),
+        "unexpected integration lane results: {:#?}",
+        output.lanes
     );
     let events = collector.await?;
     let mut session = Session::new("mock", "model");
