@@ -1554,6 +1554,11 @@ fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
     std::fs::write(&alpha, "")?;
     std::fs::write(&alpha_copy, "")?;
     std::fs::write(&current, "")?;
+    for (path, modified_epoch_secs) in [(&alpha, 1), (&alpha_copy, 2), (&current, 3)] {
+        std::fs::File::open(path)?.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(modified_epoch_secs),
+        ))?;
+    }
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.session_log_path = current;
