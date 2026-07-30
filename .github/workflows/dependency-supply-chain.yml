@@ -217,3 +217,6 @@ jobs:
 
       - name: Audit desktop dependency graph
         run: pnpm --dir apps/desktop audit --audit-level high
+
+      - name: Smoke test patched desktop tooling
+        run: pnpm --dir apps/desktop exec wdio --version
