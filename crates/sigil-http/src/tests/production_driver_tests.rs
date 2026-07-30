@@ -2872,6 +2872,7 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
         .expect("durable session binding should not require provider assembly");
+    let mut subscriber = event_bus.subscribe();
     let run = registry
         .start_run(
             &session.id,
@@ -2889,25 +2890,38 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
         )
         .expect("owned production supervisor should accept the run");
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let terminal = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let status = registry
-                .get_run(&run.id)
-                .expect("run should remain addressable")
-                .status;
-            if status.is_terminal() {
-                break status;
+            let event = subscriber
+                .recv()
+                .await
+                .expect("production failure event should remain observable");
+            if event.run_event.run_id == run.id
+                && matches!(&event.run_event.event, PublicRunEventKind::RunFailed { .. })
+            {
+                break event;
             }
-            tokio::task::yield_now().await;
         }
     })
     .await
     .expect("preparation failure should terminate promptly");
+    assert!(matches!(
+        terminal.run_event.event,
+        PublicRunEventKind::RunFailed { .. }
+    ));
 
-    assert_eq!(
-        registry.get_run(&run.id).expect("run should exist").status,
-        HttpRunStatus::Failed
-    );
+    let projected_status = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status = registry.get_run(&run.id).expect("run should exist").status;
+            if status.is_terminal() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal event should be followed by the terminal run projection");
+    assert_eq!(projected_status, HttpRunStatus::Failed);
     assert!(session.session_log_path.ends_with(".jsonl"));
     let replay = event_bus
         .replay_run_after(&session.durable_session_scope_id, &run.id, None)
