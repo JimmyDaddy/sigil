@@ -19,6 +19,10 @@ on:
       - "rust-toolchain.toml"
       - "scripts/prepare-desktop-sidecar.mjs"
       - "scripts/test-prepare-desktop-sidecar.mjs"
+      - "scripts/package-desktop-macos-local.sh"
+      - "scripts/notarize-desktop-macos.sh"
+      - "scripts/verify-desktop-macos.sh"
+      - "scripts/test-desktop-macos-signing.mjs"
   pull_request:
     paths:
       - ".github/workflows/desktop-package.yml"
@@ -35,6 +39,10 @@ on:
       - "rust-toolchain.toml"
       - "scripts/prepare-desktop-sidecar.mjs"
       - "scripts/test-prepare-desktop-sidecar.mjs"
+      - "scripts/package-desktop-macos-local.sh"
+      - "scripts/notarize-desktop-macos.sh"
+      - "scripts/verify-desktop-macos.sh"
+      - "scripts/test-desktop-macos-signing.mjs"
   workflow_dispatch:
 
 permissions:
@@ -106,9 +114,15 @@ jobs:
         run: pnpm --dir apps/desktop install --frozen-lockfile
 
       - name: Test sidecar staging contract
-        run: node scripts/test-prepare-desktop-sidecar.mjs
+        run: |
+          node scripts/test-prepare-desktop-sidecar.mjs
+          node scripts/test-desktop-macos-signing.mjs
 
       - name: Build native desktop package with bundled runtime
+        env:
+          # Dogfood artifacts stay explicitly ad-hoc. Public macOS packages use the
+          # publisher-owned local Developer ID + notarization workflow.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
         run: pnpm --dir apps/desktop package --bundles ${{ matrix.bundles }}
 
       - name: Verify macOS bundle, sidecar, and ad-hoc signature
@@ -119,6 +133,8 @@ jobs:
           test -x target/release/bundle/macos/Sigil.app/Contents/MacOS/sigil-runtime
           target/release/bundle/macos/Sigil.app/Contents/MacOS/sigil-runtime --version
           codesign --verify --deep --strict --verbose=4 target/release/bundle/macos/Sigil.app
+          codesign_details="$(codesign -dv --verbose=4 target/release/bundle/macos/Sigil.app 2>&1)"
+          grep -Fq "Signature=adhoc" <<<"${codesign_details}"
 
       - name: Verify Linux package contains the runtime sidecar
         if: runner.os == 'Linux'

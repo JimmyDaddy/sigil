@@ -17,6 +17,7 @@
     "sidecar:test": "node ../../scripts/test-prepare-desktop-sidecar.mjs",
     "check": "pnpm contract:check && pnpm ui:check && pnpm typecheck && pnpm test && pnpm build",
     "package": "tauri build --config src-tauri/tauri.bundle.conf.json",
+    "package:macos:signed": "../../scripts/package-desktop-macos-local.sh",
     "tauri": "tauri"
   },
   "dependencies": {

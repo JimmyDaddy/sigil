@@ -306,7 +306,11 @@ debug build才允许开发期`sigil` fallback。CI现在分别生成Linux `.deb`
 macOS真实package启动审计发现并修复了pre-setup读取managed state导致窗口创建前panic的问题。window和desktop state
 现在都在Tauri setup中建立；启动失败只写入本机bounded、control-safe、Unix `0600`的4 KiB单行诊断文件，成功启动会
 清理旧记录。重新打包后native process成功创建`Sigil`窗口，bundled runtime可执行，`.app`通过strict ad-hoc
-`codesign`校验；没有Apple notarization凭据时仍明确跳过notarization。
+`codesign`校验。普通 GitHub Actions dogfood artifact 明确使用 ad-hoc 签名；公开
+macOS 安装包由受信发布者 Mac 使用 Developer ID 签名，并通过
+`scripts/package-desktop-macos-local.sh` 完成 Apple notarization、staple、Gatekeeper
+与嵌套 sidecar 校验。完整操作见
+[`dev/docs/desktop-macos-signing.md`](../desktop-macos-signing.md)。
 
 frontend interaction suite现覆盖IME composition、paste、single reply、approval/cancel/verification和仅在用户仍停留
 底部时自动滚动；timeline使用live-region语义。native、frontend、contract、full workspace、docs/site与supply-chain
