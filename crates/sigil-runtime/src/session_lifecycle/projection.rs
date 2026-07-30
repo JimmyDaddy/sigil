@@ -20,8 +20,8 @@ use thiserror::Error as ThisError;
 
 use super::{
     LocalSessionCatalogState, LocalSessionLifecycleLimits, LocalSessionLifecycleService,
-    LocalSessionMutationError, SessionCandidate, direct_jsonl_candidates, hash_file_bounded,
-    modified_at_unix_ms,
+    LocalSessionMutationError, SessionCandidate, acquire_session_writer_lease,
+    direct_jsonl_candidates, hash_file_bounded, modified_at_unix_ms,
 };
 
 mod query;
@@ -31,8 +31,9 @@ pub use query::{
     SessionCatalogProjectionQuery,
 };
 
-pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 1;
+pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 2;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
+const SESSION_CATALOG_PROJECTION_REVISION: u16 = 1;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
 const SESSION_CATALOG_TITLE_MAX_BYTES: usize = 160;
@@ -42,6 +43,7 @@ const CREATE_SCHEMA_SQL: &str = r#"
 CREATE TABLE session_catalog_workspace_v1 (
     workspace_id TEXT PRIMARY KEY NOT NULL,
     generation INTEGER NOT NULL CHECK (generation >= 0),
+    projection_revision INTEGER NOT NULL CHECK (projection_revision >= 0),
     reconciled_at_unix_ms INTEGER NOT NULL CHECK (reconciled_at_unix_ms >= 0),
     degraded_source_count INTEGER NOT NULL CHECK (degraded_source_count >= 0),
     identity_conflict_count INTEGER NOT NULL CHECK (identity_conflict_count >= 0),
@@ -411,16 +413,16 @@ impl SessionCatalogProjectionService {
         })
     }
 
-    /// Moves one exact invalid source into the local quarantine directory and refreshes SQLite.
+    /// Moves one exact unavailable source into the local quarantine directory and refreshes SQLite.
     ///
     /// The source metadata is revalidated under the session-maintenance lease before the atomic
-    /// rename. Ready, oversized, scan-limited, and legacy sources are never accepted by this
-    /// recovery operation.
+    /// rename. Ready sources are never accepted by this recovery operation; unavailable sources do
+    /// not need a trusted durable session identity, but must retain their exact catalog fingerprint.
     ///
     /// # Errors
     ///
     /// Returns a stable mutation error when the reference is unsafe, the source is no longer
-    /// invalid, its metadata changed, or the quarantine directory cannot be used safely.
+    /// unavailable, its metadata changed, or the quarantine directory cannot be used safely.
     pub fn quarantine_invalid_source(
         &self,
         session_ref: &str,
@@ -437,7 +439,7 @@ impl SessionCatalogProjectionService {
             .into_iter()
             .find(|entry| entry.session_ref == session_ref_text)
             .ok_or(LocalSessionMutationError::NotFound)?;
-        if entry.source_state != LocalSessionCatalogState::Invalid || entry.session_id.is_some() {
+        if !entry.source_state.permits_source_cleanup() || entry.session_id.is_some() {
             return Err(LocalSessionMutationError::NotReady);
         }
         if entry.source_bytes != expected_source_bytes
@@ -452,6 +454,17 @@ impl SessionCatalogProjectionService {
             .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
         let session_dir = canonical_real_directory(&self.lifecycle.session_dir)?;
         let source_path = session_ref.resolve(&session_dir);
+        let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
+            _ => LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(error),
+            },
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(LocalSessionMutationError::NotReady);
+        }
+        let source_writer_lease = acquire_session_writer_lease(&source_path)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
         let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
             _ => LocalSessionMutationError::Unavailable {
@@ -480,6 +493,7 @@ impl SessionCatalogProjectionService {
                 source: anyhow::Error::new(source),
             }
         })?;
+        drop(source_writer_lease);
         let projection_generation = self.reconcile().ok().map(|report| report.generation);
         Ok(SessionCatalogQuarantineReceipt {
             session_ref: session_ref_text,
@@ -489,7 +503,7 @@ impl SessionCatalogProjectionService {
         })
     }
 
-    /// Permanently removes one exact invalid source and refreshes SQLite.
+    /// Permanently removes one exact unavailable source and refreshes SQLite.
     ///
     /// This operation is intentionally separate from audited durable-session deletion: malformed
     /// input has no trustworthy session identity to bind to the lifecycle journal. The direct-child
@@ -499,7 +513,8 @@ impl SessionCatalogProjectionService {
     /// # Errors
     ///
     /// Returns a stable mutation error when the reference is unsafe, the selected catalog row is
-    /// no longer invalid, its source fingerprint changed, or the file cannot be removed safely.
+    /// is no longer unavailable, its source fingerprint changed, or the file cannot be removed
+    /// safely.
     pub fn delete_invalid_source(
         &self,
         session_ref: &str,
@@ -516,7 +531,7 @@ impl SessionCatalogProjectionService {
             .into_iter()
             .find(|entry| entry.session_ref == session_ref_text)
             .ok_or(LocalSessionMutationError::NotFound)?;
-        if entry.source_state != LocalSessionCatalogState::Invalid || entry.session_id.is_some() {
+        if !entry.source_state.permits_source_cleanup() || entry.session_id.is_some() {
             return Err(LocalSessionMutationError::NotReady);
         }
         if entry.source_bytes != expected_source_bytes
@@ -540,6 +555,17 @@ impl SessionCatalogProjectionService {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(LocalSessionMutationError::NotReady);
         }
+        let source_writer_lease = acquire_session_writer_lease(&source_path)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+        let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
+            _ => LocalSessionMutationError::Unavailable {
+                source: anyhow::Error::new(error),
+            },
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(LocalSessionMutationError::NotReady);
+        }
         if metadata.len() != expected_source_bytes
             || modified_at_unix_ms(&metadata) != expected_modified_at_unix_ms
         {
@@ -549,6 +575,7 @@ impl SessionCatalogProjectionService {
         fs::remove_file(&source_path).map_err(|source| LocalSessionMutationError::Unavailable {
             source: anyhow::Error::new(source),
         })?;
+        drop(source_writer_lease);
         let projection_generation = self.reconcile().ok().map(|report| report.generation);
         Ok(SessionCatalogInvalidSourceDeleteReceipt {
             session_ref: session_ref_text,
@@ -715,6 +742,10 @@ impl SessionCatalogProjectionService {
             let base_generation = base_metadata
                 .as_ref()
                 .map_or(0, |metadata| metadata.generation);
+            let force_rebuild = force_rebuild
+                || base_metadata.as_ref().is_some_and(|metadata| {
+                    metadata.projection_revision != SESSION_CATALOG_PROJECTION_REVISION
+                });
             let existing = list_workspace_entries(&connection, &self.lifecycle.workspace_id)?
                 .into_iter()
                 .map(|entry| (entry.session_ref.clone(), entry))
@@ -745,7 +776,8 @@ impl SessionCatalogProjectionService {
             let updated_source_count = updated_entries.len();
             let removed_source_count = removed_session_refs.len();
             let metadata_changed = base_metadata.as_ref().is_none_or(|metadata| {
-                metadata.degraded_source_count != degraded_source_count
+                metadata.projection_revision != SESSION_CATALOG_PROJECTION_REVISION
+                    || metadata.degraded_source_count != degraded_source_count
                     || metadata.identity_conflict_count != identity_conflict_count
                     || metadata.truncated_source_count != scan.truncated_source_count
             });
@@ -1068,6 +1100,7 @@ struct SessionCatalogScan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionCatalogWorkspaceMetadata {
     generation: u64,
+    projection_revision: u16,
     reconciled_at_unix_ms: u64,
     degraded_source_count: usize,
     identity_conflict_count: usize,
@@ -1115,17 +1148,18 @@ fn workspace_metadata(
 ) -> Result<Option<SessionCatalogWorkspaceMetadata>, SessionCatalogProjectionError> {
     connection
         .query_row(
-            "SELECT generation, reconciled_at_unix_ms, degraded_source_count, \
-             identity_conflict_count, truncated_source_count \
+            "SELECT generation, projection_revision, reconciled_at_unix_ms, \
+             degraded_source_count, identity_conflict_count, truncated_source_count \
              FROM session_catalog_workspace_v1 WHERE workspace_id = ?1",
             params![workspace_id],
             |row| {
                 Ok(SessionCatalogWorkspaceMetadata {
                     generation: decode_u64(row.get(0)?, 0)?,
-                    reconciled_at_unix_ms: decode_u64(row.get(1)?, 1)?,
-                    degraded_source_count: decode_usize(row.get(2)?, 2)?,
-                    identity_conflict_count: decode_usize(row.get(3)?, 3)?,
-                    truncated_source_count: decode_usize(row.get(4)?, 4)?,
+                    projection_revision: decode_u16(row.get(1)?, 1)?,
+                    reconciled_at_unix_ms: decode_u64(row.get(2)?, 2)?,
+                    degraded_source_count: decode_usize(row.get(3)?, 3)?,
+                    identity_conflict_count: decode_usize(row.get(4)?, 4)?,
+                    truncated_source_count: decode_usize(row.get(5)?, 5)?,
                 })
             },
         )
@@ -1406,6 +1440,23 @@ fn initialize_or_validate_schema(
         tighten_catalog_permissions(database_path)?;
         transaction.execute_batch(CREATE_SCHEMA_SQL)?;
         transaction.pragma_update(None, "application_id", SESSION_CATALOG_APPLICATION_ID)?;
+        transaction.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION)?;
+        transaction.commit()?;
+        return Ok(());
+    }
+    if application_id == SESSION_CATALOG_APPLICATION_ID && user_version == 1 {
+        validate_schema_object_names(&transaction).map_err(|()| {
+            SessionCatalogProjectionError::IncompatibleSchema {
+                application_id,
+                user_version,
+            }
+        })?;
+        transaction.execute(
+            "ALTER TABLE session_catalog_workspace_v1 \
+             ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0 \
+             CHECK (projection_revision >= 0)",
+            [],
+        )?;
         transaction.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION)?;
         transaction.commit()?;
         return Ok(());
@@ -1712,11 +1763,12 @@ fn upsert_workspace_metadata(
 ) -> Result<(), SessionCatalogProjectionError> {
     transaction.execute(
         "INSERT INTO session_catalog_workspace_v1(\
-             workspace_id, generation, reconciled_at_unix_ms, degraded_source_count, \
-             identity_conflict_count, truncated_source_count\
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             workspace_id, generation, projection_revision, reconciled_at_unix_ms, \
+             degraded_source_count, identity_conflict_count, truncated_source_count\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(workspace_id) DO UPDATE SET \
              generation = excluded.generation, \
+             projection_revision = excluded.projection_revision, \
              reconciled_at_unix_ms = excluded.reconciled_at_unix_ms, \
              degraded_source_count = excluded.degraded_source_count, \
              identity_conflict_count = excluded.identity_conflict_count, \
@@ -1724,6 +1776,7 @@ fn upsert_workspace_metadata(
         params![
             workspace_id,
             to_i64(generation, "generation")?,
+            i64::from(SESSION_CATALOG_PROJECTION_REVISION),
             to_i64(reconciled_at_unix_ms, "reconciled_at_unix_ms")?,
             usize_to_i64(degraded_source_count, "degraded_source_count")?,
             usize_to_i64(identity_conflict_count, "identity_conflict_count")?,
@@ -1896,6 +1949,16 @@ fn decode_optional<T: for<'de> Deserialize<'de>>(
 
 fn decode_u64(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
     u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+fn decode_u16(value: i64, column: usize) -> Result<u16, rusqlite::Error> {
+    u16::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
             rusqlite::types::Type::Integer,

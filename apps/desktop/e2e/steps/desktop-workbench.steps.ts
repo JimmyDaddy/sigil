@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
 import { Given, Then, When } from "@wdio/cucumber-framework";
 import { $, $$, browser } from "@wdio/globals";
 
 import { desktopProviderCanaries } from "../provider-fixture";
+
+const unavailableSessionRef = "desktop-e2e-unsupported.jsonl";
+let unavailableSessionPath: string | undefined;
 
 Given("the current-source desktop has restored the isolated workspace", async () => {
   await $(".app-shell").waitForDisplayed();
@@ -202,8 +205,7 @@ Then("the generated semantic title is synchronized into the conversation page", 
 When("I invoke the custom workspace skill", async () => {
   const composer = await $("#desktop-prompt");
   await composer.waitForEnabled({ timeout: 20_000 });
-  await composer.click();
-  await composer.addValue("$desktop-e2e-skill inspect README");
+  await composer.setValue("$desktop-e2e-skill inspect README");
   await browser.keys("Enter");
 });
 
@@ -238,8 +240,7 @@ Then("the custom workspace skill executes with durable load evidence", async () 
 When("I invoke the custom workspace agent", async () => {
   const composer = await $("#desktop-prompt");
   await composer.waitForEnabled({ timeout: 20_000 });
-  await composer.click();
-  await composer.addValue("@desktop-e2e-agent inspect README");
+  await composer.setValue("@desktop-e2e-agent inspect README");
   await browser.keys("Enter");
 });
 
@@ -257,8 +258,7 @@ Then("the custom workspace agent executes with its profile instructions", async 
 When("I invoke Desktop plan mode", async () => {
   const composer = await $("#desktop-prompt");
   await composer.waitForEnabled({ timeout: 20_000 });
-  await composer.click();
-  await composer.addValue("/plan inspect the runtime architecture");
+  await composer.setValue("/plan inspect the runtime architecture");
   await browser.keys("Enter");
 });
 
@@ -283,8 +283,7 @@ Then("the supervised plan agent executes with durable profile evidence", async (
 When("I request automatic multi-Agent execution", async () => {
   const composer = await $("#desktop-prompt");
   await composer.waitForEnabled({ timeout: 20_000 });
-  await composer.click();
-  await composer.addValue(desktopProviderCanaries.autoOrchestrationPrompt);
+  await composer.setValue(desktopProviderCanaries.autoOrchestrationPrompt);
   await browser.keys("Enter");
 });
 
@@ -329,6 +328,81 @@ Then("Desktop completes one durable task with two overlapping read Agents", asyn
   for (const stepId of desktopProviderCanaries.autoReadStepIds) {
     assert.equal(evidence.requestCounts[`auto_read:${stepId}`], 1);
   }
+});
+
+When("an unsupported legacy conversation source is stored in the workspace", () => {
+  const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
+  assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
+  const currentSession = filesUnder(runtimeRoot).find((path) =>
+    path.endsWith(".jsonl") && basename(dirname(path)) === "sessions",
+  );
+  assert.ok(currentSession, "the source-built Desktop did not create a durable session directory");
+
+  unavailableSessionPath = resolve(dirname(currentSession), unavailableSessionRef);
+  writeFileSync(
+    unavailableSessionPath,
+    `${JSON.stringify({
+      user: {
+        id: "desktop-e2e-legacy-message",
+        role: "user",
+        content: "legacy conversation source",
+        tool_calls: [],
+        tool_call_id: null,
+      },
+    })}\n`,
+    "utf8",
+  );
+});
+
+Then("I can permanently delete the unavailable source from conversation management", async () => {
+  assert.ok(unavailableSessionPath, "the unavailable Desktop E2E source was not prepared");
+
+  const topbarActions = await $$(".topbar-actions .sg-icon-button");
+  assert.ok(topbarActions.length >= 2, "the Desktop top bar did not expose conversation management");
+  const manageConversations = topbarActions[1];
+  assert.ok(manageConversations, "the Desktop conversation management action is unavailable");
+  await manageConversations.click();
+  await $(".conversation-library-page").waitForDisplayed();
+
+  const row = await $(`//tr[contains(., '${unavailableSessionRef}')]`);
+  await row.waitForDisplayed({
+    timeout: 20_000,
+    timeoutMsg: "the unsupported source was not projected into conversation management",
+  });
+  await row.$('input[type="checkbox"]').click();
+
+  const batchActions = await $$(".library-batch-actions .sg-button");
+  assert.equal(batchActions.length, 3, "conversation management did not expose all batch actions");
+  const deleteUnavailable = batchActions[2];
+  assert.ok(deleteUnavailable, "the unavailable-source delete action is unavailable");
+  await deleteUnavailable.waitForEnabled();
+  await deleteUnavailable.click();
+
+  const preview = await $('[role="dialog"]');
+  await preview.waitForDisplayed({
+    timeout: 20_000,
+    timeoutMsg: "the unavailable source did not receive a batch cleanup preview",
+  });
+  const applyAction = await preview.$(".confirmation-actions .sg-button-danger");
+  await applyAction.waitForEnabled();
+  await applyAction.click();
+
+  await browser.waitUntil(
+    () => !existsSync(unavailableSessionPath!),
+    {
+      timeout: 20_000,
+      timeoutMsg: "the unavailable source remained on disk after confirmed deletion",
+    },
+  );
+  await $(".batch-receipt").waitForDisplayed({
+    timeout: 20_000,
+    timeoutMsg: "Desktop did not render an unavailable-source deletion receipt",
+  });
+  await row.waitForExist({
+    reverse: true,
+    timeout: 20_000,
+    timeoutMsg: "the deleted unavailable source remained in conversation management",
+  });
 });
 
 function durableEvents(): string[] {

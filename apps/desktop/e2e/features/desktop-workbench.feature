@@ -36,3 +36,9 @@ Feature: Desktop workbench remains usable
     When I create a new desktop conversation
     And I request automatic multi-Agent execution
     Then Desktop completes one durable task with two overlapping read Agents
+
+  Scenario: Delete a conversation source that the current runtime cannot open
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And an unsupported legacy conversation source is stored in the workspace
+    Then I can permanently delete the unavailable source from conversation management

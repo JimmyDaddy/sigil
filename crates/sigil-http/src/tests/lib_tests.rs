@@ -13,7 +13,7 @@ use sigil_kernel::{
     AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
     EgressNetworkRoute, EvidenceScope, IntegrationPlanId, IntegrationPromotionStatus,
     JsonlSessionStore, ModelMessage, PreEgressDisclosure, PublicRunEvent, PublicRunEventKind,
-    Session, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskStepId,
+    Session, SessionLogEntry, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskStepId,
     TaskVerificationRerunRequest, ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent,
     VerificationProductAction, VerificationProductEvidence, VerificationProductView,
     VerificationRecommendationKind, VerificationVerdict,
@@ -1455,6 +1455,67 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
             .is_some_and(|value| value.starts_with("invalid-source-delete:"))
     );
     assert!(!disposable_source.exists());
+
+    let legacy_source = sessions.join("legacy.jsonl");
+    fs::write(
+        &legacy_source,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))
+                .expect("legacy source should encode")
+        ),
+    )
+    .expect("legacy source should write");
+    let (status, legacy_page) = http_raw_request(
+        address,
+        http_get(
+            "/session-catalog?state=unsupported_legacy",
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let legacy_entry = &legacy_page["entries"][0];
+    let legacy_items = json!([{
+        "session_ref": legacy_entry["session_ref"],
+        "source_bytes": legacy_entry["source_bytes"],
+        "source_modified_at_unix_ms": legacy_entry["source_modified_at_unix_ms"],
+    }]);
+    let legacy_plan_body = json!({
+        "action": "delete_invalid_sources",
+        "items": legacy_items,
+    })
+    .to_string();
+    let (status, legacy_plan) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/plan",
+            Some("secret-token"),
+            &legacy_plan_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(legacy_plan["executable"], 1);
+    let legacy_execute_body = json!({
+        "plan_id": legacy_plan["plan_id"],
+        "action": "delete_invalid_sources",
+        "items": legacy_items,
+    })
+    .to_string();
+    let (status, legacy_deleted) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/execute",
+            Some("secret-token"),
+            &legacy_execute_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(legacy_deleted["completed"], 1);
+    assert!(!legacy_source.exists());
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving

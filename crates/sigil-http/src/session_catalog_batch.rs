@@ -232,8 +232,7 @@ fn classify_item(
         }
         HttpSessionCatalogBatchAction::QuarantineInvalidSources
         | HttpSessionCatalogBatchAction::DeleteInvalidSources => {
-            if entry.source_state != LocalSessionCatalogState::Invalid || entry.session_id.is_some()
-            {
+            if !entry.source_state.permits_source_cleanup() || entry.session_id.is_some() {
                 return Some("not_ready");
             }
             (entry.source_bytes != item.source_bytes.unwrap_or_default()

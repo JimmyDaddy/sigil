@@ -107,7 +107,7 @@ export function ConversationLibrary({
     (entry): entry is CatalogEntry & { sessionId: string } =>
       entry.sourceState === "ready" && entry.sessionId !== undefined,
   );
-  const selectedInvalid = selectedEntries.filter((entry) => entry.sourceState === "invalid");
+  const selectedUnavailable = selectedEntries.filter((entry) => entry.sourceState !== "ready");
   const allLoadedSelected = page.entries.length > 0 && selectedRefs.size === page.entries.length;
 
   const toggleAllLoaded = (checked: boolean) => {
@@ -226,15 +226,15 @@ export function ConversationLibrary({
             >{t("deleteSelectedReady", { count: selectedReady.length })}</Button>
             <Button
               type="button"
-              disabled={selectedInvalid.length === 0 || planning}
-              onClick={() => void prepare("quarantine_invalid_sources", selectedInvalid)}
-            >{t("quarantineSelectedInvalid", { count: selectedInvalid.length })}</Button>
+              disabled={selectedUnavailable.length === 0 || planning}
+              onClick={() => void prepare("quarantine_invalid_sources", selectedUnavailable)}
+            >{t("quarantineSelectedInvalid", { count: selectedUnavailable.length })}</Button>
             <Button
               type="button"
               variant="danger"
-              disabled={selectedInvalid.length === 0 || planning}
-              onClick={() => void prepare("delete_invalid_sources", selectedInvalid)}
-            >{t("deleteSelectedInvalid", { count: selectedInvalid.length })}</Button>
+              disabled={selectedUnavailable.length === 0 || planning}
+              onClick={() => void prepare("delete_invalid_sources", selectedUnavailable)}
+            >{t("deleteSelectedInvalid", { count: selectedUnavailable.length })}</Button>
           </div>
         </div>
       </div>

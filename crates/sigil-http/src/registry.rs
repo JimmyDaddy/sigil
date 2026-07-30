@@ -1143,8 +1143,8 @@ impl HttpSessionRunRegistry {
                 // The exact queue candidate was validated and cancellation was accepted while
                 // excluding concurrent queue mutations. Subsequent edits may now update the
                 // latest revision while the cooperative terminal/release barrier completes.
-                drop(queue_command_guard.take());
                 drop(queue_session_guard.take());
+                drop(queue_command_guard.take());
                 catch_unwind(AssertUnwindSafe(|| {
                     self.driver
                         .wait_for_run_release(&owner.run_id, QUEUE_INTERRUPT_RELEASE_TIMEOUT)

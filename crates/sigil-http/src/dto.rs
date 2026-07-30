@@ -566,7 +566,7 @@ pub struct HttpSessionDeleteRequest {
     pub session_id: String,
 }
 
-/// Exact invalid catalog source fingerprint selected for quarantine.
+/// Exact unavailable catalog source fingerprint selected for quarantine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HttpSessionQuarantineRequest {
@@ -575,7 +575,7 @@ pub struct HttpSessionQuarantineRequest {
     pub source_modified_at_unix_ms: u64,
 }
 
-/// Exact invalid catalog source fingerprint selected for permanent deletion.
+/// Exact unavailable catalog source fingerprint selected for permanent deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HttpSessionInvalidSourceDeleteRequest {
@@ -714,7 +714,7 @@ impl From<sigil_runtime::SessionCatalogMutationReceipt> for HttpSessionMutationR
     }
 }
 
-/// Bounded receipt for an invalid source moved out of the active catalog.
+/// Bounded receipt for an unavailable source moved out of the active catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HttpSessionQuarantineReceipt {
@@ -736,7 +736,7 @@ impl From<sigil_runtime::SessionCatalogQuarantineReceipt> for HttpSessionQuarant
     }
 }
 
-/// Bounded receipt for one invalid source permanently removed from the active catalog.
+/// Bounded receipt for one unavailable source permanently removed from the active catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HttpSessionInvalidSourceDeleteReceipt {

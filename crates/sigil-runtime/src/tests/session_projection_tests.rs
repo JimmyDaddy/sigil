@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use fs2::FileExt;
 use rusqlite::Connection;
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, ModelMessage, Session, SessionLogEntry, SessionRef, TaskId,
@@ -384,6 +385,50 @@ fn projection_rejects_incompatible_schema_without_deleting_it() -> Result<()> {
 }
 
 #[test]
+fn projection_migrates_v1_and_rebuilds_rows_from_current_durable_semantics() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    fs::write(
+        lifecycle.session_dir.join("broken.jsonl"),
+        b"not a session stream\n",
+    )?;
+    projection.rebuild()?;
+
+    let connection = Connection::open(projection.database_path())?;
+    connection.execute(
+        "UPDATE session_catalog_entry_v1 \
+         SET source_state = 'ready', session_id = 'stale-projected-identity'",
+        [],
+    )?;
+    connection.execute(
+        "ALTER TABLE session_catalog_workspace_v1 DROP COLUMN projection_revision",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", 1)?;
+    drop(connection);
+
+    let report = projection.reconcile()?;
+    let row = projection.list_workspace_entries()?.remove(0);
+    let connection = Connection::open(projection.database_path())?;
+    let user_version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let projection_revision: i64 = connection.query_row(
+        "SELECT projection_revision FROM session_catalog_workspace_v1 \
+         WHERE workspace_id = 'workspace-1'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    assert!(report.generation_changed);
+    assert_eq!(row.source_state, LocalSessionCatalogState::Invalid);
+    assert!(row.session_id.is_none());
+    assert_eq!(user_version, i64::from(SESSION_CATALOG_SCHEMA_VERSION));
+    assert_eq!(projection_revision, 1);
+    Ok(())
+}
+
+#[test]
 fn projection_rejects_unowned_default_pragma_database() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
@@ -592,6 +637,23 @@ fn invalid_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Re
         ),
         Err(LocalSessionMutationError::IdentityChanged)
     ));
+    let active_store = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(source.with_file_name("broken.jsonl.writer-lock"))?;
+    FileExt::try_lock_exclusive(&active_store)?;
+    assert!(matches!(
+        projection.delete_invalid_source(
+            "broken.jsonl",
+            entry.source_bytes,
+            entry.source_modified_at_unix_ms,
+        ),
+        Err(LocalSessionMutationError::Unavailable { .. })
+    ));
+    assert!(source.exists());
+    drop(active_store);
     let receipt = projection.delete_invalid_source(
         "broken.jsonl",
         entry.source_bytes,
@@ -601,6 +663,74 @@ fn invalid_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Re
     assert!(receipt.operation_id.starts_with("invalid-source-delete:"));
     assert!(receipt.projection_generation.is_some());
     assert!(!source.exists());
+    assert!(projection.list_workspace_entries()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn legacy_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("legacy.jsonl");
+    fs::write(
+        &source,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+        ),
+    )?;
+    projection.rebuild()?;
+    let entry = projection.list_workspace_entries()?.remove(0);
+
+    assert_eq!(
+        entry.source_state,
+        LocalSessionCatalogState::UnsupportedLegacy
+    );
+    projection.delete_invalid_source(
+        "legacy.jsonl",
+        entry.source_bytes,
+        entry.source_modified_at_unix_ms,
+    )?;
+    assert!(!source.exists());
+    Ok(())
+}
+
+#[test]
+fn size_limited_catalog_sources_can_be_permanently_deleted() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    fs::write(lifecycle.session_dir.join("oversized.jsonl"), b"0123456789")?;
+    fs::write(lifecycle.session_dir.join("scan-limited.jsonl"), b"small")?;
+    let projection = SessionCatalogProjectionService::new(
+        lifecycle.with_limits(LocalSessionLifecycleLimits {
+            max_stream_bytes: 8,
+            max_total_validation_bytes: 0,
+            ..LocalSessionLifecycleLimits::default()
+        }),
+        projection.database_path().to_path_buf(),
+    );
+    projection.rebuild()?;
+    let entries = projection.list_workspace_entries()?;
+
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.source_state == LocalSessionCatalogState::Oversized })
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.source_state == LocalSessionCatalogState::ScanBudgetExceeded })
+    );
+    for entry in entries {
+        projection.delete_invalid_source(
+            &entry.session_ref,
+            entry.source_bytes,
+            entry.source_modified_at_unix_ms,
+        )?;
+    }
     assert!(projection.list_workspace_entries()?.is_empty());
     Ok(())
 }

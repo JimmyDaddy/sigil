@@ -587,8 +587,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Permanently delete one exact invalid local session source
-         * @description Revalidates the invalid source fingerprint under a maintenance lease, then permanently removes the regular file after native-shell confirmation.
+         * Permanently delete one exact unavailable local session source
+         * @description Revalidates the non-ready source fingerprint under maintenance and writer leases, then permanently removes the regular file after native-shell confirmation.
          */
         post: {
             parameters: {
@@ -635,8 +635,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Quarantine one exact invalid local session source
-         * @description Revalidates the invalid source metadata under a maintenance lease, then moves it into the local quarantine directory without exposing a filesystem path.
+         * Quarantine one exact unavailable local session source
+         * @description Revalidates the non-ready source metadata under maintenance and writer leases, then moves it into the local quarantine directory without exposing a filesystem path.
          */
         post: {
             parameters: {

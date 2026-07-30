@@ -217,16 +217,13 @@ export function HistoryContent({
                             label={<Icon name="more" />}
                           >
                             <MenuItem
-                              disabled={entry.sourceState !== "invalid"}
                               onSelect={() => onQuarantine(entry)}
                             >
-                              {entry.sourceState === "invalid" ? t("quarantineInvalid") : t("noSafeAction")}
+                              {t("quarantineInvalid")}
                             </MenuItem>
-                            {entry.sourceState === "invalid" ? (
-                              <MenuItem onSelect={() => onDeleteInvalidSource(entry)}>
-                                {t("deleteInvalidSource")}
-                              </MenuItem>
-                            ) : null}
+                            <MenuItem onSelect={() => onDeleteInvalidSource(entry)}>
+                              {t("deleteInvalidSource")}
+                            </MenuItem>
                           </Menu>
                         </div>
                       )}

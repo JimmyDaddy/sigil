@@ -395,8 +395,8 @@ pub fn http_openapi_document() -> Value {
             },
             "/session-catalog/quarantine": {
                 "post": {
-                    "summary": "Quarantine one exact invalid local session source",
-                    "description": "Revalidates the invalid source metadata under a maintenance lease, then moves it into the local quarantine directory without exposing a filesystem path.",
+                    "summary": "Quarantine one exact unavailable local session source",
+                    "description": "Revalidates the non-ready source metadata under maintenance and writer leases, then moves it into the local quarantine directory without exposing a filesystem path.",
                     "requestBody": {
                         "required": true,
                         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionQuarantineRequest" } } }
@@ -413,8 +413,8 @@ pub fn http_openapi_document() -> Value {
             },
             "/session-catalog/delete-invalid-source": {
                 "post": {
-                    "summary": "Permanently delete one exact invalid local session source",
-                    "description": "Revalidates the invalid source fingerprint under a maintenance lease, then permanently removes the regular file after native-shell confirmation.",
+                    "summary": "Permanently delete one exact unavailable local session source",
+                    "description": "Revalidates the non-ready source fingerprint under maintenance and writer leases, then permanently removes the regular file after native-shell confirmation.",
                     "requestBody": {
                         "required": true,
                         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionInvalidSourceDeleteRequest" } } }

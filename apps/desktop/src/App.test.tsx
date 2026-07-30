@@ -2674,6 +2674,54 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByRole("heading", { name: "Latest batch result" })).toBeTruthy();
   });
 
+  it("offers source cleanup for a selected unsupported conversation", async () => {
+    const user = userEvent.setup();
+    const entry = {
+      sessionRef: "legacy.jsonl",
+      sourceState: "unsupported_legacy" as const,
+      sourceBytes: 256,
+      sourceModifiedAtUnixMs: 1_784_419_100_000,
+      title: "Legacy session",
+      userMessageCount: 0,
+      assistantMessageCount: 0,
+      toolResultCount: 0,
+      pinned: false,
+    };
+    const planSessionCatalogBatch = vi.fn(async () => ({
+      planId: "sha256:legacy-delete",
+      action: "delete_invalid_sources" as const,
+      generation: 8,
+      total: 1,
+      executable: 1,
+      blocked: 0,
+      items: [{ sessionRef: entry.sessionRef, status: "executable" as const }],
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({ ...emptyCatalog, generation: 8, entries: [entry] }),
+      planSessionCatalogBatch,
+    })} />);
+
+    await screen.findByText("Legacy session");
+    await user.click(screen.getByRole("button", { name: "Manage conversations" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Select conversation: Legacy session" }));
+
+    expect(screen.getByRole("button", { name: "Delete unavailable (1)" }).hasAttribute("disabled")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Delete unavailable (1)" }));
+    expect(planSessionCatalogBatch).toHaveBeenCalledWith(workspace.id, {
+      action: "delete_invalid_sources",
+      items: [{
+        sessionRef: entry.sessionRef,
+        sourceBytes: entry.sourceBytes,
+        sourceModifiedAtUnixMs: entry.sourceModifiedAtUnixMs,
+      }],
+    });
+  });
+
   it("stores the startup restore preference and honors it on the next bootstrap", async () => {
     const user = userEvent.setup();
     const openRecentWorkspace = vi.fn(async () => workspace);
@@ -3849,7 +3897,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByRole("button", { name: /^Readable active title/ })).toBeTruthy();
   });
 
-  it("quarantines an invalid source from its context menu after confirmation", async () => {
+  it("quarantines an unavailable source from its context menu after confirmation", async () => {
     const quarantineSession = vi.fn(async (_workspaceId, input: { sessionRef: string }) => ({
       sessionRef: input.sessionRef,
       quarantineName: `quarantined--${input.sessionRef}`,
@@ -3883,18 +3931,18 @@ describe("desktop workspace and history shell", () => {
 
     const unavailableRow = await screen.findByText("Broken source");
     fireEvent.contextMenu(unavailableRow);
-    await user.click(screen.getByRole("menuitem", { name: "Move invalid source to quarantine" }));
-    expect(screen.getByRole("alertdialog", { name: "Quarantine invalid conversation source?" })).toBeTruthy();
+    await user.click(screen.getByRole("menuitem", { name: "Move unavailable source to quarantine" }));
+    expect(screen.getByRole("alertdialog", { name: "Quarantine unavailable conversation source?" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Move to quarantine" }));
     await waitFor(() => expect(quarantineSession).toHaveBeenCalledWith(workspace.id, {
       sessionRef: "broken.jsonl",
       sourceBytes: 17,
       sourceModifiedAtUnixMs: 1_784_419_200_000,
     }));
-    expect((await screen.findByText("Invalid conversation source moved to quarantine.")).closest(".sg-toast-success")).toBeTruthy();
+    expect((await screen.findByText("Unavailable conversation source moved to quarantine.")).closest(".sg-toast-success")).toBeTruthy();
   });
 
-  it("permanently deletes an invalid source only after explicit confirmation", async () => {
+  it("permanently deletes an unavailable source only after explicit confirmation", async () => {
     const deleteInvalidSessionSource = vi.fn(async (_workspaceId, input: { sessionRef: string }) => ({
       sessionRef: input.sessionRef,
       projectionGeneration: 3,
@@ -3927,9 +3975,9 @@ describe("desktop workspace and history shell", () => {
 
     const unavailableRow = await screen.findByText("Broken source");
     fireEvent.contextMenu(unavailableRow);
-    await user.click(screen.getByRole("menuitem", { name: "Delete invalid source" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete unavailable source" }));
     expect(deleteInvalidSessionSource).not.toHaveBeenCalled();
-    expect(screen.getByRole("alertdialog", { name: "Delete invalid conversation source?" })).toBeTruthy();
+    expect(screen.getByRole("alertdialog", { name: "Delete unavailable conversation source?" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Delete permanently" }));
     await waitFor(() => expect(deleteInvalidSessionSource).toHaveBeenCalledWith(workspace.id, {
       sessionRef: "broken.jsonl",

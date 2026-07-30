@@ -270,7 +270,7 @@ impl DesktopHttpClient {
         .await
     }
 
-    /// Moves one exact invalid source out of the active catalog after server revalidation.
+    /// Moves one exact unavailable source out of the active catalog after server revalidation.
     pub async fn quarantine_session(
         &self,
         request: DesktopSessionQuarantineRequest,
@@ -283,7 +283,7 @@ impl DesktopHttpClient {
         .await
     }
 
-    /// Permanently removes one exact invalid source after native-shell confirmation.
+    /// Permanently removes one exact unavailable source after native-shell confirmation.
     pub async fn delete_invalid_source(
         &self,
         request: DesktopSessionInvalidSourceDeleteRequest,

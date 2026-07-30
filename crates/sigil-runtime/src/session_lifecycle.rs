@@ -95,6 +95,15 @@ pub enum LocalSessionCatalogState {
     Invalid,
 }
 
+impl LocalSessionCatalogState {
+    /// Whether an exact non-ready source may be cleaned up without trusting a durable session
+    /// identity.
+    #[must_use]
+    pub const fn permits_source_cleanup(self) -> bool {
+        !matches!(self, Self::Ready)
+    }
+}
+
 /// Bounded metadata for one direct child of the configured session directory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

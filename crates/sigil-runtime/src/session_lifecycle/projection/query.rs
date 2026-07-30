@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    LocalSessionCatalogState, SessionCatalogProjectionEntry, SessionCatalogProjectionError,
-    SessionCatalogProjectionService, SessionCatalogWorkspaceMetadata, catalog_state_name,
-    decode_entry_row, to_i64, workspace_metadata,
+    LocalSessionCatalogState, SESSION_CATALOG_PROJECTION_REVISION, SessionCatalogProjectionEntry,
+    SessionCatalogProjectionError, SessionCatalogProjectionService,
+    SessionCatalogWorkspaceMetadata, catalog_state_name, decode_entry_row, to_i64,
+    workspace_metadata,
 };
 
 pub const DEFAULT_SESSION_CATALOG_PAGE_SIZE: usize = 50;
@@ -226,6 +227,7 @@ impl SessionCatalogProjectionService {
         };
         let metadata = metadata.unwrap_or(SessionCatalogWorkspaceMetadata {
             generation: 0,
+            projection_revision: SESSION_CATALOG_PROJECTION_REVISION,
             reconciled_at_unix_ms: 0,
             degraded_source_count: 0,
             identity_conflict_count: 0,
