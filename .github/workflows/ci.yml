@@ -353,14 +353,19 @@ jobs:
         include:
           - name: core-tools
             packages: "sigil-kernel sigil-process sigil-tools-builtin sigil-mcp"
+            test-threads: 2
           - name: runtime
             packages: "sigil-runtime"
+            test-threads: 1
           - name: providers
             packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-openai-responses sigil-provider-anthropic sigil-provider-gemini"
+            test-threads: 2
           - name: automation-surfaces
             packages: "sigil-code-intel sigil-http sigil"
+            test-threads: 2
           - name: tui
             packages: "sigil-tui"
+            test-threads: 2
 
     steps:
       - name: Checkout
@@ -389,7 +394,7 @@ jobs:
       - name: cargo llvm-cov --no-report (${{ matrix.name }})
         run: >-
           COVERAGE_NO_REPORT=1 COVERAGE_PACKAGES="${{ matrix.packages }}"
-          ./scripts/coverage.sh
+          ./scripts/coverage.sh -- --test-threads=${{ matrix.test-threads }}
 
       - name: Archive coverage profiles
         run: tar -C target -czf coverage-${{ matrix.name }}.tar.gz llvm-cov-target
