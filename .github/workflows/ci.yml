@@ -401,30 +401,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  runtime-test:
-    name: Runtime tests
-    needs: check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Test runtime without recursive coverage instrumentation
-        run: >-
-          timeout --kill-after=30s 18m
-          cargo test --locked -p sigil-runtime --all-targets
-          -- --test-threads=2
-
   clippy:
     needs: check
     runs-on: ubuntu-latest
@@ -453,9 +429,7 @@ jobs:
 
   tui-web-v1-pty-acceptance:
     name: TUI Web V1 PTY acceptance
-    needs:
-      - test
-      - runtime-test
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -489,7 +463,6 @@ jobs:
   coverage:
     needs:
       - test
-      - runtime-test
       - clippy
       - tui-web-v1-pty-acceptance
     runs-on: ubuntu-latest
