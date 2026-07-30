@@ -19,6 +19,42 @@ SPEC.loader.exec_module(MODULE)
 
 
 class WebPtyAcceptanceTests(unittest.TestCase):
+    def test_semantic_title_request_is_routed_outside_conversation_turns(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate a concise semantic title for a coding-agent "
+                        "conversation. Return only one title."
+                    ),
+                }
+            ],
+            "tools": [],
+        }
+
+        self.assertTrue(MODULE.is_semantic_title_request(payload))
+
+        fixture = MODULE.FixtureState()
+        fixture.record_semantic_title()
+        _, _, _, provider_requests, title_requests = fixture.snapshot()
+        self.assertEqual(provider_requests, [])
+        self.assertEqual(title_requests, 1)
+
+    def test_provider_request_without_tools_is_safe(self) -> None:
+        fixture = MODULE.FixtureState()
+
+        request_index = fixture.record_provider({"messages": []})
+
+        self.assertEqual(request_index, 1)
+        _, _, protocol_errors, provider_requests, title_requests = fixture.snapshot()
+        self.assertEqual(protocol_errors, [])
+        self.assertEqual(
+            provider_requests,
+            [{"has_websearch_tool": False, "has_tool_result": False}],
+        )
+        self.assertEqual(title_requests, 0)
+
     def test_write_config_uses_v2_unauthenticated_loopback_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "sigil.toml"

@@ -33,6 +33,7 @@ ANSI_RE = re.compile(
     rb"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>])"
 )
 FINAL_ANSWER = "Fixture websearch completed."
+SEMANTIC_TITLE = "Fixture websearch validation"
 TOOL_CALL_ID = "fixture-websearch-call"
 MAX_FIXTURE_REQUEST_BYTES = 1024 * 1024
 
@@ -43,8 +44,10 @@ class FixtureState:
     http_methods: list[str] = field(default_factory=list)
     protocol_error_kinds: list[str] = field(default_factory=list)
     provider_requests: list[dict[str, bool]] = field(default_factory=list)
+    semantic_title_requests: int = 0
     tool_call_started: threading.Event = field(default_factory=threading.Event)
     release_tool_call: threading.Event = field(default_factory=threading.Event)
+    semantic_title_completed: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def record_mcp(self, method: str) -> None:
@@ -63,17 +66,19 @@ class FixtureState:
         request = payload if isinstance(payload, dict) else {}
         messages = request.get("messages")
         tools = request.get("tools")
+        message_items = messages if isinstance(messages, list) else []
+        tool_items = tools if isinstance(tools, list) else []
         has_websearch_tool = any(
             isinstance(tool, dict)
             and isinstance(tool.get("function"), dict)
             and tool["function"].get("name") == "websearch"
-            for tool in tools if isinstance(tools, list)
+            for tool in tool_items
         )
         has_tool_result = any(
             isinstance(message, dict)
             and message.get("role") == "tool"
             and message.get("tool_call_id") == TOOL_CALL_ID
-            for message in messages if isinstance(messages, list)
+            for message in message_items
         )
         with self.lock:
             self.provider_requests.append(
@@ -84,14 +89,39 @@ class FixtureState:
             )
             return len(self.provider_requests)
 
-    def snapshot(self) -> tuple[list[str], list[str], list[str], list[dict[str, bool]]]:
+    def record_semantic_title(self) -> None:
+        with self.lock:
+            self.semantic_title_requests += 1
+
+    def snapshot(
+        self,
+    ) -> tuple[list[str], list[str], list[str], list[dict[str, bool]], int]:
         with self.lock:
             return (
                 list(self.mcp_methods),
                 list(self.http_methods),
                 list(self.protocol_error_kinds),
                 list(self.provider_requests),
+                self.semantic_title_requests,
             )
+
+
+def is_semantic_title_request(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    tools = payload.get("tools")
+    if isinstance(tools, list) and tools:
+        return False
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), str)
+        and "Generate a concise semantic title for a coding-agent conversation"
+        in message["content"]
+        for message in messages
+    )
 
 
 class FixtureServer(ThreadingHTTPServer):
@@ -162,6 +192,20 @@ class FixtureHandler(BaseHTTPRequestHandler):
             total += size
 
     def _handle_provider(self, payload: object) -> None:
+        if is_semantic_title_request(payload):
+            self.fixture.record_semantic_title()
+            self._send_sse(
+                {
+                    "choices": [
+                        {
+                            "delta": {"content": SEMANTIC_TITLE},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            )
+            self.fixture.semantic_title_completed.set()
+            return
         request_index = self.fixture.record_provider(payload)
         if request_index == 1:
             self._send_sse(
@@ -560,7 +604,13 @@ def assert_acceptance(
         raise RuntimeError("final provider answer was not rendered by the TUI")
     if "websearch" not in rendered.lower():
         raise RuntimeError("websearch tool card was not rendered by the TUI")
-    methods, http_methods, protocol_error_kinds, provider_requests = fixture.snapshot()
+    (
+        methods,
+        http_methods,
+        protocol_error_kinds,
+        provider_requests,
+        semantic_title_requests,
+    ) = fixture.snapshot()
     assert_subsequence(
         methods,
         ["initialize", "notifications/initialized", "tools/list", "tools/call"],
@@ -575,6 +625,11 @@ def assert_acceptance(
         raise RuntimeError("initial provider request did not expose websearch")
     if not any(request["has_tool_result"] for request in provider_requests[1:]):
         raise RuntimeError("no continuation provider request contained the websearch tool result")
+    if semantic_title_requests != 1:
+        raise RuntimeError(
+            "expected one semantic title provider request, observed "
+            f"{semantic_title_requests}"
+        )
     if audit.session_path is None:
         raise RuntimeError("TUI did not create a session JSONL")
     if audit.disclosure_count == 0:
@@ -598,19 +653,26 @@ def write_report(
     disclosure_visible_before_tool_body: bool,
     notes: list[str],
 ) -> None:
-    methods, http_methods, protocol_error_kinds, provider_requests = fixture.snapshot()
+    (
+        methods,
+        http_methods,
+        protocol_error_kinds,
+        provider_requests,
+        semantic_title_requests,
+    ) = fixture.snapshot()
     lines = [
         "# Sigil Web V1 Real-PTY Acceptance",
         "",
         f"Status: `{status}`",
         f"Binary: `{binary}`",
         f"Raw PTY log: `{raw_log_path}`",
-        f"Session: `{audit.session_path or '-'}'",
+        f"Session: `{audit.session_path or '-'}`",
         "",
         "## Checks",
         "",
         f"- Network disclosure visible before fixture tool body: `{disclosure_visible_before_tool_body}`",
         f"- Provider request count: `{len(provider_requests)}`",
+        f"- Semantic title request count: `{semantic_title_requests}`",
         f"- Fixture HTTP verbs: `{', '.join(http_methods) or '-'}`",
         f"- Fixture protocol errors: `{', '.join(protocol_error_kinds) or '-'}`",
         f"- MCP methods: `{', '.join(methods) or '-'}`",
@@ -713,6 +775,14 @@ def main() -> int:
             min(30.0, args.timeout),
             "final provider answer",
         )
+        semantic_title_deadline = time.monotonic() + min(10.0, args.timeout)
+        while (
+            not fixture.semantic_title_completed.is_set()
+            and time.monotonic() < semantic_title_deadline
+        ):
+            runner.read_available(0.1)
+        if not fixture.semantic_title_completed.is_set():
+            raise TimeoutError("timed out waiting for semantic title provider request")
         audit = inspect_session(state_dir)
         assert_acceptance(rendered, fixture, audit)
         status = "passed"
