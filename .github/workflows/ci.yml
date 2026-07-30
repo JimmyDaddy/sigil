@@ -374,6 +374,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-${{ matrix.name }}
 
       - name: Install cargo-llvm-cov
         run: |
@@ -382,10 +384,12 @@ jobs:
           fi
 
       - name: Clean coverage artifacts
-        run: cargo llvm-cov clean --workspace
+        run: cargo llvm-cov clean --profraw-only
 
       - name: cargo llvm-cov --no-report (${{ matrix.name }})
-        run: COVERAGE_NO_REPORT=1 COVERAGE_PACKAGES="${{ matrix.packages }}" ./scripts/coverage.sh
+        run: >-
+          COVERAGE_NO_REPORT=1 COVERAGE_PACKAGES="${{ matrix.packages }}"
+          ./scripts/coverage.sh
 
       - name: Archive coverage profiles
         run: tar -C target -czf coverage-${{ matrix.name }}.tar.gz llvm-cov-target
