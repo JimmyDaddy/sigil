@@ -151,9 +151,9 @@ type MaterializedIntegrationLane = (
 /// Materializes and executes independent integration lanes concurrently.
 ///
 /// Worktree creation is intentionally completed before lane futures are launched so every child is
-/// bound to the exact same parent snapshot and Git worktree administration stays serialized. Patch
-/// application, structural verification, commit creation, and private-ref CAS then overlap across
-/// lanes. Results return in deterministic lane order.
+/// bound to the exact same parent snapshot. Git common-dir administration is serialized separately
+/// for add/remove/prune, while patch application, structural verification, commit creation, and
+/// private-ref CAS overlap across lanes. Results return in deterministic lane order.
 ///
 /// # Errors
 ///

@@ -1397,6 +1397,9 @@ rollout gate。
     child verification 误当成 parent verification。
   - materialization receipt 不可 clone；cleanup 按值消费，只删除 exact owned Git worktree，
     不使用任意路径递归删除。
+  - 同一 Git common directory 下的 `worktree add/remove/prune` 通过 runtime-private
+    cross-process lease 串行管理，避免并行 lane 收尾竞争共享 `.git/worktrees` inventory；
+    lane 的 apply、verification、commit 与 private-ref CAS 仍保持并行。
 - O6b2a（已完成）：append-only workspace ownership 与 restart inventory。
   - `IsolatedWorkspacePrepared` 在 physical materialization 前冻结完整 binding；
     `IsolatedWorkspaceCleanupRecorded` 记录 removed/already-missing/retained/failed。

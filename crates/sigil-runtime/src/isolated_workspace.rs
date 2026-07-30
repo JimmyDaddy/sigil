@@ -7,12 +7,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    fs::{self, File, OpenOptions},
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
@@ -31,6 +34,9 @@ use tokio::{
 };
 
 const ISOLATED_WORKTREE_ROOT: &str = "sigil-isolated-worktrees";
+const GIT_WORKTREE_ADMIN_LOCK: &str = "sigil-worktree-admin.lock";
+const GIT_WORKTREE_ADMIN_LOCK_TIMEOUT: Duration = Duration::from_secs(35);
+const GIT_WORKTREE_ADMIN_LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const GIT_ERROR_OUTPUT_LIMIT: usize = 8 * 1024;
@@ -309,6 +315,10 @@ pub struct GitWorktreeCleanupRequest {
     pub isolated_workspace_id: String,
 }
 
+pub(crate) struct GitWorktreeAdminLease {
+    _file: File,
+}
+
 /// Bounded startup cleanup summary. Individual failures remain durable inventory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IsolatedWorkspaceCleanupReconciliation {
@@ -557,6 +567,7 @@ async fn materialize_git_worktree_binding(
     frozen: Option<&FrozenGitWorktreeBase>,
 ) -> Result<MaterializedGitWorktree> {
     let git_common_dir = resolve_git_common_dir(&parent_workspace_root).await?;
+    let admin_lease = acquire_git_worktree_admin_lease(&git_common_dir).await?;
     let isolation_root = prepare_isolation_root(&git_common_dir).await?;
     let workspace_root = isolation_root.join(&isolated_workspace_id);
     ensure_confined_destination(&isolation_root, &workspace_root, &isolated_workspace_id)?;
@@ -578,17 +589,28 @@ async fn materialize_git_worktree_binding(
         ],
     )
     .await;
+    drop(admin_lease);
     if let Err(error) = add_result {
-        let cleanup_error =
-            cleanup_failed_materialization(&parent_workspace_root, &workspace_root).await;
+        let cleanup_error = cleanup_failed_materialization(
+            &parent_workspace_root,
+            &isolation_root,
+            &workspace_root,
+            &isolated_workspace_id,
+        )
+        .await;
         return Err(with_cleanup_context(error, cleanup_error));
     }
 
     let canonical_workspace_root = match canonical_directory(&workspace_root).await {
         Ok(path) => path,
         Err(error) => {
-            let cleanup_error =
-                cleanup_failed_materialization(&parent_workspace_root, &workspace_root).await;
+            let cleanup_error = cleanup_failed_materialization(
+                &parent_workspace_root,
+                &isolation_root,
+                &workspace_root,
+                &isolated_workspace_id,
+            )
+            .await;
             return Err(with_cleanup_context(error, cleanup_error));
         }
     };
@@ -597,15 +619,25 @@ async fn materialize_git_worktree_binding(
         &canonical_workspace_root,
         &isolated_workspace_id,
     ) {
-        let cleanup_error =
-            cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root).await;
+        let cleanup_error = cleanup_failed_materialization(
+            &parent_workspace_root,
+            &isolation_root,
+            &canonical_workspace_root,
+            &isolated_workspace_id,
+        )
+        .await;
         return Err(with_cleanup_context(error, cleanup_error));
     }
     if let Some(frozen) = frozen
         && let Err(error) = apply_frozen_overlay(&canonical_workspace_root, frozen).await
     {
-        let cleanup_error =
-            cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root).await;
+        let cleanup_error = cleanup_failed_materialization(
+            &parent_workspace_root,
+            &isolation_root,
+            &canonical_workspace_root,
+            &isolated_workspace_id,
+        )
+        .await;
         return Err(with_cleanup_context(error, cleanup_error));
     }
     let child_snapshot_id =
@@ -614,7 +646,9 @@ async fn materialize_git_worktree_binding(
             Err(error) => {
                 let cleanup_error = cleanup_failed_materialization(
                     &parent_workspace_root,
+                    &isolation_root,
                     &canonical_workspace_root,
+                    &isolated_workspace_id,
                 )
                 .await;
                 return Err(with_cleanup_context(error, cleanup_error));
@@ -623,17 +657,26 @@ async fn materialize_git_worktree_binding(
     let baseline_tree = match capture_materialized_baseline_tree(&canonical_workspace_root).await {
         Ok(tree) => tree,
         Err(error) => {
-            let cleanup_error =
-                cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root)
-                    .await;
+            let cleanup_error = cleanup_failed_materialization(
+                &parent_workspace_root,
+                &isolation_root,
+                &canonical_workspace_root,
+                &isolated_workspace_id,
+            )
+            .await;
             return Err(with_cleanup_context(error, cleanup_error));
         }
     };
     if let Err(error) =
         validate_frozen_parent(&parent_workspace_root, &base_commit, &parent_snapshot).await
     {
-        let cleanup_error =
-            cleanup_failed_materialization(&parent_workspace_root, &canonical_workspace_root).await;
+        let cleanup_error = cleanup_failed_materialization(
+            &parent_workspace_root,
+            &isolation_root,
+            &canonical_workspace_root,
+            &isolated_workspace_id,
+        )
+        .await;
         return Err(with_cleanup_context(error, cleanup_error));
     }
 
@@ -671,15 +714,6 @@ pub async fn cleanup_git_worktree(
     validate_git_repository_root(&parent_workspace_root).await?;
     let git_common_dir = resolve_git_common_dir(&parent_workspace_root).await?;
     let isolation_root = git_common_dir.join(ISOLATED_WORKTREE_ROOT);
-    let Some(isolation_root) = existing_isolation_root(&git_common_dir, &isolation_root).await?
-    else {
-        return Ok(GitWorktreeCleanupReceipt {
-            isolated_workspace_id: request.isolated_workspace_id.clone(),
-            workspace_root: isolation_root.join(&request.isolated_workspace_id),
-            isolation_root_removed: true,
-            status: IsolatedWorkspaceCleanupStatus::AlreadyMissing,
-        });
-    };
     let workspace_root = isolation_root.join(&request.isolated_workspace_id);
     cleanup_owned_git_worktree(
         &parent_workspace_root,
@@ -1705,6 +1739,99 @@ async fn resolve_git_common_dir(parent_workspace_root: &Path) -> Result<PathBuf>
         .context("failed to canonicalize Git common directory")
 }
 
+pub(crate) async fn acquire_git_worktree_admin_lease(
+    git_common_dir: &Path,
+) -> Result<GitWorktreeAdminLease> {
+    let lock_path = git_common_dir.join(GIT_WORKTREE_ADMIN_LOCK);
+    tokio::task::spawn_blocking(move || {
+        match fs::symlink_metadata(&lock_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => bail!(
+                "Git worktree administration lock is not a plain file: {}",
+                lock_path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect Git worktree administration lock {}",
+                        lock_path.display()
+                    )
+                });
+            }
+        }
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&lock_path).with_context(|| {
+            format!(
+                "failed to open Git worktree administration lock {}",
+                lock_path.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let metadata = file.metadata()?;
+            if metadata.nlink() != 1 {
+                bail!(
+                    "Git worktree administration lock has unexpected hard links: {}",
+                    lock_path.display()
+                );
+            }
+            if metadata.mode() & 0o777 != 0o600 {
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .with_context(|| {
+                        format!(
+                            "failed to secure Git worktree administration lock {}",
+                            lock_path.display()
+                        )
+                    })?;
+            }
+        }
+        let started = Instant::now();
+        loop {
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => break,
+                Err(error)
+                    if git_worktree_admin_lock_is_contended(&error)
+                        && started.elapsed() < GIT_WORKTREE_ADMIN_LOCK_TIMEOUT =>
+                {
+                    thread::sleep(GIT_WORKTREE_ADMIN_LOCK_RETRY_DELAY);
+                }
+                Err(error) if git_worktree_admin_lock_is_contended(&error) => {
+                    bail!(
+                        "timed out acquiring Git worktree administration lock {}",
+                        lock_path.display()
+                    );
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to acquire Git worktree administration lock {}",
+                            lock_path.display()
+                        )
+                    });
+                }
+            }
+        }
+        Ok(GitWorktreeAdminLease { _file: file })
+    })
+    .await
+    .context("Git worktree administration lock task failed")?
+}
+
+fn git_worktree_admin_lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 async fn prepare_isolation_root(git_common_dir: &Path) -> Result<PathBuf> {
     let isolation_root = git_common_dir.join(ISOLATED_WORKTREE_ROOT);
     match tokio::fs::symlink_metadata(&isolation_root).await {
@@ -1777,8 +1904,29 @@ async fn cleanup_owned_git_worktree(
     workspace_root: &Path,
     isolated_workspace_id: &str,
 ) -> Result<GitWorktreeCleanupReceipt> {
-    ensure_confined_destination(isolation_root, workspace_root, isolated_workspace_id)?;
-    let status = match tokio::fs::symlink_metadata(workspace_root).await {
+    let git_common_dir = resolve_git_common_dir(parent_workspace_root).await?;
+    let expected_isolation_root = git_common_dir.join(ISOLATED_WORKTREE_ROOT);
+    if isolation_root != expected_isolation_root {
+        bail!("isolated Git worktree cleanup root no longer matches its Git common directory");
+    }
+    let expected_workspace_root = expected_isolation_root.join(isolated_workspace_id);
+    if workspace_root != expected_workspace_root {
+        bail!("isolated Git worktree cleanup destination no longer matches its durable identity");
+    }
+    let _admin_lease = acquire_git_worktree_admin_lease(&git_common_dir).await?;
+    let Some(isolation_root) =
+        existing_isolation_root(&git_common_dir, &expected_isolation_root).await?
+    else {
+        return Ok(GitWorktreeCleanupReceipt {
+            isolated_workspace_id: isolated_workspace_id.to_owned(),
+            workspace_root: expected_workspace_root,
+            isolation_root_removed: true,
+            status: IsolatedWorkspaceCleanupStatus::AlreadyMissing,
+        });
+    };
+    let workspace_root = isolation_root.join(isolated_workspace_id);
+    ensure_confined_destination(&isolation_root, &workspace_root, isolated_workspace_id)?;
+    let status = match tokio::fs::symlink_metadata(&workspace_root).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 bail!(
@@ -1786,9 +1934,9 @@ async fn cleanup_owned_git_worktree(
                     workspace_root.display()
                 );
             }
-            let canonical_workspace_root = canonical_directory(workspace_root).await?;
+            let canonical_workspace_root = canonical_directory(&workspace_root).await?;
             ensure_confined_destination(
-                isolation_root,
+                &isolation_root,
                 &canonical_workspace_root,
                 isolated_workspace_id,
             )?;
@@ -1831,7 +1979,7 @@ async fn cleanup_owned_git_worktree(
         }
     };
 
-    let isolation_root_removed = match tokio::fs::remove_dir(isolation_root).await {
+    let isolation_root_removed = match tokio::fs::remove_dir(&isolation_root).await {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => false,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -2091,16 +2239,15 @@ fn ensure_confined_destination(
 
 async fn cleanup_failed_materialization(
     parent_workspace_root: &Path,
+    isolation_root: &Path,
     workspace_root: &Path,
+    isolated_workspace_id: &str,
 ) -> Result<()> {
-    run_git(
+    cleanup_owned_git_worktree(
         parent_workspace_root,
-        [
-            OsString::from("worktree"),
-            OsString::from("remove"),
-            OsString::from("--force"),
-            workspace_root.as_os_str().to_owned(),
-        ],
+        isolation_root,
+        workspace_root,
+        isolated_workspace_id,
     )
     .await
     .map(|_| ())

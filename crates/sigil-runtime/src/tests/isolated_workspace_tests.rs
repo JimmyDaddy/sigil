@@ -17,9 +17,9 @@ use tempfile::TempDir;
 
 use crate::isolated_workspace::{
     FrozenGitWorktreeBaseRestoreRequest, GitWorktreeBaseFreezeRequest,
-    GitWorktreeMaterializationRequest, freeze_git_worktree_base, materialize_git_worktree,
-    materialize_git_worktree_from_frozen_base, reconcile_isolated_workspace_cleanup,
-    restore_frozen_git_worktree_base,
+    GitWorktreeMaterializationRequest, acquire_git_worktree_admin_lease, freeze_git_worktree_base,
+    materialize_git_worktree, materialize_git_worktree_from_frozen_base,
+    reconcile_isolated_workspace_cleanup, restore_frozen_git_worktree_base,
 };
 
 #[tokio::test]
@@ -569,6 +569,59 @@ async fn startup_reconciliation_removes_durable_created_worktree_once() -> Resul
 
     let second = reconcile_isolated_workspace_cleanup(&mut session, repository.root()).await?;
     assert_eq!(second.inspected, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_git_worktree_cleanup_serializes_common_dir_administration() -> Result<()> {
+    let repository = TestRepository::new()?;
+    let base_snapshot_id = task_snapshot_id(repository.root())?;
+    let first = materialize_git_worktree(GitWorktreeMaterializationRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        isolated_workspace_id: "task-1-step-first".to_owned(),
+        base_snapshot_id: base_snapshot_id.clone(),
+    })
+    .await?;
+    let second = materialize_git_worktree(GitWorktreeMaterializationRequest {
+        parent_workspace_root: repository.root().to_path_buf(),
+        isolated_workspace_id: "task-1-step-second".to_owned(),
+        base_snapshot_id,
+    })
+    .await?;
+    let git_common_dir = fs::canonicalize(repository.root().join(".git"))?;
+    let admin_lease = acquire_git_worktree_admin_lease(&git_common_dir).await?;
+
+    let first_cleanup = tokio::spawn(first.cleanup());
+    let second_cleanup = tokio::spawn(second.cleanup());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!first_cleanup.is_finished());
+    assert!(!second_cleanup.is_finished());
+    drop(admin_lease);
+
+    let (first_receipt, second_receipt) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let first_receipt = first_cleanup.await??;
+            let second_receipt = second_cleanup.await??;
+            Ok::<_, anyhow::Error>((first_receipt, second_receipt))
+        })
+        .await??;
+    assert_eq!(
+        first_receipt.status,
+        IsolatedWorkspaceCleanupStatus::Removed
+    );
+    assert_eq!(
+        second_receipt.status,
+        IsolatedWorkspaceCleanupStatus::Removed
+    );
+    let worktree_list = repository.git(&["worktree", "list", "--porcelain"])?;
+    assert_eq!(
+        worktree_list
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1,
+        "{worktree_list}"
+    );
     Ok(())
 }
 
