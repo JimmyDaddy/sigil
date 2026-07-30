@@ -8,8 +8,8 @@ use sigil_kernel::{
     ApprovalMode, EgressBindingOrigin, EgressDataCategory, EgressDisclosurePresenter,
     EgressNetworkRoute, McpRemoteClientCapability, McpServerConfig, NetworkEffect, NetworkPolicy,
     RootConfig, SecretString, Tool, ToolAccess, ToolCategory, ToolContext, ToolEgressAudit,
-    ToolErrorKind, ToolLifecycleOwner, ToolOperation, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudgetLimits,
+    ToolErrorKind, ToolLifecycleOwner, ToolMutationTracking, ToolOperation, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudgetLimits,
     safe_persistence_text,
 };
 use sigil_mcp::{
@@ -522,6 +522,13 @@ impl Tool for RemoteMcpTool {
             network_effect: Some(NetworkEffect::Read),
             preview: ToolPreviewCapability::None,
         }
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        // A Streamable HTTP server has no local process or filesystem capability. Its external
+        // effects remain covered by network approval and egress audit, while treating it like a
+        // local stdio MCP tool would require a fictitious workspace mutation profile.
+        ToolMutationTracking::None
     }
 
     fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {

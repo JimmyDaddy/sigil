@@ -3144,6 +3144,20 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
 
     assert_eq!(added, 1);
     assert!(registry.spec_for("mcp__remote_eager__echo").is_some());
+    let store = JsonlSessionStore::new(temp.path().join("remote-execution-session.jsonl"))?;
+    let context =
+        ToolContext::new(temp.path(), 5).with_mutation_recorder(MutationEventRecorder::new(store));
+    let remote_call = ToolCall {
+        id: "remote-eager-echo".to_owned(),
+        name: "mcp__remote_eager__echo".to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    assert!(
+        registry
+            .execution_mutation_profile(&context, &remote_call)?
+            .is_none(),
+        "remote HTTP MCP tools cannot mutate the local workspace"
+    );
     let requests = server.await??;
     assert_eq!(requests.len(), 3);
     assert!(requests[0].contains("\"method\":\"initialize\""));

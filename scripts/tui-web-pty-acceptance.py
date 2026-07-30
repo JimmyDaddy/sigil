@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise Web V1 through the production TUI binary in a deterministic PTY.
 
-The fixture is a real loopback HTTP peer for the DeepSeek-compatible SSE and
+The fixture is a real loopback HTTP peer for the OpenAI-compatible SSE and
 Streamable HTTP MCP protocols. Sigil itself runs without test-only flags or
 code paths, so this verifies the assembled provider, tool, egress, session,
 and rendered-TUI contracts without contacting a real provider or the network.
@@ -468,8 +468,10 @@ def looks_like_main_tui_ready(text: str) -> bool:
 def write_config(path: Path, port: int) -> None:
     endpoint = f"http://127.0.0.1:{port}"
     path.write_text(
-        f'''[agent]
-provider = "deepseek"
+        f'''config_version = 2
+
+[agent]
+connection = "web-fixture"
 model = "fixture-model"
 
 [permission]
@@ -487,12 +489,12 @@ allowed_ports = [80]
 server = "fixture-search"
 tool = "search"
 
-[providers.deepseek]
+[connections.web-fixture]
+label = "Web fixture"
+provider = "custom"
+protocol = "chat_completions"
 base_url = "{endpoint}/provider"
-beta_base_url = "{endpoint}/provider"
-anthropic_base_url = "{endpoint}/provider"
-api_key = "fixture-key"
-strict_tools_mode = "off"
+credential = {{ source = "none" }}
 
 [[mcp_servers]]
 name = "fixture-search"

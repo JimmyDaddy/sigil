@@ -33,6 +33,7 @@ on:
       - "scripts/tui-attention-signals-pty-acceptance.py"
       - "scripts/tui-feedback-pty-acceptance.py"
       - "scripts/tui-web-pty-acceptance.py"
+      - "scripts/test-tui-web-pty-acceptance.py"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
@@ -63,6 +64,7 @@ on:
       - "scripts/tui-attention-signals-pty-acceptance.py"
       - "scripts/tui-feedback-pty-acceptance.py"
       - "scripts/tui-web-pty-acceptance.py"
+      - "scripts/test-tui-web-pty-acceptance.py"
 
 permissions:
   contents: read
@@ -92,6 +94,7 @@ jobs:
           python3 scripts/test-run-evals.py
           python3 scripts/test-tui-stateful-pty-acceptance.py
           python3 scripts/test-tui-orchestration-pty-acceptance.py
+          python3 scripts/test-tui-web-pty-acceptance.py
 
       - name: Enforce physical Rust test layout
         run: |
