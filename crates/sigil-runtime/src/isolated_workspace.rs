@@ -2166,17 +2166,29 @@ async fn run_git_with_limit(
     stdout_limit: usize,
 ) -> Result<Vec<u8>> {
     let args = args.into_iter().collect::<Vec<_>>();
+    let output = collect_git_output_with_limit(current_dir, &args, stdout_limit).await?;
+    if !output.status.success() {
+        return Err(git_status_error(&args, &output));
+    }
+    Ok(output.stdout.bytes)
+}
+
+async fn collect_git_output_with_limit(
+    current_dir: &Path,
+    args: &[OsString],
+    stdout_limit: usize,
+) -> Result<BoundedGitOutput> {
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(current_dir)
-        .args(&args)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command
         .spawn()
-        .with_context(|| format!("failed to start Git command {}", display_git_args(&args)))?;
+        .with_context(|| format!("failed to start Git command {}", display_git_args(args)))?;
     let stdout = child
         .stdout
         .take()
@@ -2204,30 +2216,31 @@ async fn run_git_with_limit(
             GIT_COMMAND_TIMEOUT.as_secs()
         )
     })?
-    .with_context(|| format!("failed to collect Git command {}", display_git_args(&args)))?;
+    .with_context(|| format!("failed to collect Git command {}", display_git_args(args)))?;
     if output.stdout.truncated {
         bail!(
             "Git command {} exceeded the {} byte stdout limit",
-            display_git_args(&args),
+            display_git_args(args),
             stdout_limit
         );
     }
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr.bytes);
-        let suffix = if output.stderr.truncated {
-            " [truncated]"
-        } else {
-            ""
-        };
-        bail!(
-            "Git command {} failed with status {}: {}{}",
-            display_git_args(&args),
-            output.status,
-            stderr.trim(),
-            suffix
-        );
-    }
-    Ok(output.stdout.bytes)
+    Ok(output)
+}
+
+fn git_status_error(args: &[OsString], output: &BoundedGitOutput) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    let suffix = if output.stderr.truncated {
+        " [truncated]"
+    } else {
+        ""
+    };
+    anyhow!(
+        "Git command {} failed with status {}: {}{}",
+        display_git_args(args),
+        output.status,
+        stderr.trim(),
+        suffix
+    )
 }
 
 pub(crate) async fn run_git_bytes(
@@ -2236,6 +2249,23 @@ pub(crate) async fn run_git_bytes(
     stdout_limit: usize,
 ) -> Result<Vec<u8>> {
     run_git_with_limit(current_dir, args, stdout_limit).await
+}
+
+pub(crate) async fn run_git_optional_bytes(
+    current_dir: &Path,
+    args: impl IntoIterator<Item = OsString>,
+    stdout_limit: usize,
+    missing_exit_code: i32,
+) -> Result<Option<Vec<u8>>> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let output = collect_git_output_with_limit(current_dir, &args, stdout_limit).await?;
+    if output.status.success() {
+        return Ok(Some(output.stdout.bytes));
+    }
+    if output.status.code() == Some(missing_exit_code) {
+        return Ok(None);
+    }
+    Err(git_status_error(&args, &output))
 }
 
 pub(crate) async fn run_git_bytes_with_stdin(

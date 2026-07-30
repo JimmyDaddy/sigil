@@ -75,11 +75,11 @@ async fn git_worktree_materialization_is_snapshot_bound_confined_and_consumably_
     assert!(cleanup.isolation_root_removed);
     assert_eq!(cleanup.status, IsolatedWorkspaceCleanupStatus::Removed);
     assert!(!cleanup.workspace_root.exists());
-    assert!(
-        repository
-            .git(&["worktree", "list", "--porcelain"])?
-            .contains(repository.root_text())
-    );
+    let worktree_list = repository
+        .git(&["worktree", "list", "--porcelain"])?
+        .replace('\\', "/");
+    let repository_root = repository.root_text().replace('\\', "/");
+    assert!(worktree_list.contains(&repository_root));
     Ok(())
 }
 

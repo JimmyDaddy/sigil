@@ -33,7 +33,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use crate::isolated_workspace::{
     FrozenGitWorktreeBase, GitWorktreeMaterializationRequest, MaterializedGitWorktree,
     materialize_git_worktree, materialize_git_worktree_from_frozen_base, run_git_bytes,
-    run_git_bytes_with_stdin,
+    run_git_bytes_with_stdin, run_git_optional_bytes,
 };
 
 mod parent_verification;
@@ -1356,13 +1356,12 @@ async fn git_optional_text(
     root: &std::path::Path,
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<Option<String>> {
-    match run_git_bytes(root, args, MAX_INTEGRATION_GIT_OUTPUT_BYTES).await {
-        Ok(output) => {
+    match run_git_optional_bytes(root, args, MAX_INTEGRATION_GIT_OUTPUT_BYTES, 1).await? {
+        Some(output) => {
             let text = String::from_utf8(output).context("Git output is not valid UTF-8")?;
             Ok(Some(text.trim().to_owned()))
         }
-        Err(error) if format!("{error:#}").contains("status exit status: 1") => Ok(None),
-        Err(error) => Err(error),
+        None => Ok(None),
     }
 }
 

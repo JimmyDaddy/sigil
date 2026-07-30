@@ -1280,6 +1280,13 @@ fn validate_regular_projection_file(
         fs::symlink_metadata(path).map_err(|error| SessionCatalogProjectionError::Recovery {
             message: format!("failed to inspect {label}: {error}"),
         })?;
+    validate_regular_projection_metadata(&metadata, label)
+}
+
+fn validate_regular_projection_metadata(
+    metadata: &fs::Metadata,
+    label: &'static str,
+) -> Result<(), SessionCatalogProjectionError> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(SessionCatalogProjectionError::UnsafePath {
             message: format!("{label} must be a regular file and not a symlink"),
@@ -1293,8 +1300,11 @@ fn validate_optional_regular_projection_file(
     label: &'static str,
 ) -> Result<bool, SessionCatalogProjectionError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => {
-            validate_regular_projection_file(path, label)?;
+        Ok(metadata) => {
+            // SQLite may delete a WAL/SHM sidecar as the last concurrent connection closes.
+            // Validate the metadata from this single observation instead of re-statting a path
+            // that is explicitly allowed to disappear.
+            validate_regular_projection_metadata(&metadata, label)?;
             Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
