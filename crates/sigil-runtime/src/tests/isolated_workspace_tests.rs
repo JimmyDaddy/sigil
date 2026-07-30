@@ -75,11 +75,15 @@ async fn git_worktree_materialization_is_snapshot_bound_confined_and_consumably_
     assert!(cleanup.isolation_root_removed);
     assert_eq!(cleanup.status, IsolatedWorkspaceCleanupStatus::Removed);
     assert!(!cleanup.workspace_root.exists());
-    let worktree_list = repository
-        .git(&["worktree", "list", "--porcelain"])?
-        .replace('\\', "/");
-    let repository_root = repository.root_text().replace('\\', "/");
-    assert!(worktree_list.contains(&repository_root));
+    let worktree_list = repository.git(&["worktree", "list", "--porcelain"])?;
+    assert_eq!(
+        worktree_list
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1,
+        "{worktree_list}"
+    );
     Ok(())
 }
 
@@ -686,12 +690,6 @@ impl TestRepository {
 
     fn root(&self) -> &Path {
         &self.root
-    }
-
-    fn root_text(&self) -> &str {
-        self.root
-            .to_str()
-            .expect("temporary repository path should be UTF-8")
     }
 
     fn head(&self) -> Result<String> {
