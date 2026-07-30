@@ -32,8 +32,8 @@ use super::{
     StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
     cli_application_run_request, drain_provider_stream, load_serve_root_config,
     render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
-    render_serve_startup_json, render_serve_startup_plan, render_version,
-    run_machine_command_with_cancellation, run_machine_command_with_writer,
+    render_serve_startup_json, render_serve_startup_plan, render_update_apply, render_update_check,
+    render_version, run_machine_command_with_cancellation, run_machine_command_with_writer,
 };
 
 fn boxed_chunk_stream(
@@ -516,7 +516,7 @@ fn run_input_with_repo_context_attaches_repository_candidates() -> Result<()> {
     let workspace = unique_temp_workspace("sigil-cli-context")?;
     fs::write(
         workspace.join("README.md"),
-        "Sigil is a TUI-first Rust coding agent.",
+        "Sigil is a Rust coding agent with Desktop and TUI experiences.",
     )?;
 
     let input = application_run_input(&workspace, "summarize README.md".to_owned());
@@ -1170,22 +1170,28 @@ fn render_version_includes_build_metadata() {
         git_hash: "abc123def456",
         target: "test-target",
         profile: "release",
+        distribution: "github-release",
     });
 
     assert!(rendered.contains("sigil 1.2.3"));
     assert!(rendered.contains("commit: abc123def456"));
     assert!(rendered.contains("target: test-target"));
     assert!(rendered.contains("profile: release"));
+    assert!(rendered.contains("distribution: github-release"));
 }
 
 #[test]
 fn build_info_current_uses_compile_time_metadata() {
     let info = BuildInfo::current();
+    let update = info.update_metadata();
 
     assert!(!info.version.is_empty());
     assert!(!info.git_hash.is_empty());
     assert!(!info.target.is_empty());
     assert!(!info.profile.is_empty());
+    assert!(!info.distribution.is_empty());
+    assert_eq!(update.version, info.version);
+    assert_eq!(update.distribution, info.distribution);
 }
 
 #[test]
@@ -1195,6 +1201,7 @@ fn build_info_projects_exactly_into_tui_support_metadata() {
         git_hash: "abc123",
         target: "test-target",
         profile: "release",
+        distribution: "github-release",
     }
     .into();
 
@@ -1202,6 +1209,101 @@ fn build_info_projects_exactly_into_tui_support_metadata() {
     assert_eq!(support.commit, "abc123");
     assert_eq!(support.target, "test-target");
     assert_eq!(support.profile, "release");
+}
+
+#[test]
+fn cli_parses_update_check_and_explicit_apply() -> Result<()> {
+    let check = Cli::try_parse_from([
+        "sigil",
+        "update",
+        "check",
+        "--channel",
+        "beta",
+        "--refresh",
+        "--output",
+        "json",
+    ])?;
+    assert!(matches!(
+        check.command,
+        Some(Commands::Update {
+            command: super::UpdateCommand::Check {
+                channel: super::UpdateChannelArg::Beta,
+                refresh: true,
+                output: super::UpdateOutput::Json,
+            }
+        })
+    ));
+
+    let apply = Cli::try_parse_from(["sigil", "update", "apply", "--yes"])?;
+    assert!(matches!(
+        apply.command,
+        Some(Commands::Update {
+            command: super::UpdateCommand::Apply { yes: true, .. }
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn update_text_output_explains_managed_and_installed_results() {
+    let check = sigil_updater::UpdateCheckOutcome {
+        current_version: "1.0.0-beta.1".to_owned(),
+        target: "aarch64-apple-darwin".to_owned(),
+        channel: sigil_updater::UpdateChannel::Current,
+        install_source: sigil_updater::InstallSource::Npm,
+        checked_at_unix_seconds: 1,
+        cached: false,
+        candidate: Some(sigil_updater::UpdateCandidate {
+            version: "1.0.0-beta.2".to_owned(),
+            tag_name: "v1.0.0-beta.2".to_owned(),
+            prerelease: true,
+            asset_name: None,
+            security: sigil_updater::ReleaseSecurity {
+                immutable: true,
+                sha256: Some("a".repeat(64)),
+                eligible_for_apply: true,
+                blocking_reason: None,
+            },
+        }),
+        managed_update_command: Some("npm install -g @sigil-ai/sigil@beta".to_owned()),
+    };
+
+    assert!(render_update_check(&check).contains("npm install -g @sigil-ai/sigil@beta"));
+    assert!(
+        render_update_apply(&sigil_updater::UpdateApplyOutcome::Installed {
+            version: "1.0.0-beta.2".to_owned(),
+        })
+        .contains("Restart Sigil")
+    );
+}
+
+#[test]
+fn update_text_output_does_not_offer_in_place_apply_to_source_builds() {
+    let check = sigil_updater::UpdateCheckOutcome {
+        current_version: "1.0.0".to_owned(),
+        target: "aarch64-apple-darwin".to_owned(),
+        channel: sigil_updater::UpdateChannel::Stable,
+        install_source: sigil_updater::InstallSource::Source,
+        checked_at_unix_seconds: 1,
+        cached: false,
+        candidate: Some(sigil_updater::UpdateCandidate {
+            version: "1.0.1".to_owned(),
+            tag_name: "v1.0.1".to_owned(),
+            prerelease: false,
+            asset_name: Some("sigil-1.0.1-aarch64-apple-darwin.tar.gz".to_owned()),
+            security: sigil_updater::ReleaseSecurity {
+                immutable: true,
+                sha256: Some("a".repeat(64)),
+                eligible_for_apply: true,
+                blocking_reason: None,
+            },
+        }),
+        managed_update_command: None,
+    };
+
+    let rendered = render_update_check(&check);
+    assert!(!rendered.contains("sigil update apply --yes"));
+    assert!(rendered.contains("install blocked"));
 }
 
 #[test]

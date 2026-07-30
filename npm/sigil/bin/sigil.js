@@ -35,6 +35,10 @@ const binaryName = process.platform === "win32" ? "sigil.exe" : "sigil";
 const binaryPath = path.join(path.dirname(packageJsonPath), "bin", binaryName);
 const child = childProcess.spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
+  env: {
+    ...process.env,
+    SIGIL_INSTALL_SOURCE: "npm",
+  },
 });
 
 child.on("error", (error) => {

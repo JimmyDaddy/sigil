@@ -1,10 +1,22 @@
-<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: main-tui-session,ai-planned-task-execution,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction-preview; cta: start-quickstart -->
+<!-- public-doc-role: visual-tour; authority: visual-orientation; sections: desktop-workbench,desktop-settings,main-tui-session,ai-planned-task-execution,approval-review,configuration-panel,task-verification,checkpoint-restore,context-compaction; cta: start-quickstart -->
 
 # 界面导览
 
 [文档首页](README.md) · [快速开始](quickstart.md) · [English](../en/visual-tour.md)
 
-这些截图展示 TUI 中主要的工作与决策界面。
+这些真实 Desktop 截图和 TUI 预览展示两个一等产品表面中的主要工作与决策界面。
+
+## Desktop 工作台
+
+![Sigil Desktop 工作台](../../site/assets/screenshots/zh-CN/desktop-workbench.png)
+
+Desktop 工作台在同一个有边界的空间中展示已保存会话、当前计划、流式输出、工具活动、审批、队列与输入框。
+
+## Desktop 设置
+
+![Sigil Desktop 设置](../../site/assets/screenshots/zh-CN/desktop-settings.png)
+
+通过原生设置界面管理 provider 与 model 默认值、外观、启动行为和诊断信息。
 
 ## 主 TUI 会话
 
@@ -42,11 +54,11 @@
 
 按 `Ctrl-R` 检查文件恢复；也可以只分叉对话，不修改共享文件。
 
-## 上下文压缩预览
+## 上下文压缩
 
 ![Sigil 上下文压缩预览](../../site/assets/screenshots/compaction-preview.svg)
 
-使用 `/compact`，在应用前检查建议的上下文精简方案。
+`/compact` 命令本身就是明确意图：单次调用会生成、校验并激活可恢复 checkpoint。失败时保持当前上下文并显示原因，不再增加一次重复确认。
 
 <!-- public-doc-cta: start-quickstart -->
 下一步：[从快速开始入门](quickstart.md)。

@@ -7,6 +7,8 @@ Usage: scripts/verify-desktop-macos.sh \
   --dmg PATH \
   --expected-arch arm64|x86_64 \
   --team-id TEAM_ID \
+  [--expected-version VERSION] \
+  [--expected-commit COMMIT] \
   [--notarized]
 
 Verify the exact Sigil DMG that will be distributed. Developer ID signatures,
@@ -18,6 +20,8 @@ USAGE
 dmg_path=""
 expected_arch=""
 team_id=""
+expected_version=""
+expected_commit=""
 notarized=false
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +36,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --team-id)
       team_id="${2-}"
+      shift 2
+      ;;
+    --expected-version)
+      expected_version="${2-}"
+      shift 2
+      ;;
+    --expected-commit)
+      expected_commit="${2-}"
       shift 2
       ;;
     --notarized)
@@ -61,6 +73,21 @@ fi
 if [[ ! "$team_id" =~ ^[A-Z0-9]{10}$ ]]; then
   echo "Apple Team ID must contain exactly 10 uppercase letters or digits" >&2
   exit 2
+fi
+if [[ -n "$expected_version" && -z "$expected_commit" ]] ||
+  [[ -z "$expected_version" && -n "$expected_commit" ]]; then
+  echo "expected version and expected commit must be supplied together" >&2
+  exit 2
+fi
+if [[ -n "$expected_version" ]]; then
+  if [[ ! "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    echo "expected version must be a bounded release version" >&2
+    exit 2
+  fi
+  if [[ ! "$expected_commit" =~ ^[0-9a-f]{7,40}$ ]]; then
+    echo "expected commit must contain 7 to 40 lowercase hexadecimal characters" >&2
+    exit 2
+  fi
 fi
 
 for command_name in codesign hdiutil lipo plutil spctl xcrun; do
@@ -143,7 +170,20 @@ assert_hardened_executable "$runtime_executable" "Sigil runtime sidecar"
 test "$(plutil -extract CFBundleIdentifier raw "$info_plist")" = "dev.sigil.desktop"
 test "$(lipo -archs "$main_executable")" = "$expected_arch"
 test "$(lipo -archs "$runtime_executable")" = "$expected_arch"
-"$runtime_executable" --version
+runtime_version_output="$("$runtime_executable" --version)"
+printf '%s\n' "$runtime_version_output"
+if [[ -n "$expected_version" ]]; then
+  actual_version="$(sed -n 's/^sigil //p' <<<"$runtime_version_output")"
+  actual_commit="$(sed -n 's/^commit: //p' <<<"$runtime_version_output")"
+  if [[ "$actual_version" != "$expected_version" ]]; then
+    echo "Sigil runtime version mismatch: expected $expected_version, found ${actual_version:-missing}" >&2
+    exit 1
+  fi
+  if [[ "$actual_commit" != "$expected_commit" ]]; then
+    echo "Sigil runtime commit mismatch: expected $expected_commit, found ${actual_commit:-missing}" >&2
+    exit 1
+  fi
+fi
 
 if [[ "$notarized" == true ]]; then
   xcrun stapler validate "$dmg_path"

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -17,6 +17,7 @@ pub(crate) const DESKTOP_RUN_EVENT_NAME: &str = "sigil-run-event";
 pub(crate) const DESKTOP_RUN_STREAM_STATUS_NAME: &str = "sigil-run-stream-status";
 
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const MIN_HEALTHY_STREAM_LIFETIME: Duration = Duration::from_secs(10);
 const MAX_RECONNECT_ATTEMPTS: u8 = 8;
 const MAX_ATTACHMENT_EVENTS: usize = 512;
 const MAX_ATTACHMENT_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -452,6 +453,8 @@ async fn follow_run(
                 continue;
             }
         };
+        let connected_at = Instant::now();
+        let mut observed_event = false;
         loop {
             let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next_event()).await;
             let protocol_event = match next {
@@ -461,6 +464,7 @@ async fn follow_run(
             if protocol_event.run_event.sequence <= last_sequence {
                 continue;
             }
+            observed_event = true;
             attempts = 0;
             let durable_cursor = protocol_event.replay_id.clone();
             let timeline = match protocol_event.into_timeline(
@@ -507,7 +511,7 @@ async fn follow_run(
         {
             return;
         }
-        attempts = attempts.saturating_add(1);
+        attempts = next_reconnect_attempt(attempts, connected_at.elapsed(), observed_event);
         if attempts >= MAX_RECONNECT_ATTEMPTS {
             publish_status(
                 &owner,
@@ -632,6 +636,18 @@ fn timeline_is_terminal(event: &DesktopTimelineEvent) -> bool {
 
 fn reconnect_delay(attempt: u8) -> Duration {
     Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt.min(3)))
+}
+
+fn next_reconnect_attempt(
+    previous_attempts: u8,
+    connected_for: Duration,
+    observed_event: bool,
+) -> u8 {
+    if observed_event || connected_for >= MIN_HEALTHY_STREAM_LIFETIME {
+        1
+    } else {
+        previous_attempts.saturating_add(1)
+    }
 }
 
 fn stream_key(workspace_id: &str, run_id: &str) -> String {

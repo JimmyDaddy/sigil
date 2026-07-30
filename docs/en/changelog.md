@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-07-31,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,7 +8,22 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been added after `v0.0.1-alpha.6` yet.
+No user-facing changes have landed after `v0.0.1-beta.1`.
+
+## v0.0.1-beta.1 - 2026-07-31
+
+These changes are included in the packaged `v0.0.1-beta.1` release.
+
+- Added the public macOS Desktop beta channel with signed, Apple-notarized Apple Silicon and Intel DMGs plus signed architecture-specific update bundles.
+- Added explicit version checks and updates across Desktop Settings, TUI `/update`, and CLI `sigil update`; managed installations receive their package-manager command, while standalone updates remain checksum/signature verified and never restart silently.
+- Release tags now stage a mutable draft first. The explicit publish run verifies all Desktop assets, makes the completed GitHub Release public, publishes npm with the matching `beta` or `alpha` dist-tag, and only then updates the website and Homebrew; this remains compatible with immutable GitHub Releases.
+- Updated the website, README, installation/status docs, and visual tour so Desktop and TUI are coequal entry points with architecture-specific download guidance, a real Desktop capture tour, and the existing TUI real-run demo.
+- `/compact` now treats the command itself as explicit intent: one invocation generates, validates, and atomically activates an admitted recoverable checkpoint without a confirmation modal. Failures keep the current context and remain visible with their exact reason.
+- Fixed semantic compaction discarding its own result as stale after its audited provider-attempt and usage records advanced the durable stream.
+- Fixed Desktop Enter submissions during active work failing to reach the durable follow-up queue, intermittent loss of live runtime controls, and valid live/durable replay being misclassified as a message conflict.
+- Conversation titles can now be generated semantically by the active model after the first turn, while manual and generated renames stay synchronized with the open conversation page; title generation no longer competes with the primary request.
+- Aligned the Desktop timeline, activity state, approval card, and composer widths, narrowed the approval presentation, and stopped unknown totals from appearing as stalled percentage progress.
+- Added current-source Desktop Gherkin E2E coverage for real approvals, Enter queuing, skill/agent loading, `/plan`, automatic planning, and parallel Agents, alongside the existing stateful and orchestration TUI PTY acceptance campaigns.
 
 ## v0.0.1-alpha.6 - 2026-07-30
 

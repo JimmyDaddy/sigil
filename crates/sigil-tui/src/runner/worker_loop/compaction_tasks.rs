@@ -17,6 +17,7 @@ pub(in crate::runner) struct ManualV2CompactionPreparation {
     pub(in crate::runner) review: V2CompactionReview,
     pub(in crate::runner) local_preview: Option<PendingLocalV2Compaction>,
     pub(in crate::runner) pending: Option<PendingV2Compaction>,
+    pub(in crate::runner) apply_source: super::V2CompactionApplySource,
 }
 
 pub(in crate::runner) struct IdleV2CompactionPreparation {

@@ -18,10 +18,12 @@ env:
   HOMEBREW_NO_AUTO_UPDATE: "1"
   NPM_CONFIG_AUDIT: "false"
   NPM_CONFIG_FUND: "false"
+  RELEASE_CHANNEL: beta
+  RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
   resolve-release:
-    name: Resolve current alpha release
+    name: Resolve current beta release
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
@@ -34,13 +36,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(npm view @sigil-ai/sigil@alpha version --json | jq -er '.')"
-          tag="$(
-            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=20" |
-              jq -er '[.[] | select(.prerelease == true and .draft == false)][0].tag_name'
+          test "${RELEASE_CHANNEL}" = "beta"
+          version="$(npm view "@sigil-ai/sigil@${RELEASE_CHANNEL}" version --json | jq -er '.')"
+          case "${version}" in
+            *-"${RELEASE_CHANNEL}" | *-"${RELEASE_CHANNEL}".*) ;;
+            *)
+              echo "npm ${RELEASE_CHANNEL} tag resolved to an unexpected version: ${version}" >&2
+              exit 1
+              ;;
+          esac
+          tag="v${version}"
+          release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
           )"
+          test "$(jq -r '.draft' <<<"${release}")" = "false"
+          test "$(jq -r '.prerelease' <<<"${release}")" = "true"
+          test "$(jq -r '.tag_name' <<<"${release}")" = "${tag}"
+          if [[ "$(jq -r '.immutable // false' <<<"${release}")" != "true" ]]; then
+            echo "published smoke target ${tag} is not immutable" >&2
+            exit 1
+          fi
           test -n "${version}"
-          test "${tag}" = "v${version}"
           printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
           printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
 
@@ -66,7 +85,7 @@ jobs:
         with:
           node-version: "22.22.0"
 
-      - name: Install current alpha in an isolated directory
+      - name: Install current prerelease in an isolated directory
         shell: bash
         env:
           VERSION: ${{ needs.resolve-release.outputs.version }}
@@ -97,7 +116,7 @@ jobs:
           const report = JSON.parse(fs.readFileSync("doctor.json", "utf8"));
           if (report.schema_version !== 1) throw new Error("unexpected doctor schema");
           if (!report.build || report.build.version !== process.env.VERSION) {
-            throw new Error("doctor build version does not match npm alpha");
+            throw new Error("doctor build version does not match npm prerelease");
           }
           if (!report.privacy || report.privacy.review_before_sharing !== true) {
             throw new Error("doctor privacy projection is missing");
@@ -105,10 +124,23 @@ jobs:
           NODE
 
   github-release:
-    name: GitHub Release archives
+    name: GitHub Release and Desktop assets
     needs: resolve-release
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout published tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag }}
+
+      - name: Install Rust signature verifier
+        if: ${{ env.RELEASE_CHANNEL == 'beta' }}
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
+          rustup default "${RUST_TOOLCHAIN_VERSION}"
+
       - name: Download current prerelease assets
         shell: bash
         env:
@@ -161,6 +193,99 @@ jobs:
           for archive in "${asset_dir}/sigil-${VERSION}-"*.tar.gz; do
             gh attestation verify "${archive}" --repo "${GITHUB_REPOSITORY}"
           done
+
+      - name: Verify beta Desktop assets and update endpoint
+        if: ${{ env.RELEASE_CHANNEL == 'beta' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          desktop_dir="${RUNNER_TEMP}/sigil-desktop-smoke"
+          mkdir -p "${desktop_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'Sigil_*.dmg' \
+            --pattern 'Sigil_*.dmg.sha256' \
+            --pattern 'Sigil_*.app.tar.gz' \
+            --pattern 'Sigil_*.app.tar.gz.sha256' \
+            --pattern 'Sigil_*.app.tar.gz.sig' \
+            --pattern latest.json \
+            --dir "${desktop_dir}"
+
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            for suffix in dmg dmg.sha256 app.tar.gz app.tar.gz.sha256 app.tar.gz.sig; do
+              test -s "${desktop_dir}/Sigil_${VERSION}_${target}.${suffix}"
+            done
+            (
+              cd "${desktop_dir}"
+              shasum -a 256 --check "Sigil_${VERSION}_${target}.dmg.sha256"
+              shasum -a 256 --check "Sigil_${VERSION}_${target}.app.tar.gz.sha256"
+            )
+            scripts/verify-desktop-update-signature.sh \
+              --archive "${desktop_dir}/Sigil_${VERSION}_${target}.app.tar.gz" \
+              --signature "${desktop_dir}/Sigil_${VERSION}_${target}.app.tar.gz.sig"
+          done
+
+          if scripts/verify-desktop-update-signature.sh \
+            --archive "${desktop_dir}/Sigil_${VERSION}_aarch64-apple-darwin.app.tar.gz" \
+            --signature "${desktop_dir}/Sigil_${VERSION}_x86_64-apple-darwin.app.tar.gz.sig"; then
+            echo "swapped Desktop updater signature unexpectedly verified" >&2
+            exit 1
+          else
+            verification_status=$?
+            if [[ "${verification_status}" -ne 1 ]]; then
+              echo "swapped-signature negative control could not complete verification" >&2
+              exit "${verification_status}"
+            fi
+          fi
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "${desktop_dir}/pages-latest.json" \
+            "https://sigil.corerobin.com/updates/beta/latest.json"
+          cmp "${desktop_dir}/latest.json" "${desktop_dir}/pages-latest.json"
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (manifest.version !== process.env.VERSION) throw new Error("unexpected update version");
+            const expected = new Map([
+              ["darwin-aarch64", "aarch64-apple-darwin"],
+              ["darwin-x86_64", "x86_64-apple-darwin"],
+            ]);
+            if (
+              manifest.platforms === null
+              || typeof manifest.platforms !== "object"
+              || Array.isArray(manifest.platforms)
+              || Object.keys(manifest.platforms).sort().join(",")
+                !== [...expected.keys()].sort().join(",")
+            ) {
+              throw new Error("unexpected Desktop update platform inventory");
+            }
+            for (const [platform, target] of expected) {
+              const entry = manifest.platforms[platform];
+              const name = `Sigil_${process.env.VERSION}_${target}.app.tar.gz`;
+              const expectedUrl =
+                `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.RELEASE_TAG}/${name}`;
+              if (entry?.url !== expectedUrl) {
+                throw new Error(`unsafe update URL or asset name for ${platform}`);
+              }
+              const signature = fs.readFileSync(
+                `${process.argv[2]}/${name}.sig`,
+                "utf8",
+              ).trim();
+              if (
+                entry.signature !== signature
+                || signature.length < 40
+                || signature.length > 4096
+                || !/^[A-Za-z0-9+/]+={0,2}$/.test(signature)
+              ) {
+                throw new Error(`invalid update signature for ${platform}`);
+              }
+            }
+          ' "${desktop_dir}/latest.json" "${desktop_dir}"
 
   homebrew-install:
     name: Homebrew ${{ matrix.label }}

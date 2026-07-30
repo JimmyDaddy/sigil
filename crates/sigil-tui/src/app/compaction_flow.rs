@@ -186,7 +186,8 @@ impl V2CompactionPreviewModalState {
                 standalone_tool_output_shrink_available,
             } => {
                 lines.push(
-                    "full compaction: Enter generates one billed semantic summary".to_owned(),
+                    "full compaction: Enter generates one billed semantic summary and applies it after validation"
+                        .to_owned(),
                 );
                 if *standalone_tool_output_shrink_available {
                     lines.push(
@@ -316,7 +317,7 @@ impl AppState {
         self.last_notice = Some(if admitted {
             "review V2 compaction; Enter applies the admitted checkpoint".to_owned()
         } else if locally_prepared {
-            "review local compaction plan; Enter generates the billed summary, S cleans only large tool outputs"
+            "review local compaction plan; Enter generates and applies the validated summary, S cleans only large tool outputs"
                 .to_owned()
         } else {
             "review V2 compaction; local target request admission is unavailable".to_owned()
@@ -360,6 +361,7 @@ impl AppState {
     ) {
         self.sync_current_session_state(entries);
         let prefix = match source {
+            V2CompactionApplySource::DirectCommand => "Context compacted",
             V2CompactionApplySource::ManualConfirmation => "Context compacted",
             V2CompactionApplySource::IdleAutomatic => "Context compacted automatically",
             V2CompactionApplySource::PreTurnPressure => {
@@ -376,8 +378,12 @@ impl AppState {
     }
 
     pub(super) fn apply_v2_compaction_failed(&mut self, error: String) {
-        self.last_notice = Some(format!("V2 compaction was not applied: {error}"));
-        self.push_timeline(TimelineRole::Notice, "V2 compaction was not applied");
+        let message = format!(
+            "V2 compaction was not applied: {}",
+            sigil_kernel::safe_persistence_text(&error)
+        );
+        self.last_notice = Some(message.clone());
+        self.push_timeline(TimelineRole::Notice, message);
         self.push_event("compact:apply-error", error);
     }
 }

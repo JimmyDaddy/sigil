@@ -62,6 +62,10 @@ mod application_catalog_tests;
 #[path = "tests/conversation_display_tests.rs"]
 mod conversation_display_tests;
 
+#[cfg(test)]
+#[path = "tests/session_title_tests.rs"]
+mod session_title_tests;
+
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod orchestration_guard; // route-local hard-invariant rollback and durable observation.
 mod orchestration_rollout; // release-qualified new-install orchestration defaults.
@@ -112,6 +116,7 @@ pub mod provider_debug;
 pub mod provider_status;
 pub mod session_control;
 pub mod session_lifecycle;
+mod session_title;
 pub mod skills;
 #[allow(dead_code)] // E21.15 runtime-private route is intentionally dormant before E21.17.
 mod stable_mcp_search;
@@ -295,6 +300,7 @@ pub use session_lifecycle::{
     SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
     SessionRetentionPreview, SessionRetentionReason, SessionTombstonePruneOutput,
 };
+pub use session_title::generate_and_persist_session_title;
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
     SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,

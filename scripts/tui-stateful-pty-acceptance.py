@@ -17,6 +17,7 @@ import re
 import select
 import shutil
 import signal
+import ssl
 import stat
 import subprocess
 import sys
@@ -300,6 +301,8 @@ def install_tokenizer(
 class FixtureState:
     provider_requests: list[dict[str, bool]] = dataclasses.field(default_factory=list)
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
+    semantic_summary_requests: int = 0
+    semantic_title_requests: int = 0
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
     def record_request(self, payload: object) -> int:
@@ -326,10 +329,79 @@ class FixtureState:
         with self.lock:
             self.protocol_errors.append(type(error).__name__)
 
+    def record_semantic_summary(self) -> None:
+        with self.lock:
+            self.semantic_summary_requests += 1
+
+    def record_semantic_title(self) -> None:
+        with self.lock:
+            self.semantic_title_requests += 1
+
+
+def is_semantic_title_request(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    tools = payload.get("tools")
+    if isinstance(tools, list) and tools:
+        return False
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), str)
+        and "Generate a concise semantic title for a coding-agent conversation"
+        in message["content"]
+        for message in messages
+    )
+
+
+def semantic_compaction_output(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    final_message = messages[-1]
+    if not isinstance(final_message, dict):
+        return None
+    instruction = final_message.get("content")
+    if not isinstance(instruction, str) or "SOURCE_INDEX=" not in instruction:
+        return None
+    source_index = instruction.split("SOURCE_INDEX=", 1)[1]
+    sources = json.loads(source_index)
+    if not isinstance(sources, list) or not sources:
+        raise AcceptanceError("semantic compaction source index is empty")
+    first_source = sources[0]
+    if not isinstance(first_source, dict):
+        raise AcceptanceError("semantic compaction source index entry is malformed")
+    source_event_id = first_source.get("event_id")
+    if not isinstance(source_event_id, str) or not source_event_id:
+        raise AcceptanceError("semantic compaction source event id is missing")
+    return json.dumps(
+        {
+            "in_progress": [],
+            "pending_actions": [],
+            "provider_continuity": [],
+            "model_notes": [
+                {
+                    "text": (
+                        "The stateful acceptance retains long-history and checkpoint "
+                        "mutation context."
+                    ),
+                    "source_event_ids": [source_event_id],
+                    "priority": "normal",
+                }
+            ],
+        },
+        separators=(",", ":"),
+    )
+
 
 class FixtureServer(ThreadingHTTPServer):
     daemon_threads = True
     fixture: FixtureState
+    tls_context: ssl.SSLContext
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -344,6 +416,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
         assert isinstance(server, FixtureServer)
         return server.fixture
 
+    def do_CONNECT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract.
+        if self.path != "api.deepseek.com:443":
+            self.send_error(502, "unsupported fixture tunnel")
+            return
+        self.send_response(200, "Connection Established")
+        self.end_headers()
+        self.wfile.flush()
+        server = self.server
+        assert isinstance(server, FixtureServer)
+        tls_socket = server.tls_context.wrap_socket(
+            self.connection,
+            server_side=True,
+        )
+        self.connection = tls_socket
+        self.rfile = tls_socket.makefile("rb", self.rbufsize)
+        self.wfile = tls_socket.makefile("wb", self.wbufsize)
+        self.close_connection = False
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract.
         self._send_json({"is_available": True, "balance_infos": []})
 
@@ -353,9 +443,31 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if not self.path.endswith("/chat/completions"):
                 self._send_json({"is_available": True, "balance_infos": []})
                 return
+            compaction_output = semantic_compaction_output(payload)
+            if compaction_output is not None:
+                self.fixture.record_semantic_summary()
+                self._send_sse(
+                    {
+                        "delta": {"content": compaction_output},
+                        "finish_reason": "stop",
+                    },
+                    usage={"prompt_tokens": 9000, "completion_tokens": 80},
+                )
+                return
+            if is_semantic_title_request(payload):
+                self.fixture.record_semantic_title()
+                self._send_sse(
+                    {
+                        "delta": {"content": "Stateful acceptance"},
+                        "finish_reason": "stop",
+                    }
+                )
+                return
             request_index = self.fixture.record_request(payload)
             if request_index <= 3:
-                body = ("verified-history " * 900) + f"STATEFUL-HISTORY-{request_index}"
+                # Keep the campaign above the real RFC-0057 economics floor even after the
+                # provider/tool schema prefix and the billed semantic-summary usage are counted.
+                body = ("verified-history " * 4000) + f"STATEFUL-HISTORY-{request_index}"
                 self._send_sse({"delta": {"content": body}, "finish_reason": "stop"})
             elif request_index == 4:
                 self._send_sse(
@@ -407,9 +519,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
 
-    def _send_sse(self, choice: dict[str, object]) -> None:
+    def _send_sse(
+        self,
+        choice: dict[str, object],
+        *,
+        usage: dict[str, int] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {"choices": [choice]}
+        if usage is not None:
+            payload["usage"] = usage
         body = (
-            f"data: {json.dumps({'choices': [choice]}, separators=(',', ':'))}\n\n"
+            f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
             "data: [DONE]\n\n"
         ).encode("utf-8")
         self.send_response(200)
@@ -825,15 +945,12 @@ def write_config(
     session_dir: Path,
     port: int | None,
 ) -> None:
-    route_config = ""
-    if port is not None:
-        endpoint = f"http://127.0.0.1:{port}"
-        route_config = f'''base_url = "{endpoint}"
-beta_base_url = "{endpoint}"
-anthropic_base_url = "{endpoint}"
-'''
+    del port
+    endpoint = "https://api.deepseek.com"
     path.write_text(
-        f'''[workspace]
+        f'''config_version = 2
+
+[workspace]
 root = "{workspace}"
 
 [storage]
@@ -844,7 +961,7 @@ cache_root = "{cache_root}"
 log_dir = "{session_dir}"
 
 [agent]
-provider = "deepseek"
+connection = "stateful-fixture"
 model = "{MODEL_NAME}"
 max_turns = 12
 tool_timeout_secs = 10
@@ -865,15 +982,26 @@ keyboard_enhancement = "off"
 mouse_capture = false
 osc52_clipboard = false
 
-[providers.deepseek]
-{route_config}api_key = "stateful-fixture-key"
+[connections.stateful-fixture]
+label = "Stateful acceptance fixture"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "{endpoint}"
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+
+[connections.stateful-fixture.options]
 strict_tools_mode = "auto"
 ''',
         encoding="utf-8",
     )
 
 
-def isolated_environment(root: Path) -> dict[str, str]:
+def isolated_environment(root: Path, proxy_port: int | None = None) -> dict[str, str]:
+    proxy_url = (
+        f"http://127.0.0.1:{proxy_port}"
+        if proxy_port is not None
+        else "http://127.0.0.1:9"
+    )
     env = identity_environment(os.environ)
     env.update(
         {
@@ -883,17 +1011,112 @@ def isolated_environment(root: Path) -> dict[str, str]:
             "XDG_CACHE_HOME": str(root / "xdg-cache"),
             "TMPDIR": str(root / "tmp"),
             "TERM": env.get("TERM", "xterm-256color"),
-            "HTTP_PROXY": "http://127.0.0.1:9",
-            "HTTPS_PROXY": "http://127.0.0.1:9",
-            "http_proxy": "http://127.0.0.1:9",
-            "https_proxy": "http://127.0.0.1:9",
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
+            "SSL_CERT_FILE": str(root / "tls-ca.pem"),
+            "SIGIL_API_KEY": "stateful-fixture-key",
         }
     )
     for directory in ("home", "xdg-config", "xdg-state", "xdg-cache", "tmp"):
         (root / directory).mkdir()
     return env
+
+
+def generate_fixture_tls_identity(root: Path) -> tuple[Path, Path]:
+    ca_certificate = root / "tls-ca.pem"
+    ca_private_key = root / "tls-ca-key.pem"
+    certificate = root / "tls-cert.pem"
+    private_key = root / "tls-key.pem"
+    certificate_request = root / "tls-cert.csr"
+    extensions = root / "tls-cert.ext"
+    extensions.write_text(
+        "\n".join(
+            (
+                "basicConstraints=critical,CA:FALSE",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "extendedKeyUsage=serverAuth",
+                "subjectAltName=DNS:api.deepseek.com",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    commands = (
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-keyout",
+            str(ca_private_key),
+            "-out",
+            str(ca_certificate),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=Sigil stateful fixture CA",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+        ],
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-keyout",
+            str(private_key),
+            "-out",
+            str(certificate_request),
+            "-subj",
+            "/CN=api.deepseek.com",
+        ],
+        [
+            "openssl",
+            "x509",
+            "-req",
+            "-in",
+            str(certificate_request),
+            "-CA",
+            str(ca_certificate),
+            "-CAkey",
+            str(ca_private_key),
+            "-CAcreateserial",
+            "-out",
+            str(certificate),
+            "-days",
+            "1",
+            "-sha256",
+            "-extfile",
+            str(extensions),
+        ],
+    )
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if completed.returncode != 0:
+            raise AcceptanceError(
+                f"failed to create local TLS fixture identity: {completed.stderr.strip()}"
+            )
+    os.chmod(ca_private_key, 0o600)
+    os.chmod(private_key, 0o600)
+    return certificate, private_key
 
 
 def read_session_audit(path: Path) -> SessionAudit:
@@ -1006,7 +1229,7 @@ def validate_passed_contract(
     session_evidence: dict[str, dict[str, str]],
 ) -> None:
     expected = {
-        "provider_request_count": 6,
+        "provider_request_count": 5,
         "live_final_reply_screen_count": 1,
         "resumed_final_reply_screen_count": 1,
         "source_final_answer_count": 1,
@@ -1133,12 +1356,20 @@ def main() -> int:
             snapshot=args.tokenizer_snapshot,
             expected_sha256=args.expected_tokenizer_sha256,
         )
-        env = isolated_environment(fixture_root)
+        tls_certificate, tls_private_key = generate_fixture_tls_identity(fixture_root)
         fixture = FixtureState()
         server = FixtureServer(("127.0.0.1", 0), FixtureHandler)
         server.fixture = fixture
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.load_cert_chain(
+            certfile=str(tls_certificate),
+            keyfile=str(tls_private_key),
+        )
+        server.tls_context = tls_context
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
+        fixture_port = int(server.server_address[1])
+        env = isolated_environment(fixture_root, fixture_port)
         config_path = fixture_root / "sigil.toml"
         write_config(
             config_path,
@@ -1146,7 +1377,7 @@ def main() -> int:
             state_root=state_root,
             cache_root=cache_root,
             session_dir=session_dir,
-            port=int(server.server_address[1]),
+            port=fixture_port,
         )
         first_runner = PtyRunner(
             [str(frozen_binary), "--config", str(config_path)],
@@ -1200,18 +1431,13 @@ def main() -> int:
         first_runner.quit(timeout=deadline.remaining(10.0))
         first_runner.stop()
         first_runner = None
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=5)
-        server = None
-        server_thread = None
         write_config(
             config_path,
             workspace=workspace,
             state_root=state_root,
             cache_root=cache_root,
             session_dir=session_dir,
-            port=None,
+            port=fixture_port,
         )
         first_runner = PtyRunner(
             [
@@ -1231,21 +1457,18 @@ def main() -> int:
         first_runner.type_text("/compact")
         first_runner.send("\r")
         first_runner.wait_until(
-            lambda text: "target request: verified locally" in text,
-            deadline.remaining(),
-            "locally admitted compaction review",
-            final_screen=True,
-        )
-        first_runner.send("\r")
-        first_runner.wait_until(
             lambda text: "Context compacted:" in text,
             deadline.remaining(),
-            "applied compaction",
-            final_screen=True,
+            "semantic compaction apply receipt",
         )
         compact_audit = read_session_audit(source_path)
         if compact_audit.event_counts.get("compaction_applied_v2", 0) != 1:
             raise AcceptanceError("source session must contain exactly one compaction_applied_v2")
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
+        server = None
+        server_thread = None
 
         first_runner.send(b"\x12")
         first_runner.wait_until(
@@ -1322,7 +1545,11 @@ def main() -> int:
             "resume selector",
             final_screen=True,
         )
-        if fork_path.name not in selector_screen and "STATEFUL-EDIT-TURN" not in selector_screen:
+        if (
+            fork_path.name not in selector_screen
+            and "STATEFUL-EDIT-TURN" not in selector_screen
+            and "stateful history turn 1" not in selector_screen
+        ):
             raise AcceptanceError("resume selector did not expose the non-current fork")
         resume_runner.send("\r")
         fork_display_token = session_display_token(fork_path)
@@ -1365,8 +1592,22 @@ def main() -> int:
             if fixture.protocol_errors:
                 raise AcceptanceError(f"provider fixture errors: {fixture.protocol_errors}")
             requests = list(fixture.provider_requests)
-        if len(requests) != 6:
-            raise AcceptanceError(f"expected 6 provider requests, observed {len(requests)}")
+            semantic_summary_requests = fixture.semantic_summary_requests
+            semantic_title_requests = fixture.semantic_title_requests
+        if len(requests) != 5:
+            raise AcceptanceError(
+                f"expected 5 conversation provider requests, observed {len(requests)}"
+            )
+        if semantic_summary_requests != 1:
+            raise AcceptanceError(
+                "expected one billed semantic summary request, observed "
+                f"{semantic_summary_requests}"
+            )
+        if semantic_title_requests != 1:
+            raise AcceptanceError(
+                "expected one semantic title request, observed "
+                f"{semantic_title_requests}"
+            )
         if not requests[3]["has_write_file"] or not requests[4]["has_tool_result"]:
             raise AcceptanceError("write_file tool-call continuation contract was not observed")
 

@@ -252,6 +252,7 @@ const context: RunContext = {
 function renderComposer(overrides: {
   active?: boolean;
   submissionBlocked?: boolean;
+  queueSubmissionBlocked?: boolean;
   queueCount?: number;
   queuePaused?: boolean;
   queueBusy?: boolean;
@@ -264,7 +265,7 @@ function renderComposer(overrides: {
   onOpenSessionPicker?: (query: string) => void;
   onOpenSettings?: () => void;
   onOpenSupport?: () => void;
-  onPreviewCompaction?: () => void;
+  onCompact?: () => Promise<boolean>;
   onOpenIntentStack?: () => void;
   onNotice?: (message: string, error?: boolean) => void;
   activityState?: ComposerActivityState;
@@ -283,7 +284,7 @@ function renderComposer(overrides: {
   const onOpenSessionPicker = overrides.onOpenSessionPicker ?? vi.fn((_query: string) => undefined);
   const onOpenSettings = overrides.onOpenSettings ?? vi.fn(() => undefined);
   const onOpenSupport = overrides.onOpenSupport ?? vi.fn(() => undefined);
-  const onPreviewCompaction = overrides.onPreviewCompaction ?? vi.fn(() => undefined);
+  const onCompact = overrides.onCompact ?? vi.fn(async () => true);
   const onOpenIntentStack = overrides.onOpenIntentStack ?? vi.fn(() => undefined);
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   const runContext = overrides.runContext ?? context;
@@ -295,6 +296,7 @@ function renderComposer(overrides: {
         draftKey="composer-test"
         active={overrides.active ?? false}
         submissionBlocked={overrides.submissionBlocked ?? false}
+        queueSubmissionBlocked={overrides.queueSubmissionBlocked ?? false}
         submitting={false}
         controlBusy={false}
         composerRef={createRef<HTMLTextAreaElement>()}
@@ -317,7 +319,7 @@ function renderComposer(overrides: {
         onOpenSupport={onOpenSupport}
         onOpenAgentWorkbench={onOpenAgentWorkbench}
         onOpenQueue={onOpenQueue}
-        onPreviewCompaction={onPreviewCompaction}
+        onCompact={onCompact}
         onOpenIntentStack={onOpenIntentStack}
         onNotice={onNotice}
         onSubmit={onSubmit}
@@ -335,7 +337,7 @@ function renderComposer(overrides: {
     onOpenSessionPicker,
     onOpenSettings,
     onOpenSupport,
-    onPreviewCompaction,
+    onCompact,
     onOpenIntentStack,
     onNotice,
     onModelChange,
@@ -547,15 +549,15 @@ describe("structured composer", () => {
     expect(onOpenSessionPicker).toHaveBeenCalledWith("typo");
   });
 
-  it("routes /compact to an explicit desktop preview instead of the model", async () => {
+  it("routes /compact to the direct compaction action instead of the model", async () => {
     const user = userEvent.setup();
-    const { onPreviewCompaction, onSubmit } = renderComposer();
+    const { onCompact, onSubmit } = renderComposer();
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "/compact");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(onPreviewCompaction).toHaveBeenCalledOnce();
+    expect(onCompact).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -621,6 +623,38 @@ describe("structured composer", () => {
     expect(onSubmit).toHaveBeenCalledWith("Run this after the current task", undefined, undefined);
     expect(onInterruptAndRunNext).not.toHaveBeenCalled();
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  it("keeps the durable queue available while live controls are recovering", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({ active: true, submissionBlocked: true });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+
+    await user.type(input, "Keep working after the current task");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      "Keep working after the current task",
+      undefined,
+      undefined,
+    );
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  it("retains the draft when the durable queue itself is unavailable", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderComposer({
+      active: true,
+      submissionBlocked: true,
+      queueSubmissionBlocked: true,
+    });
+    const input = screen.getByRole("combobox", { name: "Message Sigil" });
+
+    await user.type(input, "Do not lose this draft");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect((input as HTMLTextAreaElement).value).toBe("Do not lose this draft");
   });
 
   it("does not queue an IME composition Enter", async () => {

@@ -1,8 +1,9 @@
 # Contributing to Sigil
 
-Thanks for helping improve Sigil. The project is a TUI-first Rust coding agent,
-so changes should preserve the terminal user experience, provider-neutral
-kernel contracts, and auditable session and tool behavior.
+Thanks for helping improve Sigil. The project is a Rust coding agent with
+first-class Desktop and TUI experiences, so changes should preserve shared
+product semantics, provider-neutral kernel contracts, and auditable session
+and tool behavior.
 
 ## Before You Start
 

@@ -8,16 +8,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
-    Agent, AgentRunOptions, AutoApproveHandler, CompactionConfig, CompletionRequest, ControlEntry,
-    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
+    Agent, AgentRole, AgentRunOptions, AutoApproveHandler, CompactionConfig, CompletionRequest,
+    ControlEntry, ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
     ConversationInputQueuedEntry, ConversationInputReorderedEntry, ConversationInputStatus,
     ConversationInputStatusEntry, ConversationInputTarget, ConversationQueueDurableProjection,
     DurableEventType, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
     MemoryConfig, ModelMessage, NoopEventHandler, PermissionConfig, PermissionEvaluationContext,
-    Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, SecretString, Session,
-    SessionLogEntry, ToolRegistry, conversation_promotion_capability_digest,
+    Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, RootConfig,
+    SecretString, Session, SessionLogEntry, ToolRegistry, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
 };
+
+use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 
 use super::{
     ApplicationQueuedPromptMaterial, ApplicationQueuedRunPreparationRequest,
@@ -313,6 +315,21 @@ impl Provider for RecordingProvider {
     }
 }
 
+struct QueueTaskRoleProviderBuilder;
+
+#[async_trait]
+impl TaskRoleProviderBuilder for QueueTaskRoleProviderBuilder {
+    async fn build(
+        &self,
+        _root_config: &RootConfig,
+        _role: AgentRole,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(RecordingProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }))
+    }
+}
+
 #[tokio::test]
 async fn queued_input_sends_the_exact_turn_once_without_persisting_a_second_user_message()
 -> Result<()> {
@@ -445,10 +462,28 @@ fn application_owned_queue_fixture(
     root: &Path,
     exact_prompt: &str,
 ) -> Result<ApplicationOwnedQueueFixture> {
+    application_owned_queue_fixture_with_auto_routing(root, exact_prompt, false)
+}
+
+fn application_owned_queue_fixture_with_auto_routing(
+    root: &Path,
+    exact_prompt: &str,
+    automatic_routing: bool,
+) -> Result<ApplicationOwnedQueueFixture> {
     let config_path = root.join("sigil.toml");
+    let task_config = if automatic_routing {
+        r#"
+[task]
+enabled = true
+routing_policy = "auto"
+"#
+    } else {
+        ""
+    };
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        format!(
+            r#"[workspace]
 root = "."
 
 [agent]
@@ -457,7 +492,9 @@ model = "deepseek-v4-flash"
 
 [providers.deepseek]
 api_key = "test-secret-key"
-"#,
+{task_config}
+"#
+        ),
     )?;
     let session_path = root.join("state/sessions/queued.jsonl");
     let binding = bind_application_session(&config_path, root, Some(&session_path))?;
@@ -563,6 +600,62 @@ async fn application_assembly_freezes_exact_first_request_without_persisting_it(
         |entry| matches!(entry, SessionLogEntry::User(message) if message.id == durable_message_id)
     ));
     assert!(!std::fs::read_to_string(session_log_path)?.contains(&exact_prompt));
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let fixture = application_owned_queue_fixture_with_auto_routing(
+        root.path(),
+        "inspect with authorization=super-secret-value",
+        true,
+    )?;
+    let run_request = fixture.run_request();
+    let durable_message_id = fixture.promotion.durable_user_message.id.clone();
+    let exact_prompt = fixture.exact_prompt.clone();
+    drop(fixture.session);
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(QueueTaskRoleProviderBuilder));
+
+    let (prepared, assembly) = prepare_application_run_with_exact_first_request(
+        run_request,
+        &services,
+        SecretString::new(exact_prompt.clone()),
+        durable_message_id.clone(),
+    )
+    .await?;
+
+    let request = assembly.frozen_request.request();
+    assert_eq!(
+        request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
+            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+        ]
+    );
+    let routing_index = request
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.as_deref()
+                == Some(sigil_kernel::task_routing_system_prompt_contract_material())
+        })
+        .expect("frozen request contains the routing-only system contract");
+    let exact_user_index = request
+        .messages
+        .iter()
+        .position(|message| {
+            message.id == durable_message_id
+                && message.content.as_deref() == Some(exact_prompt.as_str())
+        })
+        .expect("frozen request contains the exact queued user turn");
+    assert!(routing_index < exact_user_index);
+    drop(prepared);
     Ok(())
 }
 

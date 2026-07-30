@@ -1834,7 +1834,10 @@ impl Session {
     /// This is the pre-turn admission surface: it accepts process-local transient message
     /// material, applies the same safe/exact overlay assembly as an ordinary request, and leaves
     /// the session stream and in-memory history unchanged. Callers must separately establish a
-    /// promotion and pre-send barrier before using this material for provider I/O.
+    /// promotion and pre-send barrier before using this material for provider I/O. Non-system
+    /// transient messages participate in context selection through their safe persistence
+    /// projection so a pre-promotion queued user turn selects the same context as its later
+    /// durable promotion without exposing exact process-local material.
     #[allow(clippy::too_many_arguments)]
     pub fn build_pre_turn_candidate_request(
         &self,
@@ -1852,9 +1855,17 @@ impl Session {
         let session_projection = self.request_context_projection()?;
         let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
         let projected_messages = session_projection.model_messages();
+        let mut context_query_messages = projected_messages.clone();
+        for transient in transient_messages
+            .iter()
+            .filter(|message| message.role != crate::MessageRole::System)
+        {
+            let (safe_transient, _) = crate::project_message_for_persistence(transient.clone())?;
+            context_query_messages.push(safe_transient);
+        }
         let context_message = self.build_runtime_context_v1_message(
             &session_projection,
-            &projected_messages,
+            &context_query_messages,
             runtime_context,
         )?;
         let mut request = self

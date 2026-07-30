@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sigil - 在一个终端里完成仓库工作</title>
+    <title>Sigil - 在桌面端或终端完成仓库工作</title>
     <meta
       name="description"
-      content="Sigil 是一个 TUI-first coding agent，用一个终端工作区检查、修改并验证真实仓库。"
+      content="Sigil 是一个 Rust coding agent，通过并列的一等 Desktop 与 TUI 工作区检查、修改并验证真实仓库。"
     >
     <link rel="canonical" href="https://sigil.corerobin.com/zh-CN/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/">
@@ -16,25 +16,25 @@
     <meta name="theme-color" content="#1ecfc5">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Sigil">
-    <meta property="og:title" content="Sigil - 在一个终端里完成仓库工作">
+    <meta property="og:title" content="Sigil - 在桌面端或终端完成仓库工作">
     <meta
       property="og:description"
-      content="在一个终端工作区里检查、修改并验证真实仓库。"
+      content="在桌面端或终端检查、修改并验证真实仓库。"
     >
     <meta property="og:url" content="https://sigil.corerobin.com/zh-CN/">
     <meta property="og:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
     <meta property="og:image:type" content="image/png">
     <meta property="og:image:width" content="1280">
     <meta property="og:image:height" content="640">
-    <meta property="og:image:alt" content="Sigil — 在一个终端中完成可审查、可恢复的仓库工作">
+    <meta property="og:image:alt" content="Sigil — 在桌面端或终端完成可审查、可恢复的仓库工作">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Sigil - 在一个终端里完成仓库工作">
+    <meta name="twitter:title" content="Sigil - 在桌面端或终端完成仓库工作">
     <meta
       name="twitter:description"
-      content="在一个终端工作区里检查、修改并验证真实仓库。"
+      content="在桌面端或终端检查、修改并验证真实仓库。"
     >
     <meta name="twitter:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
-    <meta name="twitter:image:alt" content="Sigil — 在一个终端中完成可审查、可恢复的仓库工作">
+    <meta name="twitter:image:alt" content="Sigil — 在桌面端或终端完成可审查、可恢复的仓库工作">
     <script>
       (() => {
         try {
@@ -103,14 +103,14 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>以 TUI 为核心的编码智能体</p>
-          <h1>在一个终端里<br><span class="hero-accent">完成仓库工作。</span></h1>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>Desktop + TUI 编码智能体</p>
+          <h1>选择合适的表面<br><span class="hero-accent">完成仓库工作。</span></h1>
           <p class="lede">
-            给出目标、检查 AI 生成的计划、跟进并行工作，并在终端里决定下一步。
+            给出目标、检查 AI 生成的计划、跟进并行工作，并从桌面端或终端决定下一步。
           </p>
           <div class="alpha-status" aria-label="发布状态">
-            <strong>早期预览</strong>
-            <span>官网内容基于 <code>main</code> 分支，安装包的更新可能稍晚；main 上的可选桌面壳已提供紧凑导航和可持久的跟随系统/亮色/暗色外观，但仍是源码 dogfood，不属于公开安装渠道。正式使用前请先查看<a href="docs/status/">当前支持状态</a>。</span>
+            <strong>Beta 预览</strong>
+            <span>Desktop 与 TUI 是并列的一等产品表面。已签名并完成 Apple 公证的 macOS Desktop 安装包通过 GitHub prerelease 分发；npm 使用对应的 <code>beta</code> tag。使用前请查看<a href="docs/status/">当前支持状态</a>和<a href="docs/changelog/">变更记录</a>。</span>
           </div>
           <div class="hero-actions" aria-label="主要操作">
             <a class="button primary" href="#quickstart">安装</a>
@@ -141,7 +141,7 @@
               </li>
               <li class="session-phase session-phase-tool" data-phase="tool">
                 <span class="session-role">并行</span>
-                <span class="session-description">文档与 TUI 截图独立更新</span>
+                <span class="session-description">文档与双端截图独立更新</span>
                 <span class="session-state session-state-ready">2 项进行中</span>
               </li>
               <li class="session-phase session-phase-verify" data-phase="verify">
@@ -167,47 +167,66 @@
       <section class="section demo-showcase" id="demo">
         <div class="section-heading demo-heading">
           <div>
-            <p class="eyebrow">45 秒演示</p>
-            <h2>看一个真实修改从任务走到验证结果。</h2>
+            <p class="eyebrow">Desktop + TUI Demo</p>
+            <h2>选择适合当前工作的产品表面。</h2>
           </div>
           <p>
-            这是一次真实的 Sigil TUI 操作：在临时仓库里只修改 README 中的一条安装命令。视频仅剪掉模型响应的等待时间，差异、审批、工具结果和会话恢复都按实际过程呈现。
+            Desktop 导览使用真实应用截图；TUI 录屏展示一次真实仓库修改如何经过请求、审批、验证与会话恢复。
           </p>
         </div>
-        <div class="demo-frame">
-          <video
-            controls
-            loop
-            muted
-            playsinline
-            preload="metadata"
-            poster="../assets/demo/sigil-45-second-demo-poster.png"
-            aria-label="Sigil 45 秒仓库修改演示"
-          >
-            <source src="../assets/demo/sigil-45-second-demo.webm" type="video/webm">
-            <source src="../assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
-            <track kind="captions" srclang="zh-CN" label="简体中文" src="../assets/demo/sigil-45-second-demo.zh-CN.vtt" default>
-            <track kind="captions" srclang="en" label="English" src="../assets/demo/sigil-45-second-demo.en.vtt">
-            <a href="../assets/demo/sigil-45-second-demo.mp4">观看 MP4 演示。</a>
-          </video>
+        <div class="demo-grid">
+          <article class="demo-card">
+            <div class="demo-card-heading"><span>Desktop</span><strong>工作区导览</strong></div>
+            <div class="demo-frame">
+              <video controls loop muted playsinline preload="metadata" poster="../assets/demo/sigil-desktop-demo-poster.png" aria-label="Sigil Desktop 工作区导览">
+                <source src="../assets/demo/sigil-desktop-demo.webm" type="video/webm">
+                <source src="../assets/demo/sigil-desktop-demo.mp4" type="video/mp4">
+                <track kind="captions" srclang="zh-CN" label="简体中文" src="../assets/demo/sigil-desktop-demo.zh-CN.vtt" default>
+                <track kind="captions" srclang="en" label="English" src="../assets/demo/sigil-desktop-demo.en.vtt">
+                <a href="../assets/demo/sigil-desktop-demo.mp4">观看 Desktop MP4 演示。</a>
+              </video>
+            </div>
+          </article>
+          <article class="demo-card">
+            <div class="demo-card-heading"><span>TUI</span><strong>45 秒真实修改</strong></div>
+            <div class="demo-frame">
+              <video controls loop muted playsinline preload="metadata" poster="../assets/demo/sigil-45-second-demo-poster.png" aria-label="Sigil 45 秒仓库修改演示">
+                <source src="../assets/demo/sigil-45-second-demo.webm" type="video/webm">
+                <source src="../assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
+                <track kind="captions" srclang="zh-CN" label="简体中文" src="../assets/demo/sigil-45-second-demo.zh-CN.vtt" default>
+                <track kind="captions" srclang="en" label="English" src="../assets/demo/sigil-45-second-demo.en.vtt">
+                <a href="../assets/demo/sigil-45-second-demo.mp4">观看 TUI MP4 演示。</a>
+              </video>
+            </div>
+          </article>
         </div>
-        <ol class="demo-beats" aria-label="演示内容">
-          <li><span>01</span><strong>提出任务</strong><small>一个聚焦的仓库修改。</small></li>
-          <li><span>02</span><strong>检查修改</strong><small>写入前查看准确的文件差异。</small></li>
-          <li><span>03</span><strong>验证并恢复</strong><small>结果清楚可见，会话随时可继续。</small></li>
-        </ol>
       </section>
 
       <section class="section" id="quickstart">
         <div class="section-heading">
           <p class="eyebrow">快速开始</p>
-          <h2>安装一次，然后在仓库中启动。</h2>
+          <h2>下载 Desktop，或安装终端应用。</h2>
         </div>
         <div class="install-options" aria-label="推荐安装方式">
           <article class="install-card install-card-primary">
-            <span class="resource-kicker">推荐</span>
-            <h3>npm alpha</h3>
-            <pre><code>npm install -g @sigil-ai/sigil@alpha</code></pre>
+            <span class="resource-kicker">Desktop beta · macOS</span>
+            <h3>已签名并完成 Apple 公证的 DMG</h3>
+            <div class="download-links">
+              <a class="button primary" href="https://github.com/JimmyDaddy/sigil/releases" data-desktop-update-platform="darwin-aarch64" data-desktop-target="aarch64-apple-darwin" data-desktop-update-manifest="../updates/beta/latest.json">Apple 芯片</a>
+              <a class="button secondary" href="https://github.com/JimmyDaddy/sigil/releases" data-desktop-update-platform="darwin-x86_64" data-desktop-target="x86_64-apple-darwin" data-desktop-update-manifest="../updates/beta/latest.json">Intel</a>
+            </div>
+            <small>Beta manifest 可用后，按钮会直接指向对应已签名、公证并装订票据的 DMG；否则打开 Releases。</small>
+          </article>
+          <article class="install-card">
+            <span class="resource-kicker">TUI beta</span>
+            <h3>npm</h3>
+            <pre><code>npm install -g @sigil-ai/sigil@beta</code></pre>
+          </article>
+          <article class="install-card">
+            <span class="resource-kicker">本次变化</span>
+            <h3>Beta 发布说明</h3>
+            <p>安装前确认修复内容、产品表面支持范围与更新方式。</p>
+            <a href="docs/changelog/">查看变更记录 →</a>
           </article>
         </div>
         <div class="steps">
@@ -230,18 +249,18 @@ sigil</code></pre>
           <p class="eyebrow">界面导览</p>
           <h2>看清工作内容与决策点。</h2>
         </div>
-        <div class="visual-grid terminal-deck">
-          <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/#ai-规划任务执行">
-            <img src="../assets/screenshots/planned-task-execution.svg" alt="Sigil AI 规划任务执行截图" loading="lazy" decoding="async">
-            <span>AI 规划任务执行</span>
+        <div class="visual-grid product-deck">
+          <a class="visual-card visual-card-large" href="docs/visual-tour/#desktop-工作台">
+            <img src="../assets/screenshots/desktop-workbench.png" alt="包含计划、工具活动与审批的 Sigil Desktop 工作台" loading="lazy" decoding="async">
+            <span>Desktop 工作台</span>
           </a>
-          <a class="visual-card terminal-window-approval" href="docs/visual-tour/#审批检查">
-            <img src="../assets/screenshots/approval-review.svg" alt="Sigil 审批检查截图" loading="lazy" decoding="async">
-            <span>审批检查</span>
+          <a class="visual-card" href="docs/visual-tour/#desktop-设置">
+            <img src="../assets/screenshots/desktop-settings.png" alt="Sigil Desktop 设置页" loading="lazy" decoding="async">
+            <span>Desktop 设置</span>
           </a>
-          <a class="visual-card terminal-window-verification" href="docs/visual-tour/#任务验证">
-            <img src="../assets/screenshots/verification-card.svg" alt="Sigil 任务验证卡片截图" loading="lazy" decoding="async">
-            <span>任务验证</span>
+          <a class="visual-card" href="docs/visual-tour/#ai-规划任务执行">
+            <img src="../assets/screenshots/planned-task-execution.svg" alt="Sigil TUI AI 规划任务执行截图" loading="lazy" decoding="async">
+            <span>TUI 规划任务执行</span>
           </a>
         </div>
       </section>
@@ -277,7 +296,7 @@ sigil</code></pre>
             </ul>
             <div class="feature-visual feature-diff" aria-hidden="true">
               <div class="feature-visual-bar"><span>审批 · README.md</span><b>请检查</b></div>
-              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@alpha</span></code>
+              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@beta</span></code>
               <div class="feature-visual-actions"><span>拒绝</span><strong>仅允许这次</strong></div>
             </div>
           </article>

@@ -96,6 +96,7 @@ SIGIL_BUILD_GIT_HASH="${git_hash}" \
   SIGIL_RUNTIME_BUILD_GIT_HASH="${git_hash}" \
   SIGIL_BUILD_TARGET="${target_triple}" \
   SIGIL_BUILD_PROFILE="release" \
+  SIGIL_BUILD_DISTRIBUTION="github-release" \
   cargo build -p sigil --release --locked "${target_args[@]}"
 
 if [[ ! -x "${binary_path}" ]]; then

@@ -331,6 +331,52 @@
     });
   }
 
+  async function resolveDesktopDownloads() {
+    const links = [...document.querySelectorAll("[data-desktop-update-platform]")];
+    const manifestPaths = [...new Set(
+      links.map((link) => link.dataset.desktopUpdateManifest).filter(Boolean)
+    )];
+    for (const manifestPath of manifestPaths) {
+      try {
+        const response = await fetch(manifestPath, {
+          cache: "no-store",
+          credentials: "omit",
+        });
+        if (!response.ok) {
+          continue;
+        }
+        const manifest = await response.json();
+        if (!/^\d+\.\d+\.\d+-beta\.\d+$/.test(manifest.version || "")) {
+          continue;
+        }
+        links
+          .filter((link) => link.dataset.desktopUpdateManifest === manifestPath)
+          .forEach((link) => {
+            const platform = link.dataset.desktopUpdatePlatform;
+            const archive = manifest.platforms?.[platform]?.url;
+            if (typeof archive !== "string") {
+              return;
+            }
+            const archiveUrl = new URL(archive);
+            const expectedPrefix =
+              `/JimmyDaddy/sigil/releases/download/v${manifest.version}/Sigil_${manifest.version}_`;
+            if (
+              archiveUrl.protocol !== "https:"
+              || archiveUrl.hostname !== "github.com"
+              || !archiveUrl.pathname.startsWith(expectedPrefix)
+              || !archiveUrl.pathname.endsWith(".app.tar.gz")
+            ) {
+              return;
+            }
+            archiveUrl.pathname = archiveUrl.pathname.replace(/\.app\.tar\.gz$/, ".dmg");
+            link.href = archiveUrl.href;
+          });
+      } catch (_error) {
+        // The release page remains a safe fallback before the beta manifest exists.
+      }
+    }
+  }
+
   media.addEventListener("change", () => {
     if (selectedTheme() === "system") {
       applyTheme();
@@ -354,4 +400,5 @@
   attachSurfaceSpotlights();
   attachRevealMotion();
   attachCapabilityMotionControls();
+  void resolveDesktopDownloads();
 })();

@@ -47,6 +47,9 @@ pub use reasoning_effort::deepseek_reasoning_efforts;
 #[path = "tests/catalog_tests.rs"]
 mod catalog_tests;
 #[cfg(test)]
+#[path = "tests/client_tests.rs"]
+mod client_tests;
+#[cfg(test)]
 #[path = "tests/reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;
 

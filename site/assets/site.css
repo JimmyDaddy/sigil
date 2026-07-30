@@ -1383,6 +1383,40 @@ code {
   color: var(--muted);
 }
 
+.demo-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+.demo-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.demo-card-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.demo-card-heading span {
+  color: var(--cyan);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.demo-card-heading strong {
+  color: var(--ink);
+}
+
 .demo-frame {
   position: relative;
   max-width: 1180px;
@@ -1411,6 +1445,10 @@ code {
   aspect-ratio: 16 / 9;
   border-radius: 10px;
   background: #050d16;
+}
+
+.demo-card:first-child .demo-frame video {
+  aspect-ratio: 16 / 10;
 }
 
 .demo-beats {
@@ -1502,6 +1540,17 @@ h3 {
   color: var(--code-text);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.download-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 16px 0 12px;
+}
+
+.install-card small {
+  color: var(--muted);
 }
 
 .step,
@@ -1828,6 +1877,15 @@ h3 {
 
 .visual-card span {
   font-weight: 900;
+}
+
+.product-deck {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.product-deck .visual-card-large {
+  grid-column: span 2;
+  grid-row: span 2;
 }
 
 .terminal-deck {
@@ -3066,6 +3124,7 @@ footer a {
 
   .steps,
   .install-options,
+  .demo-grid,
   .feature-grid,
   .doc-grid,
   .visual-grid,
@@ -3343,6 +3402,7 @@ footer a {
 
   .steps,
   .install-options,
+  .demo-grid,
   .feature-grid,
   .doc-grid,
   .split-list,

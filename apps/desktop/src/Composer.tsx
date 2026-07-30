@@ -34,6 +34,7 @@ export function Composer({
   draftKey,
   active,
   submissionBlocked,
+  queueSubmissionBlocked = false,
   draftEditingBlocked = false,
   submitting,
   controlBusy,
@@ -59,7 +60,7 @@ export function Composer({
   onOpenSupport,
   onOpenAgentWorkbench,
   onOpenQueue,
-  onPreviewCompaction,
+  onCompact,
   onOpenIntentStack,
   onNotice,
   onSubmit,
@@ -69,6 +70,7 @@ export function Composer({
   draftKey: string;
   active: boolean;
   submissionBlocked: boolean;
+  queueSubmissionBlocked?: boolean;
   draftEditingBlocked?: boolean;
   submitting: boolean;
   controlBusy: boolean;
@@ -94,7 +96,7 @@ export function Composer({
   onOpenSupport: () => void;
   onOpenAgentWorkbench: (query: string) => void;
   onOpenQueue: () => void;
-  onPreviewCompaction: () => void;
+  onCompact: () => Promise<boolean>;
   onOpenIntentStack: () => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
@@ -143,7 +145,12 @@ export function Composer({
 
   const submit = async () => {
     let nextPrompt = prompt.trim();
-    if (nextPrompt === "" || submissionBlocked || submitting || (active && queueBusy)) return;
+    if (
+      nextPrompt === ""
+      || (active ? queueSubmissionBlocked : submissionBlocked)
+      || submitting
+      || (active && queueBusy)
+    ) return;
     const command = resolveCommand(runContext, nextPrompt);
     if (command !== undefined) {
       if (await executeCommand(command.suggestion, command.argument)) clearComposer();
@@ -232,8 +239,7 @@ export function Composer({
   const executeCommand = async (suggestion: ComposerSuggestion, argument: string) => {
     switch (suggestion.clientAction) {
       case "preview_compaction":
-        onPreviewCompaction();
-        return true;
+        return onCompact();
       case "open_intent_stack":
         onOpenIntentStack();
         return true;
@@ -431,7 +437,11 @@ export function Composer({
             setActiveSuggestion(0);
             writeDraft(draftKey, event.target.value);
           }}
-          placeholder={submissionBlocked ? t("readOnlyRecoveryPrompt") : active ? t("activePrompt") : t("prompt")}
+          placeholder={
+            active
+              ? queueSubmissionBlocked ? t("conversationQueueUnavailable") : t("activePrompt")
+              : submissionBlocked ? t("readOnlyRecoveryPrompt") : t("prompt")
+          }
           rows={1}
           onKeyDown={(event) => {
             if (suggestionsOpen) {
@@ -575,7 +585,7 @@ export function Composer({
                   type="submit"
                   aria-label={t("queueMessage")}
                   icon={<Icon name="queue" />}
-                  disabled={prompt.trim() === "" || submissionBlocked || submitting || queueBusy}
+                  disabled={prompt.trim() === "" || queueSubmissionBlocked || submitting || queueBusy}
                   aria-busy={queueBusy || undefined}
                 />
               </Tooltip>

@@ -63,6 +63,7 @@ struct BuildInfo {
     git_hash: &'static str,
     target: &'static str,
     profile: &'static str,
+    distribution: &'static str,
 }
 
 impl BuildInfo {
@@ -72,7 +73,17 @@ impl BuildInfo {
             git_hash: env!("SIGIL_BUILD_GIT_HASH"),
             target: env!("SIGIL_BUILD_TARGET"),
             profile: env!("SIGIL_BUILD_PROFILE"),
+            distribution: env!("SIGIL_BUILD_DISTRIBUTION"),
         }
+    }
+
+    fn update_metadata(self) -> sigil_updater::BuildMetadata {
+        sigil_updater::BuildMetadata::new(
+            self.version,
+            self.target,
+            self.profile,
+            self.distribution,
+        )
     }
 }
 
@@ -84,7 +95,7 @@ impl From<BuildInfo> for SupportBuildInfo {
 
 #[derive(Parser)]
 #[command(name = "sigil")]
-#[command(about = "TUI-first shell for Sigil")]
+#[command(about = "Terminal workspace for the Sigil coding agent")]
 #[command(disable_version_flag = true)]
 struct Cli {
     #[arg(long = "version", action = clap::ArgAction::SetTrue)]
@@ -128,6 +139,11 @@ enum Commands {
     Tokenizer {
         #[command(subcommand)]
         command: TokenizerCommand,
+    },
+    /// Check for or install a Sigil update.
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
     },
     Serve {
         #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
@@ -223,10 +239,57 @@ enum ServeStartupOutput {
     Json,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum UpdateOutput {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum UpdateChannelArg {
+    #[default]
+    Current,
+    Stable,
+    Beta,
+}
+
+impl From<UpdateChannelArg> for sigil_updater::UpdateChannel {
+    fn from(value: UpdateChannelArg) -> Self {
+        match value {
+            UpdateChannelArg::Current => Self::Current,
+            UpdateChannelArg::Stable => Self::Stable,
+            UpdateChannelArg::Beta => Self::Beta,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum TokenizerCommand {
     /// Explicitly download and checksum-verify the public tokenizer needed for DeepSeek V4 Flash portable compaction.
     Install { profile: String },
+}
+
+#[derive(Subcommand)]
+enum UpdateCommand {
+    /// Check GitHub Releases without changing the current installation.
+    Check {
+        #[arg(long, value_enum, default_value = "current")]
+        channel: UpdateChannelArg,
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long, value_enum, default_value = "text")]
+        output: UpdateOutput,
+    },
+    /// Install an admitted standalone update or print the owning package-manager command.
+    Apply {
+        #[arg(long, value_enum, default_value = "current")]
+        channel: UpdateChannelArg,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, value_enum, default_value = "text")]
+        output: UpdateOutput,
+    },
 }
 
 #[cfg(not(test))]
@@ -256,12 +319,17 @@ fn main() -> ExitCode {
 #[cfg(not(test))]
 async fn run_main() -> Result<u8> {
     let cli = Cli::parse();
+    let build = BuildInfo::current();
     if cli.show_version {
-        print!("{}", render_version(BuildInfo::current()));
+        print!("{}", render_version(build));
         return Ok(0);
     }
     let Some(command) = cli.command else {
-        sigil_tui::launcher::run_tui_with_build_info(cli.config, BuildInfo::current().into())?;
+        sigil_tui::launcher::run_tui_with_build_context(
+            cli.config,
+            build.into(),
+            build.update_metadata(),
+        )?;
         return Ok(0);
     };
     let machine_output = match &command {
@@ -363,10 +431,11 @@ async fn run_main() -> Result<u8> {
             return Ok(u8::try_from(code).expect("machine exit codes must fit in u8"));
         }
         Commands::Resume { session } => {
-            sigil_tui::launcher::run_tui_resume_with_build_info(
+            sigil_tui::launcher::run_tui_resume_with_build_context(
                 cli.config,
                 session,
-                BuildInfo::current().into(),
+                build.into(),
+                build.update_metadata(),
             )?;
         }
         Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
@@ -380,6 +449,9 @@ async fn run_main() -> Result<u8> {
         }
         Commands::Tokenizer { command } => {
             tokenizer_command(&config_path, &cwd, command).await?;
+        }
+        Commands::Update { command } => {
+            update_command(&config_path, &cwd, build, command).await?;
         }
         Commands::Serve {
             host,
@@ -750,10 +822,142 @@ async fn tokenizer_command(
     Ok(())
 }
 
+#[cfg(not(test))]
+async fn update_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    build: BuildInfo,
+    command: UpdateCommand,
+) -> Result<()> {
+    let paths = match RootConfig::load(config_path) {
+        Ok(config) => {
+            let workspace_root =
+                resolve_workspace_root(config_path, launch_cwd, &config.workspace.root);
+            resolve_sigil_paths(&config.storage, &config.session, &workspace_root)
+        }
+        Err(_) => resolve_sigil_paths(
+            &sigil_kernel::StorageConfig::default(),
+            &sigil_kernel::SessionConfig::default(),
+            launch_cwd,
+        ),
+    };
+    let cache_file = paths
+        .cache_root
+        .join(sigil_updater::UPDATE_CACHE_RELATIVE_PATH);
+    let current_exe = env::current_exe()?;
+    let metadata = build.update_metadata();
+    let install_source = metadata.install_source(&current_exe);
+
+    match command {
+        UpdateCommand::Check {
+            channel,
+            refresh,
+            output,
+        } => {
+            let service = sigil_updater::UpdateService::github(cache_file)?;
+            let outcome = service
+                .check(sigil_updater::CheckOptions {
+                    current_version: metadata.version,
+                    target: metadata.target,
+                    channel: channel.into(),
+                    install_source,
+                    force_refresh: refresh,
+                })
+                .await?;
+            match output {
+                UpdateOutput::Text => print!("{}", render_update_check(&outcome)),
+                UpdateOutput::Json => println!("{}", serde_json::to_string_pretty(&outcome)?),
+            }
+        }
+        UpdateCommand::Apply {
+            channel,
+            yes,
+            output,
+        } => {
+            if !yes {
+                anyhow::bail!("refusing to update without explicit --yes");
+            }
+            if matches!(
+                install_source,
+                sigil_updater::InstallSource::Source | sigil_updater::InstallSource::Unknown
+            ) {
+                anyhow::bail!(
+                    "this source build cannot update itself; rebuild or reinstall with Cargo"
+                );
+            }
+            let service = sigil_updater::UpdateService::github(cache_file)?;
+            let outcome = service
+                .check(sigil_updater::CheckOptions {
+                    current_version: metadata.version,
+                    target: metadata.target,
+                    channel: channel.into(),
+                    install_source,
+                    force_refresh: true,
+                })
+                .await?;
+            let applied = sigil_updater::apply_checked_update(&outcome, &current_exe).await?;
+            match output {
+                UpdateOutput::Text => print!("{}", render_update_apply(&applied)),
+                UpdateOutput::Json => println!("{}", serde_json::to_string_pretty(&applied)?),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_update_check(outcome: &sigil_updater::UpdateCheckOutcome) -> String {
+    let mut rendered = format!(
+        "Sigil update check\ncurrent: {}\nchannel: {}\ninstall source: {}\n",
+        outcome.current_version,
+        outcome.channel,
+        install_source_label(outcome.install_source)
+    );
+    let Some(candidate) = outcome.candidate.as_ref() else {
+        rendered.push_str("status: up to date\n");
+        return rendered;
+    };
+    rendered.push_str(&format!("available: {}\n", candidate.version));
+    if let Some(command) = outcome.managed_update_command.as_deref() {
+        rendered.push_str(&format!("update command: {command}\n"));
+    } else if outcome.apply_permitted() {
+        rendered.push_str("status: ready to install with `sigil update apply --yes`\n");
+    } else {
+        let blocking_reason = candidate
+            .security
+            .blocking_reason
+            .as_deref()
+            .unwrap_or("this installation source cannot be updated in place");
+        rendered.push_str(&format!("status: install blocked ({})\n", blocking_reason));
+    }
+    rendered
+}
+
+fn render_update_apply(outcome: &sigil_updater::UpdateApplyOutcome) -> String {
+    match outcome {
+        sigil_updater::UpdateApplyOutcome::Installed { version } => {
+            format!("Sigil {version} installed. Restart Sigil to use the new version.\n")
+        }
+        sigil_updater::UpdateApplyOutcome::ManagedExternally { command } => {
+            format!("This installation is managed externally. Run:\n{command}\n")
+        }
+    }
+}
+
+const fn install_source_label(source: sigil_updater::InstallSource) -> &'static str {
+    match source {
+        sigil_updater::InstallSource::StandaloneGitHubArchive => "standalone GitHub archive",
+        sigil_updater::InstallSource::Npm => "npm",
+        sigil_updater::InstallSource::Homebrew => "Homebrew",
+        sigil_updater::InstallSource::Cargo => "Cargo",
+        sigil_updater::InstallSource::Source => "source build",
+        sigil_updater::InstallSource::Unknown => "unknown",
+    }
+}
+
 fn render_version(info: BuildInfo) -> String {
     format!(
-        "sigil {}\ncommit: {}\ntarget: {}\nprofile: {}\n",
-        info.version, info.git_hash, info.target, info.profile
+        "sigil {}\ncommit: {}\ntarget: {}\nprofile: {}\ndistribution: {}\n",
+        info.version, info.git_hash, info.target, info.profile, info.distribution
     )
 }
 

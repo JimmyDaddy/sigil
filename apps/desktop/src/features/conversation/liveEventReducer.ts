@@ -687,8 +687,13 @@ function compareTimelineEvents(left: TimelineEvent, right: TimelineEvent): numbe
 }
 
 function toolStatus(event: TimelineEvent): LiveConversationDisplayItem["status"] {
-  if (event.kind === "tool_started") return "running";
-  if (event.kind === "tool_completed") return "completed";
+  // These two events describe provider-side tool-call assembly. The actual
+  // execution lifecycle starts later with tool_progress, possibly after an
+  // approval. Treating assembly completion as execution completion makes the
+  // same provisional item regress from completed back to running.
+  if (event.kind === "tool_started" || event.kind === "tool_completed") {
+    return "requested";
+  }
   switch (event.status) {
     case "approved":
       return "approved";

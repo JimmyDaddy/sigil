@@ -164,6 +164,56 @@
 .settings-section-heading h2 { margin: 0; font-size: 16px; }
 .settings-section-heading p { margin: 6px 0 0; color: var(--sg-sys-color-on-surface-variant); font-size: 13px; line-height: 1.5; }
 .settings-choice-group { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: var(--sg-sys-space-2); }
+.desktop-update-control {
+  display: grid;
+  min-width: 0;
+  gap: var(--sg-sys-space-3);
+}
+.desktop-update-status {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sg-sys-space-2);
+  color: var(--sg-sys-color-on-surface-variant);
+  font-size: 12px;
+}
+.desktop-update-release {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: var(--sg-sys-space-3);
+  border: 1px solid var(--sg-sys-color-outline-variant);
+  border-radius: var(--sg-sys-radius-md);
+  background: var(--sg-sys-color-surface-container);
+}
+.desktop-update-release strong { font-size: 14px; }
+.desktop-update-release small { color: var(--sg-sys-color-on-surface-subtle); }
+.desktop-update-release p {
+  max-height: 144px;
+  margin: var(--sg-sys-space-1) 0 0;
+  overflow: auto;
+  color: var(--sg-sys-color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.desktop-update-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sg-sys-space-2);
+}
+.desktop-update-progress progress {
+  width: 100%;
+  accent-color: var(--sg-sys-color-primary);
+}
+.desktop-update-progress small,
+.desktop-update-restart-note {
+  color: var(--sg-sys-color-on-surface-variant);
+  font-size: 12px;
+}
+.desktop-update-restart-note { margin: 0; line-height: 1.5; }
 .theme-option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sg-sys-space-2); }
 .theme-option.sg-button {
   min-width: 0;

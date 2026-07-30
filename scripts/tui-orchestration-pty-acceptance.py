@@ -332,6 +332,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
                         f"unexpected synthesis request {request_number}"
                     )
                 self._send_text(final)
+            elif kind == "title":
+                self._send_text("Orchestration acceptance")
             else:
                 raise AcceptanceError(f"unsupported request kind {kind}")
         except Exception as error:  # noqa: BLE001 - retain fixture diagnostics.
@@ -493,6 +495,11 @@ def has_tool_result(payload: object, call_id: str) -> bool:
 def classify_request(payload: object) -> str:
     names = tool_names(payload)
     text = request_text(payload)
+    if (
+        not names
+        and "Generate a concise semantic title for a coding-agent conversation" in text
+    ):
+        return "title"
     if "request_task_planning" in names:
         return "conversation"
     if "task_plan_update" in names:
@@ -756,6 +763,7 @@ def validate_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         f"read:{READ_STEP_IDS[0]}": 1,
         f"read:{READ_STEP_IDS[1]}": 1,
         "synthesis": 1,
+        "title": 1,
     }
     if fixture.request_counts != expected_requests:
         raise AcceptanceError(
@@ -797,6 +805,7 @@ def validate_approval_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         "write:request": 1,
         "write:after_tool": 1,
         "synthesis": 2,
+        "title": 1,
     }
     if fixture.request_counts != expected_requests:
         raise AcceptanceError(
@@ -989,6 +998,7 @@ def main() -> int:
         for directory in (workspace, state_root, cache_root, session_dir):
             directory.mkdir()
         (workspace / "README.md").write_text("orchestration fixture\n", encoding="utf-8")
+        SUPPORT.generate_fixture_tls_identity(fixture_root)
         env = SUPPORT.isolated_environment(fixture_root)
         initialize_git_workspace(workspace, env)
         fixture = FixtureState()

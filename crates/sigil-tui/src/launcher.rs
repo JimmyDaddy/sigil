@@ -46,6 +46,8 @@ use sigil_kernel::preferred_config_path;
 use sigil_runtime::provider_connections::legacy_migration_recovery_state;
 #[cfg(not(test))]
 use sigil_runtime::support::SupportBuildInfo;
+#[cfg(not(test))]
+use sigil_updater::BuildMetadata;
 
 #[cfg(not(test))]
 use crate::ui;
@@ -80,7 +82,26 @@ pub fn run_tui_with_build_info(
     config: Option<PathBuf>,
     build_info: SupportBuildInfo,
 ) -> Result<()> {
-    run_tui_with_initial_session(config, InitialSessionTarget::Latest, build_info)
+    let update_info = BuildMetadata::source(
+        build_info.version.clone(),
+        build_info.target.clone(),
+        build_info.profile.clone(),
+    );
+    run_tui_with_build_context(config, build_info, update_info)
+}
+
+#[cfg(not(test))]
+pub fn run_tui_with_build_context(
+    config: Option<PathBuf>,
+    build_info: SupportBuildInfo,
+    update_info: BuildMetadata,
+) -> Result<()> {
+    run_tui_with_initial_session(
+        config,
+        InitialSessionTarget::Latest,
+        build_info,
+        update_info,
+    )
 }
 
 #[cfg(not(test))]
@@ -94,11 +115,26 @@ pub fn run_tui_resume_with_build_info(
     session_selector: Option<String>,
     build_info: SupportBuildInfo,
 ) -> Result<()> {
+    let update_info = BuildMetadata::source(
+        build_info.version.clone(),
+        build_info.target.clone(),
+        build_info.profile.clone(),
+    );
+    run_tui_resume_with_build_context(config, session_selector, build_info, update_info)
+}
+
+#[cfg(not(test))]
+pub fn run_tui_resume_with_build_context(
+    config: Option<PathBuf>,
+    session_selector: Option<String>,
+    build_info: SupportBuildInfo,
+    update_info: BuildMetadata,
+) -> Result<()> {
     let target = session_selector
         .as_deref()
         .map(InitialSessionTarget::Selector)
         .unwrap_or(InitialSessionTarget::Latest);
-    run_tui_with_initial_session(config, target, build_info)
+    run_tui_with_initial_session(config, target, build_info, update_info)
 }
 
 #[cfg(not(test))]
@@ -106,6 +142,7 @@ fn run_tui_with_initial_session(
     config: Option<PathBuf>,
     initial_session: InitialSessionTarget<'_>,
     build_info: SupportBuildInfo,
+    update_info: BuildMetadata,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(config.as_deref(), &cwd)?;
@@ -117,6 +154,7 @@ fn run_tui_with_initial_session(
         spawn_worker,
     )?;
     app.set_support_build_info(build_info);
+    app.set_update_build_info(update_info);
 
     enable_raw_mode()?;
     let inline_viewport_height = current_inline_viewport_height()?;
@@ -457,6 +495,7 @@ async fn run_app(
                 latest_frame_area = frame.area();
                 ui::render(frame, app);
             })?;
+            let _ = app.maybe_start_automatic_update_check();
             let _ = app.acknowledge_active_egress_disclosure_frame();
             last_spinner_tick = spinner_tick;
             needs_render = false;
@@ -741,8 +780,10 @@ where
             root_config,
         } => {
             let support_build_info = app.support_build_info().clone();
+            let update_build_info = app.update_build_info().clone();
             *app = AppState::from_root_config(&config_path, &root_config);
             app.set_support_build_info(support_build_info);
+            app.set_update_build_info(update_build_info);
             app.ensure_current_workspace_trust_decision("trusted by user during quick setup")?;
             *worker = Some(spawn_worker_fn(*root_config, app)?);
         }
@@ -819,6 +860,15 @@ where
                     app.record_feedback_external_action_failure("reveal feedback report", &error);
                 }
             }
+        }
+        AppAction::CheckForUpdate {
+            force_refresh,
+            channel,
+        } => {
+            app.start_update_check(force_refresh, true, channel);
+        }
+        AppAction::ApplyUpdate { channel } => {
+            app.start_update_apply(channel);
         }
         action => {
             let command = app.into_worker_command(action);

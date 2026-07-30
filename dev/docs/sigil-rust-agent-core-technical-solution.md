@@ -2,7 +2,8 @@
 
 ## 1. 背景
 
-`sigil` 计划做成一个基于 Rust 的 AI coding agent，定位是 TUI-first 的终端产品、内核复用、前端可插拔。
+`sigil` 是一个基于 Rust 的 AI coding agent：内核复用、前端可插拔，
+Desktop 与 TUI 作为并列的一等产品表面共享同一套任务、审批、恢复和验证语义。
 
 它要继承的不是某个具体项目的代码形态，而是那套已经被验证过的核心能力模型：
 
@@ -19,7 +20,8 @@
 
 第一代 `sigil` 内核应该达成这些目标：
 
-1. 用 Rust 构建一个可被 TUI、CLI、HTTP、未来桌面端共同复用的 agent kernel，其中 TUI 是第一用户表面。
+1. 用 Rust 构建一个可被 Desktop、TUI、CLI 和 HTTP 共同复用的 agent kernel，
+   其中 Desktop 与 TUI 是并列的一等用户表面。
 2. 保持 provider、tool、plugin 都由配置和注册机制驱动，而不是写死在核心里。
 3. 通过独立 provider crate 支持 DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic 和 Gemini，同时保持内核 provider-neutral。
 4. 内置工具和 MCP 工具通过统一的工具注册表暴露给 agent。
@@ -27,13 +29,14 @@
 6. 提供适合自动化 coding 场景的 permission layer 和 workspace confinement。
 7. 给 planner / executor 双模型协作预留清晰的架构边界，但不强行塞进 MVP。
 
-## 3. 第一阶段非目标
+## 3. 初始阶段非目标与当前演进
 
-第一版需要明确不做这些事情，避免一开始范围失控：
+以下条目记录第一版的范围控制，不表示当前产品仍然缺少对应能力。Desktop 已在后续阶段作为
+与 TUI 并列的一等产品表面落地；其他条目仍按当前实现和对应 RFC 判断：
 
-- 第一阶段不做桌面壳
+- Desktop shell 不与第一版 kernel 同期交付；当前已由 `sigil-desktop` 与 `apps/desktop` 落地
 - 第一阶段不做 codegraph 或更重的代码智能子系统
-- 第一阶段核心 runtime 不依赖 npm、Homebrew 或自更新；首发分发包装层只作为 release 工程存在，复用 `sigil` binary、GitHub release archives、Homebrew tap formula 和 npm wrapper，不改变 TUI-first 产品入口
+- 第一阶段核心 runtime 不依赖 npm、Homebrew 或自更新；首发分发包装层只作为 release 工程存在，复用 `sigil` binary、GitHub release archives、Homebrew tap formula 和 npm wrapper，不把命令包装层变成独立产品表面
 - 不把 Anthropic/Gemini/DeepSeek/OpenAI-compatible 的私有 request 或 stream 语义上移进 kernel
 - 在单会话内核跑稳之前，不做复杂的多 agent 编排
 - 第一阶段不继续扩张用户可见命令面，不把 provider 专项能力直接暴露成产品主心智
@@ -41,8 +44,10 @@
 ## 4. 设计原则
 
 1. 契约优先：先定义稳定 trait 和事件契约，再铺前端。
-2. 内核优先：CLI、TUI、desktop 都只是 adapter，不能各写一套执行逻辑。
-3. TUI-first 产品表面：优先把真实用户会看到的交互壳做对，再决定哪些命令需要显式暴露。
+2. 内核优先：共享执行逻辑留在 kernel/runtime；Desktop 与 TUI 作为产品表面、CLI 与 HTTP 作为
+   adapter，都不能各写一套执行逻辑。
+3. 双一等产品表面：优先定义共享产品语义，再分别把 Desktop 与 TUI 的交互壳做对；
+   CLI/HTTP 不反向塑造普通用户心智。
 4. 配置驱动、插件驱动：模型和工具来自配置、注册和运行时接入，不靠核心里的大段 `match`。
 5. 缓存优先：system prompt prefix 尽可能稳定；memory、skills 只在 session 启动时折入一次；任何会破坏 byte-stable prefix 的动态注入都必须被隔离。
 6. Rust 风格优先：用清晰 ownership、显式状态机和合理 async 边界，而不是机械翻译 Go。
@@ -84,6 +89,9 @@ sigil/
           permission_tests.rs
           provider_tests.rs
           session_tests.rs
+    sigil-provider-http/
+      src/
+        lib.rs
     sigil-provider-deepseek/
       src/
         capabilities.rs
@@ -186,6 +194,16 @@ sigil/
       src/
         lib.rs
         tests/lib_tests.rs
+    sigil-updater/
+      src/
+        apply.rs
+        cache.rs
+        channel.rs
+        github.rs
+        install_source.rs
+        lib.rs
+        tests/
+          *_tests.rs
     sigil-desktop/
       src/
         client.rs
@@ -270,6 +288,7 @@ sigil/
 ### 当前边界说明
 
 - `sigil-kernel`：承载 provider、tool、session、event、approval、permission、memory、config 和 agent loop 等通用契约。当前采用 flat public module 文件，测试统一收纳在 `src/tests/*_tests.rs`；这里不出现 DeepSeek 专有字段，也不持有 TUI 状态。
+- `sigil-provider-http`：所有 provider 共用的安全 HTTP client builder。默认保留 rustls 内建信任根；显式设置 `SSL_CERT_FILE` 时追加该 PEM bundle，供企业代理与私有网关使用。它不关闭证书链或主机名校验，也不承载任何 provider 协议、模型或鉴权语义。
 - `sigil-provider-deepseek`：首个旗舰 provider，内部拆成 transport、endpoint、request、response、stream、mapper、reasoning、tools、pricing 等模块。DeepSeek 专项能力在这里解释和降级，不反向污染 kernel。
 - `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions provider，覆盖通用 streaming text、tool call、usage 和 endpoint/header 配置，不承载 DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint 语义。
 - `sigil-provider-openai-responses`：OpenAI Responses provider，独立处理 Responses 的 `input` / output-item / SSE 协议，并将每轮完整、原样的原生 output items 作为 provider continuation state 绑定到对应 assistant message；它不修改 Chat Completions wire contract，也不把 OpenAI 字段泄漏到 kernel。官方 route 的 cache key 使用 tenant partition 下的 HMAC 稳定分片，logical A0/A2 boundary 不触碰 active A4；`/responses/compact` 返回的 opaque window 只有在同 cursor 的 portable checkpoint 已激活后才能写成加密 native carrier，不能把候选明文写入 JSONL。
@@ -277,15 +296,16 @@ sigil/
 - `sigil-provider-gemini`：Gemini GenerateContent provider，负责 `systemInstruction`、`functionDeclarations`、`functionCall` / `functionResponse`、block reason，以及 provider-native `google_search` / grounding metadata 映射；Gemini 的 function-response、hosted model eligibility、streaming grounding index 与 retry 细节保留在 provider crate 内。
 - `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。大输出路径使用 kernel policy-safe streaming sink 形成 artifact + bounded view；`read_tool_artifact` 只接受 opaque ref 和 byte/line/literal selector，并返回 transient bounded page + body-free receipt。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
 - `sigil-process`：只承载跨 crate 复用的进程树 lifecycle ownership、整树终止和离线 capability probe。Windows 使用 kill-on-close Job Object，Unix 提供独立process-group配置和整组终止primitive；等待、grace policy与receipt仍由调用crate拥有。它不承载shell选择、sandbox、terminal I/O、MCP framing、desktop bootstrap、receipt或TUI状态。
+- `sigil-updater`：Desktop、TUI 与 CLI 共享的更新策略边界，拥有 release discovery、SemVer channel isolation、immutable/digest admission、安装源分类、24 小时 global cache 与 standalone binary replacement；它不拥有产品 UI、release publication 或 package-manager execution。GitHub digest 只作为完整性证据，standalone apply 还要求编译期分发 marker、精确 tag/target/asset 和下载后二进制元数据复核；npm、Homebrew、Cargo、source 与 unknown 只返回原安装器命令。
 - `sigil-desktop`：桌面 Rust 后端的 library-only boundary。它生成并私有持有 per-launch bearer，以独立process tree启动one `sigil serve` per workspace，bounded解析startup metadata，再用no-proxy/no-redirect的鉴权`/server-info`验证同一DTO；关闭时先drop owner pipe等待graceful drain，超时才整树终止。typed client只反序列化server response，包含server-private path的DTO没有IPC serialization surface。它不依赖kernel、runtime、TUI或HTTP server crate，renderer也不能取得token/child/generic HTTP。
 - `apps/desktop`：RFC-0044 的 Tauri 2 + React/TypeScript/Vite companion。Tauri backend通过`sigil-desktop`维持one process per workspace，native recent store私有持有canonical path；renderer只接收workspace id/display/server state、bounded catalog rows与process-local session summary。history pagination/search/filter/new/open/rename/confirmed-delete全部经authenticated typed HTTP client；rename追加bounded lifecycle decision，delete复用exact preview/apply并与活动run/verification互斥，server-private path与durable scope在IPC前丢弃。capability仅允许冻结的desktop业务command，不开放generic shell/process/filesystem/HTTP。wire schema由`sigil-http` OpenAPI导出并在CI检查snapshot和generated TypeScript drift；SSE `ProtocolEvent`/`PublicRunEvent` 也属于该合约，native client以provider-neutral typed DTO消费task/plan/batch/step/integration事件，未知事件只降级且raw payload不进入renderer，renderer不直接持有loopback client或bearer。RFC-0046 进一步把桌面表现层收口到 Material-derived semantic roles 和 Sigil-owned accessible primitives；application-scope `system | light | dark` 由 bounded native store 持久化，不进入 workspace/session/OpenAPI/SQLite/runtime truth，theme/navigation/review 切换不得 remount active conversation。
 - `sigil-code-intel`：隔离 LSP client 生命周期、多语言 Tree-sitter request-local fallback、RepoMapLite source map、符号/诊断缓存、warm LSP context snapshot、代码查询 tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。首批 request-local adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用编译期固定 grammar、ignore-aware bounded walker/read、deterministic caps 和 same-language unique-reference heuristic；它不建立 persistent repo graph，也不把 heuristic edge 宣传为 resolved call graph。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态结果以 bounded Context V1/tool result 进入 provider-visible request，不修改 stable base system prompt。`LanguageServerConfig.trust_required = true` 时，runtime 必须把当前 session 对精确 workspace 的 durable trust projection 传到 code-intel，并在 command resolution 与 process spawn 前 fail-closed；旧调用入口和 fresh headless session 默认 `Unknown`，`trust_required = false` 只显式关闭 LSP 进程启动 gate，不改变写工具权限。外部规划型写入采用 kernel-owned `ToolPreparationDraft -> PreparedToolCall` 一次性 envelope：code-intel 只负责单次 LSP plan、source/version/hash、完整 edit set 与 proposed bytes 的进程内 materialization，kernel 用 exact target subjects 求 permission，并把 args、policy、approval、preview 与 execution 绑定同一 digest；execute 只能按值消费 artifact，不能再次查询 LSP。多文件写入复用 RFC-0002 coordinator，进程内失败采用可审计的补偿回滚，crash 仍按逐文件 reconciliation 处理而不宣称原子事务。
 - `sigil-mcp`：隔离 stdio 与 Streamable HTTP MCP client、OAuth 2.1 凭据生命周期和工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry、run options、Context source provider contract / hard-cap enforcement 和 request resolver，避免 TUI / CLI 各自硬编码装配链。tool surface 保留与 registry 同一个 `CodeIntelligenceService` inner；每次请求先在 35ms 内只读 query-relevant warm LSP cache，有命中时使用 explicit path + LSP rows 并跳过 RepoMap，miss/disabled/timeout 才使用 request-local multilingual RepoMap。它把这些结果转换为带 score breakdown 的 bounded Context V1 items，并把 trusted plugin hook output / caller-supplied MCP resource text 通过同一个 source-provider contract 转成 `ExtensionProvided` / `McpResource` rows；缺失或不可信输入只产生 excluded provenance，不阻塞普通 request。normal、plan、headless、queue 和 compaction preparation 共享该 resolver；已经冻结的 provider request 不在 dispatch 时重算。kernel 只看到 provider-neutral `ContextItem` 和 packer，不知道 runtime 存在。
 - `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。历史session reopen只接受catalog提供的relative ref与expected durable id，并由runtime重新验证lifecycle/JSONL truth；SQLite projection不能授权resume。artifact page route 必须 authenticated、typed、session/source-bound、hash-verified 且 endpoint cap 固定，response/error 均不包含物理路径。
-- `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义。`sigil-desktop`已按workspace监管单独的`serve`进程，通过单行版本化JSON/鉴权`server-info`完成bootstrap，并用stdin owner pipe与process-tree fallback拥有child lifecycle；诊断事实由 `sigil-runtime` 提供，避免 CLI、TUI与desktop各写一套判断。
-- `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs；`scripts/publish-npm-packages.sh` 通过 npm Trusted Publisher 按 platform-first、root-last 顺序发布并支持 partial retry；`.github/workflows/release.yml` 在 tag 发布时构建多平台 archive、生成 provenance attestation、渲染 Homebrew formula asset、准备并发布 npm packages、创建 GitHub release，再由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key 同步 tap。crates.io package name 决策和自更新仍是 release-management 工作。
-- `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 runtime、composer、approval、session browser 以及 timeline presentation、review/checkpoint、agent panel、egress disclosure 等私有领域 bundle，根 `AppState` 只为兼容保留公开 timeline/event/scroll 字段和顶层编排状态；`runner/worker_loop.rs` 只保留 worker façade，私有 `WorkerLoopState` 统一持有 session/run/compaction/refresh/agent 状态，scheduler 通过统一 `WorkerEvent` inbox 阻塞等待 command、typed completion、durable projection 与 supervisor wake，只在存在 MCP/terminal 等真实 deadline 时使用 nearest-deadline timeout；七个 advancement function 与穷尽 public-command 到 domain-typed-command classifier/handler 分别承担确定性 safe-point 推进和路由。session scheduler 的 queue、TaskGuidance、continuation、terminal 与 usage/readiness 热查询读取 kernel active-session 增量 projection，并以 durable frontier/CAS 保持最终写入权威；switch/new-session/local-session fork/checkpoint fork 复用一个 session transition，替换 projection observer generation，并在 foreground 或 detached background run 存在时 fail-closed，同时按目标 session 重建 agent supervisor 与模型可见 agent-tool surface。TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
+- `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`update`、`serve` 和隐藏 provider 调试命令保留为显式自动化/高级入口，不承担最终产品心智；`update check` 只发现更新，`update apply --yes` 只对已准入 standalone archive 执行替换，包管理器安装仅返回 owner command；`serve` 当前通过共享 runtime application service 启动 loopback-only、bearer-authenticated HTTP/SSE listener，支持 durable replay、live event、approval/cancel 与 graceful drain，不提供 remote bind 或 multi-user daemon 语义。`sigil-desktop`已按workspace监管单独的`serve`进程，通过单行版本化JSON/鉴权`server-info`完成bootstrap，并用stdin owner pipe与process-tree fallback拥有child lifecycle；诊断事实由 `sigil-runtime` 提供，避免 CLI、TUI与desktop各写一套判断。
+- `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke，并为可独立替换的官方归档写入 `github-release` 分发 marker；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs，npm launcher 再覆盖 install-source marker 以保留包管理器 ownership；`scripts/publish-npm-packages.sh` 通过 npm Trusted Publisher 按 platform-first、root-last 顺序发布并支持 partial retry；`.github/workflows/release.yml` 在 tag push 时构建多平台 TUI archive、生成 provenance attestation、准备 npm packages 并创建或更新 draft Release。显式 publish 先验证双架构 macOS Desktop DMG、updater archive、checksum 与 signature，冻结 `latest.json`，再公开 immutable Release、发布 npm、部署 Pages updater endpoint，并由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key 同步 tap。crates.io package name 决策仍是 release-management 工作。
+- `sigil-tui`：并列一等产品表面中的终端实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 runtime、composer、approval、session browser 以及 timeline presentation、review/checkpoint、agent panel、egress disclosure 等私有领域 bundle，根 `AppState` 只为兼容保留公开 timeline/event/scroll 字段和顶层编排状态；`runner/worker_loop.rs` 只保留 worker façade，私有 `WorkerLoopState` 统一持有 session/run/compaction/refresh/agent 状态，scheduler 通过统一 `WorkerEvent` inbox 阻塞等待 command、typed completion、durable projection 与 supervisor wake，只在存在 MCP/terminal 等真实 deadline 时使用 nearest-deadline timeout；七个 advancement function 与穷尽 public-command 到 domain-typed-command classifier/handler 分别承担确定性 safe-point 推进和路由。session scheduler 的 queue、TaskGuidance、continuation、terminal 与 usage/readiness 热查询读取 kernel active-session 增量 projection，并以 durable frontier/CAS 保持最终写入权威；switch/new-session/local-session fork/checkpoint fork 复用一个 session transition，替换 projection observer generation，并在 foreground 或 detached background run 存在时 fail-closed，同时按目标 session 重建 agent supervisor 与模型可见 agent-tool surface。TUI `/doctor` 复用 runtime 诊断事实；`/update [check|refresh|apply]` 复用 updater policy，网络和替换在独立后台任务执行，启动自动检查只在 release packaged build 且非 CI/source 时调度，并且永不自动 apply；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
 
 Provider connection 配置采用 V2 复合身份。kernel 只定义中立的 `ConnectionId`、
 `ModelRef` 与 durable `ResolvedModelRoute`；runtime 拥有
@@ -305,7 +325,7 @@ secret-free offline readiness，用户主动进入配置流程后才异步验证
 漂移时 fail closed，切换 connection 或 model 必须创建新 session，fork/restore 也不得静默改写
 原 route。
 
-这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流则留在 `sigil-tui` 内，因为它们属于第一用户表面的交互模型。
+这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流留在 `sigil-tui` 内，Desktop 的 renderer 与 native shell 状态留在各自 adapter 内，因为它们属于不同产品表面的交互模型。
 
 ### 重构后不变量
 
@@ -851,7 +871,7 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 - kernel 只描述 agent run、session、approval、tool、provider 和事件契约，不知道 TUI worker 存在
 - TUI runner 把用户交互转成 `WorkerCommand`，把 kernel 事件和运行结果转成 `WorkerMessage`
 - CLI 可以直接使用 runtime 装配和 kernel agent loop，不需要引入 TUI runner
-- 未来 HTTP / desktop shell 可以复用 kernel event stream，但各自拥有自己的 transport protocol
+- HTTP 与 Desktop 已复用 kernel event stream，并分别拥有收窄的 transport / IPC protocol
 
 ### 7.1 TUI worker 命令面
 
@@ -925,7 +945,7 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 - `AssistantMessage`
 - `Notice`
 
-CLI、TUI、HTTP streaming、未来 desktop UI 都应该消费同一套事件流，而不是各自重写 turn lifecycle。
+Desktop、TUI、CLI 与 HTTP streaming 都消费同一套事件语义，而不是各自重写 turn lifecycle。
 
 其中 `Usage`、`Control` 和 session stats 至少要能让前端展示：
 
@@ -979,7 +999,7 @@ CLI、TUI、HTTP streaming、未来 desktop UI 都应该消费同一套事件流
 
 ## 9. Planner / Executor / Subagent 协作模型
 
-Planner / executor / subagent 协作已经作为 TUI-first task flow 落地。Durable task 的显式入口是 TUI `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则 blocked，不能把 routing 文本当作用户回答。默认 `manual` 仍保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Cancelled`；cleanup、join 或最终 binding 不确定时只能追加 `Interrupted`。普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。兼容默认值仍保持 `manual`，是否切换只由 qualified real-model evidence 与 rollout decision 决定。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
+Planner / executor / subagent 协作已经作为跨表面的共享 task flow 落地。Durable task 在 TUI 中的显式入口是 `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则 blocked，不能把 routing 文本当作用户回答。默认 `manual` 仍保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Cancelled`；cleanup、join 或最终 binding 不确定时只能追加 `Interrupted`。普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。兼容默认值仍保持 `manual`，是否切换只由 qualified real-model evidence 与 rollout decision 决定。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
 
 自动 routing 的 negative decision 还必须通过 route-fingerprinted direct-execution
 continuation contract 进入 ordinary turn：恢复 ordinary tools 后执行原始请求，不能只复述
@@ -1034,7 +1054,7 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
   Committed drop 使旧 verification stale、public intent 进入 Dropped、checkpoint restore
   返回 intent-state conflict，并让该 layer 退出 retention protected set。R51.5 提供
   dependency closure、read-only revise/replace impact、immutable supersession 与 exact
-  fork/workspace adoption；R51.6 提供 TUI-first review、responsive/mouse、retention/conflict
+  fork/workspace adoption；R51.6 提供 Desktop/TUI 共享 review 语义、responsive/mouse、retention/conflict
   与 exact Drop confirmation；R51.7 让 TUI、typed HTTP、Desktop 和 CLI automation 复用同一
   application command/projection，并把 Plan V2 Intent proposal、Task child grant、worktree
   ChangeSet、integration promotion、`ChangeSetApplied` 与 materialized layer 串成 exact
@@ -1583,10 +1603,11 @@ pub struct ProviderCapabilities {
 
 在进入 phase 划分之前，需要先明确产品表面原则：
 
-- `sigil` 无子命令启动 TUI；TUI 是第一用户表面，也是后续能力设计的基准面
+- Desktop 与 TUI 是并列的一等产品表面；`sigil` 无子命令启动 TUI
+  只是终端 binary 的默认行为
 - `sigil run`、`sigil doctor` 和隐藏 provider 调试命令保留为自动化入口和调试通道，不承载最终产品心智
-- `strict tools`、`prefix completion`、`FIM` 这类 provider 专项能力，默认应被 TUI 内部流程吸收，而不是直接变成普通用户必须理解的顶层命令
-- 如果某个能力只能靠新增命令解释自己，应该先反问：它是否其实应该是 TUI 内部动作、审批卡片或编辑模式
+- `strict tools`、`prefix completion`、`FIM` 这类 provider 专项能力，默认应被 Desktop/TUI 交互流程吸收，而不是直接变成普通用户必须理解的顶层命令
+- 如果某个能力只能靠新增命令解释自己，应该先反问：它是否其实应该是共享应用动作，并由 Desktop/TUI 以审批卡片、编辑模式或其他表面原生交互呈现
 
 ### Phase 0：脚手架
 
@@ -1688,14 +1709,14 @@ pub struct ProviderCapabilities {
 
 主题与右侧信息栏启动可见性作为 TUI appearance 能力落在 `AppearanceConfig`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId`、`info_rail` 和 `[appearance.colors]` 原始字符串；`sigil-tui` 将主题配置解析为 `ThemePalette`，并把 `info_rail` 作为启动默认值投影到当前运行的可见状态。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。Info rail 的 `F2` 运行时覆盖只改变进程内布局状态，不写回配置，也不进入会话审计。
 
-### 15.2 TUI-first 下的能力暴露规则
+### 15.2 Desktop/TUI 双表面下的能力暴露规则
 
 为了避免把产品越做越像命令集合，需要提前规定：
 
-1. 普通用户主入口默认只有进入 TUI 这一件事。
+1. 普通用户可以进入 Desktop 或 TUI；终端里的 `sigil` 默认进入 TUI。
 2. `run` 这类命令保留给自动化、CI、脚本或最小 smoke test。
-3. `prefix completion` 不应该成为普通用户必须理解的单独概念，而应在 TUI 中表现为“继续补全”或“沿当前前缀续写”。
-4. `FIM` 不应该成为普通用户必须手动切换的独立模式，而应在编辑/补洞场景中被 TUI 内部自动选择。
+3. `prefix completion` 不应该成为普通用户必须理解的单独概念，而应在交互表面中表现为“继续补全”或“沿当前前缀续写”。
+4. `FIM` 不应该成为普通用户必须手动切换的独立模式，而应在编辑/补洞场景中由应用内部自动选择。
 5. `strict tools` 是 provider/tool discipline，不是用户命令；用户看到的应该是“工具调用更严格/可审批/更可预测”。
 
 ## 16. 关键风险
@@ -1705,14 +1726,14 @@ pub struct ProviderCapabilities {
 3. 文件编辑工具正确性：编码保留、partial replace、diff preview、中断恢复都不简单。
 4. MCP 协议边角：streamable HTTP、notifications、server lifecycle 这些细节容易被低估。
 5. 过早拆太多 crate：行为还没稳定前，包过多只会拖慢迭代。
-6. 如果先把 provider 专项能力做成越来越多的 CLI 子命令，再补 TUI，最终很容易得到“命令集合”而不是“交互产品”。
+6. 如果先把 provider 专项能力做成越来越多的 CLI 子命令，再补 Desktop/TUI 交互，最终很容易得到“命令集合”而不是“交互产品”。
 
 ## 17. 已锁定的关键决策
 
 当前实现已经锁定并落地这些工程决策：
 
 1. 项目配置文件名为 `sigil.toml`
-2. 第一层用户壳由 `sigil` 默认启动 TUI；子命令只保留 debug / automation，不做命令产品化
+2. Desktop 与 TUI 是并列的一等用户壳；`sigil` 默认启动 TUI，子命令只保留 debug / automation，不做命令产品化
 3. kernel 是 event-driven、agent-runtime-centered
 4. provider crate 保持 provider-specific 协议细节内聚，kernel 只承载中立契约
 5. DeepSeek、OpenAI-compatible、Anthropic、Gemini 共用 runtime 装配与 capability view
@@ -1725,12 +1746,12 @@ pub struct ProviderCapabilities {
 
 1. 补齐 `/doctor` 与 `/config` 的 provider capability 明细，确保用户能核验具体能力差异
 2. 扩充 Anthropic/Gemini provider 的真实协议 fixture，覆盖 tool result、thought signature、finish reason 和 safety 边界
-3. 继续收紧 provider canonical naming、model routing、auth resolution 在 TUI/runtime/doctor 之间的一致性
+3. 继续收紧 provider canonical naming、model routing、auth resolution 在 Desktop/TUI/runtime/doctor 之间的一致性
 4. 为 provider-specific continuation state 保持 durable、append-only 的恢复测试
-5. 让 provider setup assistant 进入 TUI，而不是把配置体验继续摊到 README 或隐藏命令里
-6. 在不破坏 TUI-first 心智的前提下，再评估 packaging 和分发包装
+5. 让 provider setup assistant 在 Desktop 与 TUI 复用同一配置语义，而不是把配置体验继续摊到 README 或隐藏命令里
+6. 继续补齐 Desktop 的签名分发与更新渠道，同时保持 TUI 安装渠道稳定
 
-这样做能让 `sigil` 一开始就站在两件最重要的东西上：一个可复用、可扩展、契约稳定的 agent 内核，以及一个真实面向用户的终端交互产品，而不是一个子命令越来越多的命令集合。
+这样做能让 `sigil` 站在两件最重要的东西上：一个可复用、可扩展、契约稳定的 agent 内核，以及两个共享产品语义、分别适配桌面与终端的信息架构，而不是一个子命令越来越多的命令集合。
 
 ## 19. DeepSeek 专项优化设计
 

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "dev.sigil.desktop.e2e",
+  "build": {
+    "beforeBuildCommand": "pnpm build:e2e"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        "main-desktop",
+        {
+          "identifier": "desktop-e2e",
+          "description": "Test-only WebDriver access for a feature-gated debug binary.",
+          "windows": ["main"],
+          "local": true,
+          "permissions": ["wdio:default", "wdio-webdriver:default"]
+        }
+      ]
+    }
+  }
+}

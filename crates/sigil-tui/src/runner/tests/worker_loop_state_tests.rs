@@ -301,6 +301,10 @@ fn worker_commands_are_routed_to_explicit_domains() {
             WorkerCommandDomain::Session,
         ),
         (
+            WorkerCommand::StartV2Compaction,
+            WorkerCommandDomain::QueueCompaction,
+        ),
+        (
             WorkerCommand::PreviewV2Compaction,
             WorkerCommandDomain::QueueCompaction,
         ),

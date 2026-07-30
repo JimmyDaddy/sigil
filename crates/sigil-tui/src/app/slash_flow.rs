@@ -776,7 +776,7 @@ impl AppState {
     fn slash_command_requires_mouse_confirmation(command: &ResolvedSlashCommand) -> bool {
         matches!(
             command.canonical.as_str(),
-            "/compact" | "/model" | "/new" | "/quit" | "/resume"
+            "/model" | "/new" | "/quit" | "/resume"
         )
     }
 

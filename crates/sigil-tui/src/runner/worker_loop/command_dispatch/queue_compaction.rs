@@ -176,6 +176,142 @@ where
                     }
                 }
             }
+            QueueCompactionCommand::StartV2Compaction => {
+                state.compaction.local_preview = None;
+                state.compaction.pending = None;
+                state.session.pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                if state.run.active.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot compact context while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                let Some(session) = state.session.current.as_ref() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+                let effective_config = effective_compaction_config(
+                    session.provider_name(),
+                    session.model_name(),
+                    &options.compaction_config,
+                );
+                if !effective_config.enabled {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "compaction is disabled".to_owned(),
+                    ));
+                    continue;
+                }
+                match sigil_runtime::context_window::compaction_preview_for_strategy(
+                    session,
+                    &effective_config,
+                ) {
+                    Ok(Some(preview)) => {
+                        let request_id = state.compaction.next_request_id;
+                        state.compaction.next_request_id =
+                            state.compaction.next_request_id.saturating_add(1);
+                        let expected_session_scope_id = session.session_scope_id().to_owned();
+                        let stable_snapshot = match capture_stable_idle_compaction_snapshot(session)
+                        {
+                            Ok(Some(snapshot)) => snapshot,
+                            Ok(None) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(
+                                    "compaction requires a stable active-session frontier"
+                                        .to_owned(),
+                                ));
+                                continue;
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                    "failed to capture compaction source: {error:#}"
+                                )));
+                                continue;
+                            }
+                        };
+                        let root_config = root_config.clone();
+                        let workspace_root = workspace_root.clone();
+                        let session_log_path = state.session.log_path.clone();
+                        let options = options.clone();
+                        let tools = agent.tool_registry().specs();
+                        let runtime_handle = runtime.handle().clone();
+                        let direct_context_resolver = context_resolver.clone();
+                        let preparation_agent = std::sync::Arc::clone(agent);
+                        state.compaction.preparation_tasks.start_manual(
+                            runtime,
+                            request_id,
+                            expected_session_scope_id.clone(),
+                            state.compaction.preparation_tx.clone(),
+                            move || {
+                                let Some(mut session) = stable_snapshot
+                                    .materialize_compaction_session()
+                                    .map_err(|error| format!("{error:#}"))?
+                                else {
+                                    return Err(
+                                        "compaction source changed before preparation".to_owned()
+                                    );
+                                };
+                                if session.session_scope_id() != expected_session_scope_id {
+                                    return Err(
+                                        "compaction preparation loaded a different session scope"
+                                            .to_owned(),
+                                    );
+                                }
+                                let (review, pending) = prepare_v2_compaction_summary_review(
+                                    request_id,
+                                    &root_config,
+                                    &workspace_root,
+                                    &session_log_path,
+                                    preparation_agent.provider(),
+                                    &mut session,
+                                    &options,
+                                    tools,
+                                    &direct_context_resolver,
+                                    &runtime_handle,
+                                    preview,
+                                )
+                                .map_err(|error| format!("{error:#}"))?;
+                                Ok(ManualV2CompactionPreparation {
+                                    review,
+                                    local_preview: None,
+                                    pending,
+                                    apply_source: V2CompactionApplySource::DirectCommand,
+                                })
+                            },
+                        );
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "generating and validating one semantic compaction checkpoint"
+                                .to_owned(),
+                        ));
+                    }
+                    Ok(None) => {
+                        let durable_message_count = session
+                            .entries()
+                            .iter()
+                            .filter(|entry| {
+                                matches!(
+                                    entry,
+                                    SessionLogEntry::User(_)
+                                        | SessionLogEntry::Assistant(_)
+                                        | SessionLogEntry::ToolResult(_)
+                                )
+                            })
+                            .count();
+                        let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
+                            state: V2CompactionPreviewState::NoFoldableHistory {
+                                durable_message_count,
+                                configured_tail_message_count: effective_config.tail_messages,
+                            },
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "V2 compaction failed: {error:#}"
+                        )));
+                    }
+                }
+            }
             QueueCompactionCommand::PreviewV2Compaction => {
                 state.compaction.local_preview = None;
                 state.compaction.pending = None;
@@ -265,6 +401,7 @@ where
                                     review,
                                     local_preview: Some(local_preview),
                                     pending: None,
+                                    apply_source: V2CompactionApplySource::ManualConfirmation,
                                 })
                             },
                         );
@@ -404,6 +541,7 @@ where
                                 review,
                                 local_preview: None,
                                 pending,
+                                apply_source: V2CompactionApplySource::ManualConfirmation,
                             })
                         },
                     );

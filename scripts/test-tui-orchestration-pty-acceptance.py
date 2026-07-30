@@ -90,6 +90,23 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
                 {
                     "messages": [
                         {
+                            "role": "system",
+                            "content": (
+                                "Generate a concise semantic title for a coding-agent "
+                                "conversation"
+                            ),
+                        }
+                    ],
+                    "tools": [],
+                }
+            ),
+            "title",
+        )
+        self.assertEqual(
+            MODULE.classify_request(
+                {
+                    "messages": [
+                        {
                             "role": "user",
                             "content": (
                                 "Execute this delegated subagent step.\n"
@@ -251,6 +268,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
                 f"read:{MODULE.READ_STEP_IDS[0]}": 1,
                 f"read:{MODULE.READ_STEP_IDS[1]}": 1,
                 "synthesis": 1,
+                "title": 1,
             },
             max_concurrent_reads=2,
         )

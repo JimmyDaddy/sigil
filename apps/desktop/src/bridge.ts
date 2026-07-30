@@ -9,6 +9,7 @@ import type {
   CatalogPage,
   CatalogRequest,
   ConversationContinuity,
+  CompactionExecutionSummary,
   ConversationQueueCommandInput,
   ConversationQueueCommandReceipt,
   ConversationQueueView,
@@ -21,6 +22,7 @@ import type {
   ConversationDisplayPage,
   ConversationDisplayRequest,
   DesktopBootstrap,
+  DesktopUpdateSnapshot,
   SessionOpenInput,
   SessionCatalogBatchExecuteInput,
   SessionCatalogBatchPlan,
@@ -76,6 +78,10 @@ import type {
 
 export interface DesktopBridge {
   bootstrap(): Promise<DesktopBootstrap>;
+  updateState(): Promise<DesktopUpdateSnapshot>;
+  checkForUpdate(): Promise<DesktopUpdateSnapshot>;
+  downloadAndInstallUpdate(): Promise<DesktopUpdateSnapshot>;
+  restartAfterUpdate(): Promise<void>;
   setAppearance(preference: ThemePreference): Promise<AppearanceSnapshot>;
   openExternalUrl(url: string): Promise<void>;
   supportDoctor(workspaceId: string): Promise<SupportDoctorReport>;
@@ -150,6 +156,10 @@ export interface DesktopBridge {
   ): Promise<ConversationQueueCommandReceipt>;
   conversationRecovery(workspaceId: string, sessionId: string): Promise<ConversationRecoveryView>;
   conversationCompactionPreview(workspaceId: string, sessionId: string): Promise<CompactionReview>;
+  compactConversation(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<CompactionExecutionSummary>;
   checkpointRestorePreview(
     workspaceId: string,
     input: CheckpointRestorePreviewInput,
@@ -223,10 +233,18 @@ export interface DesktopBridge {
   subscribeRunEvents(listener: (event: TimelineEvent) => void): Promise<() => void>;
   subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
   subscribeAppearance(listener: (snapshot: AppearanceSnapshot) => void): Promise<() => void>;
+  subscribeUpdate(listener: (snapshot: DesktopUpdateSnapshot) => void): Promise<() => void>;
 }
 
 export const desktopBridge: DesktopBridge = {
   bootstrap: () => invoke<DesktopBootstrap>("desktop_bootstrap"),
+  updateState: () => invoke<DesktopUpdateSnapshot>("desktop_update_state"),
+  checkForUpdate: () =>
+    invoke<DesktopUpdateSnapshot>("desktop_check_for_update"),
+  downloadAndInstallUpdate: () =>
+    invoke<DesktopUpdateSnapshot>("desktop_download_and_install_update"),
+  restartAfterUpdate: () =>
+    invoke<void>("desktop_restart_after_update"),
   setAppearance: (preference) =>
     invoke<AppearanceSnapshot>("desktop_set_appearance", { input: { preference } }),
   openExternalUrl: (url) =>
@@ -320,6 +338,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<ConversationRecoveryView>("desktop_conversation_recovery", { workspaceId, sessionId }),
   conversationCompactionPreview: (workspaceId, sessionId) =>
     invoke<CompactionReview>("desktop_conversation_compaction_preview", { workspaceId, sessionId }),
+  compactConversation: (workspaceId, sessionId) =>
+    invoke<CompactionExecutionSummary>("desktop_compact_conversation", {
+      workspaceId,
+      sessionId,
+    }),
   checkpointRestorePreview: (workspaceId, input) =>
     invoke<CheckpointRestoreReview>("desktop_checkpoint_restore_preview", { workspaceId, input }),
   commandConversationRecovery: (workspaceId, input) =>
@@ -426,4 +449,6 @@ export const desktopBridge: DesktopBridge = {
     listen<RunStreamStatus>("sigil-run-stream-status", (event) => listener(event.payload)),
   subscribeAppearance: async (listener) =>
     listen<AppearanceSnapshot>("sigil-appearance-changed", (event) => listener(event.payload)),
+  subscribeUpdate: async (listener) =>
+    listen<DesktopUpdateSnapshot>("sigil-update-state", (event) => listener(event.payload)),
 };

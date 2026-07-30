@@ -19,12 +19,17 @@ describe("conversation continuity reducer", () => {
     state = reduceConversationContinuity(state, {
       type: "initial_page_failed",
       sessionId: SESSION_ID,
+      code: "conversation_display_unavailable",
       message: "projection unavailable",
     });
 
     expect(state.lifecycle).toBe("error");
     expect(state.transcriptLoaded).toBe(false);
-    expect(state.recovery).toEqual(expect.objectContaining({ canContinueReadOnly: false }));
+    expect(state.recovery).toEqual({
+      code: "conversation_display_unavailable",
+      message: "projection unavailable",
+      canContinueReadOnly: false,
+    });
 
     state = reduceConversationContinuity(state, {
       type: "recovery_retry_started",
@@ -444,6 +449,31 @@ describe("conversation continuity reducer", () => {
     expect(state.liveItems.get("live-tool")?.toolInput).toBe("rg TODO");
   });
 
+  it("accepts one tool provisional through request, execution and result settlement", () => {
+    let state = receiveInitial([]);
+    const lifecycle = [
+      liveTool("live-tool", "run-1", "1", "requested", ""),
+      liveTool("live-tool", "run-1", "2", "running", ""),
+      liveTool("live-tool", "run-1", "3", "completed", "captured output"),
+      liveTool("live-tool", "run-1", "4", "succeeded", "captured output"),
+    ];
+
+    for (const item of lifecycle) {
+      state = reduceConversationContinuity(state, {
+        type: "live_item_received",
+        sessionId: SESSION_ID,
+        item,
+      });
+      expect(state.contractError).toBeUndefined();
+    }
+
+    expect(state.liveItems.get("live-tool")).toMatchObject({
+      runSequence: "4",
+      status: "succeeded",
+      content: { output: "captured output" },
+    });
+  });
+
   it("treats selecting the current session as a referential no-op and resets for another session", () => {
     const current = receiveInitial([messageItem("message-1", "1", "safe")]);
     expect(reduceConversationContinuity(current, {
@@ -717,7 +747,7 @@ function liveTool(
   provisionalId: string,
   runId: string,
   runSequence: string,
-  status: "running" | "completed",
+  status: "requested" | "running" | "completed" | "succeeded",
   output: string,
 ): LiveConversationDisplayItem {
   return {

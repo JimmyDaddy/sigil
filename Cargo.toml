@@ -2,6 +2,7 @@
 members = [
     "apps/desktop/src-tauri",
     "crates/sigil-kernel",
+    "crates/sigil-provider-http",
     "crates/sigil-provider-deepseek",
     "crates/sigil-provider-openai-compat",
     "crates/sigil-provider-openai-responses",
@@ -13,6 +14,7 @@ members = [
     "crates/sigil-desktop",
     "crates/sigil-mcp",
     "crates/sigil-runtime",
+    "crates/sigil-updater",
     "crates/sigil-http",
     "crates/sigil",
     "crates/sigil-tui",
@@ -22,7 +24,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.0.1-alpha.6"
+version = "0.0.1-beta.1"
 
 [workspace.dependencies]
 aho-corasick = "1.1.4"
@@ -41,6 +43,7 @@ hmac = "0.12.1"
 httpdate = "1.0.3"
 ignore = "0.4.25"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+minisign-verify = "0.2.5"
 keyring = { version = "3.6.3", default-features = false, features = [
     "apple-native",
     "windows-native",
@@ -56,8 +59,10 @@ ring = "0.17.14"
 portable-pty = "0.9.0"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["float_roundtrip", "raw_value"] }
+self_update = { version = "=1.0.0-rc.6", default-features = false, features = ["async", "github", "rustls", "archive-tar", "compression-tar-gz", "checksums"] }
 sha2 = "0.10.9"
 similar = "2.7.0"
 syntect = { version = "5", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-onig"] }

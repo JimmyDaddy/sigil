@@ -12,20 +12,24 @@
 
 注意：下文第 3 节中的“当前状态”和各 phase “当前问题”保留 2026-06-25 frozen baseline，用于说明路线图设计时的缺口，不应解读为 2026-07-15 的实时完成表。
 
+产品表面校正（2026-07-31）：Roadmap 冻结后 Desktop 已经落地。当前产品定位以仓库治理和核心技术方案为准：
+Desktop 与 TUI 是并列的一等产品表面，共享 kernel/runtime 的任务、审批、恢复、验证和更新语义；
+CLI 与 HTTP 只承担自动化、调试和 adapter 职责。下文保留的阶段性缺口应结合该校正阅读。
+
 本文基于当前仓库实现、`README.md`、`dev/governance/*` 和
 [`sigil-rust-agent-core-technical-solution.md`](sigil-rust-agent-core-technical-solution.md)
 整理。它不是对核心技术方案的替代，而是把下一阶段能力成熟度拆成可执行路线。
 
 ## 1. 当前判断
 
-Sigil 已经是一个真正的 TUI-first coding agent，而不是普通 tool-calling CLI 或只提供 agent framework 的库。
+Sigil 已经是一个以 Desktop 与 TUI 为并列一等产品表面的 coding agent，而不是普通 tool-calling CLI 或只提供 agent framework 的库。
 
 当前已经形成的核心能力：
 
 - Agent loop：已具备模型、工具、观察结果、继续调用模型的闭环，并支持流式 reasoning、tool call、provider continuation、最大轮次和结构化工具错误反馈。
 - Tool system：工具具备 JSON schema、读写执行分类、动态权限主体、preview、egress audit 和结构化结果。
 - Safety and audit：写工具支持 diff / preview；权限支持 allow / ask / deny、工具规则、subject glob 和外部目录控制；session/control state 走 append-only 持久化。
-- TUI product surface：TUI 已经是第一用户入口，承载 transcript、composer、approval、tool activity、config、resume、context compaction 和 provider/tool 状态展示。
+- Product surfaces：Desktop 与 TUI 共享 transcript、composer、approval、tool activity、config、resume、context compaction 和 provider/tool 状态语义，并按各自信息架构呈现；CLI 与 HTTP 不承担普通用户产品心智。
 - Multi-provider and MCP：runtime 支持 DeepSeek、OpenAI-compatible、Anthropic、Gemini；MCP 已具备 stdio server、lazy activation、trust、approval、resources/prompts 和 elicitation 边界。
 - Code intelligence：已有 LSP 与 Tree-sitter fallback，提供 symbols、definition、references、diagnostics、code action 和 rename 等工具。
 - Task and subagent：已有 `/task` planner/executor/subagent 角色、任务控制日志、子 agent 工具、mailbox、后台 task 和 token budget。
@@ -42,7 +46,7 @@ Sigil 已经是一个真正的 TUI-first coding agent，而不是普通 tool-cal
 
 ## 2. Roadmap 原则
 
-1. TUI 是第一用户表面。新增能力必须先考虑 TUI 状态、事件流、键位提示和恢复体验。
+1. Desktop 与 TUI 是并列的一等产品表面。新增能力必须同时检查共享状态、事件流和恢复语义，并分别补齐 Desktop 信息架构与 TUI 键位提示。
 2. Kernel 保持 provider-neutral。DeepSeek、Anthropic、Gemini、OpenAI-compatible 的私有语义不得进入公共 kernel API。
 3. Completion 必须可判定。模型输出 final text 只能表示模型认为完成，不能直接等同于用户目标已验证完成。
 4. Permission 不等于 sandbox。权限负责决定能不能执行，执行后端负责限制最多能影响什么。
@@ -1066,7 +1070,7 @@ cargo test -p sigil-tui
 
 ## 14. Phase 10：Protocol / App Server Boundary
 
-目标：在核心状态、事件和投影稳定后，为 TUI、CLI、未来 IDE / daemon / desktop 提供共享协议层。
+目标：在核心状态、事件和投影稳定后，为 Desktop、TUI、CLI 以及未来 IDE / daemon 提供共享协议层。
 
 当前问题：
 
@@ -1131,7 +1135,7 @@ struct CommandEnvelope<T> {
 - 旧客户端不能在 stream sequence 已推进后继续批准过期 tool call。
 - SSE 断线重连可以补齐 durable events，且不会承诺补发 transient event。
 - OpenAPI/SSE 输出和 TUI 状态一致，不能各自定义一套事件语义。
-- 新协议不要求立即支持 IDE 或 desktop，但不阻碍未来接入。
+- 冻结时新协议不要求立即支持 IDE 或 Desktop；当前 Desktop 已经接入共享协议，IDE 仍属于未来扩展。
 
 建议验证：
 

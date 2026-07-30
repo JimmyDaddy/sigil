@@ -57,7 +57,8 @@ The most common control commands are:
 - `/resume` — choose a saved session.
 - `/plan <prompt>` — request a read-only plan before execution.
 - `/task <task>` and `/task continue` — start or continue multi-step work.
-- `/compact` — review a context-reduction proposal.
+- `/compact` — generate, validate, and activate a recoverable context checkpoint.
+- `/update [check|refresh|apply]` — check or explicitly install an admitted update.
 - `/feedback` — preview and save a local support report.
 - `/quit` — close the TUI.
 
@@ -121,7 +122,7 @@ When the current session has accepted Intent Stack history, press `Alt-S` or run
 
 ## Long Context and Compaction
 
-The info rail shows reported context use and warns as the model window fills. `/compact` first builds a local-only review without contacting the provider or changing the active context. You can keep the current context, clean only recoverable large historical tool outputs, or explicitly generate one billed semantic summary on the current route. A generated summary is still not activated until you confirm the final ready review. If context size is unknown, set `fallback_context_window_tokens`. See [Advanced configuration](advanced-configuration.md) for settings and recovery guidance.
+The info rail shows reported context use and warns as the model window fills. `/compact` directly generates, validates, and atomically activates one recoverable semantic checkpoint; there is no confirmation modal. On an admitted route this performs one billed semantic-summary request. Sigil shows progress and then an applied receipt or the exact refusal reason. A failed summary, token proof, economics check, or concurrent conversation change leaves the active context unchanged. If context size is unknown, set `fallback_context_window_tokens`. See [Advanced configuration](advanced-configuration.md) for settings and recovery guidance.
 
 ## Code Intelligence
 

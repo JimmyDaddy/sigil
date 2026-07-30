@@ -346,6 +346,27 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     void loadHistory(activeWorkspaceId);
   }, [activeWorkspaceId, loadHistory]);
 
+  useEffect(() => {
+    if (selectedDurableSessionId === undefined) return;
+    const entry = catalog.entries.find(
+      (candidate) => candidate.sessionId === selectedDurableSessionId,
+    );
+    const title = entry?.title?.trim();
+    if (entry === undefined || title === undefined || title.length === 0) return;
+    setSelectedSession((current) =>
+      current === undefined || current.label === title
+        ? current
+        : { ...current, label: title },
+    );
+    if (activeWorkspaceId !== undefined) {
+      writeLastSession(activeWorkspaceId, {
+        sessionRef: entry.sessionRef,
+        sessionId: selectedDurableSessionId,
+        label: title,
+      });
+    }
+  }, [activeWorkspaceId, catalog.entries, selectedDurableSessionId]);
+
   const loadProviderInventory = useCallback(async (workspaceId: string) => {
     setProviderInventoryState("loading");
     try {
@@ -1254,6 +1275,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 session={selectedSession}
                 onInitialLoadComplete={finishConversationNavigation}
                 onRunContextChange={captureRunContext}
+                onSessionCatalogChange={() => {
+                  if (activeWorkspaceId !== undefined) void loadHistory(activeWorkspaceId);
+                }}
                 onNewSession={async () => (await createSession()) !== undefined}
                 onCreateSessionForModel={createSession}
                 onOpenWorkspacePicker={() => void pickWorkspace()}

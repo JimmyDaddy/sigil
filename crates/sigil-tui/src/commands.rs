@@ -16,8 +16,9 @@ pub(crate) enum UiCommand {
     OpenConfig,
     OpenDoctor,
     OpenFeedback,
+    CheckForUpdate,
     StartNewSession,
-    PreviewV2Compaction,
+    CompactContext,
     CycleAgentView,
     CycleAgentViewPrevious,
     CheckChangedFilesDiagnostics,
@@ -146,11 +147,11 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
-        command: UiCommand::PreviewV2Compaction,
+        command: UiCommand::CompactContext,
         keys: &[],
         slash: Some("/compact"),
-        label: "Preview compact",
-        help: "Build a local V3 plan; then choose keep, tool-output cleanup, or one billed semantic summary.",
+        label: "Compact context",
+        help: "Generate, validate, and activate one recoverable semantic checkpoint.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
@@ -167,6 +168,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: Some("/feedback"),
         label: "Feedback",
         help: "Review and privately export a redacted support report.",
+        surface: CommandSurface::Slash,
+    },
+    UiCommandSpec {
+        command: UiCommand::CheckForUpdate,
+        keys: &[],
+        slash: Some("/update"),
+        label: "Update",
+        help: "Check for a new Sigil release or install an admitted standalone update.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
@@ -420,7 +429,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     );
     lines.extend(command_help_lines([
         UiCommand::StartNewSession,
-        UiCommand::PreviewV2Compaction,
+        UiCommand::CompactContext,
     ]));
     lines.extend([
         "Ctrl-J: Insert a newline in the composer.".to_owned(),

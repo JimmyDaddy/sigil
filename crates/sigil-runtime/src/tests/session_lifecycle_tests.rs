@@ -1049,6 +1049,60 @@ fn session_display_name_is_identity_bound_and_durably_projected() -> Result<()> 
 }
 
 #[test]
+fn manual_session_name_always_wins_over_generated_title() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(
+        &source,
+        "Please investigate the stale desktop conversation header",
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let listed = service.catalog()?.entries.remove(0);
+    let session_id = listed.session_id.expect("durable identity");
+
+    let generated = service.record_generated_title(
+        &listed.session_ref,
+        &session_id,
+        "修复桌面会话标题同步",
+        "deepseek",
+        "deepseek-v4-flash",
+        Some(128),
+        Some(12),
+        200,
+    )?;
+    assert!(matches!(
+        generated.event,
+        LocalSessionLifecycleEvent::GeneratedTitleChanged(
+            LocalSessionGeneratedTitleJournalBinding { ref title, .. }
+        ) if title == "修复桌面会话标题同步"
+    ));
+    assert_eq!(
+        service.catalog()?.entries[0].title.as_deref(),
+        Some("修复桌面会话标题同步")
+    );
+
+    service.rename_session(&listed.session_ref, &session_id, "Desktop title bug", 201)?;
+    service.record_generated_title(
+        &listed.session_ref,
+        &session_id,
+        "稍后完成的自动标题",
+        "deepseek",
+        "deepseek-v4-flash",
+        Some(128),
+        Some(8),
+        202,
+    )?;
+    assert_eq!(
+        service.catalog()?.entries[0].title.as_deref(),
+        Some("Desktop title bug")
+    );
+    Ok(())
+}
+
+#[test]
 fn retention_preview_is_read_only_deterministic_and_respects_pin_and_protection() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let sessions = temp.path().join("sessions");

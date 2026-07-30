@@ -1,34 +1,45 @@
-<!-- public-doc-role: installation; authority: install-update-uninstall-authority; sections: requirements,supported-install-channels,install-with-npm,install-with-homebrew,install-with-cargo,install-from-source,start,install-from-a-release-archive,update,uninstall; cta: start-quickstart -->
+<!-- public-doc-role: installation; authority: install-update-uninstall-authority; sections: requirements,supported-install-channels,install-desktop-on-macos,install-tui-with-npm,install-with-homebrew,install-with-cargo,install-from-source,start,install-from-a-release-archive,update,uninstall; cta: start-quickstart -->
 
 # 安装
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。`v0.0.1-alpha.6` 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
+本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。Sigil beta 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
 
-下方的包管理器命令和 Cargo 标签命令安装的是 `v0.0.1-alpha.6`。官网文档基于 `main` 分支，因此[尚未发布](changelog.md#尚未发布-main)的功能在下一个 alpha 版本发布前可能只能从源码体验。
+官网文档基于 `main` 分支，因此[尚未发布](changelog.md#尚未发布-main)的功能在下一个 beta 版本发布前可能只能从源码体验。带精确版本的 Cargo 示例仍固定到最近一次源码 tag。
 
 ## 前置条件
 
-- 一个现代终端模拟器。
-- 一种安装工具：npm、Homebrew，或通过 `rustup` / 系统软件包安装的 Rust 工具链。
+- Desktop：Apple 芯片或 Intel 的 macOS。
+- TUI：一个现代终端模拟器。
+- 一种安装工具：Desktop DMG、npm、Homebrew，或通过 `rustup` / 系统软件包安装的 Rust 工具链。
 - 一份模型服务凭据。首次启动时可以在快速设置中填写。
 
 ## 当前安装渠道
 
 | 渠道 | 当前覆盖 | 适合场景 |
 | --- | --- | --- |
-| npm alpha | `@sigil-ai/sigil@alpha` 会自动选择当前平台对应的软件包。 | 想用最短路径完成跨平台安装。 |
+| Desktop beta | 面向 Apple 芯片与 Intel Mac、已签名并完成 Apple 公证的 DMG。 | 希望使用原生会话、审批与设置工作区。 |
+| npm beta | `@sigil-ai/sigil@beta` 会自动选择当前平台对应的软件包。 | 想用最短路径完成跨平台 TUI 安装。 |
 | Homebrew tap | macOS 配方位于 `JimmyDaddy/homebrew-sigil`，安装名是 `sigil-ai`，最终命令仍是 `sigil`。 | 习惯用 Homebrew 管理终端工具。 |
 | Cargo git tag | 使用本机 Rust 工具链，从带版本标签的 Git 发布构建。 | 已有 Rust 工具链，或希望从源码构建。 |
 | GitHub 发布压缩包 | 提供各平台的压缩包与校验文件。 | 需要手动或离线安装。 |
 
-## 通过 npm 安装
+## 在 macOS 安装 Desktop
+
+打开 [GitHub prerelease 页面](https://github.com/JimmyDaddy/sigil/releases)，下载与你的 Mac 匹配的 DMG：
+
+- Apple 芯片：`Sigil_<version>_aarch64-apple-darwin.dmg`
+- Intel：`Sigil_<version>_x86_64-apple-darwin.dmg`
+
+每个 beta draft 只有在双架构 DMG、对应 SHA-256 和已签名更新包全部到齐后才会公开。DMG 上传前会完成 Developer ID 签名、Apple 公证、staple 与验证。打开 DMG，把 Sigil 拖入“应用程序”，然后正常启动。
+
+## 通过 npm 安装 TUI
 
 npm 包名是 `@sigil-ai/sigil`。安装时会先放置一个很小的 Node.js 启动器，再下载当前平台对应的 Sigil 可执行文件。最终命令仍然是 `sigil`。
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 ```
 
 确认安装：
@@ -62,7 +73,7 @@ sigil doctor
 首个发布版本通过 Git tag 安装，不从 crates.io 分发：
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil
 ```
 
 这会把 `sigil` 可执行文件安装到 Cargo 的二进制目录。macOS 和 Linux 默认为 `~/.cargo/bin`，Windows 默认为 `%USERPROFILE%\.cargo\bin`。
@@ -108,18 +119,29 @@ sigil run "总结一下当前仓库"
 
 能使用包管理器时，请优先选择上面的安装方式。手动安装时，从 [GitHub Releases 页面](https://github.com/JimmyDaddy/sigil/releases)下载当前平台对应的压缩包和校验文件，核对校验和，解压后把 `sigil` 可执行文件放到 `PATH` 中。
 
-压缩包内包含 `sigil` 可执行文件、用户 README、Logo 资源和安装文档。自动更新功能尚未提供。
+压缩包内包含 `sigil` 可执行文件、用户 README、Logo 资源和安装文档。Desktop beta 还会携带已签名的更新包；安装更新仍由用户明确触发。
 
 ## 更新
 
 使用原来的安装器更新：
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
+
+Desktop 设置页可以检查签名 beta manifest，下载并独立验证匹配当前架构的更新；只有选择“下载并安装”后才会替换应用。重启是另一个明确动作，存在运行中任务时会阻止重启。
+
+TUI 与 CLI 可以使用：
+
+```bash
+sigil update check
+sigil update apply --yes
+```
+
+TUI 对应命令是 `/update check`、`/update refresh` 与 `/update apply`。需要主动切换通道时可在动作后加 `beta` 或 `stable`，例如 `/update check beta`；`current` 会跟随当前已安装的 prerelease 通道。官方独立压缩包只有通过 checksum 与 release 准入后才会被替换；npm、Homebrew、Cargo 和源码安装只会显示对应安装器命令。Sigil 不会在后台静默安装或重启更新。
 
 ## 卸载
 
@@ -130,6 +152,8 @@ npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```
+
+把“应用程序”中的 `Sigil.app` 移除即可卸载 Desktop。除非另行删除，已保存的 Sigil 状态会保留。
 
 <!-- public-doc-cta: start-quickstart -->
 下一步：[从快速开始入门](quickstart.md)。

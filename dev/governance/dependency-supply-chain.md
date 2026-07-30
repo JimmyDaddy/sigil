@@ -2,6 +2,32 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## TUI / CLI 更新器
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `self_update` | `=1.0.0-rc.6`；关闭默认 feature，仅启用 `async,github,rustls,archive-tar,compression-tar-gz,checksums` | `sigil-updater/apply` | 只负责已准入 GitHub standalone archive 的 exact tag/asset 下载、SHA-256 校验、archive 解包、候选 binary `--version` 验证与 unattended replacement；不负责选择 release、解析 GitHub 安全字段或 package-manager 更新 | MIT；jaemk/self_update | 固定 RC 精确版本，避免预发布 API 漂移；只有 `immutable=true`、精确 target asset 和 GitHub `sha256:` digest 同时成立才进入该引擎。npm/Homebrew/Cargo/source/unknown 均不得原地替换 |
+| `semver` | `1.0.27`；默认 feature | `sigil-updater/channel` | 解析当前版本与 release tag，并按 stable、beta 或当前已安装 prerelease channel 做严格隔离和版本排序 | MIT OR Apache-2.0；dtolnay/semver | `beta` 只接收 stable 与首个 prerelease identifier 为 `beta` 的版本；`current` 对 prerelease 只跟随相同 identifier，拒绝 alpha/beta/rc 串线 |
+
+`sigil-updater` 自行使用 workspace `reqwest 0.12` 拉取 GitHub Releases，并显式请求
+`X-GitHub-Api-Version: 2026-03-10`；client 只允许 HTTPS、禁止 redirect、设置连接/总超时并将
+response 限制在 2 MiB。GitHub asset digest 只提供内容完整性，不等于发布者真实性，因此 apply
+还要求 immutable release、精确 tag/target/asset、编译期 `github-release` 分发 marker，以及下载后
+binary 的版本和 target 自报一致。release archive 构建脚本写入该 marker；npm launcher 只写入
+`SIGIL_INSTALL_SOURCE=npm`，防止把包管理器安装误识别成 standalone。进程环境 marker 只能把
+编译期 standalone 降权为 npm/Homebrew/Cargo/source ownership；`github-release` /
+`standalone` 环境值不能把编译期 source/unknown 提升成可替换安装。
+
+`self_update 1.0.0-rc.6` 当前传递引入 `reqwest 0.13`，因此 lockfile 暂时同时包含 0.12 与
+0.13。0.12 只服务 Sigil 自有的 bounded discovery client；0.13 只在用户明确 apply 且已通过
+Sigil release admission 后由 replacement engine 使用。升级 `self_update` 时必须优先复核能否
+收敛该重复版本，并重新执行三平台 archive、digest 与 downloaded-binary 验证测试。
+
+检查结果写入全局 cache 下的 owner-only、256 KiB 上限、同目录原子替换文件；24 小时内可复用，
+过期后使用 ETag revalidate。自动检查只允许 release profile 的 standalone/npm/Homebrew 分发，
+并在 CI、source build 或 `SIGIL_NO_UPDATE_CHECK` 下关闭；自动检查从不执行 apply。显式
+`sigil update apply --yes` 和 TUI `/update apply` 也只能替换 standalone，其他来源只返回原安装器命令。
+
 ## Windows canonical path interoperability
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
@@ -84,8 +110,9 @@ R44.1 没有引入新的第三方版本或来源。新增 `sigil-desktop` librar
 | `tokio` + `serde` + `serde_json` + `thiserror` | 复用 workspace版本/feature | `sigil-desktop/launcher` | bounded pipe/readiness/process wait、独立 DTO strict decode 和 path/token-free typed errors | MIT 或 MIT OR Apache-2.0；Tokio/Serde/社区维护 | 不增加 runtime/serialization 实现 |
 | `nix` | 复用 workspace `0.28.0` `signal` feature | `sigil-process` | 将 desktop launcher 的 Unix child 配置为独立process group并在grace deadline后终止完整group | MIT；nix-rust/nix | 把通用process-tree primitive收敛到`sigil-process`；config/bootstrap仍留在desktop owner |
 
-`sigil-desktop` 不依赖 `sigil-kernel`、`sigil-runtime`、`sigil-tui` 或 `sigil-http`。后续 R44.2 引入
-Tauri/npm/codegen依赖时必须单独补充版本、feature、license、capability和updater/build-script审计，不能以本节覆盖。
+`sigil-desktop` 不依赖 `sigil-kernel`、`sigil-runtime`、`sigil-tui` 或 `sigil-http`。
+`apps/desktop` 已引入的 Tauri、npm、codegen 与 updater/build-script 依赖由本台账对应章节单独审计；
+后续变更仍必须同步补充版本、feature、license、capability 和供应链边界，不能以 launcher 本节覆盖。
 
 ## SQLite desktop session catalog（RFC-0042 R42.1）
 
@@ -96,7 +123,7 @@ Tauri/npm/codegen依赖时必须单独补充版本、feature、license、capabil
 | `url` | 复用 workspace 声明 `2.5.7`（lock `2.5.8`）；默认 feature | `sigil-http/listener` | 严格解析loopback HTTP query的percent encoding与UTF-8，再由adapter拒绝duplicate/unknown/bounded-invalid字段；不发起网络请求 | `MIT OR Apache-2.0`；`servo/rust-url` | 只新增HTTP crate直接消费，不引入第二套URL实现、新版本或来源 |
 
 bundled 模式避免 desktop 分发依赖目标机系统 SQLite ABI，同时会增加二进制体积和 C build surface。数据库只
-在 production `sigil serve` / future desktop catalog owner 显式初始化；普通 TUI/CLI startup 不创建它。
+在 production `sigil serve` / Desktop catalog owner 显式初始化；普通 TUI/CLI startup 不创建它。
 SQLite row 不保存 raw message、tool body、URL、secret、absolute source path 或 workspace root，且数据库
 故障不能反向阻断 JSONL append、approval 或 run execution。
 

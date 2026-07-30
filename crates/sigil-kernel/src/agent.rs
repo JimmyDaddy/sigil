@@ -729,6 +729,133 @@ fn validate_initial_frozen_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_initial_frozen_task_routing_request(
+    session: &Session,
+    frozen_request: &FrozenProviderRequestMaterial,
+    binding: &TaskPlanningHandoffBinding,
+    options: &AgentRunOptions,
+    max_output_tokens: Option<u32>,
+    transient_context: &[ModelMessage],
+    runtime_context: RuntimeContextCandidates,
+) -> Result<()> {
+    validate_initial_frozen_request(session, frozen_request)?;
+    let durable_user = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::User(message) if message.id == binding.source_turn.message_id => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow!("automatic task routing frozen request source is not durable in the session")
+        })?;
+    if durable_user.role != crate::MessageRole::User
+        || durable_user.content.as_deref() != Some(binding.objective.as_str())
+    {
+        return Err(anyhow!(
+            "automatic task routing frozen request source conflicts with its handoff binding"
+        ));
+    }
+
+    let mut normalized_request = frozen_request.request().clone();
+    let matching_indices = normalized_request
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message.id == binding.source_turn.message_id).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [message_index] = matching_indices.as_slice() else {
+        return Err(anyhow!(
+            "automatic task routing frozen request must contain its exact source turn once"
+        ));
+    };
+    let exact_user = &normalized_request.messages[*message_index];
+    if exact_user.role != durable_user.role
+        || exact_user.tool_calls.len() != durable_user.tool_calls.len()
+        || exact_user
+            .tool_calls
+            .iter()
+            .zip(&durable_user.tool_calls)
+            .any(|(left, right)| {
+                left.id != right.id || left.name != right.name || left.args_json != right.args_json
+            })
+        || exact_user.tool_call_id != durable_user.tool_call_id
+        || exact_user.assistant_kind != durable_user.assistant_kind
+        || exact_user.image_attachments != durable_user.image_attachments
+    {
+        return Err(anyhow!(
+            "automatic task routing frozen request source shape conflicts with the durable turn"
+        ));
+    }
+    normalized_request.messages[*message_index] = durable_user;
+    normalize_task_routing_system_message_id(&mut normalized_request)?;
+
+    let mut expected_request = session.build_pre_turn_candidate_request(
+        &options.workspace_root,
+        &options.memory_config,
+        vec![
+            request_task_planning_tool_spec(),
+            continue_without_task_planning_tool_spec(),
+        ],
+        max_output_tokens,
+        options.reasoning_effort.clone(),
+        session.latest_response_handle(frozen_request.request().provider_name.as_str()),
+        options.traffic_partition_key.clone(),
+        transient_context,
+        runtime_context,
+        &[],
+    )?;
+    normalize_task_routing_system_message_id(&mut expected_request)?;
+    let normalized_material =
+        FrozenProviderRequestMaterial::freeze(session.session_scope_id(), normalized_request)?;
+    let expected_material =
+        FrozenProviderRequestMaterial::freeze(session.session_scope_id(), expected_request)?;
+    if normalized_material.canonical_bytes_for_in_process_use()
+        != expected_material.canonical_bytes_for_in_process_use()
+    {
+        return Err(anyhow!(
+            "caller-frozen initial provider request does not match automatic task routing"
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_task_routing_system_message_id(request: &mut crate::CompletionRequest) -> Result<()> {
+    let matching_indices = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message.role == crate::MessageRole::System
+                && message.content.as_deref()
+                    == Some(task_routing_system_prompt_contract_material()))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [message_index] = matching_indices.as_slice() else {
+        return Err(anyhow!(
+            "automatic task routing request must contain its system contract once"
+        ));
+    };
+    let message = &mut request.messages[*message_index];
+    if !message.tool_calls.is_empty()
+        || message.tool_call_id.is_some()
+        || message.assistant_kind.is_some()
+        || !message.image_attachments.is_empty()
+    {
+        return Err(anyhow!(
+            "automatic task routing system contract has an invalid message shape"
+        ));
+    }
+    message.id = "system:task-routing-contract-v1".to_owned();
+    Ok(())
+}
+
 fn claim_natural_run_terminal(
     cancellation: Option<&RunCancellationHandle>,
     terminal_authority: bool,
@@ -1348,16 +1475,25 @@ where
                 "tool registry collides with reserved internal tool {REQUEST_TASK_PLANNING_TOOL_NAME}"
             ));
         }
-        if task_handoff_binding.is_some() && initial_frozen_provider_request.is_some() {
-            return Err(anyhow!(
-                "automatic task routing cannot use a caller-frozen initial provider request"
-            ));
-        }
         if task_handoff_binding.is_some() {
             transient_context.insert(
                 0,
                 ModelMessage::system(task_routing_system_prompt_contract_material()),
             );
+        }
+        if let (Some(binding), Some(frozen_request)) = (
+            task_handoff_binding.as_ref(),
+            initial_frozen_provider_request.as_ref(),
+        ) {
+            validate_initial_frozen_task_routing_request(
+                session,
+                frozen_request,
+                binding,
+                &options,
+                max_output_tokens,
+                &transient_context,
+                runtime_context.clone(),
+            )?;
         }
         match purpose.as_ref() {
             Some(AgentRunPurpose::TaskPlanner(_)) => transient_context.insert(

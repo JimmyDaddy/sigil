@@ -15,7 +15,7 @@ where
         agent,
         root_config,
         provider_capabilities: _,
-        workspace_root: _,
+        workspace_root,
         options,
         message_tx,
         elicitation_handler,
@@ -75,6 +75,39 @@ where
                 };
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
+
+                if !cfg!(test)
+                    && !plan_mode
+                    && !prompt.trim().is_empty()
+                    && !run_session
+                        .entries()
+                        .iter()
+                        .any(|entry| matches!(entry, SessionLogEntry::User(_)))
+                    && let Some(route) = run_session.resolved_model_route().cloned()
+                {
+                    let title_root_config = root_config.clone();
+                    let title_workspace_root = workspace_root.clone();
+                    let title_session_log_path = state.session.log_path.clone();
+                    let title_session_id = run_session.session_scope_id().to_owned();
+                    let title_prompt = prompt.clone();
+                    runtime.spawn(async move {
+                        let result = sigil_runtime::generate_and_persist_session_title(
+                            title_root_config,
+                            title_workspace_root,
+                            route.model_ref,
+                            title_session_log_path,
+                            title_session_id,
+                            title_prompt,
+                        )
+                        .await;
+                        if let Err(error) = result {
+                            tracing::debug!(
+                                %error,
+                                "semantic session title generation was not applied"
+                            );
+                        }
+                    });
+                }
 
                 let safe_started_prompt = if prompt.is_empty() && !attachments.is_empty() {
                     sigil_kernel::render_image_attachment_placeholders(&attachments)

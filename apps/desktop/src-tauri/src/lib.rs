@@ -5,6 +5,7 @@ mod recent;
 mod run_streams;
 mod startup;
 mod state;
+mod update;
 mod window_state;
 
 pub use startup::{clear_startup_failure, record_startup_failure, record_startup_panic};
@@ -25,8 +26,8 @@ use crate::{
         desktop_accept_task_integration, desktop_agent_activity, desktop_attach_run,
         desktop_bootstrap, desktop_cancel_run, desktop_catalog, desktop_checkpoint_restore_preview,
         desktop_close_workspace, desktop_command_conversation_queue,
-        desktop_command_conversation_recovery, desktop_continue_task, desktop_continuity,
-        desktop_conversation_compaction_preview, desktop_conversation_queue,
+        desktop_command_conversation_recovery, desktop_compact_conversation, desktop_continue_task,
+        desktop_continuity, desktop_conversation_compaction_preview, desktop_conversation_queue,
         desktop_conversation_recovery, desktop_create_session,
         desktop_delete_invalid_session_source, desktop_delete_session, desktop_display,
         desktop_execute_intent_drop, desktop_execute_session_catalog_batch,
@@ -42,6 +43,10 @@ use crate::{
         desktop_transcript, desktop_verification, resolve_sigil_binary,
     },
     state::DesktopAppState,
+    update::{
+        DesktopUpdaterState, desktop_check_for_update, desktop_download_and_install_update,
+        desktop_restart_after_update, desktop_update_state,
+    },
     window_state::{DisplayBounds, WindowGeometry, WindowStateOwner},
 };
 
@@ -49,12 +54,55 @@ const EXIT_IDLE: u8 = 0;
 const EXIT_CLEANING: u8 = 1;
 const EXIT_ALLOWED: u8 = 2;
 
+#[derive(Clone)]
+pub(crate) struct DesktopExitState {
+    value: Arc<AtomicU8>,
+}
+
+impl DesktopExitState {
+    fn new() -> Self {
+        Self {
+            value: Arc::new(AtomicU8::new(EXIT_IDLE)),
+        }
+    }
+
+    fn load(&self) -> u8 {
+        self.value.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn begin_cleanup(&self) -> bool {
+        self.value
+            .compare_exchange(
+                EXIT_IDLE,
+                EXIT_CLEANING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn cancel_cleanup(&self) {
+        self.value.store(EXIT_IDLE, Ordering::Release);
+    }
+
+    pub(crate) fn allow_exit(&self) {
+        self.value.store(EXIT_ALLOWED, Ordering::Release);
+    }
+}
+
 /// Builds and runs the native shell while preserving workspace process ownership on exit.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let sigil_binary = resolve_sigil_binary()?;
-    let exit_state = Arc::new(AtomicU8::new(EXIT_IDLE));
-    let app = tauri::Builder::default()
+    let exit_state = DesktopExitState::new();
+    let setup_exit_state = exit_state.clone();
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "desktop-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)
@@ -106,6 +154,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 recent_workspaces_path,
                 appearance,
             ));
+            let updater = DesktopUpdaterState::new(
+                app.package_info().version.to_string(),
+                config_dir.join("desktop-update-last-check-v1.json"),
+            );
+            app.manage(updater.clone());
+            updater.start_background_check(app.handle().clone());
+            app.manage(setup_exit_state.clone());
             app.manage(window_state);
             Ok(())
         })
@@ -139,6 +194,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_command_conversation_queue,
             desktop_conversation_recovery,
             desktop_conversation_compaction_preview,
+            desktop_compact_conversation,
             desktop_checkpoint_restore_preview,
             desktop_command_conversation_recovery,
             desktop_run_context,
@@ -156,7 +212,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_intent_stack,
             desktop_preview_intent_drop,
             desktop_execute_intent_drop,
-            desktop_set_appearance
+            desktop_set_appearance,
+            desktop_update_state,
+            desktop_check_for_update,
+            desktop_download_and_install_update,
+            desktop_restart_after_update
         ])
         .build(tauri::generate_context!())?;
 
@@ -192,22 +252,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        RunEvent::ExitRequested { api, .. } => match exit_state.load(Ordering::Acquire) {
+        RunEvent::ExitRequested { api, .. } => match exit_state.load() {
             EXIT_ALLOWED => {}
             EXIT_CLEANING => api.prevent_exit(),
             _ => {
                 persist_window_state(app_handle);
                 api.prevent_exit();
-                exit_state.store(EXIT_CLEANING, Ordering::Release);
-                let handle = app_handle.clone();
+                if !exit_state.begin_cleanup() {
+                    return;
+                }
+                let handle = (*app_handle).clone();
                 let state = app_handle.state::<DesktopAppState>();
                 let manager = Arc::clone(&state.manager);
                 let streams = state.run_streams.clone();
-                let exit_state = Arc::clone(&exit_state);
+                let exit_state = exit_state.clone();
+                let updater = app_handle.state::<DesktopUpdaterState>().inner().clone();
                 tauri::async_runtime::spawn(async move {
+                    updater.stop_background();
                     streams.stop_all().await;
                     manager.lock().await.close_all().await;
-                    exit_state.store(EXIT_ALLOWED, Ordering::Release);
+                    exit_state.allow_exit();
                     handle.exit(0);
                 });
             }
@@ -217,7 +281,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn persist_window_state(app_handle: &tauri::AppHandle) {
+pub(crate) fn persist_window_state(app_handle: &tauri::AppHandle) {
     let Some(window) = app_handle.get_webview_window("main") else {
         return;
     };

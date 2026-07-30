@@ -266,7 +266,7 @@ def probe_html(viewport, variant)
               const timelinePhases = doc.querySelectorAll(".session-timeline .session-phase");
               const deckMain = doc.querySelector(".terminal-window-main");
               const deckApproval = doc.querySelector(".terminal-window-approval");
-              const deckWindows = doc.querySelectorAll(".terminal-deck .visual-card");
+              const deckWindows = doc.querySelectorAll(".product-deck .visual-card");
               const docsCommandLine = doc.querySelector(".docs-command-line");
               const docsCommandInput = doc.querySelector(".docs-command-line input");
               const taskCards = doc.querySelectorAll(".task-router .task-card");
@@ -633,12 +633,8 @@ VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
         unless result_attribute(tag, "data-sigil-deck-windows") == "3"
           failures << "#{page_label}: homepage terminal deck must render three focused windows"
         end
-        if [1024, 1440].include?(viewport.fetch(:width)) &&
-           result_attribute(tag, "data-sigil-deck-overlap") != "true"
-          failures << "#{page_label}: desktop terminal deck must use the layered overlap layout"
-        end
-        if viewport.fetch(:width) == 390 && result_attribute(tag, "data-sigil-deck-overlap") != "false"
-          failures << "#{page_label}: mobile terminal deck must return to a non-overlapping stack"
+        if result_attribute(tag, "data-sigil-deck-overlap") != "false"
+          failures << "#{page_label}: Desktop and TUI product cards must not overlap"
         end
       end
 

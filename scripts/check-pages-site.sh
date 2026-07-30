@@ -107,6 +107,19 @@ required_files=(
   "assets/demo/sigil-45-second-demo-poster.png"
   "assets/demo/sigil-45-second-demo.en.vtt"
   "assets/demo/sigil-45-second-demo.zh-CN.vtt"
+  "assets/demo/sigil-desktop-demo.mp4"
+  "assets/demo/sigil-desktop-demo.webm"
+  "assets/demo/sigil-desktop-demo-poster.png"
+  "assets/demo/sigil-desktop-demo.en.vtt"
+  "assets/demo/sigil-desktop-demo.zh-CN.vtt"
+  "assets/screenshots/desktop-workbench.png"
+  "assets/screenshots/desktop-workbench-en.png"
+  "assets/screenshots/desktop-settings.png"
+  "assets/screenshots/desktop-settings-en.png"
+  "assets/screenshots/en/desktop-workbench.png"
+  "assets/screenshots/en/desktop-settings.png"
+  "assets/screenshots/zh-CN/desktop-workbench.png"
+  "assets/screenshots/zh-CN/desktop-settings.png"
   "assets/screenshots/tui-session.svg"
   "assets/screenshots/approval-review.svg"
   "assets/screenshots/config-panel.svg"
@@ -221,6 +234,37 @@ ruby -e '
   "${stage_dir}/assets/demo/sigil-45-second-demo.webm" \
   "${stage_dir}/assets/demo/sigil-45-second-demo.en.vtt" \
   "${stage_dir}/assets/demo/sigil-45-second-demo.zh-CN.vtt"
+
+ruby -e '
+  png = File.binread(ARGV.fetch(0), 24)
+  abort "Desktop demo poster is not a PNG" unless png.start_with?("\x89PNG\r\n\x1A\n".b)
+  width, height = png.byteslice(16, 8).unpack("NN")
+  abort "Desktop demo poster must be 1440x900, found #{width}x#{height}" unless [width, height] == [1440, 900]
+
+  mp4 = File.binread(ARGV.fetch(1), 12)
+  abort "Desktop demo MP4 is missing an ftyp box" unless mp4.byteslice(4, 4) == "ftyp"
+
+  webm = File.binread(ARGV.fetch(2), 4)
+  abort "Desktop demo WebM has an invalid EBML header" unless webm == "\x1A\x45\xDF\xA3".b
+
+  ARGV.drop(3).each do |caption|
+    abort "Desktop demo caption must start with WEBVTT: #{caption}" unless File.read(caption, 6) == "WEBVTT"
+  end
+' \
+  "${stage_dir}/assets/demo/sigil-desktop-demo-poster.png" \
+  "${stage_dir}/assets/demo/sigil-desktop-demo.mp4" \
+  "${stage_dir}/assets/demo/sigil-desktop-demo.webm" \
+  "${stage_dir}/assets/demo/sigil-desktop-demo.en.vtt" \
+  "${stage_dir}/assets/demo/sigil-desktop-demo.zh-CN.vtt"
+
+for desktop_capture in "${stage_dir}"/assets/screenshots/desktop-*.png; do
+  ruby -e '
+    png = File.binread(ARGV.fetch(0), 24)
+    abort "Desktop capture is not a PNG: #{ARGV.fetch(0)}" unless png.start_with?("\x89PNG\r\n\x1A\n".b)
+    width, height = png.byteslice(16, 8).unpack("NN")
+    abort "Desktop capture must be 1440x900, found #{width}x#{height}" unless [width, height] == [1440, 900]
+  ' "${desktop_capture}"
+done
 
 for file in "${source_docs[@]}"; do
   if [[ ! -f "${repo_root}/${file}" ]]; then

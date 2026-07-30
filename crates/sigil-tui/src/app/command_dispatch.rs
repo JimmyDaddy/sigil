@@ -188,8 +188,9 @@ impl AppState {
             | UiCommand::OpenConfig
             | UiCommand::OpenDoctor
             | UiCommand::OpenFeedback
+            | UiCommand::CheckForUpdate
             | UiCommand::StartNewSession
-            | UiCommand::PreviewV2Compaction
+            | UiCommand::CompactContext
             | UiCommand::CycleAgentView
             | UiCommand::CycleAgentViewPrevious
             | UiCommand::CheckChangedFilesDiagnostics => false,

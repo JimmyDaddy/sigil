@@ -68,6 +68,16 @@ impl ConversationCoordinator {
         guard.enforce(session, now_ms)
     }
 
+    pub(crate) fn routes_conversation_automatically(&self, session: &Session) -> bool {
+        self.task_enabled
+            && self.orchestration_route_guard.as_ref().map_or(
+                self.routing_policy == TaskRoutingPolicy::Auto,
+                |guard| {
+                    guard.effective_policy(session, self.routing_policy) == TaskRoutingPolicy::Auto
+                },
+            )
+    }
+
     /// Binds a root conversation run to its exact user turn and optional automatic handoff.
     ///
     /// The model only receives `request_task_planning` when task routing is enabled and set to
@@ -103,12 +113,8 @@ impl ConversationCoordinator {
             source.message_id,
             root_logical_run_id.clone(),
         )?;
-        let effective_policy = if self.task_enabled {
-            self.orchestration_route_guard
-                .as_ref()
-                .map_or(self.routing_policy, |guard| {
-                    guard.effective_policy(session, self.routing_policy)
-                })
+        let effective_policy = if self.routes_conversation_automatically(session) {
+            TaskRoutingPolicy::Auto
         } else {
             TaskRoutingPolicy::Manual
         };

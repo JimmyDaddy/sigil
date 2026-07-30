@@ -57,7 +57,8 @@ TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显�
 - `/resume` — 选择已保存会话。
 - `/plan <prompt>` — 执行前请求只读计划。
 - `/task <任务>` 与 `/task continue` — 启动或继续多步骤工作。
-- `/compact` — 检查上下文精简方案。
+- `/compact` — 生成、校验并激活一个可恢复的上下文 checkpoint。
+- `/update [check|refresh|apply]` — 检查更新，或明确安装已准入的更新。
 - `/feedback` — 预览并保存本机支持报告。
 - `/quit` — 关闭 TUI。
 
@@ -120,7 +121,7 @@ TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显�
 
 ## 长上下文和压缩
 
-信息栏会显示上下文用量，并在模型上下文窗口接近上限时提醒。`/compact` 首先只在本地生成预览，不联系 provider，也不改变当前上下文。你可以保持当前上下文、只清理可恢复的大型历史工具输出，或显式选择在当前 route 生成一次计费语义摘要；摘要生成后仍需确认最终就绪预览，才会真正激活压缩。上下文大小未知时，可以设置 `fallback_context_window_tokens`。设置与恢复方式见[高级配置](advanced-configuration.md)。
+信息栏会显示上下文用量，并在模型上下文窗口接近上限时提醒。`/compact` 会直接生成、校验并原子激活一个可恢复语义 checkpoint，不再打开确认弹窗；route 准入后会执行一次计费语义摘要请求。Sigil 先展示进度，随后给出已激活回执或精确拒绝原因。摘要、token proof、经济性校验失败，或摘要期间会话发生变化时，当前上下文保持不变。上下文大小未知时，可以设置 `fallback_context_window_tokens`。设置与恢复方式见[高级配置](advanced-configuration.md)。
 
 ## 代码智能
 

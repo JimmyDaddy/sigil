@@ -41,6 +41,7 @@ pub(crate) mod task_sidebar;
 mod timeline_flow;
 mod timeline_render_store;
 mod tool_card_interaction;
+mod update_flow;
 mod usage_sidebar_flow;
 mod verification_flow;
 mod worker_bridge;
@@ -308,6 +309,7 @@ pub struct AppState {
     pub session_log_path: PathBuf,
     pub session_id: String,
     support_build_info: SupportBuildInfo,
+    update_state: update_flow::UpdateUiState,
     pub(crate) runtime: RuntimeStatusState,
     pub(crate) composer: ComposerState,
     pub(crate) approval: ApprovalState,
@@ -462,6 +464,14 @@ pub enum AppAction {
     RevealFile {
         path: PathBuf,
     },
+    CheckForUpdate {
+        force_refresh: bool,
+        channel: sigil_updater::UpdateChannel,
+    },
+    ApplyUpdate {
+        channel: sigil_updater::UpdateChannel,
+    },
+    StartV2Compaction,
     PreviewV2Compaction,
     ApplyV2Compaction {
         request_id: u64,
@@ -641,6 +651,7 @@ impl AppState {
             session_log_path: PathBuf::new(),
             session_id,
             support_build_info: SupportBuildInfo::unknown(),
+            update_state: update_flow::UpdateUiState::default(),
             runtime: RuntimeStatusState {
                 provider_name: configured_provider_name,
                 model_name: configured_model_name,
@@ -760,6 +771,7 @@ impl AppState {
             session_log_path: PathBuf::new(),
             session_id,
             support_build_info: SupportBuildInfo::unknown(),
+            update_state: update_flow::UpdateUiState::default(),
             runtime: RuntimeStatusState {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),

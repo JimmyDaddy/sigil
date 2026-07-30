@@ -87,10 +87,20 @@ impl OrchestrationRouteGuard {
         session: &Session,
         configured_policy: TaskRoutingPolicy,
     ) -> TaskRoutingPolicy {
+        let disablements = session.orchestration_route_disablement_projection();
+        let exact_route_disabled =
+            disablements.is_disabled(&self.route_fingerprint, &self.sigil_build);
+        let any_route_disabled = session.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
+            )
+        });
         if configured_policy == TaskRoutingPolicy::Auto
-            && session
-                .orchestration_route_disablement_projection()
-                .is_disabled(&self.route_fingerprint, &self.sigil_build)
+            && (exact_route_disabled
+                || (!any_route_disabled
+                    && first_orchestration_hard_invariant(&orchestration_observation(session))
+                        .is_some()))
         {
             TaskRoutingPolicy::Manual
         } else {

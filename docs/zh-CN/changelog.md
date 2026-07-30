@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-07-31,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -8,7 +8,22 @@
 
 ## 尚未发布 - main
 
-`v0.0.1-alpha.6` 发布后暂未增加用户可感知的变更。
+`v0.0.1-beta.1` 之后尚无新的用户可见变更。
+
+## v0.0.1-beta.1 - 2026-07-31
+
+以下变更已包含在打包发布的 `v0.0.1-beta.1` 中。
+
+- 增加公开 macOS Desktop beta 渠道：提供已签名并完成 Apple 公证的 Apple 芯片与 Intel DMG，以及分架构签名更新包。
+- 为 Desktop 设置页、TUI `/update` 与 CLI `sigil update` 增加明确的版本检查和更新；包管理器安装会收到对应更新命令，独立安装包继续校验 checksum/签名，并且不会静默重启。
+- Release tag 现在先建立可补齐资源的 draft。明确 publish 时才校验全部 Desktop 资源、公开完整 GitHub Release、按 `beta` 或 `alpha` 发布 npm，最后更新官网与 Homebrew；该顺序兼容 immutable GitHub Releases。
+- 更新官网、README、安装/状态文档与界面导览，把 Desktop 与 TUI 作为并列入口，同时提供分架构下载指引、真实 Desktop 截图导览和已有 TUI 真实运行 Demo。
+- `/compact` 现在把命令本身视为明确意图：单次执行即可生成、校验并原子激活已准入的可恢复 checkpoint，不再打开确认弹窗。失败时保持当前上下文不变，并持续显示精确原因。
+- 修复语义压缩自己的 provider-attempt 与 usage 审计记录推进 durable stream 后，被错误判定为 stale 并丢弃结果的问题。
+- 修复 Desktop 在任务执行中按 Enter 无法可靠加入 durable 后续队列、运行控制偶发失联，以及 live/durable 消息归并可能把合法重放错误判为冲突的问题。
+- 会话标题可在首轮完成后由当前模型生成简洁语义标题，手动或自动改名会同步更新会话页标题；标题生成不再与主请求竞争 provider。
+- 统一 Desktop 会话正文、运行状态、审批卡和 composer 的宽度，收窄审批弹窗，并修复不确定总量被显示成停滞百分比的问题。
+- 增加从当前源码启动的 Desktop Gherkin E2E，覆盖真实审批、Enter 排队、skill/agent 加载、`/plan`、自动规划与并行 Agent；同时保留 TUI 的 stateful 与 orchestration PTY 验收。
 
 ## v0.0.1-alpha.6 - 2026-07-30
 

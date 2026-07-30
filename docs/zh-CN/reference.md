@@ -59,7 +59,8 @@
 | `/task continue` | 继续最近的未完成任务 |
 | `/model <model-id|connection-id/model-id>` | 切换到准确的 ready route 并新建会话；在选择器中按 `D` 只修改保存默认值 |
 | `/effort <low|medium|high|max>` | 修改下一轮的推理强度 |
-| `/compact` | 检查上下文精简方案，并在就绪时应用一次 |
+| `/compact` | 生成、校验并激活一个可恢复的上下文 checkpoint |
+| `/update [check|refresh|apply]` | 检查当前渠道、跳过检查缓存，或明确应用已准入的更新 |
 | `/intents` | 检查 durable intent 状态、artifact、冲突与精确 Drop 预览 |
 | `/quit` | 退出 TUI |
 
@@ -80,6 +81,8 @@
 | `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | 生成精确、只读的 Drop preview |
 | `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | 确认并执行该精确 preview |
 | `sigil serve` | 启动带认证且只监听回环地址的本机服务 |
+| `sigil update check [--channel current|stable|beta] [--refresh] [--output text|json]` | 只检查发布版本，不修改当前安装 |
+| `sigil update apply --yes [--channel current|stable|beta] [--output text|json]` | 明确安装已准入的独立更新，或显示对应包管理器命令 |
 | `sigil --version` | 打印已安装版本 |
 | `sigil --config <path> doctor` | 诊断显式配置 |
 

@@ -179,7 +179,7 @@ cat >"${root_package_dir}/package.json" <<JSON
 {
   "name": "${scope}/sigil",
   "version": "${version}",
-  "description": "TUI-first Rust AI coding agent",
+  "description": "Rust AI coding agent with Desktop and TUI experiences",
   "license": "MIT",
   "repository": {
     "type": "git",

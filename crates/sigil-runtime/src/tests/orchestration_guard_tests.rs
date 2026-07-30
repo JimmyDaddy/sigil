@@ -25,6 +25,15 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
     session.append_control(ControlEntry::TaskHandoffRequested(duplicate))?;
 
     let guard = OrchestrationRouteGuard::new("provider", "model", "build-1");
+    assert_eq!(
+        guard.effective_policy(&session, TaskRoutingPolicy::Auto),
+        TaskRoutingPolicy::Manual,
+        "preflight must not freeze an auto-routing request that enforce will disable"
+    );
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
+    )));
     let disabled = guard
         .enforce(&mut session, 2)?
         .expect("duplicate handoff must disable the route");

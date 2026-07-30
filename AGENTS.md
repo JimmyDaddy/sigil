@@ -14,12 +14,14 @@
 
 ## 仓库定位
 
-`sigil` 是一个 **TUI-first** 的 Rust AI coding agent。
+`sigil` 是一个 Rust AI coding agent，**Desktop 与 TUI 是并列的一等产品表面**；
+CLI 与 HTTP 只承担自动化、调试和 adapter 职责。
 
 协作时请守住这几个高优先级原则：
 
 - 不要把项目继续推成“命令越做越多的 command-only 工具”
-- 优先保护 TUI 作为第一用户表面的体验与信息架构
+- 用户可见能力应复用同一 kernel/runtime 语义，并按 Desktop 与 TUI 各自的信息架构呈现
+- 不要把某个 UI 入口、实现语言或内部架构写成 agent 的能力声明或自我介绍
 - `sigil-kernel` 必须保持通用，不引入 DeepSeek 专属术语到公共 API
 - provider 专项行为留在 provider crate 内解释
 - session / control state 必须是 append-only、可持久化、可审计的
@@ -29,22 +31,23 @@
 开始动手前请先确认：
 
 - 目标变更属于哪个 crate
-- 是否会影响 TUI、CLI、provider、tool 或 session 持久化行为
+- 是否会影响 Desktop、TUI、CLI、provider、tool 或 session 持久化行为
 - 是否需要同步更新 `README.md`、`dev/governance/*` 或 `dev/docs/*`
 - 是否需要补测试或更新现有测试断言
 
 ## 目录职责
 
 - `crates/sigil-kernel`：通用领域契约、agent loop、approval、event、session
+- `crates/sigil-provider-http`：provider 共用的安全 HTTP client 与显式 CA bundle 加载；不承载协议或模型语义
 - `crates/sigil-provider-deepseek`：DeepSeek provider 与相关专项行为
 - `crates/sigil-tools-builtin`：内置工具与 preview/diff 预览
 - `crates/sigil-process`：跨 crate 的最小进程树 ownership 与平台 capability probe
 - `crates/sigil-desktop`：桌面 Rust 后端的 launcher、私有 bearer 与 typed local HTTP client；不承载 UI 或 agent loop
 - `apps/desktop`：Tauri 2 + React 桌面壳；renderer 只通过 allowlist command/event 消费收窄 DTO，不持有 bearer、路径、process 或 generic HTTP/filesystem 能力
 - `crates/sigil-mcp`：stdio MCP client 与工具适配
-- `crates/sigil-runtime`：CLI/TUI 共享的 provider、tool registry 与 run options 装配
+- `crates/sigil-runtime`：Desktop/TUI/CLI 共享的 provider、tool registry 与 run options 装配
 - `crates/sigil-cli`：薄 CLI、调试入口、自动化入口
-- `crates/sigil-tui`：第一用户入口
+- `crates/sigil-tui`：终端产品表面
 - `dev/governance`：开发规范
 - `dev/docs`：架构与技术方案
 
@@ -73,7 +76,7 @@
 出现以下情况时，必须同步更新文档：
 
 - 新增或移除 crate / 入口命令
-- TUI 用户流程变化
+- Desktop 或 TUI 用户流程变化
 - tool 审批、session、provider 能力边界变化
 - 新的代码约束或工程约束落地
 

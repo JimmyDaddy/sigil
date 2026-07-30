@@ -18,9 +18,10 @@
 
 ### 2.1 产品层
 
-- `crates/sigil-tui` 承载第一用户入口的 TUI 状态、渲染和 runner
+- `apps/desktop` 与 `crates/sigil-tui` 是并列的一等产品表面，分别承载桌面与终端的信息架构
 - `crates/sigil` 提供 `sigil` binary；无子命令启动 TUI，显式子命令承担自动化和调试入口
-- `apps/desktop` 提供独立 opt-in 的 Tauri 桌面 companion；它通过 `sigil-desktop` 和本地 HTTP/SSE 复用同一 runtime，不改变 TUI-first 定位
+- `apps/desktop` 通过 `sigil-desktop` 和本地 HTTP/SSE 复用同一 runtime；
+  Desktop 与 TUI 共享任务、审批、恢复和验证语义，不复制 agent loop
 
 ### 2.2 内核层
 
@@ -29,13 +30,14 @@
 
 ### 2.3 基础能力层
 
+- `crates/sigil-provider-http`：provider 共用的安全 HTTP client builder；支持通过 `SSL_CERT_FILE` 追加私有 CA，保留内建信任根、证书链与主机名校验，不承载 provider 协议语义
 - `crates/sigil-provider-deepseek`：DeepSeek provider
 - `crates/sigil-provider-openai-compat`：OpenAI-compatible provider
 - `crates/sigil-tools-builtin`：内置工具
 - `crates/sigil-process`：跨 crate 的最小进程树 lifecycle ownership；不承载 shell、sandbox、MCP framing 或 TUI 状态
 - `crates/sigil-desktop`：桌面 Rust 后端的 child/token/bootstrap/client ownership；不依赖 kernel/runtime/TUI/HTTP server internals，不向 renderer 暴露 bearer 或 generic process/network API
 - `crates/sigil-mcp`：MCP 接入
-- `crates/sigil-runtime`：跨 TUI / CLI 的 provider、tool registry、run options 装配，并提供 provider-neutral 的配置草稿、状态请求/刷新任务、provider/model metadata、agent-message route 和 session-control append helper；入口层不直接依赖 provider crate
+- `crates/sigil-runtime`：跨 Desktop / TUI / CLI 的 provider、tool registry、run options 装配，并提供 provider-neutral 的配置草稿、状态请求/刷新任务、provider/model metadata、agent-message route 和 session-control append helper；入口层不直接依赖 provider crate
 
 ## 3. 变更流程
 
@@ -44,7 +46,7 @@
 先回答这几个问题：
 
 - 这是产品表面变化、内核变化，还是 provider / tool 变化
-- 是否会影响 TUI 用户流程
+- 是否会影响 Desktop 或 TUI 用户流程
 - 是否会影响 session 持久化、恢复或审批安全边界
 - 是否需要同步文档
 - 是否把内部机制、低频调试项或高级策略暴露成了普通用户主流程；如果是，优先改成粗粒度模式、当前任务 action、doctor 建议、配置文件或高级流程
@@ -52,7 +54,7 @@
 ### 3.2 实施时
 
 - 优先做最小闭环，不做“大而全”半成品
-- 优先保护现有运行链路，不要为新能力破坏已有 TUI 体验
+- 优先保护现有运行链路，不要为新能力破坏已有 Desktop 或 TUI 体验
 - 跨 crate 变更时，优先先定边界，再改代码
 - 改 TUI / `/config` / slash command 时，默认先减少用户需要理解的概念数量，再考虑暴露更多开关；不要为了覆盖所有实现能力而增加日常操作成本
 
@@ -69,7 +71,7 @@
 以下变更默认要同步文档：
 
 - 新入口、新 crate、新配置块
-- TUI 主流程变化
+- Desktop 或 TUI 主流程变化
 - tool 审批 / diff / session 行为变化
 - provider 能力边界变化
 - 代码约束、工程约束变化
@@ -152,9 +154,12 @@ hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业�
 - 新增配置项时，要同时考虑默认值、兼容性和文档说明
 - 用户主心智相关配置要谨慎暴露，不要把调试开关直接产品化
 
-## 7. TUI 产品规范
+## 7. Desktop 与 TUI 产品规范
 
-- 新能力默认先想清楚如何进入 TUI，而不是先加 CLI 子命令
+- 新能力默认先想清楚共享状态、命令与事件如何被 Desktop 和 TUI 消费，
+  而不是先加 CLI 子命令
+- 已同时存在于 Desktop 和 TUI 的行为变更必须检查两端；允许表面特有交互，
+  但审批、恢复、任务与验证语义不得各自分叉
 - 键位、状态栏、面板提示必须同步更新
 - 审批体验优先级很高：写工具要尽量有 preview / diff / 导航
 - session 体验要可持续使用，而不只是“一次性跑完一轮”

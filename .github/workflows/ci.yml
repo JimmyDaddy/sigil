@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - ".github/workflows/ci.yml"
+      - ".github/workflows/desktop-package.yml"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/published-distribution-smoke.yml"
+      - ".github/workflows/release.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "apps/desktop/**"
@@ -34,13 +38,29 @@ on:
       - "scripts/tui-feedback-pty-acceptance.py"
       - "scripts/tui-web-pty-acceptance.py"
       - "scripts/test-tui-web-pty-acceptance.py"
+      - "scripts/build-release-archive.sh"
+      - "scripts/extract-verified-desktop-updater-app.py"
+      - "scripts/generate-desktop-update-manifest.mjs"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/release-channel-version.mjs"
+      - "scripts/notarize-desktop-macos-app.sh"
       - "scripts/notarize-desktop-macos.sh"
+      - "scripts/verify-desktop-macos-app.sh"
       - "scripts/verify-desktop-macos.sh"
       - "scripts/test-desktop-macos-signing.mjs"
+      - "scripts/test-extract-verified-desktop-updater-app.py"
+      - "scripts/test-published-distribution-smoke.sh"
+      - "scripts/test-product-surface-positioning.mjs"
+      - "scripts/test-update-distribution-markers.mjs"
+      - "scripts/select-published-desktop-beta.mjs"
+      - "scripts/verify-desktop-update-signature.sh"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
+      - ".github/workflows/desktop-package.yml"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/published-distribution-smoke.yml"
+      - ".github/workflows/release.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "apps/desktop/**"
@@ -69,10 +89,22 @@ on:
       - "scripts/tui-feedback-pty-acceptance.py"
       - "scripts/tui-web-pty-acceptance.py"
       - "scripts/test-tui-web-pty-acceptance.py"
+      - "scripts/build-release-archive.sh"
+      - "scripts/extract-verified-desktop-updater-app.py"
+      - "scripts/generate-desktop-update-manifest.mjs"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/release-channel-version.mjs"
+      - "scripts/notarize-desktop-macos-app.sh"
       - "scripts/notarize-desktop-macos.sh"
+      - "scripts/verify-desktop-macos-app.sh"
       - "scripts/verify-desktop-macos.sh"
       - "scripts/test-desktop-macos-signing.mjs"
+      - "scripts/test-extract-verified-desktop-updater-app.py"
+      - "scripts/test-published-distribution-smoke.sh"
+      - "scripts/test-product-surface-positioning.mjs"
+      - "scripts/test-update-distribution-markers.mjs"
+      - "scripts/select-published-desktop-beta.mjs"
+      - "scripts/verify-desktop-update-signature.sh"
 
 permissions:
   contents: read
@@ -96,7 +128,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Verify alpha dogfood runner contracts
+      - name: Verify dogfood and distribution contracts
         run: |
           python3 scripts/test-alpha-dogfood-campaign.py
           python3 scripts/test-run-evals.py
@@ -104,6 +136,10 @@ jobs:
           python3 scripts/test-tui-orchestration-pty-acceptance.py
           python3 scripts/test-tui-web-pty-acceptance.py
           node scripts/test-desktop-macos-signing.mjs
+          python3 scripts/test-extract-verified-desktop-updater-app.py
+          node scripts/test-product-surface-positioning.mjs
+          node scripts/test-update-distribution-markers.mjs
+          scripts/test-published-distribution-smoke.sh
 
       - name: Enforce physical Rust test layout
         run: |
@@ -192,6 +228,12 @@ jobs:
 
       - name: cargo check --locked
         run: cargo check --locked
+
+      - name: Check updater release verifier
+        run: >-
+          cargo check --locked -p sigil-updater
+          --features release-verifier
+          --bin sigil-verify-tauri-update
 
   code-intel-rustdoc:
     name: Code intelligence public API docs
@@ -438,6 +480,13 @@ jobs:
 
       - name: cargo clippy --locked --all-targets -- -D warnings
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy updater release verifier
+        run: >-
+          cargo clippy --locked -p sigil-updater
+          --features release-verifier
+          --bin sigil-verify-tauri-update
+          -- -D warnings
 
   tui-web-v1-pty-acceptance:
     name: TUI Web V1 PTY acceptance

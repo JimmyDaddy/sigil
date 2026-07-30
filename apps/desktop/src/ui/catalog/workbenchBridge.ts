@@ -434,6 +434,25 @@ export function createCatalogWorkbenchBridge(
       recentWorkspaces: [],
       appearance: appearance(currentPreference),
     }),
+    updateState: async () => ({
+      phase: "unsupported",
+      channel: "beta",
+      currentVersion: "catalog",
+      downloadedBytes: 0,
+    }),
+    checkForUpdate: async () => ({
+      phase: "unsupported",
+      channel: "beta",
+      currentVersion: "catalog",
+      downloadedBytes: 0,
+    }),
+    downloadAndInstallUpdate: async () => ({
+      phase: "unsupported",
+      channel: "beta",
+      currentVersion: "catalog",
+      downloadedBytes: 0,
+    }),
+    restartAfterUpdate: async () => undefined,
     setAppearance: async (next) => {
       currentPreference = next;
       return appearance(currentPreference);
@@ -645,6 +664,10 @@ export function createCatalogWorkbenchBridge(
       retainedEventCount: 0,
       admission: { kind: "no_foldable_history", durableMessageCount: 0, configuredTailMessageCount: 12 },
     }),
+    compactConversation: async () => ({
+      outcome: "nothing_to_compact",
+      recovery: { checkpoints: [], forkPoints: [], throughStreamSequence: 0 },
+    }),
     checkpointRestorePreview: async (_workspaceId, input) => ({
       checkpointId: input.checkpointId,
       checkpointDigest: input.checkpointDigest,
@@ -733,5 +756,6 @@ export function createCatalogWorkbenchBridge(
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     subscribeAppearance: async () => () => undefined,
+    subscribeUpdate: async () => () => undefined,
   };
 }

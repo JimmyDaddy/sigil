@@ -187,6 +187,65 @@ describe("live event reducer", () => {
     });
   });
 
+  it("separates provider tool-call assembly from the execution lifecycle", () => {
+    let state = createLiveEventState(SESSION_ID);
+    const lifecycle = [
+      event({
+        runSequence: "1",
+        provisionalId: "live-tool",
+        kind: "tool_started",
+        itemId: "call-1",
+        toolName: "bash",
+        toolInput: "head -1 README.md",
+      }),
+      event({
+        runSequence: "2",
+        provisionalId: "live-tool",
+        kind: "tool_completed",
+        itemId: "call-1",
+        toolName: "bash",
+      }),
+      event({
+        runSequence: "3",
+        provisionalId: "live-tool",
+        kind: "tool_progress",
+        itemId: "call-1",
+        toolName: "bash",
+        status: "started",
+      }),
+      event({
+        runSequence: "4",
+        provisionalId: "live-tool",
+        kind: "tool_progress",
+        itemId: "call-1",
+        toolName: "bash",
+        status: "completed",
+      }),
+      event({
+        runSequence: "5",
+        provisionalId: "live-tool",
+        kind: "tool_result",
+        itemId: "call-1",
+        toolName: "bash",
+        status: "ok",
+      }),
+    ];
+
+    const statuses = lifecycle.map((timelineEvent) => {
+      state = reduceLiveTimelineEvent(state, timelineEvent);
+      return selectSemanticLiveItems(state)[0]?.status;
+    });
+
+    expect(statuses).toEqual([
+      "requested",
+      "requested",
+      "running",
+      "completed",
+      "succeeded",
+    ]);
+    expect(selectSemanticLiveItems(state)[0]?.toolInput).toBe("head -1 README.md");
+  });
+
   it("buffers id-less deltas by BigInt run sequence and ignores duplicate sequence replay", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({

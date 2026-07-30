@@ -2521,8 +2521,7 @@ fn slash_command_busy_and_unknown_paths_leave_tui_responsive() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.role == TimelineRole::Notice
-                && entry.text == "busy; preview compact later")
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "busy; compact later")
     );
 
     app.composer.input = "/resume missing".to_owned();

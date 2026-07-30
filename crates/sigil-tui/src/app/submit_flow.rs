@@ -175,11 +175,11 @@ impl AppState {
         match command.canonical.as_str() {
             "/compact" => {
                 if self.runtime.is_busy {
-                    self.push_timeline(TimelineRole::Notice, "busy; preview compact later");
+                    self.push_timeline(TimelineRole::Notice, "busy; compact later");
                     Ok(None)
                 } else {
-                    self.last_notice = Some("V2 compact preview requested".to_owned());
-                    Ok(Some(AppAction::PreviewV2Compaction))
+                    self.last_notice = Some("Compacting context…".to_owned());
+                    Ok(Some(AppAction::StartV2Compaction))
                 }
             }
             "/config" => {
@@ -210,6 +210,7 @@ impl AppState {
             }
             "/plan" => self.execute_plan_slash_command(command.arg.trim()),
             "/task" => self.execute_task_slash_command(command.arg.trim()),
+            "/update" => Ok(self.execute_update_slash_command(&command.arg)),
             "/quit" => {
                 self.should_quit = true;
                 self.push_timeline(TimelineRole::Notice, "quitting");

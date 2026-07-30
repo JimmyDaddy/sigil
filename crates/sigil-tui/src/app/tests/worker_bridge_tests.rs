@@ -2880,6 +2880,10 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
             if thread_id.as_str() == "thread-1" && prompt == "keep going"
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::StartV2Compaction),
+        WorkerCommand::StartV2Compaction
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::PreviewV2Compaction),
         WorkerCommand::PreviewV2Compaction
     ));
@@ -3547,7 +3551,7 @@ fn v2_compaction_apply_renders_one_lifecycle_notice_without_an_assistant_reply()
 
     app.handle_worker_message(WorkerMessage::V2CompactionApplied {
         request_id: 42,
-        source: crate::runner::V2CompactionApplySource::ManualConfirmation,
+        source: crate::runner::V2CompactionApplySource::DirectCommand,
         compaction_id: "portable-test-activation".to_owned(),
         folded_event_count: 3,
         entries: vec![SessionLogEntry::User(ModelMessage::user(
@@ -3568,6 +3572,26 @@ fn v2_compaction_apply_renders_one_lifecycle_notice_without_an_assistant_reply()
             && entry
                 .text
                 .contains("Context compacted: 3 message(s) folded")
+    }));
+    Ok(())
+}
+
+#[test]
+fn v2_compaction_failure_keeps_the_actionable_reason_in_the_timeline() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle_worker_message(WorkerMessage::V2CompactionApplyFailed {
+        request_id: 42,
+        error: "insufficient verified savings".to_owned(),
+    })?;
+
+    assert_eq!(
+        app.last_notice(),
+        Some("V2 compaction was not applied: insufficient verified savings")
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry.text == "V2 compaction was not applied: insufficient verified savings"
     }));
     Ok(())
 }

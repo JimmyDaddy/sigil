@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Describe the user problem before prescribing an implementation. Sigil is TUI-first, so explain how the capability should fit the interactive workflow.
+        Describe the user problem before prescribing an implementation. Desktop and TUI are first-class Sigil surfaces, so explain which shared behavior and surface-specific interaction the capability needs.
 
   - type: checkboxes
     id: existing

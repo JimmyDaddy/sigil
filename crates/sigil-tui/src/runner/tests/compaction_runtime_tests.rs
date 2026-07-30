@@ -670,3 +670,34 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
     assert!(!durable_json.contains("pre_turn_pressure"));
     Ok(())
 }
+
+#[test]
+fn v2_session_portable_transport_uses_its_durable_model_route() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut root_config = root_config(temp.path(), &temp.path().join("cache"));
+    root_config.config_version = Some(sigil_kernel::CONFIG_VERSION_V2);
+    let connection_id = sigil_kernel::ConnectionId::new("test-default")?;
+    root_config.agent.provider.clear();
+    root_config.agent.connection = Some(connection_id.clone());
+    root_config.connections.insert(
+        connection_id.as_str().to_owned(),
+        serde_json::json!({
+            "label": "Test default",
+            "provider": "deepseek",
+            "protocol": "deepseek",
+            "base_url": "https://api.deepseek.com",
+            "credential": {
+                "source": "environment",
+                "name": "SIGIL_API_KEY"
+            }
+        }),
+    );
+    let model_ref = sigil_kernel::ModelRef::new(connection_id, "deepseek-v4-flash".to_owned())?;
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_model_route(&root_config, &model_ref)
+            .map_err(anyhow::Error::new)?;
+    let session = Session::new_with_route(provider_name, route);
+
+    require_deepseek_portable_transport(&root_config, &session)?;
+    Ok(())
+}

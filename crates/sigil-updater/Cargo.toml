@@ -1,0 +1,32 @@
+[package]
+name = "sigil-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+release-verifier = ["dep:base64", "dep:minisign-verify"]
+
+[[bin]]
+name = "sigil-verify-tauri-update"
+path = "src/bin/sigil-verify-tauri-update.rs"
+required-features = ["release-verifier"]
+
+[dependencies]
+base64 = { workspace = true, optional = true }
+futures.workspace = true
+minisign-verify = { workspace = true, optional = true }
+reqwest.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+self_update.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

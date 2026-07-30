@@ -1,5 +1,5 @@
 use super::*;
-use crate::runner::V2CompactionPreviewState;
+use crate::runner::{V2CompactionAdmission, V2CompactionPreviewState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum WorkerAdvancementControl {
@@ -1361,6 +1361,24 @@ where
                 }
                 match result {
                     Ok(prepared) => {
+                        let ManualV2CompactionPreparation {
+                            review,
+                            local_preview,
+                            pending,
+                            apply_source,
+                        } = *prepared;
+                        if local_preview.is_none() && pending.is_none() {
+                            let reason = match review.admission {
+                                V2CompactionAdmission::Unavailable { reason } => reason,
+                                _ => "semantic compaction did not produce an admitted checkpoint"
+                                    .to_owned(),
+                            };
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                                request_id,
+                                error: reason,
+                            });
+                            continue;
+                        }
                         let effective_config = effective_compaction_config(
                             session.provider_name(),
                             session.model_name(),
@@ -1373,18 +1391,89 @@ where
                             )
                             .ok()
                             .flatten();
-                        if current_preview.as_ref() != Some(&prepared.review.preview) {
+                        if current_preview.as_ref() != Some(&review.preview) {
+                            let mismatch = current_preview.as_ref().map_or_else(
+                                || "current preview is unavailable".to_owned(),
+                                |current| {
+                                    format!(
+                                        "prepared/current cursor={}/{}, folded_match={}, retained_match={}, protected={}/{}, adaptive_match={}, active_compaction_match={}",
+                                        review
+                                            .preview
+                                            .plan
+                                            .base_stream_cursor
+                                            .last_applied_stream_sequence,
+                                        current
+                                            .plan
+                                            .base_stream_cursor
+                                            .last_applied_stream_sequence,
+                                        review.preview.plan.folded_event_ids
+                                            == current.plan.folded_event_ids,
+                                        review.preview.plan.retained_event_ids
+                                            == current.plan.retained_event_ids,
+                                        review.preview.plan.protected_events.len(),
+                                        current.plan.protected_events.len(),
+                                        review.preview.plan.adaptive_tail
+                                            == current.plan.adaptive_tail,
+                                        review.preview.active_compaction_id
+                                            == current.active_compaction_id,
+                                    )
+                                },
+                            );
                             let _ = message_tx.send(WorkerMessage::Notice(
-                                    "discarded stale V2 compaction preparation after session history changed"
-                                        .to_owned(),
-                                ));
+                                format!(
+                                    "discarded stale V2 compaction preparation after session history changed ({mismatch})"
+                                ),
+                            ));
                             continue;
                         }
-                        state.compaction.local_preview = prepared.local_preview;
-                        state.compaction.pending = prepared.pending;
-                        let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
-                            state: V2CompactionPreviewState::Review(Box::new(prepared.review)),
-                        });
+                        if let Some(local_preview) = local_preview {
+                            state.compaction.local_preview = Some(local_preview);
+                            let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
+                                state: V2CompactionPreviewState::Review(Box::new(review)),
+                            });
+                            continue;
+                        }
+                        let Some(pending) = pending else {
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                                request_id,
+                                error: "semantic compaction did not retain admitted apply material"
+                                    .to_owned(),
+                            });
+                            continue;
+                        };
+                        let folded_event_count = pending.folded_event_count();
+                        match pending.apply_with_optional_native(
+                            session,
+                            &state.session.log_path,
+                            agent.provider(),
+                            runtime,
+                            root_config.compaction.native_carrier_enabled,
+                        ) {
+                            Ok((outcome, native_notice)) => {
+                                if let Some(notice) = native_notice {
+                                    let _ = message_tx.send(WorkerMessage::Notice(notice));
+                                }
+                                let entries = state
+                                    .session
+                                    .current
+                                    .as_ref()
+                                    .map(|current| current.entries().to_vec())
+                                    .unwrap_or_default();
+                                let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                                    request_id,
+                                    source: apply_source,
+                                    compaction_id: outcome.compaction_id,
+                                    folded_event_count,
+                                    entries,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                                    request_id,
+                                    error: format!("{error:#}"),
+                                });
+                            }
+                        }
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!(

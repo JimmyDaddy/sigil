@@ -116,6 +116,7 @@ fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()
     let base_content_lower = base_content.to_ascii_lowercase();
     assert!(base_content.contains("AI coding agent working inside the user's workspace"));
     assert!(base_content.contains("implementation details"));
+    assert!(base_content.contains("Do not assume whether the user is in Desktop, TUI, CLI"));
     assert!(!base_content.contains("TUI-first"));
     assert!(!base_content_lower.contains("rust"));
     assert!(

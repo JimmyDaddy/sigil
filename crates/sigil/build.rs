@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SIGIL_BUILD_GIT_HASH");
     println!("cargo:rerun-if-env-changed=SIGIL_BUILD_TARGET");
     println!("cargo:rerun-if-env-changed=SIGIL_BUILD_PROFILE");
+    println!("cargo:rerun-if-env-changed=SIGIL_BUILD_DISTRIBUTION");
 
     track_git_head();
 
@@ -26,10 +27,15 @@ fn main() {
         .filter(|value| !value.trim().is_empty())
         .or_else(|| env::var("PROFILE").ok())
         .unwrap_or_else(|| "unknown".to_owned());
+    let distribution = env::var("SIGIL_BUILD_DISTRIBUTION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "source".to_owned());
 
     rustc_env("SIGIL_BUILD_GIT_HASH", &git_hash);
     rustc_env("SIGIL_BUILD_TARGET", &target);
     rustc_env("SIGIL_BUILD_PROFILE", &profile);
+    rustc_env("SIGIL_BUILD_DISTRIBUTION", &distribution);
 }
 
 fn rustc_env(name: &str, value: &str) {

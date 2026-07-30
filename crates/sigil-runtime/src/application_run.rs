@@ -22,8 +22,10 @@ use sigil_kernel::{
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
     RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest,
     TaskRunStatus, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
-    WorkspaceTrust, rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
-    verification_product_view, workspace_trust_from_entries,
+    WorkspaceTrust, continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
+    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    task_routing_system_prompt_contract_material, verification_product_view,
+    workspace_trust_from_entries,
 };
 
 use crate::{
@@ -1389,7 +1391,17 @@ pub struct ApplicationRunExecution {
     events: ApplicationRunEventSequence,
     conversation_coordinator: crate::ConversationCoordinator,
     parent_session_ref: SessionRef,
+    pending_session_title: Option<ApplicationSessionTitleRequest>,
     _session_lease: Arc<ApplicationSessionLease>,
+}
+
+struct ApplicationSessionTitleRequest {
+    root_config: RootConfig,
+    workspace_root: PathBuf,
+    model_ref: ModelRef,
+    session_log_path: PathBuf,
+    session_id: String,
+    prompt: String,
 }
 
 struct ApplicationTaskExecutionRuntime {
@@ -1602,6 +1614,9 @@ impl ApplicationRunExecution {
                     &self.redactor,
                 )?;
                 bridge.emit(terminal_event)?;
+                if let Some(request) = self.pending_session_title.take() {
+                    spawn_application_session_title(request);
+                }
                 Ok(ApplicationRunOutput {
                     session_id: self.session_id,
                     run_id: self.run_id,
@@ -2030,6 +2045,7 @@ async fn prepare_application_run_internal(
         skill_descriptor,
         agent_invocation,
         task_agent_registry,
+        generate_session_title,
     } = prepared;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
@@ -2119,7 +2135,23 @@ async fn prepare_application_run_internal(
         if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
             let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
             exact_user_message.id = durable_user_message_id.clone();
-            let tool_specs = registry.specs();
+            let automatic_routing =
+                conversation_coordinator.routes_conversation_automatically(&session);
+            let tool_specs = if automatic_routing {
+                vec![
+                    request_task_planning_tool_spec(),
+                    continue_without_task_planning_tool_spec(),
+                ]
+            } else {
+                registry.specs()
+            };
+            let mut transient_messages = vec![exact_user_message];
+            if automatic_routing {
+                transient_messages.insert(
+                    0,
+                    ModelMessage::system(task_routing_system_prompt_contract_material()),
+                );
+            }
             let request = session
                 .build_pre_turn_candidate_request(
                     &workspace_root,
@@ -2129,7 +2161,7 @@ async fn prepare_application_run_internal(
                     options.reasoning_effort.clone(),
                     session.latest_response_handle(provider.name()),
                     options.traffic_partition_key.clone(),
-                    &[exact_user_message],
+                    &transient_messages,
                     runtime_context.clone(),
                     &[],
                 )
@@ -2153,6 +2185,17 @@ async fn prepare_application_run_internal(
             None
         };
     let session_id = session.session_scope_id().to_owned();
+    let pending_session_title =
+        (queued_first_request.is_none() && generate_session_title).then(|| {
+            ApplicationSessionTitleRequest {
+                root_config: root_config.clone(),
+                workspace_root: workspace_root.clone(),
+                model_ref: model_ref.clone(),
+                session_log_path: session_path.clone(),
+                session_id: session_id.clone(),
+                prompt: prompt.clone(),
+            }
+        });
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
@@ -2199,6 +2242,7 @@ async fn prepare_application_run_internal(
             events: events.clone(),
             conversation_coordinator,
             parent_session_ref,
+            pending_session_title,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -3137,6 +3181,23 @@ pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunI
     AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }
 
+fn spawn_application_session_title(request: ApplicationSessionTitleRequest) {
+    tokio::spawn(async move {
+        let result = crate::generate_and_persist_session_title(
+            request.root_config,
+            request.workspace_root,
+            request.model_ref,
+            request.session_log_path,
+            request.session_id,
+            request.prompt,
+        )
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(error = %error, "semantic session title generation was not applied");
+        }
+    });
+}
+
 #[cfg(test)]
 async fn attach_application_request_context(
     input: AgentRunInput,
@@ -3170,6 +3231,7 @@ struct BlockingApplicationRunPreparation {
     skill_descriptor: Option<sigil_kernel::SkillDescriptor>,
     agent_invocation: Option<(crate::AgentProfileRegistry, AgentProfileId)>,
     task_agent_registry: Option<crate::AgentProfileRegistry>,
+    generate_session_title: bool,
 }
 
 fn prepare_application_run_blocking(
@@ -3248,6 +3310,12 @@ fn prepare_application_run_blocking(
         &workspace_root,
         session.entries(),
     )?;
+    let generate_session_title = request.constraints.is_none()
+        && agent_invocation.is_none()
+        && !session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::User(_)));
     let task_agent_registry =
         if task_executor_attached && root_config.task.enabled && agent_invocation.is_none() {
             Some(
@@ -3329,6 +3397,7 @@ fn prepare_application_run_blocking(
         skill_descriptor: loaded_skill.map(|loaded| loaded.descriptor),
         agent_invocation,
         task_agent_registry,
+        generate_session_title,
     })
 }
 

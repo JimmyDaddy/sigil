@@ -4,14 +4,22 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
 
-const root = document.getElementById("root");
+async function renderDesktop(): Promise<void> {
+  if (import.meta.env.VITE_SIGIL_DESKTOP_E2E === "1") {
+    await import("@wdio/tauri-plugin");
+  }
 
-if (root === null) {
-  throw new Error("desktop root element is missing");
+  const root = document.getElementById("root");
+
+  if (root === null) {
+    throw new Error("desktop root element is missing");
+  }
+
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
 }
 
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+void renderDesktop();

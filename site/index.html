@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sigil - repository work in one terminal</title>
+    <title>Sigil - repository work from Desktop or terminal</title>
     <meta
       name="description"
-      content="Sigil is a TUI-first coding agent for reviewing, changing, and verifying real repositories from one terminal workspace."
+      content="Sigil is a Rust coding agent for reviewing, changing, and verifying real repositories from first-class Desktop and TUI workspaces."
     >
     <link rel="canonical" href="https://sigil.corerobin.com/">
     <link rel="alternate" hreflang="en" href="https://sigil.corerobin.com/">
@@ -16,25 +16,25 @@
     <meta name="theme-color" content="#1ecfc5">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="Sigil">
-    <meta property="og:title" content="Sigil - repository work in one terminal">
+    <meta property="og:title" content="Sigil - repository work from Desktop or terminal">
     <meta
       property="og:description"
-      content="Review, change, and verify real repositories from one terminal workspace."
+      content="Review, change, and verify real repositories from Desktop or terminal."
     >
     <meta property="og:url" content="https://sigil.corerobin.com/">
     <meta property="og:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
     <meta property="og:image:type" content="image/png">
     <meta property="og:image:width" content="1280">
     <meta property="og:image:height" content="640">
-    <meta property="og:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
+    <meta property="og:image:alt" content="Sigil — reviewable edits and resumable sessions from Desktop or terminal">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Sigil - repository work in one terminal">
+    <meta name="twitter:title" content="Sigil - repository work from Desktop or terminal">
     <meta
       name="twitter:description"
-      content="Review, change, and verify real repositories from one terminal workspace."
+      content="Review, change, and verify real repositories from Desktop or terminal."
     >
     <meta name="twitter:image" content="https://sigil.corerobin.com/assets/social/sigil-social-preview.png">
-    <meta name="twitter:image:alt" content="Sigil — reviewable edits and resumable sessions in one terminal">
+    <meta name="twitter:image:alt" content="Sigil — reviewable edits and resumable sessions from Desktop or terminal">
     <script>
       (() => {
         try {
@@ -103,14 +103,14 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first coding agent</p>
-          <h1>Repository work,<br><span class="hero-accent">inside one terminal.</span></h1>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>Desktop + TUI coding agent</p>
+          <h1>Repository work,<br><span class="hero-accent">on your surface.</span></h1>
           <p class="lede">
-            Give Sigil a goal, review its plan, follow parallel work, and decide what happens next without leaving your terminal.
+            Give Sigil a goal, review its plan, follow parallel work, and decide what happens next from Desktop or terminal.
           </p>
           <div class="alpha-status" aria-label="Release status">
-            <strong>Early preview</strong>
-            <span>The site follows <code>main</code>; packaged releases can lag behind. The optional desktop shell on main now has compact navigation and persistent system, light, or dark appearance, but remains source-built dogfood rather than a published install channel. Review <a href="docs/status/">current support</a> before adopting Sigil.</span>
+            <strong>Beta preview</strong>
+            <span>Desktop and TUI are coequal product surfaces. Signed and Apple-notarized macOS Desktop installers are distributed through GitHub prereleases; npm uses the matching <code>beta</code> tag. Review <a href="docs/status/">current support</a> and the <a href="docs/changelog/">changelog</a> before adopting Sigil.</span>
           </div>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button primary" href="#quickstart">Install</a>
@@ -141,7 +141,7 @@
               </li>
               <li class="session-phase session-phase-tool" data-phase="tool">
                 <span class="session-role">parallel</span>
-                <span class="session-description">Docs and TUI captures update independently</span>
+                <span class="session-description">Docs and product captures update independently</span>
                 <span class="session-state session-state-ready">2 active</span>
               </li>
               <li class="session-phase session-phase-verify" data-phase="verify">
@@ -167,47 +167,66 @@
       <section class="section demo-showcase" id="demo">
         <div class="section-heading demo-heading">
           <div>
-            <p class="eyebrow">45-second demo</p>
-            <h2>Watch a real edit move from request to verified result.</h2>
+            <p class="eyebrow">Desktop + TUI demos</p>
+            <h2>Choose the surface that fits the work.</h2>
           </div>
           <p>
-            This is a real Sigil TUI run in a disposable repository, making one focused README change. The video skips only model wait time; the diff, approval, tool results, and session recovery are shown as they happened.
+            The Desktop tour uses real application captures. The TUI recording shows a real repository edit from request through approval, verification, and session recovery.
           </p>
         </div>
-        <div class="demo-frame">
-          <video
-            controls
-            loop
-            muted
-            playsinline
-            preload="metadata"
-            poster="assets/demo/sigil-45-second-demo-poster.png"
-            aria-label="Sigil 45-second repository edit demo"
-          >
-            <source src="assets/demo/sigil-45-second-demo.webm" type="video/webm">
-            <source src="assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
-            <track kind="captions" srclang="en" label="English" src="assets/demo/sigil-45-second-demo.en.vtt" default>
-            <track kind="captions" srclang="zh-CN" label="简体中文" src="assets/demo/sigil-45-second-demo.zh-CN.vtt">
-            <a href="assets/demo/sigil-45-second-demo.mp4">Watch the MP4 demo.</a>
-          </video>
+        <div class="demo-grid">
+          <article class="demo-card">
+            <div class="demo-card-heading"><span>Desktop</span><strong>Workspace tour</strong></div>
+            <div class="demo-frame">
+              <video controls loop muted playsinline preload="metadata" poster="assets/demo/sigil-desktop-demo-poster.png" aria-label="Sigil Desktop workspace tour">
+                <source src="assets/demo/sigil-desktop-demo.webm" type="video/webm">
+                <source src="assets/demo/sigil-desktop-demo.mp4" type="video/mp4">
+                <track kind="captions" srclang="en" label="English" src="assets/demo/sigil-desktop-demo.en.vtt" default>
+                <track kind="captions" srclang="zh-CN" label="简体中文" src="assets/demo/sigil-desktop-demo.zh-CN.vtt">
+                <a href="assets/demo/sigil-desktop-demo.mp4">Watch the Desktop MP4 demo.</a>
+              </video>
+            </div>
+          </article>
+          <article class="demo-card">
+            <div class="demo-card-heading"><span>TUI</span><strong>45-second real edit</strong></div>
+            <div class="demo-frame">
+              <video controls loop muted playsinline preload="metadata" poster="assets/demo/sigil-45-second-demo-poster.png" aria-label="Sigil 45-second repository edit demo">
+                <source src="assets/demo/sigil-45-second-demo.webm" type="video/webm">
+                <source src="assets/demo/sigil-45-second-demo.mp4" type="video/mp4">
+                <track kind="captions" srclang="en" label="English" src="assets/demo/sigil-45-second-demo.en.vtt" default>
+                <track kind="captions" srclang="zh-CN" label="简体中文" src="assets/demo/sigil-45-second-demo.zh-CN.vtt">
+                <a href="assets/demo/sigil-45-second-demo.mp4">Watch the TUI MP4 demo.</a>
+              </video>
+            </div>
+          </article>
         </div>
-        <ol class="demo-beats" aria-label="What the demo shows">
-          <li><span>01</span><strong>Request</strong><small>One focused repository change.</small></li>
-          <li><span>02</span><strong>Review</strong><small>An exact diff before writing.</small></li>
-          <li><span>03</span><strong>Verify + resume</strong><small>Visible results and a saved session.</small></li>
-        </ol>
       </section>
 
       <section class="section" id="quickstart">
         <div class="section-heading">
           <p class="eyebrow">Quickstart</p>
-          <h2>Install once, then launch inside a repository.</h2>
+          <h2>Download Desktop or install the terminal app.</h2>
         </div>
         <div class="install-options" aria-label="Recommended install">
           <article class="install-card install-card-primary">
-            <span class="resource-kicker">Recommended</span>
-            <h3>npm alpha</h3>
-            <pre><code>npm install -g @sigil-ai/sigil@alpha</code></pre>
+            <span class="resource-kicker">Desktop beta · macOS</span>
+            <h3>Signed and Apple-notarized DMG</h3>
+            <div class="download-links">
+              <a class="button primary" href="https://github.com/JimmyDaddy/sigil/releases" data-desktop-update-platform="darwin-aarch64" data-desktop-target="aarch64-apple-darwin" data-desktop-update-manifest="updates/beta/latest.json">Apple Silicon</a>
+              <a class="button secondary" href="https://github.com/JimmyDaddy/sigil/releases" data-desktop-update-platform="darwin-x86_64" data-desktop-target="x86_64-apple-darwin" data-desktop-update-manifest="updates/beta/latest.json">Intel</a>
+            </div>
+            <small>When the beta manifest is available these buttons resolve directly to its signed, notarized, and stapled DMGs; otherwise they open Releases.</small>
+          </article>
+          <article class="install-card">
+            <span class="resource-kicker">TUI beta</span>
+            <h3>npm</h3>
+            <pre><code>npm install -g @sigil-ai/sigil@beta</code></pre>
+          </article>
+          <article class="install-card">
+            <span class="resource-kicker">What changed</span>
+            <h3>Beta release notes</h3>
+            <p>Check fixes, supported surfaces, and update instructions before installing.</p>
+            <a href="docs/changelog/">Read the changelog →</a>
           </article>
         </div>
         <div class="steps">
@@ -230,18 +249,18 @@ sigil</code></pre>
           <p class="eyebrow">Visual tour</p>
           <h2>See the work and the decision points.</h2>
         </div>
-        <div class="visual-grid terminal-deck">
-          <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/#ai-planned-task-execution">
-            <img src="assets/screenshots/planned-task-execution.svg" alt="Sigil AI-planned task execution screenshot" loading="lazy" decoding="async">
-            <span>AI-planned task execution</span>
+        <div class="visual-grid product-deck">
+          <a class="visual-card visual-card-large" href="docs/visual-tour/#desktop-workbench">
+            <img src="assets/screenshots/desktop-workbench-en.png" alt="Sigil Desktop workbench with plan, tool activity, and approval" loading="lazy" decoding="async">
+            <span>Desktop workbench</span>
           </a>
-          <a class="visual-card terminal-window-approval" href="docs/visual-tour/#approval-review">
-            <img src="assets/screenshots/approval-review.svg" alt="Sigil approval review screenshot" loading="lazy" decoding="async">
-            <span>Approval review</span>
+          <a class="visual-card" href="docs/visual-tour/#desktop-settings">
+            <img src="assets/screenshots/desktop-settings-en.png" alt="Sigil Desktop settings" loading="lazy" decoding="async">
+            <span>Desktop settings</span>
           </a>
-          <a class="visual-card terminal-window-verification" href="docs/visual-tour/#task-verification">
-            <img src="assets/screenshots/verification-card.svg" alt="Sigil task verification card screenshot" loading="lazy" decoding="async">
-            <span>Task verification</span>
+          <a class="visual-card" href="docs/visual-tour/#ai-planned-task-execution">
+            <img src="assets/screenshots/planned-task-execution.svg" alt="Sigil TUI AI-planned task execution screenshot" loading="lazy" decoding="async">
+            <span>TUI planned task execution</span>
           </a>
         </div>
       </section>
@@ -277,7 +296,7 @@ sigil</code></pre>
             </ul>
             <div class="feature-visual feature-diff" aria-hidden="true">
               <div class="feature-visual-bar"><span>approval · README.md</span><b>review</b></div>
-              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@alpha</span></code>
+              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@beta</span></code>
               <div class="feature-visual-actions"><span>deny</span><strong>allow once</strong></div>
             </div>
           </article>

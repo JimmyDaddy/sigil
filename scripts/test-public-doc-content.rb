@@ -372,7 +372,7 @@ end
 
 assert_rule("allowlisted command cannot duplicate", "installation-authority") do |root|
   rewrite(root, "README.md") do |text|
-    text + "\n```bash\nnpm install -g @sigil-ai/sigil@alpha\n```\n"
+    text + "\n```bash\nnpm install -g @sigil-ai/sigil@beta\n```\n"
   end
 end
 

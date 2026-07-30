@@ -18,6 +18,7 @@ tokio-stream.workspace = true
 tokenizers.workspace = true
 tracing.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-provider-http = { path = "../sigil-provider-http" }
 
 [dev-dependencies]
 tempfile.workspace = true

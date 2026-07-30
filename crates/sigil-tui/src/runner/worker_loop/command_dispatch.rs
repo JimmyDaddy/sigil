@@ -204,6 +204,7 @@ pub(in crate::runner) enum QueueCompactionCommand {
     SetConversationQueuePaused {
         paused: bool,
     },
+    StartV2Compaction,
     PreviewV2Compaction,
     ApplyV2Compaction {
         request_id: u64,
@@ -548,6 +549,9 @@ pub(in crate::runner) fn classify_worker_command(
             ClassifiedWorkerCommand::QueueCompaction(
                 QueueCompactionCommand::SetConversationQueuePaused { paused },
             )
+        }
+        WorkerCommand::StartV2Compaction => {
+            ClassifiedWorkerCommand::QueueCompaction(QueueCompactionCommand::StartV2Compaction)
         }
         WorkerCommand::PreviewV2Compaction => {
             ClassifiedWorkerCommand::QueueCompaction(QueueCompactionCommand::PreviewV2Compaction)

@@ -2445,7 +2445,7 @@ fn docs_session_app() -> anyhow::Result<AppState> {
     )))?;
 
     app.handle(RunEvent::TextDelta(
-        "Sigil is TUI-first. Runtime wires providers and tools; kernel owns the agent contracts."
+        "Sigil shares one agent runtime across Desktop and TUI; kernel owns the contracts."
             .to_owned(),
     ))?;
     app.runtime.is_busy = false;

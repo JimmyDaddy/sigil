@@ -23,6 +23,8 @@ on:
       - "scripts/check-site-*"
       - "scripts/public-doc-metrics.rb"
       - "scripts/ruby-compat.rb"
+      - "scripts/select-published-desktop-beta.mjs"
+      - "scripts/test-desktop-macos-signing.mjs"
       - "scripts/test-docs-table-render.rb"
       - "scripts/test-public-doc-content.rb"
       - "site/**"
@@ -73,6 +75,77 @@ jobs:
 
       - name: Prepare static site
         run: scripts/build-pages-site.sh _site
+
+      - name: Preserve published Desktop update endpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          releases_file="${RUNNER_TEMP}/sigil-published-releases.json"
+          gh api \
+            --paginate \
+            --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${releases_file}"
+          beta_tag="$(
+            node scripts/select-published-desktop-beta.mjs \
+              --repository "${GITHUB_REPOSITORY}" \
+              --input "${releases_file}"
+          )"
+          if [[ -z "${beta_tag}" ]]; then
+            echo "no published Desktop beta manifest to preserve"
+            exit 0
+          fi
+
+          manifest_dir="${RUNNER_TEMP}/sigil-desktop-update"
+          mkdir -p "${manifest_dir}" _site/updates/beta
+          gh release download "${beta_tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern latest.json \
+            --dir "${manifest_dir}"
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const tag = process.argv[2];
+            const repository = process.env.GITHUB_REPOSITORY;
+            if (`v${manifest.version}` !== tag) {
+              throw new Error("Desktop update manifest version does not match beta release");
+            }
+            const expected = new Map([
+              ["darwin-aarch64", "aarch64-apple-darwin"],
+              ["darwin-x86_64", "x86_64-apple-darwin"],
+            ]);
+            if (
+              manifest.platforms === null
+              || typeof manifest.platforms !== "object"
+              || Array.isArray(manifest.platforms)
+              || Object.keys(manifest.platforms).sort().join(",")
+                !== [...expected.keys()].sort().join(",")
+            ) {
+              throw new Error("Desktop update manifest has an unexpected platform inventory");
+            }
+            for (const [platform, target] of expected) {
+              const entry = manifest.platforms[platform];
+              const name = `Sigil_${manifest.version}_${target}.app.tar.gz`;
+              const expectedUrl =
+                `https://github.com/${repository}/releases/download/${tag}/${name}`;
+              if (
+                entry === null
+                || typeof entry !== "object"
+                || entry.url !== expectedUrl
+                || typeof entry.signature !== "string"
+                || entry.signature.length < 40
+                || entry.signature.length > 4096
+                || !/^[A-Za-z0-9+/]+={0,2}$/.test(entry.signature)
+              ) {
+                throw new Error(`unsafe Desktop update manifest entry for ${platform}`);
+              }
+            }
+          ' "${manifest_dir}/latest.json" "${beta_tag}"
+          cp "${manifest_dir}/latest.json" _site/updates/beta/latest.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

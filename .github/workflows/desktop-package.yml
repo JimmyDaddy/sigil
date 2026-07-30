@@ -20,9 +20,15 @@ on:
       - "scripts/prepare-desktop-sidecar.mjs"
       - "scripts/test-prepare-desktop-sidecar.mjs"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/extract-verified-desktop-updater-app.py"
+      - "scripts/release-channel-version.mjs"
+      - "scripts/notarize-desktop-macos-app.sh"
       - "scripts/notarize-desktop-macos.sh"
+      - "scripts/verify-desktop-macos-app.sh"
       - "scripts/verify-desktop-macos.sh"
       - "scripts/test-desktop-macos-signing.mjs"
+      - "scripts/test-extract-verified-desktop-updater-app.py"
+      - "scripts/verify-desktop-update-signature.sh"
   pull_request:
     paths:
       - ".github/workflows/desktop-package.yml"
@@ -40,9 +46,15 @@ on:
       - "scripts/prepare-desktop-sidecar.mjs"
       - "scripts/test-prepare-desktop-sidecar.mjs"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/extract-verified-desktop-updater-app.py"
+      - "scripts/release-channel-version.mjs"
+      - "scripts/notarize-desktop-macos-app.sh"
       - "scripts/notarize-desktop-macos.sh"
+      - "scripts/verify-desktop-macos-app.sh"
       - "scripts/verify-desktop-macos.sh"
       - "scripts/test-desktop-macos-signing.mjs"
+      - "scripts/test-extract-verified-desktop-updater-app.py"
+      - "scripts/verify-desktop-update-signature.sh"
   workflow_dispatch:
 
 permissions:
@@ -117,6 +129,7 @@ jobs:
         run: |
           node scripts/test-prepare-desktop-sidecar.mjs
           node scripts/test-desktop-macos-signing.mjs
+          python3 scripts/test-extract-verified-desktop-updater-app.py
 
       - name: Build native desktop package with bundled runtime
         env:

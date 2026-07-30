@@ -11,16 +11,18 @@ use std::os::unix::fs::OpenOptionsExt;
 use serde::Serialize;
 use sigil_desktop::{
     DesktopApprovalDecision, DesktopApprovalDecisionRequest, DesktopCatalogQuery,
-    DesktopCheckpointRestoreRequest, DesktopClientError, DesktopConversationDisplayQuery,
-    DesktopConversationQueueCommandRequest, DesktopConversationQueueGeneration, DesktopLaunchError,
-    DesktopLaunchRequest, DesktopRunCancelRequest, DesktopRunStartRequest,
-    DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchItem,
-    DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
-    DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
-    DesktopTaskContinuationRequest, DesktopToolArtifactReadRequest,
-    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptQuery,
-    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopCheckpointRestoreRequest, DesktopClientError, DesktopCompactionAdmission,
+    DesktopCompactionReview as NativeCompactionReview, DesktopConversationDisplayQuery,
+    DesktopConversationQueueCommandRequest, DesktopConversationQueueGeneration,
+    DesktopConversationRecoveryCommandAction, DesktopLaunchError, DesktopLaunchRequest,
+    DesktopRunCancelRequest, DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
+    DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
+    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
+    DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
+    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopTaskContinuationRequest,
+    DesktopToolArtifactReadRequest, DesktopToolArtifactSelector as NativeToolArtifactSelector,
+    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -35,13 +37,13 @@ use crate::{
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
         DesktopCatalogPage, DesktopCatalogRequest, DesktopCatalogState,
         DesktopCheckpointRestorePreviewInput, DesktopCheckpointRestoreReview,
-        DesktopCompactionReview, DesktopConversationContinuity, DesktopConversationDisplayPage,
-        DesktopConversationDisplayRequest, DesktopConversationQueueCommandInput,
-        DesktopConversationQueueCommandReceipt, DesktopConversationQueueView,
-        DesktopConversationRecoveryCommandInput, DesktopConversationRecoveryCommandReceipt,
-        DesktopConversationRecoveryView, DesktopExternalUrlInput,
-        DesktopIntentDropExecutionSummary, DesktopIntentDropInput, DesktopIntentDropPreviewInput,
-        DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
+        DesktopCompactionExecutionSummary, DesktopCompactionReview, DesktopConversationContinuity,
+        DesktopConversationDisplayPage, DesktopConversationDisplayRequest,
+        DesktopConversationQueueCommandInput, DesktopConversationQueueCommandReceipt,
+        DesktopConversationQueueView, DesktopConversationRecoveryCommandInput,
+        DesktopConversationRecoveryCommandReceipt, DesktopConversationRecoveryView,
+        DesktopExternalUrlInput, DesktopIntentDropExecutionSummary, DesktopIntentDropInput,
+        DesktopIntentDropPreviewInput, DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
         DesktopProviderConnectionInventorySummary, DesktopProviderLegacyMigrationSummary,
         DesktopProviderSetupCatalogInput, DesktopProviderSetupCatalogSummary,
         DesktopProviderSetupSaveInput, DesktopProviderSetupSaveSummary, DesktopRunAttachInput,
@@ -837,6 +839,123 @@ pub(crate) async fn desktop_conversation_compaction_preview(
         .await
         .map(Into::into)
         .map_err(project_conversation_recovery_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_compact_conversation(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopCompactionExecutionSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let review = client
+        .conversation_compaction_review(&session_id)
+        .await
+        .map_err(project_conversation_recovery_client_error)?;
+
+    let preview_id = match direct_compaction_step(&review)? {
+        DirectCompactionStep::NothingToCompact => {
+            let recovery = client
+                .conversation_recovery(&session_id)
+                .await
+                .map_err(project_conversation_recovery_client_error)?;
+            return Ok(DesktopCompactionExecutionSummary {
+                outcome: "nothing_to_compact",
+                recovery: recovery.into(),
+                compaction: None,
+            });
+        }
+        DirectCompactionStep::Apply(preview_id) => preview_id,
+        DirectCompactionStep::Prepare(preview_id) => {
+            let prepared = client
+                .command_conversation_recovery(
+                    &session_id,
+                    DesktopConversationRecoveryCommandAction::PrepareCompaction { preview_id },
+                )
+                .await
+                .map_err(project_conversation_recovery_client_error)?;
+            let prepared_review = prepared.compaction_review.ok_or_else(|| {
+                DesktopCommandError::new(
+                    "compaction_prepare_incomplete",
+                    "The semantic compaction summary did not produce an applicable result.",
+                )
+            })?;
+            match direct_compaction_step(&prepared_review)? {
+                DirectCompactionStep::Apply(preview_id) => preview_id,
+                _ => {
+                    return Err(DesktopCommandError::new(
+                        "compaction_prepare_incomplete",
+                        "The conversation changed before the semantic compaction summary could be applied.",
+                    ));
+                }
+            }
+        }
+    };
+
+    let applied = client
+        .command_conversation_recovery(
+            &session_id,
+            DesktopConversationRecoveryCommandAction::ApplyCompaction { preview_id },
+        )
+        .await
+        .map_err(project_conversation_recovery_client_error)?;
+    let projected = DesktopConversationRecoveryCommandReceipt::from(applied);
+    if projected.compaction.is_none() {
+        return Err(DesktopCommandError::new(
+            "compaction_apply_incomplete",
+            "The compaction command completed without a durable compaction receipt.",
+        ));
+    }
+    Ok(DesktopCompactionExecutionSummary {
+        outcome: "applied",
+        recovery: projected.recovery,
+        compaction: projected.compaction,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DirectCompactionStep {
+    Prepare(String),
+    Apply(String),
+    NothingToCompact,
+}
+
+fn direct_compaction_step(
+    review: &NativeCompactionReview,
+) -> Result<DirectCompactionStep, DesktopCommandError> {
+    match &review.admission {
+        DesktopCompactionAdmission::Prepared { .. } => Ok(DirectCompactionStep::Prepare(
+            required_compaction_preview_id(review)?,
+        )),
+        DesktopCompactionAdmission::Ready { .. } => Ok(DirectCompactionStep::Apply(
+            required_compaction_preview_id(review)?,
+        )),
+        DesktopCompactionAdmission::NoFoldableHistory { .. } => {
+            Ok(DirectCompactionStep::NothingToCompact)
+        }
+        DesktopCompactionAdmission::Unavailable { .. } => Err(DesktopCommandError::new(
+            "compaction_unavailable",
+            "Context compaction is unavailable for the current conversation state.",
+        )),
+    }
+}
+
+fn required_compaction_preview_id(
+    review: &NativeCompactionReview,
+) -> Result<String, DesktopCommandError> {
+    review.preview_id.clone().ok_or_else(|| {
+        DesktopCommandError::new(
+            "compaction_preview_invalid",
+            "The compaction preparation did not return a valid exact preview.",
+        )
+    })
 }
 
 #[tauri::command]

@@ -909,21 +909,6 @@ fn manual_compaction_applies_reloads_and_repeats_with_installed_tokenizer() -> R
         );
         let request_id = review.request_id;
         worker.send(WorkerCommand::ApplyV2Compaction { request_id })?;
-        let generated = worker
-            .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
-        let WorkerMessage::V2CompactionPreviewed {
-            state: V2CompactionPreviewState::Review(generated),
-        } = generated
-        else {
-            panic!("expected a semantic compaction review");
-        };
-        assert_eq!(generated.request_id, request_id);
-        assert!(
-            matches!(generated.admission, V2CompactionAdmission::Ready { .. }),
-            "semantic summary was not admitted: {:?}",
-            generated.admission
-        );
-        worker.send(WorkerCommand::ApplyV2Compaction { request_id })?;
         let applied = worker
             .recv_until(|message| matches!(message, WorkerMessage::V2CompactionApplied { .. }))?;
         assert!(matches!(

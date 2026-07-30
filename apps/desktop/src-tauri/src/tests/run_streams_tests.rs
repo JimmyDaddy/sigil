@@ -12,6 +12,19 @@ fn reconnect_backoff_is_bounded_and_stream_keys_are_workspace_scoped() {
 }
 
 #[test]
+fn healthy_idle_streams_do_not_exhaust_the_reconnect_budget() {
+    assert_eq!(
+        next_reconnect_attempt(7, MIN_HEALTHY_STREAM_LIFETIME, false),
+        1
+    );
+    assert_eq!(next_reconnect_attempt(7, Duration::from_millis(1), true), 1);
+    assert_eq!(
+        next_reconnect_attempt(7, Duration::from_millis(1), false),
+        8
+    );
+}
+
+#[test]
 fn only_server_terminal_events_finish_a_stream() {
     let event = |kind| DesktopTimelineEvent {
         workspace_id: "workspace-1".to_owned(),

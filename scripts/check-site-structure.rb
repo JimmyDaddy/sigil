@@ -128,16 +128,13 @@ end
     failures << "#{page}: session timeline phases must be #{expected_phases.inspect}, found #{timeline_phases.inspect}"
   end
 
-  decks = tags(html, "div").count { |tag| class_token?(attributes(tag), "terminal-deck") }
-  failures << "#{page}: expected one layered terminal deck, found #{decks}" unless decks == 1
-  %w[
-    terminal-window-main
-    terminal-window-approval
-    terminal-window-verification
-  ].each do |window_class|
-    count = tags(html, "a").count { |tag| class_token?(attributes(tag), window_class) }
-    failures << "#{page}: expected one #{window_class}, found #{count}" unless count == 1
+  decks = tags(html, "div").count { |tag| class_token?(attributes(tag), "product-deck") }
+  failures << "#{page}: expected one Desktop and TUI product deck, found #{decks}" unless decks == 1
+  deck_cards = tags(html, "div").filter_map do |tag|
+    attrs = attributes(tag)
+    tag if class_token?(attrs, "product-deck")
   end
+  failures << "#{page}: missing Desktop and TUI product deck" if deck_cards.empty?
 end
 
 [
@@ -194,7 +191,7 @@ if File.file?(site_css_path)
     failures << "assets/site.css: terminal shimmer must be finite"
   end
 
-  %w[hero-field terminal-stage terminal-signals session-timeline terminal-deck docs-command-palette task-router].each do |class_name|
+  %w[hero-field terminal-stage terminal-signals session-timeline product-deck docs-command-palette task-router].each do |class_name|
     failures << "assets/site.css: missing .#{class_name} styles" unless site_css.include?(".#{class_name}")
   end
 else

@@ -68,6 +68,7 @@ pub enum V2CompactionAdmission {
 /// User-visible source of an activated portable V2 compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2CompactionApplySource {
+    DirectCommand,
     ManualConfirmation,
     IdleAutomatic,
     PreTurnPressure,
@@ -298,6 +299,7 @@ pub enum WorkerCommand {
         thread_id: AgentThreadId,
         prompt: String,
     },
+    StartV2Compaction,
     PreviewV2Compaction,
     ApplyV2Compaction {
         request_id: u64,

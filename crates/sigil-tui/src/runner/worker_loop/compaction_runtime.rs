@@ -377,6 +377,7 @@ pub(in crate::runner) struct PendingV2Compaction {
     session_scope_id: String,
     idle_auto_scope_fingerprint: Option<String>,
     deterministic_emergency_fallback: bool,
+    source_preview: V2CompactionPreview,
     preflight: PortableSemanticCompactionPreflight,
     target_material: PortableTargetRequestMaterial,
     economics_v2_input: sigil_runtime::PortableCompactionEconomicsV2Input,
@@ -423,6 +424,7 @@ struct PreparedPortableV2Compaction {
     session_scope_id: String,
     idle_auto_scope_fingerprint: Option<String>,
     deterministic_emergency_fallback: bool,
+    source_preview: V2CompactionPreview,
     cache_root: std::path::PathBuf,
     preflight: PortableSemanticCompactionPreflight,
     frozen_before_request: FrozenProviderRequestMaterial,
@@ -451,6 +453,7 @@ impl PreparedPortableV2Compaction {
             session_scope_id: self.session_scope_id,
             idle_auto_scope_fingerprint: self.idle_auto_scope_fingerprint,
             deterministic_emergency_fallback: self.deterministic_emergency_fallback,
+            source_preview: self.source_preview,
             preflight: self.preflight,
             target_material,
             economics_v2_input: self.economics_v2_input,
@@ -510,6 +513,7 @@ impl PreparedPortableV2Compaction {
             session_scope_id: self.session_scope_id,
             idle_auto_scope_fingerprint: self.idle_auto_scope_fingerprint,
             deterministic_emergency_fallback: self.deterministic_emergency_fallback,
+            source_preview: self.source_preview,
             preflight: self.preflight,
             target_material,
             economics_v2_input: self.economics_v2_input,
@@ -680,6 +684,10 @@ impl PendingV2Compaction {
 
     pub(in crate::runner) fn folded_event_count(&self) -> usize {
         self.folded_event_count
+    }
+
+    pub(in crate::runner) fn source_preview(&self) -> &V2CompactionPreview {
+        &self.source_preview
     }
 
     pub(in crate::runner) fn idle_auto_scope_fingerprint(&self) -> Option<&str> {
@@ -1140,10 +1148,13 @@ async fn prepare_v2_compaction(
     runtime_context: RuntimeContextCandidates,
     preview: V2CompactionPreview,
 ) -> Result<(V2CompactionReview, Option<PendingV2Compaction>)> {
-    let review = |admission, tool_output_shrink_candidates, continuity| V2CompactionReview {
+    let review = |source_preview: &V2CompactionPreview,
+                  admission,
+                  tool_output_shrink_candidates,
+                  continuity| V2CompactionReview {
         request_id,
         strategy: root_config.compaction.strategy,
-        preview: preview.clone(),
+        preview: source_preview.clone(),
         admission,
         tool_output_shrink_candidates,
         continuity,
@@ -1174,6 +1185,7 @@ async fn prepare_v2_compaction(
     .and_then(PreparedPortableV2Compaction::into_pending)
     {
         Ok(pending) => {
+            let source_preview = pending.source_preview().clone();
             let continuity = Some(continuity_preview(&pending.preflight));
             let tool_output_shrink_candidates = tool_output_aging_previews(
                 session,
@@ -1187,6 +1199,7 @@ async fn prepare_v2_compaction(
             match &pending.target_material.proof().input {
                 sigil_kernel::InputTokenEvidence::Exact { tokens, .. } => Ok((
                     review(
+                        &source_preview,
                         V2CompactionAdmission::Ready {
                             before_input_tokens: economics.before_input.admission_tokens(),
                             input_tokens: *tokens,
@@ -1225,6 +1238,7 @@ async fn prepare_v2_compaction(
                 )),
                 sigil_kernel::InputTokenEvidence::ConservativeUpperBound { .. } => Ok((
                     review(
+                        &source_preview,
                         V2CompactionAdmission::Unavailable {
                             reason: "local exact target proof is unavailable".to_owned(),
                         },
@@ -1237,6 +1251,7 @@ async fn prepare_v2_compaction(
         }
         Err(error) => Ok((
             review(
+                &preview,
                 V2CompactionAdmission::Unavailable {
                     reason: format!("local exact target proof is unavailable: {error:#}"),
                 },
@@ -1373,6 +1388,16 @@ struct PortableV2TargetRequestInput {
     runtime_context: RuntimeContextCandidates,
 }
 
+fn require_deepseek_portable_transport(root_config: &RootConfig, session: &Session) -> Result<()> {
+    match session.resolved_model_route() {
+        Some(route) => sigil_runtime::require_deepseek_v4_flash_portable_transport_for_model_ref(
+            root_config,
+            &route.model_ref,
+        ),
+        None => sigil_runtime::require_default_deepseek_v4_flash_portable_transport(root_config),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_portable_v2_compaction(
     request_id: u64,
@@ -1403,7 +1428,7 @@ async fn prepare_portable_v2_compaction(
         session.provider_name(),
         session.model_name(),
     ) {
-        sigil_runtime::require_default_deepseek_v4_flash_portable_transport(root_config)?;
+        require_deepseek_portable_transport(root_config, session)?;
     }
     let workspace_id = stable_workspace_id(workspace_root)?;
     let scope = root_config
@@ -1515,6 +1540,10 @@ async fn prepare_portable_v2_compaction(
         rebased_plan,
         deterministic_emergency_fallback,
     } = summary;
+    let source_preview = V2CompactionPreview {
+        plan: rebased_plan.clone(),
+        active_compaction_id: preview.active_compaction_id.clone(),
+    };
     let native_portable_compaction_id = compaction_id.clone();
     let native_covers_through = rebased_plan
         .folded_through
@@ -1578,6 +1607,7 @@ async fn prepare_portable_v2_compaction(
             | CompactionInitiation::OverflowRecovery { .. } => None,
         },
         deterministic_emergency_fallback,
+        source_preview,
         cache_root: paths.cache_root,
         preflight,
         frozen_before_request,

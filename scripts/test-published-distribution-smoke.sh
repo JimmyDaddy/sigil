@@ -12,9 +12,14 @@ required_lines=(
   "  schedule:"
   "  attestations: read"
   "  contents: read"
+  "  RELEASE_CHANNEL: beta"
   "  npm-install:"
   "  github-release:"
   "  homebrew-install:"
+  "          ref: \${{ needs.resolve-release.outputs.tag }}"
+  "            scripts/verify-desktop-update-signature.sh \\"
+  "              \"repos/\${GITHUB_REPOSITORY}/releases/tags/\${tag}\""
+  "          if [[ \"\$(jq -r '.immutable // false' <<<\"\${release}\")\" != \"true\" ]]; then"
   "          npm exec -- sigil doctor --output json > doctor.json"
   "            gh attestation verify \"\${archive}\" --repo \"\${GITHUB_REPOSITORY}\""
   "          brew install JimmyDaddy/sigil/sigil-ai"
@@ -30,7 +35,9 @@ for forbidden in \
   "npm publish" \
   "gh release create" \
   "git push" \
-  "dist-tag add"; do
+  "dist-tag add" \
+  "inputs.channel" \
+  "RELEASE_CHANNEL: alpha"; do
   if grep -Fq "${forbidden}" "${workflow}"; then
     echo "published distribution smoke contains forbidden mutation: ${forbidden}" >&2
     exit 1

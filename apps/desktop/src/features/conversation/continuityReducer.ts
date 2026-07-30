@@ -160,7 +160,7 @@ export interface ConversationContinuityState {
 export type ConversationContinuityAction =
   | { type: "session_selected"; sessionId: string }
   | { type: "initial_page_received"; sessionId: string; page: ConversationDisplayPage }
-  | { type: "initial_page_failed"; sessionId: string; message: string }
+  | { type: "initial_page_failed"; sessionId: string; code?: string; message: string }
   | { type: "older_page_received"; sessionId: string; page: ConversationDisplayPage }
   | { type: "live_item_received"; sessionId: string; item: LiveConversationDisplayItem }
   | { type: "terminal_observed"; sessionId: string; terminal: ConversationTerminalObservation }
@@ -233,7 +233,7 @@ export function reduceConversationContinuity(
         ...state,
         lifecycle: "error",
         recovery: {
-          code: "canonical_display_unavailable",
+          code: action.code ?? "canonical_display_unavailable",
           message: action.message,
           canContinueReadOnly: false,
         },
@@ -965,9 +965,9 @@ function statusRank(status: ConversationDisplayStatus): number {
     case "waiting_for_approval":
       return 2;
     case "approved":
+    case "completed":
       return 3;
     case "denied":
-    case "completed":
     case "succeeded":
     case "failed":
     case "cancelled":

@@ -23,6 +23,7 @@
     "allow-desktop-intent-stack",
     "allow-desktop-support",
     "allow-desktop-provider-setup",
+    "allow-desktop-update",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

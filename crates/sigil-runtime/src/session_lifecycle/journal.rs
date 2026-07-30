@@ -63,6 +63,21 @@ pub struct LocalSessionDisplayNameJournalBinding {
     pub display_name: String,
 }
 
+/// Bounded provenance for one system-generated semantic session title.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct LocalSessionGeneratedTitleJournalBinding {
+    pub source_session_ref: sigil_kernel::SessionRef,
+    pub source_session_id: String,
+    pub title: String,
+    pub provider_name: String,
+    pub model_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct LocalSessionArtifactGcJournalBinding {
@@ -97,6 +112,7 @@ pub enum LocalSessionLifecycleEvent {
     DeleteCompleted(LocalSessionDeleteJournalBinding),
     PinChanged(LocalSessionPinJournalBinding),
     DisplayNameChanged(LocalSessionDisplayNameJournalBinding),
+    GeneratedTitleChanged(LocalSessionGeneratedTitleJournalBinding),
     ArtifactGcCompleted(LocalSessionArtifactGcJournalBinding),
     RetentionBatchPlanned(LocalSessionRetentionJournalBinding),
     RetentionBatchCompleted(LocalSessionRetentionJournalBinding),
@@ -346,6 +362,7 @@ fn validate_operation_transition(
         | LocalSessionLifecycleEvent::DeletePlanned(_)
         | LocalSessionLifecycleEvent::PinChanged(_)
         | LocalSessionLifecycleEvent::DisplayNameChanged(_)
+        | LocalSessionLifecycleEvent::GeneratedTitleChanged(_)
         | LocalSessionLifecycleEvent::ArtifactGcCompleted(_)
         | LocalSessionLifecycleEvent::RetentionBatchPlanned(_) => {
             if !prior.is_empty() {

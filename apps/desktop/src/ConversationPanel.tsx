@@ -30,7 +30,6 @@ import type {
   ContinuityRecoveryAction,
   ConversationQueueCommandAction,
   ConversationQueueView,
-  CompactionReview,
   CheckpointRestoreReview,
   CheckpointView,
   ConversationRecoveryView,
@@ -92,6 +91,7 @@ interface ConversationPanelProps {
   session: SessionSummary;
   onInitialLoadComplete?: (sessionId: string) => void;
   onRunContextChange?: (context: RunContext) => void;
+  onSessionCatalogChange?: () => void;
   onNewSession: () => Promise<boolean>;
   onCreateSessionForModel: (modelRef: ProviderModelRef) => Promise<SessionSummary | undefined>;
   onOpenWorkspacePicker: () => void;
@@ -120,6 +120,8 @@ interface TimelineViewportSnapshot {
 
 const TIMELINE_USER_SCROLL_INTENT_MS = 1_200;
 const TIMELINE_VIEWPORT_RESTORE_FRAMES = 4;
+const QUEUED_SUCCESSOR_PROBE_DELAYS_MS = [50, 100, 200, 400, 800] as const;
+const CANONICAL_DISPLAY_RETRY_DELAYS_MS = [75, 150, 300, 600] as const;
 
 export function ConversationPanel({
   bridge,
@@ -127,6 +129,7 @@ export function ConversationPanel({
   session,
   onInitialLoadComplete,
   onRunContextChange,
+  onSessionCatalogChange,
   onNewSession,
   onCreateSessionForModel,
   onOpenWorkspacePicker,
@@ -164,6 +167,7 @@ export function ConversationPanel({
   const [submitting, setSubmitting] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt>();
   const pendingPromptRef = useRef<PendingPrompt | undefined>(undefined);
+  const livePromptSkillsByRunId = useRef(new Map<string, MessageView["skill"]>());
   const [controlBusy, setControlBusy] = useState(false);
   const [verification, setVerification] = useState<VerificationSummary>();
   const [verificationBusy, setVerificationBusy] = useState(false);
@@ -205,7 +209,6 @@ export function ConversationPanel({
   const [conversationQueueError, setConversationQueueError] = useState(false);
   const [conversationQueueReload, setConversationQueueReload] = useState(0);
   const [conversationRecovery, setConversationRecovery] = useState<ConversationRecoveryView>();
-  const [compactionReview, setCompactionReview] = useState<CompactionReview>();
   const [checkpointRestorePreview, setCheckpointRestorePreview] = useState<CheckpointRestoreReview>();
   const [conversationRecoveryBusy, setConversationRecoveryBusy] = useState(false);
   const [conversationRecoveryLoading, setConversationRecoveryLoading] = useState(false);
@@ -235,10 +238,14 @@ export function ConversationPanel({
   const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
   const pendingPromptCounter = useRef(0);
   const conversationQueueEpoch = useRef(0);
+  const queuedSuccessorExpected = useRef(false);
+  const startedRunProjectionExpected = useRef<string | undefined>(undefined);
+  const onSessionCatalogChangeRef = useRef(onSessionCatalogChange);
   const initialRunContextSessionId = useRef<string | undefined>(undefined);
   const initialDisplaySessionId = useRef<string | undefined>(undefined);
   const initialContinuitySessionId = useRef<string | undefined>(undefined);
   const initialLoadReportedSessionId = useRef<string | undefined>(undefined);
+  const catalogChangeReportedRunId = useRef<string | undefined>(undefined);
   const startRunPendingRef = useRef(false);
   const markTimelineScrollIntent = useCallback(() => {
     timelineUserScrollIntentUntil.current =
@@ -292,6 +299,14 @@ export function ConversationPanel({
       onInitialLoadComplete?.(sessionId);
     }
   }, [onInitialLoadComplete]);
+  useEffect(() => {
+    onSessionCatalogChangeRef.current = onSessionCatalogChange;
+  }, [onSessionCatalogChange]);
+  const reportSessionCatalogChange = useCallback((runId: string) => {
+    if (catalogChangeReportedRunId.current === runId) return;
+    catalogChangeReportedRunId.current = runId;
+    onSessionCatalogChangeRef.current?.();
+  }, []);
   const onNotice = useCallback((message: string, error = false) => {
     if (!error) return;
     notify({ message, tone: "error" });
@@ -371,6 +386,8 @@ export function ConversationPanel({
     dispatchLiveEvent({ type: "session_selected", sessionId: session.id });
     setPendingPrompt(undefined);
     pendingPromptRef.current = undefined;
+    livePromptSkillsByRunId.current.clear();
+    catalogChangeReportedRunId.current = undefined;
     setStreamStatus(undefined);
     setVerification(undefined);
     setTaskControlBusy(false);
@@ -412,6 +429,8 @@ export function ConversationPanel({
     setConversationRecoveryError(false);
     setConversationRecoveryOpen(false);
     conversationQueueEpoch.current += 1;
+    queuedSuccessorExpected.current = false;
+    startedRunProjectionExpected.current = undefined;
     activeRunIdRef.current = undefined;
     canonicalRefreshAttempts.current = 0;
     canonicalRefreshRunId.current = undefined;
@@ -441,6 +460,7 @@ export function ConversationPanel({
       .then((queue) => {
         if (disposed || conversationQueueEpoch.current !== requestEpoch) return;
         setConversationQueue(queue);
+        if (queueHasPendingDelivery(queue)) queuedSuccessorExpected.current = true;
         setConversationQueueError(false);
       })
       .catch(() => {
@@ -519,37 +539,49 @@ export function ConversationPanel({
 
   useEffect(() => {
     let disposed = false;
-    setDisplayBusy(true);
-    void bridge
-      .display(workspaceId, session.id, { limit: 50 })
-      .then((page) => {
-        if (disposed) return;
-        const canonicalPage = toContinuityPage(page);
-        dispatchContinuity({
-          type: "initial_page_received",
-          sessionId: session.id,
-          page: canonicalPage,
-        });
-        dispatchLiveEvent({
-          type: "anchor_received",
-          sessionId: session.id,
-          anchor: canonicalPage.liveProvisionalAnchor,
-        });
-        setDurableTaskControl(canonicalPage.taskControl);
-        setDisplayError(false);
-      })
-      .catch(() => {
+    const loadCanonicalDisplay = async () => {
+      setDisplayBusy(true);
+      let failure: CanonicalDisplayFailure | undefined;
+      try {
+        for (let attempt = 0; attempt <= CANONICAL_DISPLAY_RETRY_DELAYS_MS.length; attempt += 1) {
+          try {
+            const page = await bridge.display(workspaceId, session.id, { limit: 50 });
+            if (disposed) return;
+            const canonicalPage = toContinuityPage(page);
+            dispatchContinuity({
+              type: "initial_page_received",
+              sessionId: session.id,
+              page: canonicalPage,
+            });
+            dispatchLiveEvent({
+              type: "anchor_received",
+              sessionId: session.id,
+              anchor: canonicalPage.liveProvisionalAnchor,
+            });
+            setDurableTaskControl(canonicalPage.taskControl);
+            setDisplayError(false);
+            return;
+          } catch (error) {
+            failure = canonicalDisplayFailure(error);
+            const retryDelay = CANONICAL_DISPLAY_RETRY_DELAYS_MS[attempt];
+            if (!failure.retryable || retryDelay === undefined) break;
+            await waitForCanonicalProjection(retryDelay);
+            if (disposed) return;
+          }
+        }
+
         if (!disposed) {
+          const visibleFailure = failure ?? canonicalDisplayFailure(undefined);
           setDisplayError(true);
           dispatchContinuity({
             type: "initial_page_failed",
             sessionId: session.id,
-            message: "Canonical conversation display is unavailable.",
+            code: visibleFailure.code,
+            message: visibleFailure.message,
           });
           initialContinuitySessionId.current = session.id;
         }
-      })
-      .finally(() => {
+      } finally {
         if (!disposed) {
           setDisplayBusy(false);
           if (initialDisplaySessionId.current !== session.id) {
@@ -557,7 +589,9 @@ export function ConversationPanel({
             finishInitialLoadIfReady(session.id);
           }
         }
-      });
+      }
+    };
+    void loadCanonicalDisplay();
     return () => {
       disposed = true;
     };
@@ -691,9 +725,13 @@ export function ConversationPanel({
         if (
           event.kind === "run_started"
           && liveItem.content.type === "message"
-          && pendingPromptRef.current?.skill !== undefined
         ) {
-          liveItem.content.skill = pendingPromptRef.current.skill;
+          const skill = livePromptSkillsByRunId.current.get(event.runId)
+            ?? pendingPromptRef.current?.skill;
+          if (skill !== undefined) {
+            livePromptSkillsByRunId.current.set(event.runId, skill);
+            liveItem.content.skill = skill;
+          }
         }
         dispatchContinuity({ type: "live_item_received", sessionId: session.id, item: liveItem });
       }
@@ -718,6 +756,7 @@ export function ConversationPanel({
 
       const terminal = terminalSignalFromTimelineEvent(event);
       if (terminal !== undefined) {
+        reportSessionCatalogChange(terminal.runId);
         pendingPromptRef.current = undefined;
         setPendingPrompt(undefined);
         setConversationQueueReload((value) => value + 1);
@@ -763,6 +802,7 @@ export function ConversationPanel({
           enterRecovery(status.message ?? t("liveControlsUnavailable"));
         }
         if (status.state === "terminal") {
+          reportSessionCatalogChange(status.runId);
           setConversationQueueReload((value) => value + 1);
           dispatchContinuity({
             type: "terminal_transport_observed",
@@ -792,13 +832,39 @@ export function ConversationPanel({
       }
       unsubscribers.push(unsubscribeStatus);
 
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      const successorExpected = queuedSuccessorExpected.current;
+      const startedProjectionRunId = startedRunProjectionExpected.current;
+      const projectionExpected = successorExpected || startedProjectionRunId !== undefined;
+      const maximumAttempts = projectionExpected
+        ? QUEUED_SUCCESSOR_PROBE_DELAYS_MS.length + 1
+        : 3;
+      for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
         const continuity = await bridge.continuity(workspaceId, session.id);
         if (disposed) return;
         allowedRecoveryActions = [...continuity.recoveryActions];
         setContinuityRecoveryActions(allowedRecoveryActions);
         const owner = continuity.foregroundOwner;
         if (owner === undefined) {
+          const retryDelay = QUEUED_SUCCESSOR_PROBE_DELAYS_MS[attempt];
+          if (projectionExpected && retryDelay !== undefined) {
+            await waitForCanonicalProjection(retryDelay);
+            if (disposed) return;
+            continue;
+          }
+          if (projectionExpected) {
+            // A newly started or promoted follow-up run can complete before
+            // the renderer observes its short-lived foreground owner. Refresh
+            // the canonical display once the bounded hand-off window settles
+            // so that fast runs are still projected into the open conversation.
+            queuedSuccessorExpected.current = false;
+            startedRunProjectionExpected.current = undefined;
+            if (startedProjectionRunId !== undefined) {
+              reportSessionCatalogChange(startedProjectionRunId);
+              pendingPromptRef.current = undefined;
+              setPendingPrompt(undefined);
+            }
+            setDisplayReload((value) => value + 1);
+          }
           activeRunIdRef.current = undefined;
           setRun(undefined);
           setStreamStatus(undefined);
@@ -878,7 +944,7 @@ export function ConversationPanel({
           settleInitialContinuity();
           return;
         } catch (error) {
-          if (attempt < 2 && isOwnerRace(error)) continue;
+          if (attempt + 1 < maximumAttempts && isOwnerRace(error)) continue;
           throw error;
         }
       }
@@ -889,7 +955,7 @@ export function ConversationPanel({
       disposed = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [bridge, continuityReload, continuityState.contractError, continuityState.transcriptLoaded, finishInitialLoadIfReady, session.id, t, workspaceId]);
+  }, [bridge, continuityReload, continuityState.contractError, continuityState.transcriptLoaded, finishInitialLoadIfReady, reportSessionCatalogChange, session.id, t, workspaceId]);
 
   useEffect(() => {
     const observed = continuityState.observedTerminal;
@@ -1129,6 +1195,7 @@ export function ConversationPanel({
         action,
       });
       setConversationQueue(receipt.queue);
+      queuedSuccessorExpected.current = queueHasPendingDelivery(receipt.queue);
       setConversationQueueError(false);
       return true;
     } catch {
@@ -1169,6 +1236,7 @@ export function ConversationPanel({
         },
       });
       setConversationQueue(enqueued.queue);
+      queuedSuccessorExpected.current = queueHasPendingDelivery(enqueued.queue);
       try {
         const interrupted = await bridge.commandConversationQueue(workspaceId, {
           sessionId: session.id,
@@ -1180,6 +1248,7 @@ export function ConversationPanel({
           },
         });
         setConversationQueue(interrupted.queue);
+        queuedSuccessorExpected.current = queueHasPendingDelivery(interrupted.queue);
         setConversationQueueError(false);
       } catch {
         setConversationQueueError(true);
@@ -1204,7 +1273,7 @@ export function ConversationPanel({
   ): Promise<boolean> => {
     if (
       nextPrompt === ""
-      || submissionBlocked
+      || (!active && submissionBlocked)
       || submitting
       || conversationQueueBusy
       || (active && conversationQueueLoading)
@@ -1279,6 +1348,7 @@ export function ConversationPanel({
         agentBinding,
       );
       activeRunIdRef.current = started.id;
+      startedRunProjectionExpected.current = started.id;
       setPendingPrompt((current) => current === undefined ? current : { ...current, runId: started.id });
       setRun(started);
       dispatchContinuity({ type: "owner_probe_started", sessionId: targetSession.id });
@@ -1353,6 +1423,7 @@ export function ConversationPanel({
         guidance,
       );
       activeRunIdRef.current = started.id;
+      startedRunProjectionExpected.current = started.id;
       setRun(started);
       setPermissionMode(started.permissionMode);
       setReasoningEffort(started.reasoningEffort);
@@ -1522,99 +1593,25 @@ export function ConversationPanel({
       .finally(() => setConversationRecoveryLoading(false));
   }, [bridge, conversationRecoveryBusy, conversationRecoveryLoading, session.id, workspaceId]);
 
-  const previewCompaction = useCallback(() => {
-    if (conversationRecoveryBusy || conversationRecoveryLoading) return;
+  const compactConversation = async (): Promise<boolean> => {
+    if (conversationRecoveryBusy || conversationRecoveryLoading) return false;
     setConversationRecoveryOpen(true);
     setConversationRecoveryBusy(true);
     setConversationRecoveryError(false);
-    if (conversationRecovery === undefined) {
-      void bridge.conversationRecovery(workspaceId, session.id)
-        .then((view) => setConversationRecovery(view))
-        .catch(() => setConversationRecoveryError(true));
-    }
-    void bridge.conversationCompactionPreview(workspaceId, session.id)
-      .then((review) => setCompactionReview(review))
-      .catch(() => {
-        setCompactionReview(undefined);
-        setConversationRecoveryError(true);
-      })
-      .finally(() => setConversationRecoveryBusy(false));
-  }, [bridge, conversationRecovery, conversationRecoveryBusy, conversationRecoveryLoading, notify, session.id, t, workspaceId]);
-
-  const applyCompaction = async () => {
-    const previewId = compactionReview?.previewId;
-    if (
-      conversationRecoveryBusy
-      || compactionReview?.admission.kind !== "ready"
-      || previewId === undefined
-    ) return;
-    setConversationRecoveryBusy(true);
     try {
-      const receipt = await bridge.commandConversationRecovery(workspaceId, {
-        sessionId: session.id,
-        action: { kind: "apply_compaction", previewId },
-      });
-      setConversationRecovery(receipt.recovery);
-      setCompactionReview(undefined);
+      const result = await bridge.compactConversation(workspaceId, session.id);
+      setConversationRecovery(result.recovery);
       setDisplayReload((value) => value + 1);
       setRunContextReload((value) => value + 1);
-      notify({ message: t("compactionApplied"), tone: "success" });
-    } catch {
-      setCompactionReview(undefined);
-      setConversationRecoveryError(true);
-    } finally {
-      setConversationRecoveryBusy(false);
-    }
-  };
-
-  const prepareCompaction = async () => {
-    const previewId = compactionReview?.previewId;
-    if (
-      conversationRecoveryBusy
-      || compactionReview?.admission.kind !== "prepared"
-      || previewId === undefined
-    ) return;
-    setConversationRecoveryBusy(true);
-    try {
-      const receipt = await bridge.commandConversationRecovery(workspaceId, {
-        sessionId: session.id,
-        action: { kind: "prepare_compaction", previewId },
+      notify({
+        message: t(result.outcome === "applied" ? "compactionApplied" : "nothingToCompact"),
+        tone: "success",
       });
-      setConversationRecovery(receipt.recovery);
-      setCompactionReview(receipt.compactionReview);
-      if (receipt.compactionReview === undefined) {
-        setConversationRecoveryError(true);
-      }
-    } catch {
-      setCompactionReview(undefined);
+      return true;
+    } catch (error) {
       setConversationRecoveryError(true);
-    } finally {
-      setConversationRecoveryBusy(false);
-    }
-  };
-
-  const applyStandaloneToolOutputShrink = async () => {
-    const previewId = compactionReview?.previewId;
-    if (
-      conversationRecoveryBusy
-      || compactionReview?.admission.kind !== "prepared"
-      || !compactionReview.admission.standaloneToolOutputShrinkAvailable
-      || previewId === undefined
-    ) return;
-    setConversationRecoveryBusy(true);
-    try {
-      const receipt = await bridge.commandConversationRecovery(workspaceId, {
-        sessionId: session.id,
-        action: { kind: "apply_standalone_tool_output_shrink", previewId },
-      });
-      setConversationRecovery(receipt.recovery);
-      setCompactionReview(undefined);
-      setDisplayReload((value) => value + 1);
-      setRunContextReload((value) => value + 1);
-      notify({ message: t("toolOutputsCleaned"), tone: "success" });
-    } catch {
-      setCompactionReview(undefined);
-      setConversationRecoveryError(true);
+      onNotice(compactionErrorMessage(error, t), true);
+      return false;
     } finally {
       setConversationRecoveryBusy(false);
     }
@@ -1958,7 +1955,11 @@ export function ConversationPanel({
         {displayError || continuityState.contractError !== undefined ? (
           <ErrorCard
             title={t("savedMessagesUnavailable")}
-            message={continuityState.contractError?.message ?? t("savedMessagesRetryDetail")}
+            message={
+              continuityState.contractError?.message
+              ?? continuityState.recovery?.message
+              ?? t("savedMessagesRetryDetail")
+            }
             actionLabel={displayBusy ? t("retrying") : t("retryMessages")}
             actionDisabled={displayBusy}
             onAction={() => {
@@ -2015,6 +2016,7 @@ export function ConversationPanel({
         draftKey={draftStorageKey(workspaceId, session.id)}
         active={active}
         submissionBlocked={submissionBlocked}
+        queueSubmissionBlocked={active && conversationQueue === undefined}
         draftEditingBlocked={!continuityState.transcriptLoaded}
         submitting={submitting}
         controlBusy={controlBusy}
@@ -2065,7 +2067,7 @@ export function ConversationPanel({
         onOpenQueue={() => {
           refreshConversationQueue();
         }}
-        onPreviewCompaction={previewCompaction}
+        onCompact={compactConversation}
         onOpenIntentStack={openIntentStack}
         onNotice={onNotice}
         onSubmit={submit}
@@ -2136,15 +2138,11 @@ export function ConversationPanel({
       >
         <ConversationRecoveryPanel
           recovery={conversationRecovery}
-          compaction={compactionReview}
           preview={checkpointRestorePreview}
           busy={conversationRecoveryBusy || conversationRecoveryLoading}
           error={conversationRecoveryError}
           onRefresh={refreshConversationRecovery}
-          onPreviewCompaction={previewCompaction}
-          onPrepareCompaction={prepareCompaction}
-          onApplyStandaloneToolOutputShrink={applyStandaloneToolOutputShrink}
-          onApplyCompaction={applyCompaction}
+          onCompact={compactConversation}
           onPreview={previewCheckpointRestore}
           onRestore={restoreCheckpoint}
           onFork={forkConversation}
@@ -2221,6 +2219,18 @@ function conversationLoadingCopy(
     default:
       return undefined;
   }
+}
+
+function compactionErrorMessage(error: unknown, t: Translate): string {
+  if (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "compaction_unavailable"
+  ) {
+    return t("compactionUnavailable");
+  }
+  return t("compactionFailed");
 }
 
 function ConversationActivity({
@@ -2342,6 +2352,44 @@ function remainingDisplayItems(state: ConversationContinuityState): string {
 
 function waitForCanonicalProjection(delayMs: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+interface CanonicalDisplayFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly retryable: boolean;
+}
+
+function canonicalDisplayFailure(error: unknown): CanonicalDisplayFailure {
+  const code = boundedErrorField(error, "code") ?? "canonical_display_unavailable";
+  return {
+    code,
+    message: boundedErrorField(error, "message")
+      ?? "Canonical conversation display is unavailable.",
+    retryable: code === "conversation_display_unavailable",
+  };
+}
+
+function boundedErrorField(error: unknown, field: "code" | "message"): string | undefined {
+  if (typeof error !== "object" || error === null || !(field in error)) return undefined;
+  const value = (error as Record<"code" | "message", unknown>)[field];
+  const maximumLength = field === "code" ? 128 : 512;
+  if (
+    typeof value !== "string"
+    || value.trim().length === 0
+    || value.length > maximumLength
+    || (field === "code" && !/^[A-Za-z0-9_-]+$/.test(value))
+    || (field === "message" && /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value))
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function queueHasPendingDelivery(queue: ConversationQueueView): boolean {
+  return queue.items.some((item) => (
+    item.status === "queued" || item.status === "dispatching"
+  ));
 }
 
 function isOwnerRace(error: unknown): boolean {

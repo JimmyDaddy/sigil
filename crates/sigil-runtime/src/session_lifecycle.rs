@@ -31,8 +31,9 @@ mod retention;
 pub use journal::{
     LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionArtifactGcJournalBinding,
     LocalSessionDeleteJournalBinding, LocalSessionDisplayNameJournalBinding,
-    LocalSessionExportJournalBinding, LocalSessionLifecycleEvent, LocalSessionLifecycleRecord,
-    LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
+    LocalSessionExportJournalBinding, LocalSessionGeneratedTitleJournalBinding,
+    LocalSessionLifecycleEvent, LocalSessionLifecycleRecord, LocalSessionPinJournalBinding,
+    LocalSessionRetentionJournalBinding,
 };
 pub use projection::{
     DEFAULT_SESSION_CATALOG_PAGE_SIZE, MAX_SESSION_CATALOG_PAGE_SIZE,
@@ -405,6 +406,7 @@ impl LocalSessionLifecycleService {
                 record.event,
                 LocalSessionLifecycleEvent::PinChanged(_)
                     | LocalSessionLifecycleEvent::DisplayNameChanged(_)
+                    | LocalSessionLifecycleEvent::GeneratedTitleChanged(_)
                     | LocalSessionLifecycleEvent::ArtifactGcCompleted(_)
             ) {
                 continue;
@@ -442,6 +444,9 @@ impl LocalSessionLifecycleService {
                     }
                     LocalSessionLifecycleEvent::DisplayNameChanged(_) => {
                         return Err(anyhow!("display-name event entered operation recovery"));
+                    }
+                    LocalSessionLifecycleEvent::GeneratedTitleChanged(_) => {
+                        return Err(anyhow!("generated-title event entered operation recovery"));
                     }
                     LocalSessionLifecycleEvent::ArtifactGcCompleted(_) => {
                         return Err(anyhow!("artifact GC event entered operation recovery"));
@@ -965,6 +970,53 @@ impl LocalSessionLifecycleService {
             .map_err(|source| LocalSessionMutationError::Unavailable { source })
     }
 
+    /// Appends one bounded system-generated title without opening or locking the active session.
+    ///
+    /// The caller must already own the exact durable session identity. Manual display-name events
+    /// always win in projection, even when a generated title finishes after a user rename.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_generated_title(
+        &self,
+        session_ref: &SessionRef,
+        session_id: &str,
+        title: &str,
+        provider_name: &str,
+        model_name: &str,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+        recorded_at_unix_ms: u64,
+    ) -> Result<LocalSessionLifecycleRecord> {
+        if session_id.trim().is_empty()
+            || session_id.len() > 256
+            || title.is_empty()
+            || title.trim() != title
+            || title.len() > SESSION_TITLE_MAX_BYTES
+            || safe_persistence_text(title) != title
+            || provider_name.trim().is_empty()
+            || provider_name.len() > 128
+            || model_name.trim().is_empty()
+            || model_name.len() > 256
+        {
+            bail!("generated session title binding is invalid");
+        }
+        let operation_id = format!("session-generated-title:{}", uuid::Uuid::new_v4());
+        self.lifecycle_journal().append(
+            &operation_id,
+            recorded_at_unix_ms,
+            LocalSessionLifecycleEvent::GeneratedTitleChanged(
+                LocalSessionGeneratedTitleJournalBinding {
+                    source_session_ref: session_ref.clone(),
+                    source_session_id: session_id.to_owned(),
+                    title: title.to_owned(),
+                    provider_name: provider_name.to_owned(),
+                    model_name: model_name.to_owned(),
+                    prompt_tokens,
+                    completion_tokens,
+                },
+            ),
+        )
+    }
+
     /// Deletes one exact, unpinned durable session after rebuilding and revalidating its preview.
     ///
     /// # Errors
@@ -1372,16 +1424,29 @@ impl LocalSessionLifecycleService {
     }
 
     fn session_display_name_projection(&self) -> Result<BTreeMap<SessionRef, (String, String)>> {
-        let mut display_names = BTreeMap::new();
+        let mut generated_titles = BTreeMap::new();
+        let mut manual_names = BTreeMap::new();
         for record in self.lifecycle_records()? {
-            if let LocalSessionLifecycleEvent::DisplayNameChanged(binding) = record.event {
-                display_names.insert(
-                    binding.source_session_ref,
-                    (binding.source_session_id, binding.display_name),
-                );
+            match record.event {
+                LocalSessionLifecycleEvent::DisplayNameChanged(binding) => {
+                    manual_names.insert(
+                        binding.source_session_ref,
+                        (binding.source_session_id, binding.display_name),
+                    );
+                }
+                LocalSessionLifecycleEvent::GeneratedTitleChanged(binding) => {
+                    generated_titles.insert(
+                        binding.source_session_ref,
+                        (binding.source_session_id, binding.title),
+                    );
+                }
+                _ => {}
             }
         }
-        Ok(display_names)
+        for (session_ref, generated_title) in generated_titles {
+            manual_names.entry(session_ref).or_insert(generated_title);
+        }
+        Ok(manual_names)
     }
 
     fn is_session_pinned(&self, session_ref: &SessionRef, session_id: &str) -> Result<bool> {

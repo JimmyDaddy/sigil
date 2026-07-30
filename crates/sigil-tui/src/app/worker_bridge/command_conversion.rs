@@ -145,6 +145,7 @@ impl AppState {
             AppAction::MessageAgent { thread_id, prompt } => {
                 WorkerCommand::MessageAgent { thread_id, prompt }
             }
+            AppAction::StartV2Compaction => WorkerCommand::StartV2Compaction,
             AppAction::PreviewV2Compaction => WorkerCommand::PreviewV2Compaction,
             AppAction::ApplyV2Compaction { request_id } => {
                 WorkerCommand::ApplyV2Compaction { request_id }
@@ -297,7 +298,9 @@ impl AppState {
             | AppAction::CopySecretToClipboard { .. }
             | AppAction::OpenExternalUrl { .. }
             | AppAction::OpenSecretExternalUrl { .. }
-            | AppAction::RevealFile { .. } => unreachable!(
+            | AppAction::RevealFile { .. }
+            | AppAction::CheckForUpdate { .. }
+            | AppAction::ApplyUpdate { .. } => unreachable!(
                 "setup/config/runtime updates are handled before worker command conversion"
             ),
         }

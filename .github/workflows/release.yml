@@ -27,7 +27,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
+  APPLE_TEAM_ID: 9Q6HK7T78S
   CARGO_TERM_COLOR: always
   HOMEBREW_TAP_REPOSITORY: JimmyDaddy/homebrew-sigil
   RUST_TOOLCHAIN_VERSION: 1.94.1
@@ -52,6 +57,18 @@ jobs:
               exit 1
             fi
           fi
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          fi
+          version="${RELEASE_TAG#v}"
+          case "${version}" in
+            *-alpha | *-alpha.* | *-beta | *-beta.*) ;;
+            *-*)
+              echo "unsupported prerelease channel in ${RELEASE_TAG}; expected alpha or beta" >&2
+              exit 1
+              ;;
+            *) ;;
+          esac
           if [[ -n "${ORCHESTRATION_EVAL_MANIFEST_URL}" || -n "${ORCHESTRATION_EVAL_MANIFEST_SHA256}" ]]; then
             if [[ -z "${ORCHESTRATION_EVAL_MANIFEST_URL}" || -z "${ORCHESTRATION_EVAL_MANIFEST_SHA256}" ]]; then
               echo "orchestration report URL and SHA-256 must be supplied together" >&2
@@ -135,14 +152,13 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish:
-    name: Publish release
+  stage-release:
+    name: Stage draft release
     needs: build
     if: ${{ github.event_name == 'push' || inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -152,6 +168,17 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust signature verifier
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' &&
+              inputs.publish &&
+              contains(inputs.tag, '-beta.') }}
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
+          rustup default "${RUST_TOOLCHAIN_VERSION}"
 
       - name: Download release artifacts
         uses: actions/download-artifact@v8
@@ -221,37 +248,648 @@ jobs:
             done
           } >> RELEASE_NOTES.md
 
+      - name: Archive npm publication inputs
+        shell: bash
+        run: >-
+          tar -czf release-publication-inputs.tar.gz
+          release-npm-packages RELEASE_NOTES.md
+
+      - name: Upload npm publication inputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-publication-inputs
+          path: release-publication-inputs.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Stage draft GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_flags=(--draft)
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          else
+            release_flags+=(--prerelease=false)
+          fi
+
+          if release="$(
+            gh release view "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json isDraft,tagName 2>/dev/null
+          )"; then
+            test "$(jq -r '.tagName' <<<"${release}")" = "${RELEASE_TAG}"
+            if [[ "$(jq -r '.isDraft' <<<"${release}")" != "true" ]]; then
+              echo "release ${RELEASE_TAG} is already public; preserving its immutable assets"
+              exit 0
+            fi
+            gh release upload "${RELEASE_TAG}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sigil ${RELEASE_TAG}" \
+              --notes-file RELEASE_NOTES.md \
+              "${release_flags[@]}"
+          else
+            gh release create "${RELEASE_TAG}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sigil ${RELEASE_TAG}" \
+              --notes-file RELEASE_NOTES.md \
+              --verify-tag \
+              "${release_flags[@]}"
+          fi
+
+      - name: Verify beta Desktop assets and stage update manifest
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          case "${version}" in
+            *-beta | *-beta.*) ;;
+            *) exit 0 ;;
+          esac
+
+          release="$(
+            gh release view "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json assets,isDraft,tagName
+          )"
+          test "$(jq -r '.tagName' <<<"${release}")" = "${RELEASE_TAG}"
+          is_draft="$(jq -r '.isDraft' <<<"${release}")"
+          mapfile -t asset_names < <(jq -r '.assets[].name' <<<"${release}")
+
+          desktop_dir="${RUNNER_TEMP}/sigil-desktop-release"
+          mkdir -p "${desktop_dir}"
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            expected=(
+              "Sigil_${version}_${target}.dmg"
+              "Sigil_${version}_${target}.dmg.sha256"
+              "Sigil_${version}_${target}.app.tar.gz"
+              "Sigil_${version}_${target}.app.tar.gz.sha256"
+              "Sigil_${version}_${target}.app.tar.gz.sig"
+            )
+            for asset in "${expected[@]}"; do
+              if ! printf '%s\n' "${asset_names[@]}" | grep -Fxq -- "${asset}"; then
+                echo "draft release is missing required Desktop asset: ${asset}" >&2
+                exit 1
+              fi
+              gh release download "${RELEASE_TAG}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --pattern "${asset}" \
+                --dir "${desktop_dir}"
+              test -s "${desktop_dir}/${asset}"
+            done
+            (
+              cd "${desktop_dir}"
+              shasum -a 256 --check "Sigil_${version}_${target}.dmg.sha256"
+              shasum -a 256 --check "Sigil_${version}_${target}.app.tar.gz.sha256"
+            )
+          done
+
+          node scripts/generate-desktop-update-manifest.mjs \
+            --version "${version}" \
+            --artifact-dir "${desktop_dir}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --pub-date "$(git show -s --format=%cI "${RELEASE_TAG}")" \
+            --notes "Sigil Desktop ${version} beta update. See the release notes for details." \
+            --output "${desktop_dir}/latest.json"
+          if [[ "${is_draft}" == "true" ]]; then
+            gh release upload "${RELEASE_TAG}" "${desktop_dir}/latest.json" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release download "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern latest.json \
+              --dir "${desktop_dir}/published"
+            cmp "${desktop_dir}/latest.json" "${desktop_dir}/published/latest.json"
+          fi
+
+  verify-desktop-macos:
+    name: Verify Desktop ${{ matrix.label }}
+    needs: stage-release
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          inputs.publish &&
+          contains(inputs.tag, '-beta.') }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      # Draft releases are visible only to tokens with repository push access.
+      # This job performs read-only commands against that draft.
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - label: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            architecture: x86_64
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout published candidate
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust signature verifier
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
+          rustup default "${RUST_TOOLCHAIN_VERSION}"
+
+      - name: Download exact Desktop candidate
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          release="$(
+            gh release view "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json isDraft,isImmutable,tagName
+          )"
+          test "$(jq -r '.tagName' <<<"${release}")" = "${RELEASE_TAG}"
+          if [[ "$(jq -r '.isDraft' <<<"${release}")" != "true" ]] &&
+            [[ "$(jq -r '.isImmutable // false' <<<"${release}")" != "true" ]]; then
+            echo "public Desktop candidate is not immutable" >&2
+            exit 1
+          fi
+
+          desktop_dir="${RUNNER_TEMP}/sigil-desktop-release"
+          mkdir -p "${desktop_dir}"
+          for suffix in dmg dmg.sha256 app.tar.gz app.tar.gz.sha256 app.tar.gz.sig; do
+            asset="Sigil_${version}_${TARGET}.${suffix}"
+            gh release download "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${asset}" \
+              --dir "${desktop_dir}"
+            test -s "${desktop_dir}/${asset}"
+          done
+
+      - name: Verify checksums, updater signature, and Apple trust
+        shell: bash
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          expected_commit="$(git rev-parse --short=12 "${RELEASE_TAG}^{commit}")"
+          desktop_dir="${RUNNER_TEMP}/sigil-desktop-release"
+          dmg="${desktop_dir}/Sigil_${version}_${TARGET}.dmg"
+          archive="${desktop_dir}/Sigil_${version}_${TARGET}.app.tar.gz"
+          (
+            cd "${desktop_dir}"
+            shasum -a 256 --check "$(basename "${dmg}").sha256"
+            shasum -a 256 --check "$(basename "${archive}").sha256"
+          )
+          scripts/verify-desktop-update-signature.sh \
+            --archive "${archive}" \
+            --signature "${archive}.sig"
+          scripts/verify-desktop-macos.sh \
+            --dmg "${dmg}" \
+            --expected-arch "${EXPECTED_ARCHITECTURE}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --expected-version "${version}" \
+            --expected-commit "${expected_commit}" \
+            --notarized
+
+          extract_dir="${RUNNER_TEMP}/sigil-desktop-updater-app"
+          python3 scripts/extract-verified-desktop-updater-app.py \
+            --archive "${archive}" \
+            --destination "${extract_dir}"
+          scripts/verify-desktop-macos-app.sh \
+            --app "${extract_dir}/Sigil.app" \
+            --expected-arch "${EXPECTED_ARCHITECTURE}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --expected-version "${version}" \
+            --expected-commit "${expected_commit}" \
+            --notarized
+
+      - name: Record verified Desktop candidate digests
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          desktop_dir="${RUNNER_TEMP}/sigil-desktop-release"
+          receipt_dir="${RUNNER_TEMP}/sigil-desktop-verification"
+          mkdir -p "${receipt_dir}"
+          {
+            printf 'tag=%s\n' "${RELEASE_TAG}"
+            printf 'target=%s\n' "${TARGET}"
+            printf 'version=%s\n' "${version}"
+            printf 'commit=%s\n' "$(git rev-parse --short=12 "${RELEASE_TAG}^{commit}")"
+            printf 'dmg_sha256=%s\n' "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${TARGET}.dmg" |
+                awk '{print $1}'
+            )"
+            printf 'archive_sha256=%s\n' "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${TARGET}.app.tar.gz" |
+                awk '{print $1}'
+            )"
+          } > "${receipt_dir}/${TARGET}.txt"
+
+      - name: Upload Desktop verification receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-verification-${{ matrix.target }}
+          path: ${{ runner.temp }}/sigil-desktop-verification/${{ matrix.target }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-release:
+    name: Publish immutable release and npm
+    needs:
+      - stage-release
+      - verify-desktop-macos
+    if: >-
+      ${{ always() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.publish &&
+          needs.stage-release.result == 'success' &&
+          (!contains(inputs.tag, '-beta.') ||
+           needs.verify-desktop-macos.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    concurrency:
+      group: release-publication-${{ contains(inputs.tag, '-alpha.') && 'alpha' || contains(inputs.tag, '-beta.') && 'beta' || 'stable' }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.22.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install npm CLI
+        shell: bash
+        run: npm install --global npm@11.18.0
+
+      - name: Download npm publication inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: release-publication-inputs
+          path: release-publication-inputs
+
+      - name: Extract npm publication inputs
+        shell: bash
+        run: >-
+          tar -xzf release-publication-inputs/release-publication-inputs.tar.gz
+
+      - name: Download Desktop verification receipts
+        if: ${{ contains(inputs.tag, '-beta.') }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-verification-*
+          path: desktop-verification
+          merge-multiple: true
+
+      - name: Recheck verified Desktop candidate bytes
+        if: ${{ contains(inputs.tag, '-beta.') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          expected_commit="$(git rev-parse --short=12 "${RELEASE_TAG}^{commit}")"
+          desktop_dir="${RUNNER_TEMP}/sigil-desktop-publication"
+          mkdir -p "${desktop_dir}"
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            receipt="desktop-verification/${target}.txt"
+            test -s "${receipt}"
+            test "$(awk -F= '$1 == "tag" { print $2 }' "${receipt}")" = "${RELEASE_TAG}"
+            test "$(awk -F= '$1 == "target" { print $2 }' "${receipt}")" = "${target}"
+            test "$(awk -F= '$1 == "version" { print $2 }' "${receipt}")" = "${version}"
+            test "$(awk -F= '$1 == "commit" { print $2 }' "${receipt}")" = "${expected_commit}"
+            for suffix in dmg app.tar.gz; do
+              asset="Sigil_${version}_${target}.${suffix}"
+              gh release download "${RELEASE_TAG}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --pattern "${asset}" \
+                --dir "${desktop_dir}"
+              test -s "${desktop_dir}/${asset}"
+            done
+            test "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${target}.dmg" |
+                awk '{print $1}'
+            )" = "$(awk -F= '$1 == "dmg_sha256" { print $2 }' "${receipt}")"
+            test "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${target}.app.tar.gz" |
+                awk '{print $1}'
+            )" = "$(awk -F= '$1 == "archive_sha256" { print $2 }' "${receipt}")"
+          done
+
+      - name: Verify channel monotonicity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          case "${version}" in
+            *-alpha.*) release_channel="alpha" ;;
+            *-beta.*) release_channel="beta" ;;
+            *-*) echo "unsupported prerelease channel: ${version}" >&2; exit 1 ;;
+            *) release_channel="stable" ;;
+          esac
+
+          releases_file="${RUNNER_TEMP}/sigil-published-release-versions.json"
+          gh api \
+            --paginate \
+            --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+            jq -c '[
+              .[][] |
+              select(.draft == false) |
+              .tag_name |
+              select(type == "string" and startswith("v")) |
+              ltrimstr("v") |
+              select(test("^[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta)\\.[0-9]+)?$"))
+            ]' > "${releases_file}"
+          node scripts/release-channel-version.mjs \
+            --candidate "${version}" \
+            --channel "${release_channel}" \
+            --observed-file "${releases_file}" \
+            --surface "GitHub ${release_channel} releases"
+
+          npm_error="${RUNNER_TEMP}/sigil-npm-channel-error.txt"
+          if npm_tags="$(npm view "@sigil-ai/sigil" dist-tags --json 2>"${npm_error}")"; then
+            npm_current="$(
+              node -e '
+                const tags = JSON.parse(process.argv[1]);
+                const value = tags?.[process.argv[2]];
+                if (typeof value === "string") process.stdout.write(value);
+              ' "${npm_tags}" "$([[ "${release_channel}" == stable ]] && echo latest || echo "${release_channel}")"
+            )"
+            if [[ -n "${npm_current}" ]]; then
+              node scripts/release-channel-version.mjs \
+                --candidate "${version}" \
+                --channel "${release_channel}" \
+                --current "${npm_current}" \
+                --surface "npm @sigil-ai/sigil"
+            fi
+          elif ! grep -Fq "E404" "${npm_error}"; then
+            cat "${npm_error}" >&2
+            echo "cannot prove npm channel state before release publication" >&2
+            exit 1
+          fi
+
+      - name: Verify immutable releases policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.SIGIL_RELEASE_ADMIN_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          if ! policy="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/immutable-releases"
+          )"; then
+            echo "cannot prove GitHub immutable releases are enabled; configure SIGIL_RELEASE_ADMIN_TOKEN with repository Administration read access" >&2
+            exit 1
+          fi
+          if [[ "$(jq -r '.enabled // false' <<<"${policy}")" != "true" ]]; then
+            echo "GitHub immutable releases must be enabled before publication" >&2
+            exit 1
+          fi
+
+      - name: Publish the completed draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_flags=(--draft=false)
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          else
+            release_flags+=(--prerelease=false)
+          fi
+          release="$(
+            gh release view "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json isDraft,tagName
+          )"
+          test "$(jq -r '.tagName' <<<"${release}")" = "${RELEASE_TAG}"
+          if [[ "$(jq -r '.isDraft' <<<"${release}")" == "true" ]]; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sigil ${RELEASE_TAG}" \
+              --notes-file RELEASE_NOTES.md \
+              "${release_flags[@]}"
+          else
+            echo "release ${RELEASE_TAG} is already public; continuing idempotent publication"
+          fi
+
+      - name: Verify published release immutability
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          )"
+          test "$(jq -r '.tag_name' <<<"${release}")" = "${RELEASE_TAG}"
+          test "$(jq -r '.draft' <<<"${release}")" = "false"
+          if [[ "$(jq -r '.immutable // false' <<<"${release}")" != "true" ]]; then
+            echo "published release ${RELEASE_TAG} is not immutable; refusing downstream publication" >&2
+            exit 1
+          fi
+
       - name: Publish npm packages
         shell: bash
         run: |
           set -euo pipefail
-          npm_tag="latest"
-          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
-            npm_tag="alpha"
-          fi
+          version="${RELEASE_TAG#v}"
+          case "${version}" in
+            *-alpha | *-alpha.*) npm_tag="alpha" ;;
+            *-beta | *-beta.*) npm_tag="beta" ;;
+            *-*)
+              echo "unsupported prerelease channel in ${RELEASE_TAG}; expected alpha or beta" >&2
+              exit 1
+              ;;
+            *) npm_tag="latest" ;;
+          esac
           scripts/publish-npm-packages.sh \
-            --version "${RELEASE_TAG#v}" \
+            --version "${version}" \
             --packages-dir release-npm-packages \
             --tag "${npm_tag}"
 
-      - name: Publish GitHub release
+  publish-update-site:
+    name: Publish Desktop update manifest
+    needs: publish-release
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          inputs.publish &&
+          contains(inputs.tag, '-beta.') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout published tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download immutable update manifest
         shell: bash
         run: |
           set -euo pipefail
-          release_flags=()
-          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
-            release_flags+=(--prerelease)
+          manifest_dir="${RUNNER_TEMP}/sigil-desktop-update"
+          mkdir -p "${manifest_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern latest.json \
+            --dir "${manifest_dir}"
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("node:fs");
+            const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const version = process.env.RELEASE_TAG.slice(1);
+            if (manifest.version !== version) {
+              throw new Error("Desktop update manifest version does not match release tag");
+            }
+            const expected = new Map([
+              ["darwin-aarch64", "aarch64-apple-darwin"],
+              ["darwin-x86_64", "x86_64-apple-darwin"],
+            ]);
+            if (
+              manifest.platforms === null
+              || typeof manifest.platforms !== "object"
+              || Array.isArray(manifest.platforms)
+              || Object.keys(manifest.platforms).sort().join(",")
+                !== [...expected.keys()].sort().join(",")
+            ) {
+              throw new Error("Desktop update manifest has an unexpected platform inventory");
+            }
+            for (const [platform, target] of expected) {
+              const entry = manifest.platforms[platform];
+              const name = `Sigil_${version}_${target}.app.tar.gz`;
+              const expectedUrl =
+                `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.RELEASE_TAG}/${name}`;
+              if (
+                entry === null
+                || typeof entry !== "object"
+                || entry.url !== expectedUrl
+                || typeof entry.signature !== "string"
+                || entry.signature.length < 40
+                || entry.signature.length > 4096
+                || !/^[A-Za-z0-9+/]+={0,2}$/.test(entry.signature)
+              ) {
+                throw new Error(`unsafe Desktop update manifest entry for ${platform}`);
+              }
+            }
+          ' "${manifest_dir}/latest.json"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+
+      - name: Refuse Desktop update rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_manifest="${RUNNER_TEMP}/sigil-current-desktop-update.json"
+          set +e
+          http_status="$(
+            curl --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${current_manifest}" \
+              --write-out '%{http_code}' \
+              "https://sigil.corerobin.com/updates/beta/latest.json"
+          )"
+          curl_status=$?
+          set -e
+          if [[ "${curl_status}" -ne 0 ]]; then
+            echo "cannot prove current Desktop update channel state" >&2
+            exit 1
           fi
-          gh release create "${RELEASE_TAG}" dist/* \
-            --title "Sigil ${RELEASE_TAG}" \
-            --notes-file RELEASE_NOTES.md \
-            --verify-tag \
-            "${release_flags[@]}"
+          case "${http_status}" in
+            200)
+              current_version="$(
+                node -e '
+                  const fs = require("node:fs");
+                  const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                  if (typeof manifest.version !== "string") {
+                    throw new Error("current Desktop update manifest has no version");
+                  }
+                  process.stdout.write(manifest.version);
+                ' "${current_manifest}"
+              )"
+              node scripts/release-channel-version.mjs \
+                --candidate "${RELEASE_TAG#v}" \
+                --channel beta \
+                --current "${current_version}" \
+                --surface "Pages Desktop beta"
+              ;;
+            404) ;;
+            *)
+              echo "cannot prove current Desktop update channel state: HTTP ${http_status}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build release website with update endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-pages-site.sh _site
+          mkdir -p _site/updates/beta
+          cp "${RUNNER_TEMP}/sigil-desktop-update/latest.json" _site/updates/beta/latest.json
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
 
   sync-homebrew:
     name: Sync Homebrew tap
-    needs: publish
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    needs: publish-release
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          inputs.publish &&
+          contains(inputs.tag, '-beta.') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -262,6 +900,12 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
       - name: Checkout Homebrew tap
         uses: actions/checkout@v7
         with:
@@ -291,6 +935,26 @@ jobs:
           formula_target="homebrew-sigil/Formula/sigil-ai.rb"
 
           grep -Fq "version \"${version}\"" "${formula_source}"
+          if [[ -f "${formula_target}" ]]; then
+            # shellcheck disable=SC2016
+            current_version="$(
+              ruby -ne '
+                if $_ =~ /^\s*version "([^"]+)"/
+                  print Regexp.last_match(1)
+                  exit
+                end
+              ' "${formula_target}"
+            )"
+            if [[ -z "${current_version}" ]]; then
+              echo "cannot prove current Homebrew formula version" >&2
+              exit 1
+            fi
+            node scripts/release-channel-version.mjs \
+              --candidate "${version}" \
+              --channel any \
+              --current "${current_version}" \
+              --surface "Homebrew tap"
+          fi
           install -m 0644 "${formula_source}" "${formula_target}"
           ruby -c "${formula_target}"
 

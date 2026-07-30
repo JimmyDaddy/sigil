@@ -1,17 +1,23 @@
-# Desktop dogfood 指南
+# Desktop 构建、dogfood 与发布验收指南
 
-状态：developer preview，仅用于源码构建和 CI artifact 验收；不是公开安装或更新渠道。
+状态：Desktop 与 TUI 是并列的一等产品表面。源码构建和短期 CI artifact 仍属于 dogfood；
+macOS beta 使用独立的 Developer ID 签名、公证、staple 和签名更新通道，公开可用性以
+GitHub Releases 与官网下载安装入口为准。Linux 与 Windows package 尚未进入公开分发。
 
 ## 1. 边界
 
-- TUI 仍是第一用户入口，npm、Homebrew、Cargo 与 GitHub release archive 仍只分发 `sigil` 终端程序。
+- Desktop 与 TUI 是并列的一等产品表面，复用同一 kernel/runtime 语义。npm、Homebrew、Cargo 与 standalone
+  GitHub release archive 分发 `sigil` 终端程序；macOS Desktop 通过双架构签名 DMG 分发。
 - `apps/desktop` 监管每个工作区独立的 `sigil serve` sidecar。renderer 不持有 bearer、进程句柄、工作区绝对路径，也不能直接访问通用 HTTP、Shell 或文件系统。
 - 会话重命名写入 workspace append-only lifecycle journal；删除复用 exact preview/apply，置顶、活动 run 或 verification 会 fail closed。SQLite 仍只是可重建目录投影。
-- CI artifact 只保留七天，用于 dogfood。macOS 使用 ad-hoc 签名；Linux `.deb` 和 Windows NSIS 未进入公开发布工作流。
+- CI artifact 只保留七天，用于 dogfood，macOS 也只做 ad-hoc 签名。公开 macOS beta 必须走本地
+  Developer ID 签名、公证与 staple，再上传 draft Release；Linux `.deb` 和 Windows NSIS 未进入公开发布工作流。
 - `Desktop Package` 只在 desktop、bundled sidecar 生产代码、构建契约、manifest、toolchain 或 workflow
   变化时自动运行。参与 sidecar 构建的 Rust crate，其 `src/tests`、嵌套 `tests` 与顶层 `tests` 目录统一由主
   CI 覆盖，不为纯测试修改重复构建三套 installer；需要独立复验 package 时仍可手动 dispatch。
-- V1 不接入 updater。公开分发必须另行完成平台证书、macOS notarization、Windows signing、Linux 依赖风险复核和升级/回滚设计。
+- macOS beta 已接入用户显式触发的签名 updater，通过
+  `https://sigil.corerobin.com/updates/beta/latest.json` 检查、下载和安装；不会静默安装或自动重启。
+  源码构建、CI artifact、Linux 与 Windows package 不进入该更新通道。
 
 ## 2. 前置条件
 
@@ -76,6 +82,8 @@ pnpm --dir apps/desktop package --bundles nsis  # Windows
 11. 在 **Appearance**（`Cmd/Ctrl+,`）中切换 Follow system、Light 和 Dark；重启后仍保留手动选择，System 模式会跟随 OS，切换过程不丢 draft、timeline scroll、approval 或 active-run attachment。
 12. 分别在 1280、840、839 和 320px 检查顶栏、紧凑对话列表、filter/action popover 与 review surface；所有弹层必须留在可见 viewport 内，320px 下 Browse、workspace、new conversation 和 Appearance 均必须保持可见可操作，不出现 document 横向滚动。
 13. 用键盘完成 workspace/session 选择、filter、navigation/review drawer、会话重命名/删除确认、approval 和 theme 切换，确认 Esc、Tab trap、选择后焦点恢复与中文 IME；每个公开 installer candidate 还需在当前 Space 使用 VoiceOver 验证 WebView 内容导航，不得用 hidden-window AX probe 代替。
+14. 对公开 macOS beta candidate，在 **Settings → Desktop updates** 检查 signed beta channel；验证“仅检查”不会下载，
+    安装完成后不会自动重启，活动任务会阻止重启，签名或 manifest 校验失败时不会替换现有应用。
 
 macOS package 还必须通过：
 
@@ -102,13 +110,21 @@ codesign --verify --deep --strict --verbose=4 target/release/bundle/macos/Sigil.
 
 ## 6. 发布门禁
 
-三平台 package CI 成功只证明“能够生成并检查 dogfood artifact”，不等于可以公开发布。至少还需要：
+三平台 package CI 成功只证明“能够生成并检查 dogfood artifact”，不等于三个平台都可以公开发布。
 
-- Apple Developer ID 签名与 notarization 凭据、Windows Authenticode 证书；
+macOS beta 已建立公开发行门禁：
+
+- Apple Developer ID 签名、Hardened Runtime、安全时间戳、notarization、staple 与 Gatekeeper 验证；
+- Apple Silicon 与 Intel 两套 DMG、SHA-256、`.app.tar.gz` updater archive、archive SHA-256 和 updater signature；
+- tag 只创建或更新 draft Release；显式 publish 先验证完整 Desktop 资产并冻结 `latest.json`，再公开
+  immutable Release、发布 npm，并部署官网 updater endpoint 与 Homebrew；
+- 真实系统 WebView 的可访问性、输入法、剪贴板、滚动、任务执行、crash/restart 和更新安装 smoke。
+
+完整流程见 [`desktop-macos-signing.md`](desktop-macos-signing.md) 与
+[`release-process.md`](release-process.md)。CI artifact 的 ad-hoc signature 仍不能替代公开发行身份。
+
+Linux 与 Windows 仍需在公开分发前完成以下门禁：
+
+- Windows Authenticode 证书与 installer/update 签名；
 - Linux Tauri/WebKitGTK/GTK 传递 advisory 的重新评估与支持发行版矩阵；
-- 安装覆盖、降级、数据保留和 updater 签名/回滚契约；
-- 三平台真实系统 WebView 的可访问性、输入法、剪贴板、滚动与 crash/restart 人工回归。
-
-在这些门禁完成前，公开文档必须继续把 desktop 标记为 source-built dogfood。
-macOS 公证与签名流程以 Tauri 官方 [macOS Code Signing](https://v2.tauri.app/distribute/sign/macos/) 指南为准，不能用
-本地 ad-hoc signature 替代公开发行身份。
+- 各平台安装覆盖、降级、数据保留、回滚与真实系统交互回归。

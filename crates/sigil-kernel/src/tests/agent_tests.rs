@@ -30,23 +30,24 @@ use crate::{
     ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
-    ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent, SecretString, Session,
-    SessionLogEntry, SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TOOL_ARTIFACT_READ_SCHEMA_VERSION,
-    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskHandoffId, TaskId,
-    TaskParticipantAttemptId, TaskParticipantContext, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding,
-    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus,
-    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
-    ToolArtifactRefV1, ToolArtifactSelectorV1, ToolCall, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
-    ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
-    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
-    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent,
+    RuntimeContextCandidates, SecretString, Session, SessionLogEntry, SessionRef,
+    SessionStreamRecord, SourceCacheStatus, SourceFreshness, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    TASK_PLAN_UPDATE_TOOL_NAME, TOOL_ARTIFACT_READ_SCHEMA_VERSION, TaskGuidanceApplyReason,
+    TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskParticipantAttemptId,
+    TaskParticipantContext, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
+    ToolArtifactReadOutcome, ToolArtifactReadRecordedV1, ToolArtifactRefV1, ToolArtifactSelectorV1,
+    ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
+    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
+    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    continue_without_task_planning_tool_spec,
     direct_conversation_continuation_prompt_contract_material, plan_text_hash,
-    task_participant_finalization_prompt_contract_material,
+    request_task_planning_tool_spec, task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
 };
 
@@ -5140,6 +5141,204 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
             == Some(direct_conversation_continuation_prompt_contract_material())
     }));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing-routing", "mock-model");
+    let safe_prompt = "inspect the queued request with authorization=[redacted]";
+    let exact_prompt = "inspect the queued request with authorization=super-secret-value";
+    let logical_run_id = "frozen-routing-run";
+    session.append_user_message(ModelMessage::user("unrelated earlier request"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("queued request context evidence".to_owned()),
+        Vec::new(),
+    ))?;
+    let mut durable_user = ModelMessage::user(safe_prompt);
+    durable_user.id = "frozen-routing-user".to_owned();
+    let options = AgentRunOptions {
+        workspace_root: root.path().to_path_buf(),
+        max_turns: Some(2),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig { enabled: false },
+        compaction_config: CompactionConfig::default(),
+    };
+    let mut exact_user = ModelMessage::user(exact_prompt);
+    exact_user.id = durable_user.id.clone();
+    let request = session.build_pre_turn_candidate_request(
+        root.path(),
+        &options.memory_config,
+        vec![
+            request_task_planning_tool_spec(),
+            continue_without_task_planning_tool_spec(),
+        ],
+        None,
+        options.reasoning_effort.clone(),
+        None,
+        None,
+        &[
+            ModelMessage::system(task_routing_system_prompt_contract_material()),
+            exact_user,
+        ],
+        RuntimeContextCandidates::default(),
+        &[],
+    )?;
+    let frozen =
+        FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request.clone())?;
+    session.append_user_message(durable_user.clone())?;
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        durable_user.id.clone(),
+        logical_run_id,
+    )?;
+    let input = AgentRunInput::without_persisted_user_message(Vec::new())
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn: source_turn.clone(),
+                routing_policy: TaskRoutingPolicy::Auto,
+                task_handoff: Some(TaskPlanningHandoffBinding {
+                    handoff_id: TaskHandoffId::new("handoff-frozen-routing")?,
+                    task_id: TaskId::new("task-frozen-routing")?,
+                    source_turn,
+                    parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                    objective: safe_prompt.to_owned(),
+                    policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                    requested_at_ms: 42,
+                    decided_at_ms: 43,
+                }),
+            },
+        )))
+        .with_initial_frozen_provider_request(frozen);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(&mut session, input, options, &mut handler)
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]
+            .messages
+            .iter()
+            .find(|message| message.id == durable_user.id)
+            .and_then(|message| message.content.as_deref()),
+        Some(exact_prompt)
+    );
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            REQUEST_TASK_PLANNING_TOOL_NAME,
+            CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing-routing", "mock-model");
+    let prompt = "inspect the queued request";
+    let logical_run_id = "invalid-frozen-routing-run";
+    let mut durable_user = ModelMessage::user(prompt);
+    durable_user.id = "invalid-frozen-routing-user".to_owned();
+    session.append_user_message(durable_user.clone())?;
+    let request = session.build_pre_turn_candidate_request(
+        root.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        Some(ReasoningEffort::Medium),
+        None,
+        None,
+        &[],
+        RuntimeContextCandidates::default(),
+        &[],
+    )?;
+    let frozen = FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)?;
+    let source_turn =
+        ConversationTurnRef::new(session.session_scope_id(), durable_user.id, logical_run_id)?;
+    let input = AgentRunInput::without_persisted_user_message(Vec::new())
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn: source_turn.clone(),
+                routing_policy: TaskRoutingPolicy::Auto,
+                task_handoff: Some(TaskPlanningHandoffBinding {
+                    handoff_id: TaskHandoffId::new("handoff-invalid-frozen-routing")?,
+                    task_id: TaskId::new("task-invalid-frozen-routing")?,
+                    source_turn,
+                    parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                    objective: prompt.to_owned(),
+                    policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                    requested_at_ms: 42,
+                    decided_at_ms: 43,
+                }),
+            },
+        )))
+        .with_initial_frozen_provider_request(frozen);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let error = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: root.path().to_path_buf(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("ordinary frozen request must not bypass routing-only materialization");
+
+    assert!(error.to_string().contains("automatic task routing"));
+    assert!(
+        captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .is_empty()
+    );
     Ok(())
 }
 

@@ -13,6 +13,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-provider-http = { path = "../sigil-provider-http" }
 thiserror.workspace = true
 uuid.workspace = true
 

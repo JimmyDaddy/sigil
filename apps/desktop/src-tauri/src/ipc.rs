@@ -1269,6 +1269,15 @@ pub(crate) struct DesktopCompactionReceipt {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopCompactionExecutionSummary {
+    pub(crate) outcome: &'static str,
+    pub(crate) recovery: DesktopConversationRecoveryView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) compaction: Option<DesktopCompactionReceipt>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopCheckpointRestoreReceipt {
     pub(crate) checkpoint_id: String,
     pub(crate) batch_id: String,

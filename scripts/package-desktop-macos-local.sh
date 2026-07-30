@@ -6,13 +6,14 @@ usage() {
 Usage: scripts/package-desktop-macos-local.sh \
   [--target native|all|aarch64-apple-darwin|x86_64-apple-darwin] \
   [--notary-profile PROFILE] \
+  [--updater-key PATH] \
   [--output-dir PATH] \
   [--skip-notarization]
 
-Build Developer ID-signed Sigil desktop DMGs on the publisher's Mac. The
-default target is the native architecture. Use --target all for a public
-two-architecture release. Notarization, stapling, and Gatekeeper verification
-are enabled by default.
+Build Developer ID-signed Sigil desktop DMGs and Tauri-signed update archives
+on the publisher's Mac. The default target is the native architecture. Use
+--target all for a public two-architecture release. Notarization, stapling,
+Gatekeeper verification, and updater archive signing are enabled by default.
 USAGE
 }
 
@@ -21,6 +22,7 @@ cd "$repo_root"
 
 target_mode="native"
 notary_profile="${SIGIL_NOTARY_PROFILE:-Sigil-Notary}"
+updater_key="${SIGIL_DESKTOP_UPDATER_KEY:-$HOME/Library/Application Support/sigil/release/desktop-updater.key}"
 output_root=""
 skip_notarization=false
 
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --notary-profile)
       notary_profile="${2-}"
+      shift 2
+      ;;
+    --updater-key)
+      updater_key="${2-}"
       shift 2
       ;;
     --output-dir)
@@ -63,12 +69,35 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-for command_name in git node pnpm rustup security xcrun codesign ditto shasum; do
+for command_name in cargo git node pnpm rustup security xcrun codesign ditto shasum tar; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
   }
 done
+if [[ ! -f "$updater_key" || -L "$updater_key" ]]; then
+  echo "Tauri updater private key must be a regular non-symlink file: $updater_key" >&2
+  exit 1
+fi
+if [[ ! -f "${updater_key}.pub" || -L "${updater_key}.pub" ]]; then
+  echo "Tauri updater public key must be a regular non-symlink file: ${updater_key}.pub" >&2
+  exit 1
+fi
+if [[ "$(stat -f '%Lp' "$updater_key")" != "600" ]]; then
+  echo "Tauri updater private key must have mode 600: $updater_key" >&2
+  exit 1
+fi
+node -e '
+  const fs = require("node:fs");
+  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const embedded = config.plugins?.updater?.pubkey;
+  const publisher = fs.readFileSync(process.argv[2], "utf8").trim();
+  if (typeof embedded !== "string" || embedded !== publisher) {
+    throw new Error("publisher updater public key does not match the embedded Tauri key");
+  }
+' \
+  "$repo_root/apps/desktop/src-tauri/tauri.conf.json" \
+  "${updater_key}.pub"
 
 native_target() {
   case "$(uname -m)" in
@@ -145,6 +174,7 @@ if [[ -e "$output_root" ]]; then
   exit 1
 fi
 mkdir -p "$output_root"
+mkdir -p "$output_root/.work"
 
 pnpm --dir apps/desktop install --frozen-lockfile
 rustup target add "${targets[@]}"
@@ -168,19 +198,33 @@ for target in "${targets[@]}"; do
   esac
 
   APPLE_SIGNING_IDENTITY="$identity" \
-    pnpm --dir apps/desktop package \
+  TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key" \
+    pnpm --dir apps/desktop tauri build \
+      --config src-tauri/tauri.bundle.conf.json \
+      --config src-tauri/tauri.updater.conf.json \
       --target "$target" \
       --bundles app,dmg
 
   bundle_root="$repo_root/target/$target/release/bundle"
   source_dmg="$(find_one_dmg "$bundle_root/dmg")"
+  source_app="$bundle_root/macos/Sigil.app"
+  if [[ ! -d "$source_app" || -L "$source_app" ]]; then
+    echo "expected a bundled Sigil.app at $source_app" >&2
+    exit 1
+  fi
   output_dmg="$output_root/Sigil_${version}_${target}.dmg"
+  work_root="$output_root/.work/$target"
+  updater_app="$work_root/Sigil.app"
+  mkdir -p "$work_root"
   ditto "$source_dmg" "$output_dmg"
+  ditto "$source_app" "$updater_app"
 
   "$repo_root/scripts/verify-desktop-macos.sh" \
     --dmg "$output_dmg" \
     --expected-arch "$expected_arch" \
-    --team-id "$team_id"
+    --team-id "$team_id" \
+    --expected-version "$version" \
+    --expected-commit "${commit:0:12}"
 
   if [[ "$skip_notarization" == false ]]; then
     "$repo_root/scripts/notarize-desktop-macos.sh" \
@@ -188,13 +232,68 @@ for target in "${targets[@]}"; do
       --expected-arch "$expected_arch" \
       --team-id "$team_id" \
       --notary-profile "$notary_profile"
+
+    "$repo_root/scripts/notarize-desktop-macos-app.sh" \
+      --app "$updater_app" \
+      --expected-arch "$expected_arch" \
+      --team-id "$team_id" \
+      --notary-profile "$notary_profile"
+  else
+    "$repo_root/scripts/verify-desktop-macos-app.sh" \
+      --app "$updater_app" \
+      --expected-arch "$expected_arch" \
+      --team-id "$team_id" \
+      --expected-version "$version" \
+      --expected-commit "${commit:0:12}"
   fi
+
+  updater_archive="$output_root/Sigil_${version}_${target}.app.tar.gz"
+  tar -czf "$updater_archive" -C "$work_root" Sigil.app
+  roundtrip_root="$work_root/archive-roundtrip"
+  mkdir -p "$roundtrip_root"
+  tar -xzf "$updater_archive" -C "$roundtrip_root"
+  roundtrip_verify_args=(
+    --app "$roundtrip_root/Sigil.app"
+    --expected-arch "$expected_arch"
+    --team-id "$team_id"
+    --expected-version "$version"
+    --expected-commit "${commit:0:12}"
+  )
+  if [[ "$skip_notarization" == false ]]; then
+    roundtrip_verify_args+=(--notarized)
+  fi
+  "$repo_root/scripts/verify-desktop-macos-app.sh" "${roundtrip_verify_args[@]}"
+  TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key" \
+    pnpm --dir apps/desktop tauri signer sign "$updater_archive"
+  test -s "${updater_archive}.sig"
+  "$repo_root/scripts/verify-desktop-update-signature.sh" \
+    --archive "$updater_archive" \
+    --signature "${updater_archive}.sig"
 
   (
     cd "$output_root"
     shasum -a 256 "$(basename "$output_dmg")" >"$(basename "$output_dmg").sha256"
+    shasum -a 256 "$(basename "$updater_archive")" >"$(basename "$updater_archive").sha256"
   )
 done
+
+if [[ "${#targets[@]}" -eq 2 ]]; then
+  arm_archive="$output_root/Sigil_${version}_aarch64-apple-darwin.app.tar.gz"
+  intel_signature="$output_root/Sigil_${version}_x86_64-apple-darwin.app.tar.gz.sig"
+  if "$repo_root/scripts/verify-desktop-update-signature.sh" \
+    --archive "$arm_archive" \
+    --signature "$intel_signature"; then
+    echo "swapped Desktop updater signature unexpectedly verified" >&2
+    exit 1
+  else
+    verification_status=$?
+    if [[ "$verification_status" -ne 1 ]]; then
+      echo "swapped-signature negative control could not complete verification" >&2
+      exit "$verification_status"
+    fi
+  fi
+  echo "swapped Desktop updater signature was rejected as expected"
+fi
 
 cat >"$output_root/build.txt" <<EOF
 version=$version
@@ -203,6 +302,7 @@ team_id=$team_id
 identity=$identity
 targets=$(printf '%s ' "${targets[@]}")
 notarized=$([[ "$skip_notarization" == false ]] && echo true || echo false)
+updater_public_key=$(shasum -a 256 "${updater_key}.pub" | awk '{print $1}')
 EOF
 
 echo "signed Sigil desktop packages are ready at $output_root"

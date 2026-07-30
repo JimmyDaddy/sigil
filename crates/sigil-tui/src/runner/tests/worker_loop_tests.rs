@@ -67,7 +67,7 @@ async fn chat_agent_run_input_with_repo_context_attaches_repository_candidates()
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         temp.path().join("README.md"),
-        "Sigil is a TUI-first Rust coding agent.",
+        "Sigil is a Rust coding agent with Desktop and TUI experiences.",
     )
     .expect("write README");
 

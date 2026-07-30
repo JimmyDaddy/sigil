@@ -1032,3 +1032,83 @@ fn private_support_write_rejects_symbolic_link_targets() {
         "private"
     );
 }
+
+#[test]
+fn direct_compaction_sequences_prepare_then_apply_without_user_review() {
+    let prepared: NativeCompactionReview = serde_json::from_value(serde_json::json!({
+        "preview_id": "preview-local",
+        "folded_event_count": 4,
+        "retained_event_count": 2,
+        "admission": {
+            "kind": "prepared",
+            "standalone_tool_output_shrink_available": true
+        }
+    }))
+    .expect("prepared review should decode");
+    assert_eq!(
+        direct_compaction_step(&prepared).expect("prepared review should be actionable"),
+        DirectCompactionStep::Prepare("preview-local".to_owned())
+    );
+
+    let ready: NativeCompactionReview = serde_json::from_value(serde_json::json!({
+        "preview_id": "preview-summary",
+        "folded_event_count": 4,
+        "retained_event_count": 2,
+        "admission": {
+            "kind": "ready",
+            "economics": {
+                "before_input_tokens": 200,
+                "target_input_tokens": 100,
+                "context_window_tokens": 1000,
+                "output_tokens": 20,
+                "safety_buffer_tokens": 10,
+                "savings_tokens": 100,
+                "savings_ratio_ppm": 500000,
+                "minimum_savings_tokens": 10,
+                "minimum_savings_ratio_ppm": 10000,
+                "summary_cache_read_tokens": 80,
+                "summary_uncached_input_tokens": 20,
+                "summary_output_tokens": 8
+            }
+        }
+    }))
+    .expect("ready review should decode");
+    assert_eq!(
+        direct_compaction_step(&ready).expect("ready review should be actionable"),
+        DirectCompactionStep::Apply("preview-summary".to_owned())
+    );
+}
+
+#[test]
+fn direct_compaction_handles_noop_and_unavailable_states_without_applying() {
+    let nothing: NativeCompactionReview = serde_json::from_value(serde_json::json!({
+        "folded_event_count": 0,
+        "retained_event_count": 2,
+        "admission": {
+            "kind": "no_foldable_history",
+            "durable_message_count": 2,
+            "configured_tail_message_count": 2
+        }
+    }))
+    .expect("no-op review should decode");
+    assert_eq!(
+        direct_compaction_step(&nothing).expect("no-op should remain successful"),
+        DirectCompactionStep::NothingToCompact
+    );
+
+    let unavailable: NativeCompactionReview = serde_json::from_value(serde_json::json!({
+        "folded_event_count": 0,
+        "retained_event_count": 2,
+        "admission": {
+            "kind": "unavailable",
+            "reason": "provider unavailable"
+        }
+    }))
+    .expect("unavailable review should decode");
+    assert_eq!(
+        direct_compaction_step(&unavailable)
+            .expect_err("unavailable compaction should fail")
+            .code,
+        "compaction_unavailable"
+    );
+}

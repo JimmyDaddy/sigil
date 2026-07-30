@@ -102,12 +102,14 @@ impl AppState {
         self.poll_setup_model_catalog()
             | self.poll_connection_inventory()
             | self.reload_active_agent_child_transcript()
+            | self.poll_update_task()
     }
 
     pub fn has_pending_background_tasks(&self) -> bool {
         self.runtime.setup_model_catalog_rx.is_some()
             || self.runtime.connection_inventory_rx.is_some()
             || self.active_agent_child_entry().is_some()
+            || self.has_pending_update_task()
     }
 
     #[cfg(test)]

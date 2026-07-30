@@ -877,12 +877,11 @@ TUI 使用用户可理解的状态，不直接显示 provider 内部术语：
 - `整理收益不足 · 保持当前上下文`
 - `无法安全整理 · 需要处理超大当前步骤`
 
-### 15.2 Preview
+### 15.2 Progress and receipt
 
-手动 `/compact` 或需要用户确认时，preview 至少展示：
+手动 `/compact` 将命令本身视为用户对一次 semantic compact 的明确意图，不再增加 modal confirmation。执行过程必须展示非阻塞进度；终态回执至少包含 folded message 数、compaction id，以及失败时的精确拒绝原因。内部 admission evidence 继续覆盖：
 
-- 当前 active objective；
-- 将原样保留的 active constraints 及其来源；
+- 当前 active objective 与 active constraints 的来源；
 - fold range、完整 turn 数和 token；
 - recent tail 的 turn/token；
 - tool artifacts/shrink 数量；
@@ -891,13 +890,14 @@ TUI 使用用户可理解的状态，不直接显示 provider 内部术语：
 - native carrier 是否可用；
 - unresolved/approval/queued input 是否被保护。
 
-### 15.3 Confirmation
+该 evidence 用于 fail-closed 校验、审计和诊断，不要求用户在正常路径上重复确认。大型工具输出清理保持独立的确定性维护能力，不与一次 semantic `/compact` 混为同一个选择弹窗。
 
-- manual semantic compact：默认 preview + confirm；
+### 15.3 Activation
+
+- manual semantic compact：单次 `/compact` 生成、校验并原子激活；无可折叠历史、摘要失败、token/economics 不准入或 source frontier 过期时保持当前 epoch 不变；
 - fit-required automatic compact：只在 idle safe boundary 执行并发出可展开通知；
 - tool call 正在运行或 approval 未决：延迟，不弹出打断式 modal；
 - overflow recovery：明确告诉用户这是一次恢复动作及是否发生 provider consumption；
-- 用户可以选择“继续使用当前上下文”“只清理大工具输出”“执行完整整理”。
 
 Desktop 如展示相同功能，必须消费与 TUI 相同的 typed state，不另造 compact semantics。
 

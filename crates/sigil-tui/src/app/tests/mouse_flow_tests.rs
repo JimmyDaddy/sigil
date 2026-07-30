@@ -1428,28 +1428,21 @@ fn mouse_down_then_release_slash_candidate_does_not_execute_release_again() -> R
 }
 
 #[test]
-fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
+fn mouse_click_compact_candidate_starts_without_confirmation() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/compact");
 
-    let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
-
-    assert!(matches!(first, AppMouseOutcome::Redraw));
-    assert_eq!(app.composer.input, "/compact");
-    assert_eq!(app.last_notice(), Some("click again to confirm /compact"));
-
-    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/compact");
-    let second = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(
-        second,
-        AppMouseOutcome::Action(AppAction::PreviewV2Compaction)
+        outcome,
+        AppMouseOutcome::Action(AppAction::StartV2Compaction)
     ));
     assert!(app.composer.input.is_empty());
+    assert_eq!(app.last_notice(), Some("Compacting context…"));
     Ok(())
 }
 
@@ -1552,14 +1545,14 @@ fn mouse_click_background_path_is_noop_without_state_change() -> Result<()> {
 }
 
 #[test]
-fn keyboard_enter_dangerous_slash_command_needs_no_mouse_confirmation() -> Result<()> {
+fn keyboard_enter_compact_command_starts_without_confirmation() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/compact".to_owned();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
-    assert!(matches!(action, Some(AppAction::PreviewV2Compaction)));
-    assert_eq!(app.last_notice(), Some("V2 compact preview requested"));
+    assert!(matches!(action, Some(AppAction::StartV2Compaction)));
+    assert_eq!(app.last_notice(), Some("Compacting context…"));
     Ok(())
 }
 

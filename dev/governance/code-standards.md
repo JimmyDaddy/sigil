@@ -4,12 +4,15 @@
 
 ## 1. 总体原则
 
-### 1.1 TUI-first，不是 command-first
+### 1.1 交互产品优先，不是 command-first
 
-- 面向普通用户的主要产品表面是 TUI，默认通过 `sigil` 无子命令启动
+- Desktop 与 TUI 是面向普通用户的并列一等产品表面；`sigil` 无子命令启动 TUI
+  只是终端 binary 的默认行为，不表示产品层级
 - 子命令可以存在，但默认只承担自动化、调试、脚本入口
-- 新能力优先考虑如何进入 TUI 交互，而不是先加顶层命令
-- TUI 主路径必须优先表达用户目标，不直接暴露内部执行阶段、低频调试开关或策略矩阵
+- 新能力先定义共享的 application/kernel 语义，再决定如何进入 Desktop 与 TUI，
+  而不是先加顶层命令或只在一个表面实现
+- Desktop 与 TUI 主路径必须优先表达用户目标，不直接暴露内部执行阶段、
+  低频调试开关或策略矩阵
 - 面向普通用户的操作应优先收敛为少量粗粒度动作；细粒度规则、兼容性开关和高级策略默认留在配置文件、doctor、独立高级面板或显式高级流程中
 - 新增 footer action、菜单项、slash command 或 config field 前，必须先判断它是否是高频用户决策；如果只是内部机制或低频排障能力，不应进入默认主流程
 
@@ -18,6 +21,7 @@
 - `crates/sigil-kernel` 只能承载通用概念
 - 不要把 `DeepSeek`、`beta endpoint`、`reasoning_content` 这类 provider 私有术语直接做成 kernel 公共 API
 - provider-specific 行为应留在 `crates/sigil-provider-deepseek`
+- provider 共用传输能力应留在 `crates/sigil-provider-http`；它只能装配安全 HTTP client 和显式 CA bundle，不承载协议或模型语义，也不得关闭证书链或主机名校验
 
 ### 1.3 append-only 与可审计
 

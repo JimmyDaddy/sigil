@@ -231,7 +231,7 @@ function FixtureSurface({
             onOpenSupport={() => undefined}
             onOpenAgentWorkbench={() => undefined}
             onOpenQueue={() => undefined}
-            onPreviewCompaction={() => undefined}
+            onCompact={() => Promise.resolve(true)}
             onOpenIntentStack={() => undefined}
             onNotice={() => undefined}
             onPermissionModeChange={setPermissionMode}

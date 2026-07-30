@@ -127,7 +127,7 @@ module PublicDocContent
   ].freeze
 
   INSTALL_COMMANDS = [
-    /npm\s+install\s+-g\s+@sigil-ai\/sigil@alpha/i,
+    /npm\s+install\s+-g\s+@sigil-ai\/sigil@beta/i,
     /brew\s+install\s+\S*sigil/i,
     /cargo\s+install\s+--git\b/i,
     /cargo\s+install\s+--path\b/i,

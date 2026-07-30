@@ -19,6 +19,9 @@ pub use provider::OpenAiCompatibleProvider;
 #[cfg(test)]
 #[path = "tests/catalog_tests.rs"]
 mod catalog_tests;
+#[cfg(test)]
+#[path = "tests/client_tests.rs"]
+mod client_tests;
 
 #[cfg(test)]
 pub(crate) mod test_env {

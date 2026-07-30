@@ -9,7 +9,8 @@ below explain how Sigil is engineered and why its internal boundaries exist.
 - [Code standards](../governance/code-standards.md): Rust style, crate
   boundaries, error handling, tests, and minimum checks.
 - [Engineering standards](../governance/engineering-standards.md): change
-  workflow, quality-gate selection, documentation sync, and TUI product rules.
+  workflow, quality-gate selection, documentation sync, and cross-surface
+  product rules.
 - [Repository agent instructions](../../AGENTS.md): the short repository-wide
   constraints that apply before any code change.
 - [Contributing guide](../../CONTRIBUTING.md): public contribution and pull
@@ -21,7 +22,7 @@ below explain how Sigil is engineered and why its internal boundaries exist.
 
 - [Rust agent core technical solution](sigil-rust-agent-core-technical-solution.md):
   current crate ownership, provider-neutral contracts, event/session model, and
-  TUI-first architecture.
+  shared Desktop/TUI architecture.
 - [Capability roadmap](sigil-capability-roadmap.md): frozen capability baseline
   and the evidence gates that govern later work.
 - [TUI mouse interaction design](sigil-tui-mouse-interaction-design.md): mouse

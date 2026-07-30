@@ -37,13 +37,13 @@ The demo proves three things in order:
 | 00:11–00:16 | Pause on the write approval, affected file, and exact diff, then approve once. | `Review the exact diff before writing.` |
 | 00:16–00:36 | Show the applied edit, the real search tool result with zero old-command matches, and the final summary. | `Approve once. Sigil applies the edit and verifies the result.` |
 | 00:36–00:41 | Open `/resume` long enough to show the saved session row. | `Resume the saved repository session later.` |
-| 00:41–00:45 | Cut to the branded end card with the install command and website. | `npm install -g @sigil-ai/sigil@alpha`<br>`sigil.corerobin.com` |
+| 00:41–00:45 | Cut to the branded end card with the install command and website. | `npm install -g @sigil-ai/sigil@beta`<br>`sigil.corerobin.com` |
 
 ## Exact Demo Prompt
 
 ```text
 The README still uses the old install command `npm install -g sigil`.
-Replace only that command with `npm install -g @sigil-ai/sigil@alpha`,
+Replace only that command with `npm install -g @sigil-ai/sigil@beta`,
 show me the diff before writing, then verify that no old install command remains.
 ```
 
@@ -67,7 +67,7 @@ approval stays narrow and the verification result is unambiguous.
 - Every product interaction comes from the real TUI.
 - The diff is readable at normal playback speed.
 - No secret, personal path, provider balance, or unrelated repository data is visible.
-- The command uses the `@alpha` dist-tag.
+- The command uses the `@beta` dist-tag.
 - The published MP4 and WebM are 1920 × 1080 and 43–47 seconds long.
 - English and Simplified Chinese WebVTT caption tracks cover the complete run.
 - The end card uses `assets/social/sigil-social-preview.png` as its visual base.

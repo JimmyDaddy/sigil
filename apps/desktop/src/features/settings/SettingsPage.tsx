@@ -22,6 +22,7 @@ import {
   type ProviderMigrationRecoveryBlock,
 } from "./LegacyProviderMigration";
 import { ProviderSetup } from "./ProviderSetup";
+import { DesktopUpdateCard } from "./DesktopUpdateCard";
 
 const themeOptions: readonly ThemePreference[] = [
   "system",
@@ -364,6 +365,8 @@ export function SettingsPage({
             onChange={(event) => updateStartup(event.currentTarget.checked)}
           />
         </section>
+
+        <DesktopUpdateCard bridge={bridge} />
 
         <section className="settings-section settings-boundary" aria-labelledby="settings-runtime">
           <div className="settings-section-heading">

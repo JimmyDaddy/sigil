@@ -16,6 +16,29 @@ export interface DesktopBootstrap {
   appearance: AppearanceSnapshot;
 }
 
+export type DesktopUpdatePhase =
+  | "unsupported"
+  | "idle"
+  | "checking"
+  | "up_to_date"
+  | "available"
+  | "downloading"
+  | "installing"
+  | "ready_to_restart"
+  | "error";
+
+export interface DesktopUpdateSnapshot {
+  phase: DesktopUpdatePhase;
+  channel: "beta";
+  currentVersion: string;
+  version?: string;
+  notes?: string;
+  publishedAt?: string;
+  downloadedBytes: number;
+  totalBytes?: number;
+  errorCode?: string;
+}
+
 export interface WorkspaceSelection {
   cancelled: boolean;
   workspace?: WorkspaceSummary;
@@ -417,6 +440,12 @@ export interface CompactionReceipt {
   toolOutputProjectionRecorded: boolean;
   nativeCarrierMaterialized: boolean;
   nativeCarrierStatus?: string;
+}
+
+export interface CompactionExecutionSummary {
+  outcome: "applied" | "nothing_to_compact";
+  recovery: ConversationRecoveryView;
+  compaction?: CompactionReceipt;
 }
 
 export interface ToolOutputShrinkReceipt {

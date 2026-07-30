@@ -26,7 +26,7 @@ SPEC.loader.exec_module(MODULE)
 
 def passed_checks() -> dict[str, object]:
     return {
-        "provider_request_count": 6,
+        "provider_request_count": 5,
         "live_final_reply_screen_count": 1,
         "resumed_final_reply_screen_count": 1,
         "source_final_answer_count": 1,
@@ -146,7 +146,7 @@ class AdmissionTests(unittest.TestCase):
             "release",
         )
         args = argparse.Namespace(
-            expected_version="0.0.1-alpha.6",
+            expected_version="0.0.1-beta.1",
             expected_commit=None,
             expected_binary_sha256=None,
         )
@@ -186,7 +186,7 @@ class AdmissionTests(unittest.TestCase):
 
 
 class IsolationTests(unittest.TestCase):
-    def test_default_compaction_phase_removes_custom_provider_routes(self) -> None:
+    def test_compaction_phase_can_preserve_the_exact_session_route(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = root / "sigil.toml"
@@ -197,11 +197,73 @@ class IsolationTests(unittest.TestCase):
                 "session_dir": root / "sessions",
             }
             MODULE.write_config(config, **common, port=43123)
-            self.assertIn('base_url = "http://127.0.0.1:43123"', config.read_text())
-            MODULE.write_config(config, **common, port=None)
-            default_config = config.read_text(encoding="utf-8")
-            self.assertNotIn("base_url", default_config)
-            self.assertIn('mode = "auto-edit"', default_config)
+            active_config = config.read_text(encoding="utf-8")
+            self.assertIn("config_version = 2", active_config)
+            self.assertIn('connection = "stateful-fixture"', active_config)
+            self.assertIn('provider = "deepseek"', active_config)
+            self.assertIn('protocol = "deepseek"', active_config)
+            self.assertIn('base_url = "https://api.deepseek.com"', active_config)
+            MODULE.write_config(config, **common, port=43123)
+            resumed_config = config.read_text(encoding="utf-8")
+            self.assertEqual(resumed_config, active_config)
+            self.assertIn(
+                'credential = { source = "environment", '
+                'name = "SIGIL_API_KEY" }',
+                resumed_config,
+            )
+            self.assertIn('mode = "auto-edit"', resumed_config)
+
+    def test_semantic_title_request_is_not_counted_as_a_history_turn(self) -> None:
+        self.assertTrue(
+            MODULE.is_semantic_title_request(
+                {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Generate a concise semantic title for a coding-agent "
+                                "conversation"
+                            ),
+                        }
+                    ],
+                    "tools": [],
+                }
+            )
+        )
+        self.assertFalse(
+            MODULE.is_semantic_title_request(
+                {
+                    "messages": [{"role": "user", "content": "ordinary history turn"}],
+                    "tools": [],
+                }
+            )
+        )
+
+    def test_semantic_compaction_output_is_grounded_in_the_source_index(self) -> None:
+        output = MODULE.semantic_compaction_output(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Return a semantic continuation summary.\n"
+                            'SOURCE_INDEX=[{"event_id":"event-1"}]'
+                        ),
+                    }
+                ]
+            }
+        )
+        self.assertIsNotNone(output)
+        payload = json.loads(output or "{}")
+        self.assertEqual(
+            payload["model_notes"][0]["source_event_ids"],
+            ["event-1"],
+        )
+        self.assertIsNone(
+            MODULE.semantic_compaction_output(
+                {"messages": [{"role": "user", "content": "ordinary request"}]}
+            )
+        )
 
     def test_isolated_environment_drops_credentials_and_closes_ambient_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -211,9 +273,31 @@ class IsolationTests(unittest.TestCase):
                 clear=False,
             ):
                 env = MODULE.isolated_environment(Path(temporary))
-            self.assertNotIn("SIGIL_API_KEY", env)
+            self.assertEqual(
+                env["SIGIL_API_KEY"],
+                "stateful-fixture-key",
+            )
             self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:9")
             self.assertEqual(env["NO_PROXY"], "127.0.0.1,localhost")
+            self.assertEqual(env["SSL_CERT_FILE"], str(Path(temporary) / "tls-ca.pem"))
+
+    def test_local_tls_identity_is_private_and_trustable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            certificate, private_key = MODULE.generate_fixture_tls_identity(Path(temporary))
+            self.assertTrue(certificate.read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----"))
+            self.assertTrue(
+                (Path(temporary) / "tls-ca.pem")
+                .read_text(encoding="utf-8")
+                .startswith("-----BEGIN CERTIFICATE-----")
+            )
+            self.assertEqual(private_key.stat().st_mode & 0o777, 0o600)
+
+    def test_isolated_environment_can_route_default_tls_origin_to_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env = MODULE.isolated_environment(Path(temporary), 43123)
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:43123")
+        self.assertEqual(env["https_proxy"], "http://127.0.0.1:43123")
+        self.assertEqual(env["NO_PROXY"], "127.0.0.1,localhost")
 
 
 @unittest.skipUnless(os.name == "posix", "PTY descendant cleanup requires POSIX")

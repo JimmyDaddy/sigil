@@ -141,7 +141,7 @@ fi
 formula="$(
   cat <<FORMULA
 class ${formula_class} < Formula
-  desc "TUI-first Rust AI coding agent"
+  desc "Rust AI coding agent with Desktop and TUI experiences"
   homepage "https://github.com/JimmyDaddy/sigil"
   version "${version}"
   license "MIT"

@@ -129,6 +129,25 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
         ? { protocolVersion: 2, workspaces: [], recentWorkspaces: [] }
         : await bootstrap()),
     }),
+    updateState: async () => ({
+      phase: "unsupported",
+      channel: "beta",
+      currentVersion: "0.0.1-alpha.6",
+      downloadedBytes: 0,
+    }),
+    checkForUpdate: async () => ({
+      phase: "unsupported",
+      channel: "beta",
+      currentVersion: "0.0.1-alpha.6",
+      downloadedBytes: 0,
+    }),
+    downloadAndInstallUpdate: async () => ({
+      phase: "unsupported",
+      channel: "beta",
+      currentVersion: "0.0.1-alpha.6",
+      downloadedBytes: 0,
+    }),
+    restartAfterUpdate: async () => undefined,
     setAppearance: async (preference) => ({
       preference,
       resolvedTheme: preference === "system" ? "sigil_dark" : preference,
@@ -365,6 +384,18 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
         },
       },
     }),
+    compactConversation: async () => ({
+      outcome: "applied",
+      recovery: { checkpoints: [], forkPoints: [], throughStreamSequence: 1 },
+      compaction: {
+        compactionId: "compaction-test",
+        attemptId: "attempt-test",
+        taskMemoryId: "task-memory-test",
+        foldedEventCount: 4,
+        toolOutputProjectionRecorded: true,
+        nativeCarrierMaterialized: false,
+      },
+    }),
     checkpointRestorePreview: async (_workspaceId, input) => ({
       checkpointId: input.checkpointId,
       checkpointDigest: input.checkpointDigest,
@@ -477,6 +508,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     subscribeRunEvents: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     subscribeAppearance: async () => () => undefined,
+    subscribeUpdate: async () => () => undefined,
     ...remainingOverrides,
   };
 }
@@ -2929,6 +2961,122 @@ describe("desktop workspace and history shell", () => {
     expect(displayQueries).toEqual([undefined, "cursor-before-3"]);
   });
 
+  it("recovers an initial canonical display after a bounded transient retry", async () => {
+    const user = userEvent.setup();
+    const display = vi.fn()
+      .mockRejectedValueOnce({
+        code: "conversation_display_unavailable",
+        message: "Canonical conversation history is temporarily unavailable.",
+      })
+      .mockResolvedValue({
+        schemaVersion: 1,
+        requestScope: "transient-display-scope",
+        throughSessionStreamSequence: "2",
+        totalItems: "1",
+        items: [{
+          schemaVersion: 1,
+          displayId: "recovered-message",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          sourceEventId: "event-recovered-message",
+          kind: "assistant_message",
+          source: "durable_transcript",
+          runId: "run-fast",
+          status: "succeeded",
+          content: {
+            type: "message",
+            role: "assistant",
+            text: "Fast run recovered from the transient display window.",
+            assistantPhase: "final_answer",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 53,
+          },
+        }],
+        hasMore: false,
+        gapFacts: [],
+      });
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "transient-display.jsonl",
+          sessionId: "durable-transient-display",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Transient display session",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({
+        id: "http-transient-display",
+        label: "Transient display session",
+        runCount: 1,
+      }),
+      display,
+    });
+    render(<App bridge={bridge} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Transient display session/ }));
+
+    expect(await screen.findByText(
+      "Fast run recovered from the transient display window.",
+    )).toBeTruthy();
+    expect(display).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Saved messages are unavailable")).toBeNull();
+  });
+
+  it("preserves a non-transient canonical display error without retrying it", async () => {
+    const user = userEvent.setup();
+    const display = vi.fn().mockRejectedValue({
+      code: "conversation_display_cursor_invalid",
+      message: "The canonical display cursor is invalid.",
+    });
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "invalid-display.jsonl",
+          sessionId: "durable-invalid-display",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Invalid display session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({
+        id: "http-invalid-display",
+        label: "Invalid display session",
+        runCount: 1,
+      }),
+      display,
+    });
+    render(<App bridge={bridge} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Invalid display session/ }));
+
+    expect(await screen.findByText("Saved messages are unavailable")).toBeTruthy();
+    expect(screen.getByText("The canonical display cursor is invalid.")).toBeTruthy();
+    expect(display).toHaveBeenCalledOnce();
+  });
+
   it("reattaches an active run after listeners and restores bounded controls with honest gaps", async () => {
     const user = userEvent.setup();
     const order: string[] = [];
@@ -2973,6 +3121,7 @@ describe("desktop workspace and history shell", () => {
       replayed: false,
     }));
     let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let statusListener: ((status: RunStreamStatus) => void) | undefined;
     let cancelledRun = "";
     const activeEvent: TimelineEvent = {
       workspaceId: workspace.id,
@@ -3044,8 +3193,9 @@ describe("desktop workspace and history shell", () => {
         eventListener = listener;
         return () => undefined;
       },
-      subscribeRunStreamStatus: async () => {
+      subscribeRunStreamStatus: async (listener) => {
         order.push("status");
+        statusListener = listener;
         return () => undefined;
       },
       attachRun: async (_workspaceId, input) => {
@@ -3105,6 +3255,30 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getAllByText("Resume this work")).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: "Stop run" }));
     expect(cancelledRun).toBe("run-active");
+
+    act(() => statusListener?.({
+      workspaceId: workspace.id,
+      sessionId: "http-session-active",
+      runId: "run-active",
+      state: "error",
+      message: "Live progress is recovering.",
+    }));
+    expect(await screen.findByText("Live controls need attention")).toBeTruthy();
+    await user.type(composer, "Queue while live controls recover");
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(commandConversationQueue).toHaveBeenLastCalledWith(
+      workspace.id,
+      {
+        sessionId: "http-session-active",
+        expectedGeneration: "queue-v1:0:initial",
+        action: {
+          action: "enqueue",
+          prompt: "Queue while live controls recover",
+          kind: "chat",
+          reasoningEffort: undefined,
+        },
+      },
+    ));
   });
 
   it.each(["event", "status"] as const)(
@@ -3534,7 +3708,7 @@ describe("desktop workspace and history shell", () => {
 
     expect(await screen.findByText("Keep this conversation")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: /^Keep this conversation/ }));
-    expect(await screen.findByRole("heading", { name: "Durable session" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Keep this conversation" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Filters" }));
     await user.type(screen.getByRole("textbox", { name: "Provider" }), "deepseek");
     expect(screen.getByText("1 active filter")).toBeTruthy();
@@ -3543,7 +3717,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("Clear")).toBeNull();
     await user.click(clearActiveFilters);
     expect(screen.queryByText("1 active filter")).toBeNull();
-    expect(screen.getByRole("heading", { name: "Durable session" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Keep this conversation" })).toBeTruthy();
   });
 
   it("renames and explicitly confirms deletion from the conversation action menu", async () => {
@@ -3615,6 +3789,64 @@ describe("desktop workspace and history shell", () => {
     const deleted = await screen.findByText("Conversation deleted.");
     expect(deleted.closest(".sg-toast-success")).toBeTruthy();
     expect(document.querySelector(".session-notice")).toBeNull();
+  });
+
+  it("keeps the active conversation heading synchronized with the durable catalog title", async () => {
+    let catalogTitle = "Managed conversation";
+    const renameSession = vi.fn(async (
+      _workspaceId: string,
+      input: { sessionRef: string; sessionId: string; displayName: string },
+    ) => {
+      catalogTitle = input.displayName;
+      return {
+        sessionRef: input.sessionRef,
+        sessionId: input.sessionId,
+        projectionGeneration: 2,
+      };
+    });
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "managed.jsonl",
+          sessionId: "durable-managed",
+          sourceState: "ready",
+          sourceBytes: 1024,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: catalogTitle,
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({
+        id: "http-session-open",
+        label: "Stale server label",
+        runCount: 2,
+      }),
+      renameSession,
+    });
+    const user = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Managed conversation/ }));
+    expect(await screen.findByRole("heading", { name: "Managed conversation" })).toBeTruthy();
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /^Managed conversation/ }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Conversation name" }), {
+      target: { value: "Readable active title" },
+    });
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+
+    expect(await screen.findByRole("heading", { name: "Readable active title" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Readable active title/ })).toBeTruthy();
   });
 
   it("quarantines an invalid source from its context menu after confirmation", async () => {
@@ -3964,6 +4196,74 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("complete")).toBeNull();
     expect(screen.queryByText("Completed")).toBeNull();
     expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
+  });
+
+  it("reloads the durable projection when a newly started run finishes before its owner is observed", async () => {
+    const user = userEvent.setup();
+    let completed = false;
+    const display = vi.fn(async (): Promise<ConversationDisplayPage> => ({
+      schemaVersion: 1,
+      requestScope: "fast-run-scope",
+      throughSessionStreamSequence: completed ? "1" : "0",
+      totalItems: completed ? "1" : "0",
+      items: completed
+        ? [{
+            schemaVersion: 1,
+            displayId: "fast-run-final",
+            displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+            sourceEventId: "event-fast-run-final",
+            kind: "assistant_message",
+            source: "durable_transcript",
+            runId: "run-fast-complete",
+            status: "succeeded",
+            content: {
+              type: "message",
+              role: "assistant",
+              text: "Fast durable completion",
+              assistantPhase: "final_answer",
+              imageAttachmentCount: 0,
+              truncated: false,
+              originalContentBytes: 23,
+            },
+          }]
+        : [],
+      hasMore: false,
+      gapFacts: [],
+    }));
+    const continuity = vi.fn(async (): Promise<ConversationContinuity> => ({
+      durableFrontier: { throughStreamSequence: completed ? 1 : 0 },
+      recoveryActions: [],
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      display,
+      continuity,
+      startRun: async (_workspaceId, sessionId) => {
+        completed = true;
+        return {
+          id: "run-fast-complete",
+          sessionId,
+          status: "running",
+          permissionMode: "manual",
+          streamSequence: 0,
+        };
+      },
+    })} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    const composer = await readyComposer();
+    await user.type(composer, "Finish before attach");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("Fast durable completion", {}, { timeout: 4_000 })).toBeTruthy();
+    expect(display).toHaveBeenCalledTimes(2);
+    expect(continuity.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(screen.queryByText("Finish before attach")).toBeNull();
   });
 
   it("keeps a status-only terminal run finalizing until its interrupted durable frontier is loaded", async () => {
