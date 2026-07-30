@@ -283,7 +283,7 @@ jobs:
 
       - name: Test Windows builtin tools and terminal semantics
         if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-tools-builtin --lib
+        run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
 
       - name: Test Windows runtime integration
         if: runner.os == 'Windows'
@@ -421,8 +421,9 @@ jobs:
 
       - name: Test runtime without recursive coverage instrumentation
         run: >-
+          timeout --kill-after=30s 18m
           cargo test --locked -p sigil-runtime --all-targets
-          -- --test-threads=1
+          -- --test-threads=2
 
   clippy:
     needs: check
