@@ -9,8 +9,8 @@
 - 会话重命名写入 workspace append-only lifecycle journal；删除复用 exact preview/apply，置顶、活动 run 或 verification 会 fail closed。SQLite 仍只是可重建目录投影。
 - CI artifact 只保留七天，用于 dogfood。macOS 使用 ad-hoc 签名；Linux `.deb` 和 Windows NSIS 未进入公开发布工作流。
 - `Desktop Package` 只在 desktop、bundled sidecar 生产代码、构建契约、manifest、toolchain 或 workflow
-  变化时自动运行。`sigil-runtime` 的 test-only 目录由主 CI 的三平台 gate 覆盖，不为纯测试修改重复构建三套
-  installer；需要独立复验 package 时仍可手动 dispatch。
+  变化时自动运行。参与 sidecar 构建的 Rust crate，其 `src/tests`、嵌套 `tests` 与顶层 `tests` 目录统一由主
+  CI 覆盖，不为纯测试修改重复构建三套 installer；需要独立复验 package 时仍可手动 dispatch。
 - V1 不接入 updater。公开分发必须另行完成平台证书、macOS notarization、Windows signing、Linux 依赖风险复核和升级/回滚设计。
 
 ## 2. 前置条件
