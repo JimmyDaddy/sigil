@@ -347,31 +347,19 @@ jobs:
     name: Coverage shard (${{ matrix.name }})
     needs: check
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.timeout_minutes }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: core-tools
             packages: "sigil-kernel sigil-process sigil-tools-builtin sigil-mcp"
-            test-threads: 2
-            timeout_minutes: 30
-          - name: runtime
-            packages: "sigil-runtime"
-            test-threads: 1
-            timeout_minutes: 45
           - name: providers
             packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-openai-responses sigil-provider-anthropic sigil-provider-gemini"
-            test-threads: 2
-            timeout_minutes: 30
           - name: automation-surfaces
             packages: "sigil-code-intel sigil-http sigil"
-            test-threads: 2
-            timeout_minutes: 30
           - name: tui
             packages: "sigil-tui"
-            test-threads: 2
-            timeout_minutes: 30
 
     steps:
       - name: Checkout
@@ -400,7 +388,7 @@ jobs:
       - name: cargo llvm-cov --no-report (${{ matrix.name }})
         run: >-
           COVERAGE_NO_REPORT=1 COVERAGE_PACKAGES="${{ matrix.packages }}"
-          ./scripts/coverage.sh -- --test-threads=${{ matrix.test-threads }}
+          ./scripts/coverage.sh -- --test-threads=2
 
       - name: Archive coverage profiles
         run: tar -C target -czf coverage-${{ matrix.name }}.tar.gz llvm-cov-target
@@ -412,6 +400,29 @@ jobs:
           path: coverage-${{ matrix.name }}.tar.gz
           if-no-files-found: error
           retention-days: 1
+
+  runtime-test:
+    name: Runtime tests
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test runtime without recursive coverage instrumentation
+        run: >-
+          cargo test --locked -p sigil-runtime --all-targets
+          -- --test-threads=1
 
   clippy:
     needs: check
@@ -441,7 +452,9 @@ jobs:
 
   tui-web-v1-pty-acceptance:
     name: TUI Web V1 PTY acceptance
-    needs: test
+    needs:
+      - test
+      - runtime-test
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -475,6 +488,7 @@ jobs:
   coverage:
     needs:
       - test
+      - runtime-test
       - clippy
       - tui-web-v1-pty-acceptance
     runs-on: ubuntu-latest
