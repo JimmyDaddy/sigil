@@ -346,12 +346,15 @@ jobs:
   test:
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: core-runtime-tools
-            packages: "sigil-kernel sigil-process sigil-tools-builtin sigil-mcp sigil-runtime"
+          - name: core-tools
+            packages: "sigil-kernel sigil-process sigil-tools-builtin sigil-mcp"
+          - name: runtime
+            packages: "sigil-runtime"
           - name: providers
             packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-openai-responses sigil-provider-anthropic sigil-provider-gemini"
           - name: automation-surfaces
