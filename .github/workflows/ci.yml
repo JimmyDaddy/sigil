@@ -344,9 +344,10 @@ jobs:
           cargo test --locked -p sigil-runtime native_provider_credential_store_roundtrip_and_cleanup -- --ignored
 
   test:
+    name: Coverage shard (${{ matrix.name }})
     needs: check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
@@ -354,18 +355,23 @@ jobs:
           - name: core-tools
             packages: "sigil-kernel sigil-process sigil-tools-builtin sigil-mcp"
             test-threads: 2
+            timeout_minutes: 30
           - name: runtime
             packages: "sigil-runtime"
             test-threads: 1
+            timeout_minutes: 45
           - name: providers
             packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-openai-responses sigil-provider-anthropic sigil-provider-gemini"
             test-threads: 2
+            timeout_minutes: 30
           - name: automation-surfaces
             packages: "sigil-code-intel sigil-http sigil"
             test-threads: 2
+            timeout_minutes: 30
           - name: tui
             packages: "sigil-tui"
             test-threads: 2
+            timeout_minutes: 30
 
     steps:
       - name: Checkout
