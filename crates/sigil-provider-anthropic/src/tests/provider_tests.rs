@@ -6,8 +6,8 @@ use std::{
 
 use futures::StreamExt;
 use sigil_kernel::{
-    COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionFoldPlan, CompactionId, CompactionInitiation,
-    CompactionSidecarProjection, CompletionRequest, ContinuationItemPriority,
+    AdaptiveTailPolicyV3, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionFoldPlan, CompactionId,
+    CompactionInitiation, CompactionSidecarProjection, CompletionRequest, ContinuationItemPriority,
     ContinuationModelOutputItemV1, ContinuationModelOutputV1, DurableEventType,
     EffectiveTokenBudget, FrozenProviderRequestMaterial, HostedEvidence, HostedToolKind,
     HostedToolLimits, HostedToolRequest, ImageInputCapability, InputTokenEvidence,
@@ -89,8 +89,24 @@ fn seed_portable_checkpoint(
         Vec::new(),
     ))?;
     session.append_user_message(ModelMessage::user("continue with native acceleration"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("native carrier remains optional".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("preserve another complete turn"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("another complete turn is preserved".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("activate native acceleration"))?;
     let records = store.read_event_records_writer()?;
-    let plan = CompactionFoldPlan::from_records_after(&records, 1, None)?;
+    let policy = AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 1,
+        ..AdaptiveTailPolicyV3::default()
+    };
+    let plan =
+        CompactionFoldPlan::from_records_after_adaptive_tail(&records, policy, u64::MAX / 4, None)?;
     let source_event_id = plan
         .folded_event_ids
         .first()
