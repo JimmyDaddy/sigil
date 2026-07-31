@@ -21,7 +21,7 @@ use sigil_kernel::{
     IntentAdmissionContextV1, IntentStackId, JsonlSessionStore, MemoryConfig, ModelMessage,
     MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
+    PlanApprovalPermission, PlanApprovalScope, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
     PlanSourceRef, PlanTaskStartMode, ProviderCapabilities, ReasoningEffort, RootConfig,
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
@@ -38,9 +38,9 @@ use sigil_kernel::{
     ToolSubjectAudit, UserUrlCapabilityRegistrar, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     admit_suggested_decomposition, append_task_intent_plan_admission, bind_task_plan_intents,
     build_workspace_snapshot, default_user_config_dir, discover_candidate_checks_with_user_config,
-    plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
-    rerun_task_verification_check, saturating_elapsed, stable_event_uuid, stable_workspace_id,
-    task_id_from_plan_draft, task_plan_from_plan_draft,
+    plan_draft_created_entry, plan_task_input_from_draft, rerun_task_verification_check,
+    saturating_elapsed, stable_event_uuid, stable_workspace_id, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
 };
 
 use sigil_kernel::session::{
@@ -186,16 +186,16 @@ pub(in crate::runner) use session_transition::{
 };
 pub(in crate::runner) use state::{WorkerLoopState, register_worker_active_projection_observer};
 pub(in crate::runner) use task_runtime::{
-    AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, PlanApprovalRequest,
-    RejectPlanRequest, SkillChildRunSpawn, TaskContinueSpawn, TaskRunSpawn,
-    VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, append_plan_draft,
-    approve_plan, clean_mutation_artifacts, create_task_from_plan, delete_mutation_artifact,
-    ensure_session_workspace_trust, format_mutation_artifact_cleanup_report,
-    format_mutation_artifact_delete_report, load_worker_skill, next_task_id,
-    plan_mode_transient_context, promote_workspace_verification_check, reject_plan,
-    resolve_continue_task, run_admitted_task_to_root_terminal, session_ref_for_log_path,
-    session_workspace_is_trusted, skill_child_session_objective, skill_invocation_prompt,
-    spawn_skill_child_run, spawn_task_continue, spawn_task_run,
+    AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, RejectPlanRequest, SkillChildRunSpawn,
+    TaskContinueSpawn, TaskRunSpawn, VerificationCheckPromotionKind,
+    VerificationCheckPromotionOutcome, append_plan_draft, clean_mutation_artifacts,
+    create_task_from_plan, delete_mutation_artifact, ensure_session_workspace_trust,
+    format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
+    load_worker_skill, next_task_id, plan_mode_transient_context,
+    promote_workspace_verification_check, reject_plan, resolve_continue_task,
+    run_admitted_task_to_root_terminal, session_ref_for_log_path, session_workspace_is_trusted,
+    skill_child_session_objective, skill_invocation_prompt, spawn_skill_child_run,
+    spawn_task_continue, spawn_task_run,
 };
 pub(in crate::runner) use terminal_refresh::{
     cancel_terminal_task, refresh_terminal_task_statuses,

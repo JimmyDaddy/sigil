@@ -13,8 +13,8 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     JsonlSessionStore, SessionListProjectionEntry, SessionListReadinessSummary,
-    SessionListTaskSummary, SessionListUsageSummary, SessionRef, SessionStreamCompatibilityError,
-    safe_persistence_text, session_list_projection_from_records,
+    SessionListTaskSummary, SessionListUsageSummary, SessionRef, safe_persistence_text,
+    session_list_projection_from_records,
 };
 use thiserror::Error as ThisError;
 
@@ -973,15 +973,8 @@ impl SessionCatalogProjectionService {
         }
         let records = match JsonlSessionStore::read_event_records(&candidate.path) {
             Ok(records) => records,
-            Err(error) => {
-                entry.source_state = if error
-                    .downcast_ref::<SessionStreamCompatibilityError>()
-                    .is_some()
-                {
-                    LocalSessionCatalogState::UnsupportedLegacy
-                } else {
-                    LocalSessionCatalogState::Invalid
-                };
+            Err(_) => {
+                entry.source_state = LocalSessionCatalogState::Invalid;
                 return Ok(entry);
             }
         };
@@ -1114,10 +1107,7 @@ fn source_fingerprint_matches(
 ) -> bool {
     (previous.source_state == state
         || (state == LocalSessionCatalogState::Ready
-            && matches!(
-                previous.source_state,
-                LocalSessionCatalogState::Invalid | LocalSessionCatalogState::UnsupportedLegacy
-            )))
+            && previous.source_state == LocalSessionCatalogState::Invalid))
         && previous.source_bytes == candidate.bytes
         && previous.source_modified_at_unix_ms == candidate.modified_at_unix_ms
 }
@@ -1440,23 +1430,6 @@ fn initialize_or_validate_schema(
         tighten_catalog_permissions(database_path)?;
         transaction.execute_batch(CREATE_SCHEMA_SQL)?;
         transaction.pragma_update(None, "application_id", SESSION_CATALOG_APPLICATION_ID)?;
-        transaction.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION)?;
-        transaction.commit()?;
-        return Ok(());
-    }
-    if application_id == SESSION_CATALOG_APPLICATION_ID && user_version == 1 {
-        validate_schema_object_names(&transaction).map_err(|()| {
-            SessionCatalogProjectionError::IncompatibleSchema {
-                application_id,
-                user_version,
-            }
-        })?;
-        transaction.execute(
-            "ALTER TABLE session_catalog_workspace_v1 \
-             ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0 \
-             CHECK (projection_revision >= 0)",
-            [],
-        )?;
         transaction.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION)?;
         transaction.commit()?;
         return Ok(());
@@ -1892,7 +1865,6 @@ fn catalog_state_name(state: LocalSessionCatalogState) -> &'static str {
         LocalSessionCatalogState::Ready => "ready",
         LocalSessionCatalogState::Oversized => "oversized",
         LocalSessionCatalogState::ScanBudgetExceeded => "scan_budget_exceeded",
-        LocalSessionCatalogState::UnsupportedLegacy => "unsupported_legacy",
         LocalSessionCatalogState::Invalid => "invalid",
     }
 }
@@ -1905,7 +1877,6 @@ fn decode_catalog_state(
         "ready" => Ok(LocalSessionCatalogState::Ready),
         "oversized" => Ok(LocalSessionCatalogState::Oversized),
         "scan_budget_exceeded" => Ok(LocalSessionCatalogState::ScanBudgetExceeded),
-        "unsupported_legacy" => Ok(LocalSessionCatalogState::UnsupportedLegacy),
         "invalid" => Ok(LocalSessionCatalogState::Invalid),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             column,

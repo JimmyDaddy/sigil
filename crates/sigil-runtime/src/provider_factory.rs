@@ -7,48 +7,13 @@ use super::*;
 /// Returns an error when the configured provider is unsupported or its provider-specific
 /// configuration cannot be parsed or initialized.
 pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
-    if root_config.config_version.is_some()
-        || !root_config.connections.is_empty()
-        || root_config.agent.connection.is_some()
-    {
-        let root_config = root_config.clone();
-        return block_on_provider_future("build_provider_async", async move {
-            build_provider_async(&root_config).await
-        });
-    }
-    build_legacy_provider(root_config)
+    let root_config = root_config.clone();
+    block_on_provider_future("build_provider_async", async move {
+        build_provider_async(&root_config).await
+    })
 }
 
-fn build_legacy_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
-    let timeouts = root_config.model_request.to_timeouts()?;
-    match provider_config_key(&root_config.agent.provider) {
-        "deepseek" => Ok(Box::new(DeepSeekProvider::new(
-            resolve_deepseek_config(root_config)?,
-            timeouts,
-        )?)),
-        "openai_compat" => Ok(Box::new(OpenAiCompatibleProvider::new(
-            resolve_openai_compat_config(root_config)?,
-            timeouts,
-        )?)),
-        "openai_responses" => Ok(Box::new(OpenAiResponsesProvider::new(
-            resolve_openai_responses_config(root_config)?,
-            timeouts,
-        )?)),
-        "anthropic" => Ok(Box::new(AnthropicProvider::new(
-            resolve_anthropic_config(root_config)?,
-            timeouts,
-        )?)),
-        "gemini" => Ok(Box::new(GeminiProvider::new(
-            resolve_gemini_config(root_config)?,
-            timeouts,
-        )?)),
-        other => Err(anyhow!("unsupported provider {other}")),
-    }
-}
-
-/// Resolves an exact V2 connection credential asynchronously before constructing its provider.
-///
-/// Legacy V1 configs retain their compatibility path until the user explicitly migrates.
+/// Resolves an exact connection credential asynchronously before constructing its provider.
 pub async fn build_provider_async(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
     let credential_store =
         crate::provider_connections::ConfiguredProviderCredentialStore::from_root_config(
@@ -65,11 +30,7 @@ pub async fn build_provider_with_credentials(
     environment: &dyn crate::provider_connections::CredentialEnvironment,
 ) -> Result<Box<dyn Provider>> {
     let loaded = crate::provider_connections::load_provider_connections(root_config);
-    if matches!(
-        loaded.mode,
-        crate::provider_connections::ConfigMode::Mixed
-            | crate::provider_connections::ConfigMode::UnsupportedFuture
-    ) {
+    if loaded.mode != crate::provider_connections::ConfigMode::V2 || !loaded.issues.is_empty() {
         anyhow::bail!(
             "connection_config_invalid: {}",
             loaded
@@ -141,21 +102,8 @@ pub async fn build_provider_for_model_ref_with_credentials(
 
     let loaded = load_provider_connections(root_config);
     match loaded.mode {
-        ConfigMode::LegacyV1 => {
-            let default_model = loaded
-                .default_model
-                .as_ref()
-                .ok_or_else(|| anyhow!("model_route_not_configured"))?;
-            anyhow::ensure!(
-                default_model.connection_id == model_ref.connection_id,
-                "connection_not_found"
-            );
-            let mut exact = root_config.clone();
-            exact.agent.model = model_ref.model_id.clone();
-            return build_legacy_provider(&exact);
-        }
         ConfigMode::V2 => {}
-        ConfigMode::Mixed | ConfigMode::UnsupportedFuture => {
+        ConfigMode::Invalid => {
             anyhow::bail!(
                 "connection_config_invalid: {}",
                 loaded
@@ -522,18 +470,10 @@ fn capability_row(
 ///
 /// Returns an error when the resolved role provider is unsupported or malformed.
 pub fn build_role_provider(root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
-    if root_config.config_version.is_some()
-        || !root_config.connections.is_empty()
-        || root_config.agent.connection.is_some()
-    {
-        let root_config = root_config.clone();
-        return block_on_provider_future("build_role_provider_async", async move {
-            build_role_provider_async(&root_config, role).await
-        });
-    }
-    let role_config = root_config.task.role_config(role);
-    let resolved = root_config_with_role_agent(root_config, role_config);
-    build_provider(&resolved)
+    let root_config = root_config.clone();
+    block_on_provider_future("build_role_provider_async", async move {
+        build_role_provider_async(&root_config, role).await
+    })
 }
 
 fn block_on_provider_future<F>(async_builder: &'static str, future: F) -> Result<Box<dyn Provider>>
@@ -579,119 +519,140 @@ pub async fn build_role_provider_with_credentials(
     environment: &dyn crate::provider_connections::CredentialEnvironment,
 ) -> Result<Box<dyn Provider>> {
     let role_config = root_config.task.role_config(role);
-    if root_config.config_version == Some(sigil_kernel::CONFIG_VERSION_V2) {
-        anyhow::ensure!(
-            role_config.provider.is_none(),
-            "V2 role route cannot contain legacy provider"
-        );
-        let mut resolved = root_config.clone();
-        if let Some(connection) = role_config.connection.as_ref() {
-            resolved.agent.connection = Some(connection.clone());
-        }
-        if let Some(model) = role_config.model.as_deref() {
-            resolved.agent.model = model.to_owned();
-        }
-        return build_provider_with_credentials(&resolved, credential_store, environment).await;
+    let mut resolved = root_config.clone();
+    if let Some(connection) = role_config.connection.as_ref() {
+        resolved.agent.connection = Some(connection.clone());
     }
-    let resolved = root_config_with_role_agent(root_config, role_config);
+    if let Some(model) = role_config.model.as_deref() {
+        resolved.agent.model = model.to_owned();
+    }
     build_provider_with_credentials(&resolved, credential_store, environment).await
 }
 
-/// Parses the DeepSeek provider block from the shared root config.
-///
-/// # Errors
-///
-/// Returns an error when `[providers.deepseek]` is missing or malformed.
+/// Resolves the active DeepSeek connection options from the shared root config.
 pub fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("deepseek")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.deepseek] in sigil.toml"))?;
-    let mut config: DeepSeekProviderConfig = serde_json::from_value(provider_config_value)
-        .context("invalid deepseek provider config")?;
-    config.model = root_config.agent.model.clone();
+    use crate::provider_connections::{ProviderFamily, ProviderProtocol};
+    let (connection, model) = active_connection(root_config)?;
+    anyhow::ensure!(
+        matches!(
+            (connection.provider, connection.protocol),
+            (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek)
+        ),
+        "active connection is not DeepSeek"
+    );
+    let mut config: DeepSeekProviderConfig = exact_connection_provider_config(&connection, None)?;
+    config.model = model;
     Ok(config)
 }
 
-/// Parses the OpenAI-compatible provider block from the shared root config.
-///
-/// # Errors
-///
-/// Returns an error when `[providers.openai_compat]` is missing or malformed.
+/// Resolves the active OpenAI-compatible connection options.
 pub fn load_openai_compat_config(
     root_config: &RootConfig,
 ) -> Result<OpenAiCompatibleProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("openai_compat")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.openai_compat] in sigil.toml"))?;
-    let mut config: OpenAiCompatibleProviderConfig = serde_json::from_value(provider_config_value)
-        .context("invalid openai_compat provider config")?;
-    config.model = root_config.agent.model.clone();
+    use crate::provider_connections::{ProviderFamily, ProviderProtocol};
+    let (connection, model) = active_connection(root_config)?;
+    anyhow::ensure!(
+        matches!(
+            (connection.provider, connection.protocol),
+            (
+                ProviderFamily::Custom | ProviderFamily::OpenAi,
+                ProviderProtocol::OpenAiChatCompletions
+            )
+        ),
+        "active connection is not OpenAI-compatible"
+    );
+    let mut config: OpenAiCompatibleProviderConfig =
+        exact_connection_provider_config(&connection, None)?;
+    config.model = model;
     Ok(config)
 }
 
-/// Parses the OpenAI Responses provider block from the shared root config.
-///
-/// # Errors
-///
-/// Returns an error when `[providers.openai_responses]` is missing or malformed.
+/// Resolves the active OpenAI Responses connection options.
 pub fn load_openai_responses_config(
     root_config: &RootConfig,
 ) -> Result<OpenAiResponsesProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("openai_responses")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.openai_responses] in sigil.toml"))?;
+    use crate::provider_connections::{ProviderFamily, ProviderProtocol};
+    let (connection, model) = active_connection(root_config)?;
+    anyhow::ensure!(
+        matches!(
+            (connection.provider, connection.protocol),
+            (
+                ProviderFamily::OpenAi | ProviderFamily::Custom,
+                ProviderProtocol::OpenAiResponses
+            )
+        ),
+        "active connection is not OpenAI Responses"
+    );
     let mut config: OpenAiResponsesProviderConfig =
-        serde_json::from_value(provider_config_value)
-            .context("invalid openai_responses provider config")?;
-    config.model = root_config.agent.model.clone();
+        exact_connection_provider_config(&connection, None)?;
+    config.model = model;
     Ok(config)
 }
 
-/// Parses the Anthropic provider block from the shared root config.
-///
-/// # Errors
-///
-/// Returns an error when `[providers.anthropic]` is missing or malformed.
+/// Resolves the active Anthropic connection options.
 pub fn load_anthropic_config(root_config: &RootConfig) -> Result<AnthropicProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("anthropic")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.anthropic] in sigil.toml"))?;
-    let mut config: AnthropicProviderConfig = serde_json::from_value(provider_config_value)
-        .context("invalid anthropic provider config")?;
-    config.model = root_config.agent.model.clone();
+    use crate::provider_connections::{ProviderFamily, ProviderProtocol};
+    let (connection, model) = active_connection(root_config)?;
+    anyhow::ensure!(
+        matches!(
+            (connection.provider, connection.protocol),
+            (
+                ProviderFamily::Anthropic,
+                ProviderProtocol::AnthropicMessages
+            )
+        ),
+        "active connection is not Anthropic"
+    );
+    let mut config: AnthropicProviderConfig = exact_connection_provider_config(&connection, None)?;
+    config.model = model;
     Ok(config)
 }
 
-/// Parses the Gemini provider block from the shared root config.
-///
-/// # Errors
-///
-/// Returns an error when `[providers.gemini]` is missing or malformed.
+/// Resolves the active Gemini connection options.
 pub fn load_gemini_config(root_config: &RootConfig) -> Result<GeminiProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("gemini")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.gemini] in sigil.toml"))?;
-    let mut config: GeminiProviderConfig =
-        serde_json::from_value(provider_config_value).context("invalid gemini provider config")?;
-    config.model = root_config.agent.model.clone();
+    use crate::provider_connections::{ProviderFamily, ProviderProtocol};
+    let (connection, model) = active_connection(root_config)?;
+    anyhow::ensure!(
+        matches!(
+            (connection.provider, connection.protocol),
+            (
+                ProviderFamily::Gemini,
+                ProviderProtocol::GeminiGenerateContent
+            )
+        ),
+        "active connection is not Gemini"
+    );
+    let mut config: GeminiProviderConfig = exact_connection_provider_config(&connection, None)?;
+    config.model = model;
     Ok(config)
+}
+
+fn active_connection(
+    root_config: &RootConfig,
+) -> Result<(
+    crate::provider_connections::ProviderConnectionConfig,
+    String,
+)> {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    anyhow::ensure!(
+        loaded.mode == crate::provider_connections::ConfigMode::V2 && loaded.issues.is_empty(),
+        "connection_config_invalid"
+    );
+    let model = loaded
+        .default_model
+        .as_ref()
+        .ok_or_else(|| anyhow!("model_route_not_configured"))?;
+    let connection = loaded
+        .connections
+        .get(&model.connection_id)
+        .ok_or_else(|| anyhow!("connection_not_found"))?;
+    Ok((connection.config.clone(), model.model_id.clone()))
 }
 
 /// Source used for a resolved runtime secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretSource {
     Environment(&'static str),
-    ConfigPlaintext,
     Session,
 }
 
@@ -773,7 +734,7 @@ pub fn resolve_deepseek_api_key(config: &DeepSeekProviderConfig) -> Option<Secre
 
 #[must_use]
 pub fn resolve_deepseek_api_key_with_session(
-    config: &DeepSeekProviderConfig,
+    _config: &DeepSeekProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
     if let Some(value) = read_secret_env(SIGIL_API_KEY_ENV) {
@@ -791,15 +752,7 @@ pub fn resolve_deepseek_api_key_with_session(
             source: SecretSource::Session,
         });
     }
-    config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| SecretResolution {
-            value: value.to_owned(),
-            source: SecretSource::ConfigPlaintext,
-        })
+    None
 }
 
 #[must_use]
@@ -811,7 +764,7 @@ pub fn resolve_openai_compat_api_key(
 
 #[must_use]
 pub fn resolve_openai_compat_api_key_with_session(
-    config: &OpenAiCompatibleProviderConfig,
+    _config: &OpenAiCompatibleProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
     if let Some(value) = read_secret_env(OPENAI_COMPATIBLE_API_KEY_ENV) {
@@ -829,15 +782,7 @@ pub fn resolve_openai_compat_api_key_with_session(
             source: SecretSource::Session,
         });
     }
-    config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| SecretResolution {
-            value: value.to_owned(),
-            source: SecretSource::ConfigPlaintext,
-        })
+    None
 }
 
 #[must_use]
@@ -849,7 +794,7 @@ pub fn resolve_openai_responses_api_key(
 
 #[must_use]
 pub fn resolve_openai_responses_api_key_with_session(
-    config: &OpenAiResponsesProviderConfig,
+    _config: &OpenAiResponsesProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
     if let Some(value) = read_secret_env(OPENAI_RESPONSES_API_KEY_ENV) {
@@ -867,15 +812,7 @@ pub fn resolve_openai_responses_api_key_with_session(
             source: SecretSource::Session,
         });
     }
-    config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| SecretResolution {
-            value: value.to_owned(),
-            source: SecretSource::ConfigPlaintext,
-        })
+    None
 }
 
 #[must_use]
@@ -885,7 +822,7 @@ pub fn resolve_anthropic_api_key(config: &AnthropicProviderConfig) -> Option<Sec
 
 #[must_use]
 pub fn resolve_anthropic_api_key_with_session(
-    config: &AnthropicProviderConfig,
+    _config: &AnthropicProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
     if let Some(value) = read_secret_env(SIGIL_ANTHROPIC_API_KEY_ENV) {
@@ -903,15 +840,7 @@ pub fn resolve_anthropic_api_key_with_session(
             source: SecretSource::Session,
         });
     }
-    config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| SecretResolution {
-            value: value.to_owned(),
-            source: SecretSource::ConfigPlaintext,
-        })
+    None
 }
 
 #[must_use]
@@ -921,7 +850,7 @@ pub fn resolve_gemini_api_key(config: &GeminiProviderConfig) -> Option<SecretRes
 
 #[must_use]
 pub fn resolve_gemini_api_key_with_session(
-    config: &GeminiProviderConfig,
+    _config: &GeminiProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
     if let Some(value) = read_secret_env(SIGIL_GEMINI_API_KEY_ENV) {
@@ -939,44 +868,23 @@ pub fn resolve_gemini_api_key_with_session(
             source: SecretSource::Session,
         });
     }
-    config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| SecretResolution {
-            value: value.to_owned(),
-            source: SecretSource::ConfigPlaintext,
-        })
+    None
 }
 
 #[must_use]
 pub fn secret_redactor_for_root_config(root_config: &RootConfig) -> SecretRedactor {
     let mut redactor = SecretRedactor::empty();
-    if let Ok(config) = load_deepseek_config(root_config)
-        && let Some(api_key) = resolve_deepseek_api_key(&config)
-    {
-        redactor.add_secret(api_key.value);
-    }
-    if let Ok(config) = load_openai_compat_config(root_config)
-        && let Some(api_key) = resolve_openai_compat_api_key(&config)
-    {
-        redactor.add_secret(api_key.value);
-    }
-    if let Ok(config) = load_openai_responses_config(root_config)
-        && let Some(api_key) = resolve_openai_responses_api_key(&config)
-    {
-        redactor.add_secret(api_key.value);
-    }
-    if let Ok(config) = load_anthropic_config(root_config)
-        && let Some(api_key) = resolve_anthropic_api_key(&config)
-    {
-        redactor.add_secret(api_key.value);
-    }
-    if let Ok(config) = load_gemini_config(root_config)
-        && let Some(api_key) = resolve_gemini_api_key(&config)
-    {
-        redactor.add_secret(api_key.value);
+    let connections = crate::provider_connections::load_provider_connections(root_config);
+    for connection in connections.connections.values() {
+        if let crate::provider_connections::CredentialRefConfig::Environment { name } =
+            &connection.config.credential
+            && let Ok(value) = std::env::var(name)
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                redactor.add_secret(value);
+            }
+        }
     }
     redactor
 }
@@ -986,20 +894,6 @@ fn read_secret_env(name: &'static str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-}
-
-fn root_config_with_role_agent(
-    root_config: &RootConfig,
-    role_config: &RoleModelConfig,
-) -> RootConfig {
-    let mut resolved = root_config.clone();
-    if let Some(provider) = role_config.provider.as_deref() {
-        resolved.agent.provider = provider.to_owned();
-    }
-    if let Some(model) = role_config.model.as_deref() {
-        resolved.agent.model = model.to_owned();
-    }
-    resolved
 }
 
 #[must_use]

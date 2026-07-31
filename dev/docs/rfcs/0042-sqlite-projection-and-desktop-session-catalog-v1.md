@@ -4,6 +4,11 @@
 
 创建日期：2026-07-19
 
+### 2026-07-31 current-only cutover
+
+Desktop catalog 当前只打开当前 SQLite application/schema version。本文中的旧 schema 状态和迁移
+讨论仅保留为历史设计记录；非当前数据库不会被升级或读取，用户可删除后由当前版本重建。
+
 基线：
 
 - Projection contract: [RFC-0008](0008-thread-projection-and-agent-graph-observability.md)

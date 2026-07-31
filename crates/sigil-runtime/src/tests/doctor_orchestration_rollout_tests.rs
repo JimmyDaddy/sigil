@@ -5,9 +5,18 @@ use super::*;
 fn root_config() -> RootConfig {
     toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )
     .expect("test config")

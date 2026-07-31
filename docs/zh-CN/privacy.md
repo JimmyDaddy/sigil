@@ -22,7 +22,7 @@ Sigil 在本机运行，但模型服务、Web 路由、MCP 服务端和获准执
 
 <!-- public-doc-topic: credentials-plaintext -->
 
-可以使用[模型服务指南](providers.md#认证优先级)列出的专用环境变量，也可以通过快速设置或 `/config` 把 secret 保存到受保护凭据存储。这里并不是“密钥在任何地方都不落盘”。默认 `file` 与非交互 `auto` 都只使用 owner-only 的 `~/.sigil/credentials.json`；这个专属文件是受权限保护的明文，不是加密。`auto` 不会查询旧的原生系统记录。只有明确需要原生系统存储及其潜在认证界面时才选择严格 `keyring`。V2 配置只保存允许列表中的环境变量名或不透明 stored credential ID。Sigil 永远不会把新输入的 key 写入 `sigil.toml`、workspace、模型缓存、会话日志、快照、普通日志或诊断输出。旧 V1 文件可能已经含有明文；请在 `/config` 中检查并显式迁移，再删除仍含旧值的备份。`sigil doctor` 只报告凭据来源和就绪状态。
+可以使用[模型服务指南](providers.md#认证优先级)列出的专用环境变量，也可以通过快速设置或 `/config` 把 secret 保存到受保护凭据存储。这里并不是“密钥在任何地方都不落盘”。默认 `file` 与非交互 `auto` 都只使用 owner-only 的 `~/.sigil/credentials.json`；这个专属文件是受权限保护的明文，不是加密。只有明确需要原生系统存储及其潜在认证界面时才选择严格 `keyring`。当前配置只保存允许列表中的环境变量名或不透明 stored credential ID。Sigil 永远不会把新输入的 key 写入 `sigil.toml`、workspace、模型缓存、会话日志、快照、普通日志或诊断输出。非当前配置会被拒绝，`/config` 不会打开或迁移它；请直接换成当前模板，并轮换任何可能曾出现在明文文件中的 key。`sigil doctor` 只报告凭据来源和就绪状态。
 
 远端 MCP 服务的 OAuth 凭据存放在系统原生凭据存储中，而不是 TOML 文件里。登录、退出与清除本机凭据的行为见 [MCP 指南](mcp.md)。
 

@@ -56,13 +56,11 @@ use super::{
     HttpLocalServer, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
     HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
     HttpProtocolReplayError, HttpProtocolVersionError, HttpProviderModelRef,
-    HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource, HttpProviderSetupProtocol,
-    HttpProviderSetupSaveRequest, HttpProviderSetupTemplate, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunEventSequencer,
-    HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig,
-    HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
+    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError,
+    HttpRunCancelRequest, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
+    HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
     HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
     HttpSupportContext, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
@@ -289,353 +287,6 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
         .expect("server should join")
         .expect("server should stop cleanly");
     provider_server.abort();
-}
-
-#[tokio::test]
-async fn provider_legacy_migration_is_local_typed_and_idempotently_rejected_after_publish() {
-    let temp = tempfile::tempdir().expect("temporary directory should open");
-    let config_path = temp.path().join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-private"
-
-[providers.deepseek]
-base_url = "https://private.deepseek.example/v1"
-"#,
-    )
-    .expect("legacy config should write");
-    let server = HttpLocalServer::bind(
-        HttpServerConfig::default(),
-        Some("secret-token"),
-        Arc::new(HttpSessionRunRegistry::new(Arc::new(
-            RecordingRunDriver::default(),
-        ))),
-    )
-    .await
-    .expect("listener should bind")
-    .with_support_context(HttpSupportContext::new(
-        &config_path,
-        temp.path(),
-        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
-    ));
-    let address = server.local_addr().expect("address should resolve");
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let serving = tokio::spawn(async move {
-        server
-            .serve_until_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-    });
-
-    let (status, inventory) = http_raw_request(
-        address,
-        http_get("/settings/provider-connections", Some("secret-token"), None),
-    )
-    .await;
-    assert_eq!(status, 200);
-    let revision = inventory["legacy_migration"]["revision"]
-        .as_str()
-        .expect("legacy inventory should expose an opaque revision");
-    assert_eq!(
-        inventory["legacy_migration"]["environment_reference_count"],
-        1
-    );
-    let recovery_marker = temp
-        .path()
-        .join("sigil.toml.provider-migration-recovery-v1");
-    fs::write(&recovery_marker, b"invalid-recovery-state")
-        .expect("invalid recovery marker should write");
-    let (status, recovery_unavailable) = http_raw_request(
-        address,
-        http_post(
-            "/settings/provider-connections/migrate-legacy",
-            Some("secret-token"),
-            &json!({ "expected_revision": revision }).to_string(),
-        ),
-    )
-    .await;
-    assert_eq!(status, 503);
-    assert_eq!(
-        recovery_unavailable["error"]["code"],
-        "provider_migration_recovery_unavailable"
-    );
-    for (path, body) in [
-        (
-            "/settings/provider-connections/catalog",
-            json!({
-                "template": "open_ai_compatible",
-                "protocol": "chat_completions",
-                "endpoint": "http://127.0.0.1:11434/v1",
-                "credential_source": "none"
-            }),
-        ),
-        (
-            "/settings/provider-connections",
-            json!({
-                "template": "open_ai_compatible",
-                "protocol": "chat_completions",
-                "endpoint": "http://127.0.0.1:11434/v1",
-                "credential_source": "none",
-                "model_id": "local-model"
-            }),
-        ),
-    ] {
-        let (status, setup_recovery_unavailable) = http_raw_request(
-            address,
-            http_post(path, Some("secret-token"), &body.to_string()),
-        )
-        .await;
-        assert_eq!(status, 503);
-        assert_eq!(
-            setup_recovery_unavailable["error"]["code"],
-            "provider_migration_recovery_unavailable"
-        );
-    }
-    fs::remove_file(recovery_marker).expect("invalid recovery marker should remove");
-    let (status, migrated) = http_raw_request(
-        address,
-        http_post(
-            "/settings/provider-connections/migrate-legacy",
-            Some("secret-token"),
-            &json!({ "expected_revision": revision }).to_string(),
-        ),
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(migrated["migrated_connection_count"], 1);
-    assert_eq!(migrated["moved_inline_credential_count"], 0);
-    assert_eq!(migrated["preserved_environment_reference_count"], 1);
-    assert_eq!(migrated["outcome"], "published");
-    assert_eq!(migrated["inventory"]["config_mode"], "v2");
-    assert_eq!(
-        migrated["default_model"],
-        json!({
-            "connection_id": "deepseek-default",
-            "model_id": "deepseek-private"
-        })
-    );
-    let persisted = fs::read_to_string(&config_path).expect("migrated config should read");
-    assert!(persisted.contains("config_version = 2"));
-    assert!(persisted.contains("https://private.deepseek.example/v1"));
-    assert!(!persisted.contains("[providers.deepseek]"));
-
-    let (status, rejected) = http_raw_request(
-        address,
-        http_post(
-            "/settings/provider-connections/migrate-legacy",
-            Some("secret-token"),
-            &json!({ "expected_revision": revision }).to_string(),
-        ),
-    )
-    .await;
-    assert_eq!(status, 409);
-    assert_eq!(rejected["error"]["code"], "provider_migration_stale");
-
-    fs::remove_file(&config_path).expect("published config should remove for stale-read coverage");
-    let (status, missing) = http_raw_request(
-        address,
-        http_post(
-            "/settings/provider-connections/migrate-legacy",
-            Some("secret-token"),
-            &json!({ "expected_revision": revision }).to_string(),
-        ),
-    )
-    .await;
-    assert_eq!(status, 409);
-    assert_eq!(missing["error"]["code"], "provider_migration_stale");
-
-    let (status, invalid) = http_raw_request(
-        address,
-        http_post(
-            "/settings/provider-connections/migrate-legacy",
-            Some("secret-token"),
-            r#"{"unexpected":true}"#,
-        ),
-    )
-    .await;
-    assert_eq!(status, 400);
-    assert_eq!(
-        invalid["error"]["code"],
-        "invalid_provider_migration_request"
-    );
-
-    shutdown_tx.send(()).expect("shutdown should signal");
-    serving
-        .await
-        .expect("server should join")
-        .expect("server should stop cleanly");
-}
-
-#[test]
-fn provider_migration_recovery_survives_context_restart_until_healthy_recheck() {
-    let temp = tempfile::tempdir().expect("temporary directory should open");
-    let config_path = temp.path().join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"config_version = 2
-
-[agent]
-connection = "local"
-model = "local-model"
-
-[connections.local]
-label = "Local loopback"
-provider = "custom"
-protocol = "chat_completions"
-base_url = "http://127.0.0.1:11434/v1"
-credential = { source = "none" }
-"#,
-    )
-    .expect("healthy V2 config should write");
-    fs::write(
-        temp.path()
-            .join("sigil.toml.provider-migration-recovery-v1"),
-        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
-    )
-    .expect("recovery marker should write");
-    let build = || SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug");
-
-    let first = HttpSupportContext::new(&config_path, temp.path(), build());
-    assert!(
-        first
-            .provider_connections()
-            .expect("first context inventory")
-            .issues
-            .iter()
-            .any(|issue| issue.code == "provider_migration_reconcile_required")
-    );
-    drop(first);
-
-    let restarted = HttpSupportContext::new(&config_path, temp.path(), build());
-    assert!(
-        restarted
-            .provider_connections()
-            .expect("restarted context inventory")
-            .issues
-            .iter()
-            .any(|issue| issue.code == "provider_migration_reconcile_required")
-    );
-    let rechecked = restarted
-        .recheck_legacy_provider_migration()
-        .expect("healthy V2 recheck should clear marker");
-    assert!(rechecked.issues.is_empty());
-
-    let after_clear = HttpSupportContext::new(&config_path, temp.path(), build());
-    assert!(
-        after_clear
-            .provider_connections()
-            .expect("cleared context inventory")
-            .issues
-            .iter()
-            .all(|issue| !issue.code.starts_with("provider_migration_"))
-    );
-}
-
-#[test]
-fn provider_migration_recovery_blocks_setup_when_config_is_missing_or_malformed() {
-    let temp = tempfile::tempdir().expect("temporary directory should open");
-    let config_path = temp.path().join("sigil.toml");
-    let marker_path = temp
-        .path()
-        .join("sigil.toml.provider-migration-recovery-v1");
-    fs::write(
-        &marker_path,
-        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
-    )
-    .expect("recovery marker should write");
-    let context = HttpSupportContext::new(
-        &config_path,
-        temp.path(),
-        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
-    );
-
-    let missing_inventory = context
-        .provider_connections()
-        .expect("missing config recovery should remain inspectable");
-    assert!(missing_inventory.connections.is_empty());
-    assert!(
-        missing_inventory
-            .issues
-            .iter()
-            .any(|issue| issue.code == "provider_migration_reconcile_required")
-    );
-    let catalog_error = context
-        .provider_setup_catalog(HttpProviderSetupCatalogRequest {
-            template: HttpProviderSetupTemplate::OpenAiCompatible,
-            protocol: Some(HttpProviderSetupProtocol::ChatCompletions),
-            endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
-            credential_source: HttpProviderSetupCredentialSource::None,
-            api_key: None,
-        })
-        .expect_err("recovery block must prevent Add connection catalog");
-    assert!(
-        catalog_error
-            .to_string()
-            .contains("provider migration recovery must be resolved")
-    );
-    let save_error = context
-        .save_provider_setup(HttpProviderSetupSaveRequest {
-            template: HttpProviderSetupTemplate::OpenAiCompatible,
-            protocol: Some(HttpProviderSetupProtocol::ChatCompletions),
-            endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
-            credential_source: HttpProviderSetupCredentialSource::None,
-            api_key: None,
-            model_id: "local-model".to_owned(),
-            label: None,
-        })
-        .expect_err("recovery block must prevent Add connection save");
-    assert!(
-        save_error
-            .to_string()
-            .contains("provider migration recovery must be resolved")
-    );
-
-    fs::write(&config_path, b"not valid toml = [")
-        .expect("malformed config should write beside recovery record");
-    let malformed_inventory = context
-        .provider_connections()
-        .expect("malformed config recovery should remain inspectable");
-    assert!(
-        malformed_inventory
-            .issues
-            .iter()
-            .any(|issue| issue.code == "provider_migration_reconcile_required")
-    );
-
-    fs::write(&marker_path, b"invalid recovery record")
-        .expect("invalid recovery record should replace");
-    let unavailable_inventory = context
-        .provider_connections()
-        .expect("invalid recovery state should remain actionable");
-    assert!(
-        unavailable_inventory
-            .issues
-            .iter()
-            .any(|issue| issue.code == "provider_migration_recovery_unavailable")
-    );
-    let invalid_recovery_setup_error = context
-        .provider_setup_catalog(HttpProviderSetupCatalogRequest {
-            template: HttpProviderSetupTemplate::OpenAiCompatible,
-            protocol: Some(HttpProviderSetupProtocol::ChatCompletions),
-            endpoint: Some("http://127.0.0.1:11434/v1".to_owned()),
-            credential_source: HttpProviderSetupCredentialSource::None,
-            api_key: None,
-        })
-        .expect_err("invalid recovery state must keep setup diagnostics-only");
-    assert_eq!(
-        invalid_recovery_setup_error.to_string(),
-        "provider migration recovery state is unavailable"
-    );
-
-    fs::remove_file(marker_path).expect("recovery marker should remove");
-    assert!(
-        context.provider_connections().is_err(),
-        "malformed config without a recovery record must still fail closed"
-    );
 }
 
 #[tokio::test]
@@ -1122,7 +773,6 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert!(server_info.capabilities.support_diagnostics);
     assert!(server_info.capabilities.provider_connections);
     assert!(server_info.capabilities.provider_setup);
-    assert!(server_info.capabilities.provider_migration);
     assert!(!server_info.shutdown_on_stdin_close);
 
     let (status, first_page) = http_raw_request(
@@ -1456,66 +1106,69 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     );
     assert!(!disposable_source.exists());
 
-    let legacy_source = sessions.join("legacy.jsonl");
+    let removed_format_source = sessions.join("removed-format.jsonl");
     fs::write(
-        &legacy_source,
+        &removed_format_source,
         format!(
             "{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))
-                .expect("legacy source should encode")
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("removed format")))
+                .expect("removed-format source should encode")
         ),
     )
-    .expect("legacy source should write");
-    let (status, legacy_page) = http_raw_request(
+    .expect("removed-format source should write");
+    let (status, invalid_page) = http_raw_request(
         address,
-        http_get(
-            "/session-catalog?state=unsupported_legacy",
-            Some("secret-token"),
-            None,
-        ),
+        http_get("/session-catalog?state=invalid", Some("secret-token"), None),
     )
     .await;
     assert_eq!(status, 200);
-    let legacy_entry = &legacy_page["entries"][0];
-    let legacy_items = json!([{
-        "session_ref": legacy_entry["session_ref"],
-        "source_bytes": legacy_entry["source_bytes"],
-        "source_modified_at_unix_ms": legacy_entry["source_modified_at_unix_ms"],
+    let invalid_entry = invalid_page["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["session_ref"] == "removed-format.jsonl")
+        })
+        .expect("removed-format source should be listed as invalid");
+    let invalid_items = json!([{
+        "session_ref": invalid_entry["session_ref"],
+        "source_bytes": invalid_entry["source_bytes"],
+        "source_modified_at_unix_ms": invalid_entry["source_modified_at_unix_ms"],
     }]);
-    let legacy_plan_body = json!({
+    let invalid_plan_body = json!({
         "action": "delete_invalid_sources",
-        "items": legacy_items,
+        "items": invalid_items,
     })
     .to_string();
-    let (status, legacy_plan) = http_raw_request(
+    let (status, invalid_plan) = http_raw_request(
         address,
         http_post(
             "/session-catalog/batch/plan",
             Some("secret-token"),
-            &legacy_plan_body,
+            &invalid_plan_body,
         ),
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(legacy_plan["executable"], 1);
-    let legacy_execute_body = json!({
-        "plan_id": legacy_plan["plan_id"],
+    assert_eq!(invalid_plan["executable"], 1);
+    let invalid_execute_body = json!({
+        "plan_id": invalid_plan["plan_id"],
         "action": "delete_invalid_sources",
-        "items": legacy_items,
+        "items": invalid_items,
     })
     .to_string();
-    let (status, legacy_deleted) = http_raw_request(
+    let (status, invalid_deleted) = http_raw_request(
         address,
         http_post(
             "/session-catalog/batch/execute",
             Some("secret-token"),
-            &legacy_execute_body,
+            &invalid_execute_body,
         ),
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(legacy_deleted["completed"], 1);
-    assert!(!legacy_source.exists());
+    assert_eq!(invalid_deleted["completed"], 1);
+    assert!(!removed_format_source.exists());
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
@@ -2437,7 +2090,6 @@ fn compaction_preview_and_apply_preserve_exact_binding_and_durable_replay() {
             forecast_confidence: Some(sigil_kernel::CompactionForecastConfidenceV1::Medium),
             admission_reason: Some(sigil_kernel::CompactionAdmissionReasonV2::QualifiedCostSavings),
             native_carrier_available: true,
-            legacy_migration_fields: vec!["tail_messages".to_owned()],
         },
         details: None,
         admission: HttpCompactionAdmission::Ready {
@@ -3331,26 +2983,11 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["components"]["schemas"]["ServerCapabilities"]["properties"]["provider_setup"]["type"],
         "boolean"
     );
-    assert_eq!(
-        document["components"]["schemas"]["ServerCapabilities"]["properties"]["provider_migration"]
-            ["type"],
-        "boolean"
-    );
     assert!(
         document["paths"]["/settings/provider-connections"]["post"]["responses"]["201"].is_object()
     );
     assert!(
         document["paths"]["/settings/provider-connections/catalog"]["post"]["responses"]["200"]
-            .is_object()
-    );
-    assert!(
-        document["paths"]["/settings/provider-connections/migrate-legacy"]["post"]["responses"]
-            ["200"]
-            .is_object()
-    );
-    assert!(
-        document["paths"]["/settings/provider-connections/migrate-legacy"]["post"]["responses"]
-            ["422"]
             .is_object()
     );
     assert_eq!(

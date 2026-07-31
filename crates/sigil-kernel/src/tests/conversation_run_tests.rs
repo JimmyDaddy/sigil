@@ -319,6 +319,7 @@ fn terminal_summary_is_redacted_bounded_and_utf8_safe() -> Result<()> {
 fn persisted_reopen_keeps_lifecycle_idempotent_and_session_decoding_canonical() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    crate::session::append_current_test_session_identity(&store)?;
     let mut session = Session::new("provider", "model").with_store(store.clone());
     session.append_user_message(ModelMessage::user("durable request"))?;
     let recorder = session.conversation_run_lifecycle_recorder()?;

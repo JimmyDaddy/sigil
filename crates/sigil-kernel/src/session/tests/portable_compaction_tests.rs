@@ -16,6 +16,7 @@ use crate::{
 fn setup_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    append_current_test_session_identity(&store)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
     session.append_user_message(ModelMessage::user(
         "必须保留 CJK 约束：不要删除原始 JSONL，也不要使用旧日志 bridge。",
@@ -25,7 +26,39 @@ fn setup_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
         Vec::new(),
     ))?;
     session.append_user_message(ModelMessage::user("继续实现 portable checkpoint。"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("继续保留可审计的 checkpoint 证据。".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("验证完整 turn 边界。"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("完整 turn 边界已经验证。".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("继续执行当前 compaction。"))?;
     Ok((temp, store, session))
+}
+
+fn compact_test_policy() -> AdaptiveTailPolicyV3 {
+    AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 1,
+        ..AdaptiveTailPolicyV3::default()
+    }
+}
+
+fn extend_custom_session_tail(session: &mut Session) -> Result<()> {
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("current turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("preserve another complete turn"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("another complete turn is preserved".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("continue with the active turn"))?;
+    Ok(())
 }
 
 #[test]
@@ -44,7 +77,7 @@ fn adaptive_checkpoint_rebuilds_the_same_whole_turn_plan_during_activation() -> 
     let policy = AdaptiveTailPolicyV3 {
         tail_target_min_tokens: 1,
         tail_target_max_tokens: 64,
-        ..AdaptiveTailPolicyV3::from_legacy_tail_messages(6)
+        ..AdaptiveTailPolicyV3::default()
     };
     let plan =
         CompactionFoldPlan::from_records_after_adaptive_tail(&records, policy, 900_000, None)?;
@@ -109,7 +142,12 @@ fn portable_compaction_long_session_evidence() -> Result<()> {
     let records = store.read_event_records_writer()?;
     let file_bytes_before = fs::metadata(store.path())?.len();
     let planning_started = Instant::now();
-    let plan = CompactionFoldPlan::from_records_after(&records, 1, None)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        AdaptiveTailPolicyV3::default(),
+        u64::MAX / 4,
+        None,
+    )?;
     let elapsed_ms = planning_started.elapsed().as_millis();
     let file_bytes_after = fs::metadata(store.path())?.len();
 
@@ -143,7 +181,12 @@ fn request(
     prior_folded_through: Option<CompactionCursor>,
 ) -> Result<PortableSemanticCompactionRequest> {
     let records = store.read_event_records_writer()?;
-    let plan = CompactionFoldPlan::from_records_after(&records, 1, prior_folded_through.as_ref())?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        prior_folded_through.as_ref(),
+    )?;
     let source_event_id = plan
         .folded_event_ids
         .first()
@@ -408,15 +451,17 @@ fn portable_executor_pins_cjk_user_constraints_and_projects_checkpoint_after_app
         .try_context_projection_from_durable()?
         .expect("store-backed session has a durable projection");
     let messages = projection.model_messages();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 6);
     assert_eq!(messages[0].role, crate::MessageRole::Assistant);
     let checkpoint = messages[0].content.as_deref().expect("checkpoint content");
     assert!(checkpoint.contains("Constraints & Preferences"));
     assert!(checkpoint.contains("不要删除原始 JSONL"));
     assert!(checkpoint.contains("[model-generated, unverified]"));
     assert_eq!(
-        messages[1].content.as_deref(),
-        Some("继续实现 portable checkpoint。")
+        messages
+            .last()
+            .and_then(|message| message.content.as_deref()),
+        Some("继续执行当前 compaction。")
     );
     assert_eq!(projection.folded_through, expected_folded_through);
     Ok(())
@@ -693,13 +738,17 @@ fn portable_preflight_materializes_the_full_candidate_without_durable_writes() -
     let (temp, store, session) = setup_session()?;
     let session_scope_id = session_scope_id(&store)?;
     let before = std::fs::read(store.path())?;
+    let before_record_count = store.read_event_records_writer()?.len();
     let request = request(&store, "attempt-preflight", "compaction-preflight", None)?;
     let preflight = store.prepare_portable_semantic_compaction(request)?;
     assert_eq!(std::fs::read(store.path())?, before);
-    assert_eq!(preflight.candidate_messages().len(), 2);
+    assert_eq!(preflight.candidate_messages().len(), 6);
     assert_eq!(
-        preflight.candidate_messages()[1].content.as_deref(),
-        Some("继续实现 portable checkpoint。")
+        preflight
+            .candidate_messages()
+            .last()
+            .and_then(|message| message.content.as_deref()),
+        Some("继续执行当前 compaction。")
     );
 
     let target_request = session.build_portable_compaction_candidate_request(
@@ -733,19 +782,19 @@ fn portable_preflight_materializes_the_full_candidate_without_durable_writes() -
     let target_material = target_material_for_request(&session_scope_id, target_request)?;
     store.execute_portable_semantic_compaction(preflight, target_material)?;
     let records = store.read_event_records_writer()?;
-    assert_eq!(records.len(), 6);
+    assert_eq!(records.len(), before_record_count + 3);
     assert!(matches!(
-        records[3],
+        records[before_record_count],
         SessionStreamRecord::Stored(ref event)
             if event.event_kind() == Some(DurableEventType::CompactionStarted)
     ));
     assert!(matches!(
-        records[4],
+        records[before_record_count + 1],
         SessionStreamRecord::Stored(ref event)
             if event.event_kind() == Some(DurableEventType::TaskMemoryRecordedV1)
     ));
     assert!(matches!(
-        records[5],
+        records[before_record_count + 2],
         SessionStreamRecord::Stored(ref event)
             if event.event_kind() == Some(DurableEventType::CompactionAppliedV2)
     ));
@@ -1177,6 +1226,7 @@ fn accepted_anchor_keeps_exact_active_spans_without_pinning_a_large_first_turn()
         Vec::new(),
     ))?;
     session.append_user_message(ModelMessage::user("Continue with the implementation."))?;
+    extend_custom_session_tail(&mut session)?;
 
     let admission = crate::admit_user_declared_root(
         &crate::IntentAdmissionContextV1::initial(
@@ -1241,27 +1291,28 @@ fn accepted_anchor_keeps_exact_active_spans_without_pinning_a_large_first_turn()
 }
 
 #[test]
-fn legacy_anchor_bounds_a_large_first_turn_and_keeps_a_durable_body_reference() -> Result<()> {
+fn user_source_anchor_bounds_a_large_first_turn_and_keeps_a_durable_body_reference() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("legacy-large-first-turn.jsonl"))?;
+    let store = JsonlSessionStore::new(temp.path().join("user-source-large-first-turn.jsonl"))?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
-    let corpus = "legacy-large-corpus-line\n".repeat(12_000);
+    let corpus = "user-source-large-corpus-line\n".repeat(12_000);
     session.append_user_message(ModelMessage::user(format!(
-        "Implement the bounded legacy fallback.\n\nReference corpus:\n{corpus}"
+        "Implement the bounded user-source anchor.\n\nReference corpus:\n{corpus}"
     )))?;
     session.append_assistant_message(ModelMessage::assistant(
         Some("I will retain a durable transcript reference.".to_owned()),
         Vec::new(),
     ))?;
     session.append_user_message(ModelMessage::user("Continue."))?;
+    extend_custom_session_tail(&mut session)?;
 
     let session_scope_id = session_scope_id(&store)?;
     execute_with_target(
         &store,
         request(
             &store,
-            "legacy-large-first-attempt",
-            "legacy-large-first-compaction",
+            "user-source-large-first-attempt",
+            "user-source-large-first-compaction",
             None,
         )?,
         |checkpoint, task_memory, candidate| {
@@ -1273,15 +1324,15 @@ fn legacy_anchor_bounds_a_large_first_turn_and_keeps_a_durable_body_reference() 
     let sidecars = CompactionSidecarProjection::from_records(&records)?;
     let active = sidecars
         .latest_for_branch(None)
-        .expect("legacy large first-turn compaction is active");
+        .expect("user-source large first-turn compaction is active");
     let anchor = active
         .checkpoint
         .session_anchor
         .as_ref()
-        .expect("legacy session has an anchor");
+        .expect("user-source session has an anchor");
     assert_eq!(
         anchor.root_objective.exact_text,
-        "Implement the bounded legacy fallback."
+        "Implement the bounded user-source anchor."
     );
     let body = anchor
         .attachment_refs
@@ -1295,7 +1346,7 @@ fn legacy_anchor_bounds_a_large_first_turn_and_keeps_a_durable_body_reference() 
         .render_for_provider(&active.task_memory)?
         .content
         .expect("checkpoint content");
-    assert!(!rendered.contains("legacy-large-corpus-line"));
+    assert!(!rendered.contains("user-source-large-corpus-line"));
     Ok(())
 }
 
@@ -1310,6 +1361,7 @@ fn continuity_anchor_does_not_reactivate_terminal_task_permissions() -> Result<(
         Vec::new(),
     ))?;
     session.append_user_message(ModelMessage::user("Continue."))?;
+    extend_custom_session_tail(&mut session)?;
     let plan_id = crate::PlanId::new("terminal-permission-plan")?;
     let task_id = crate::TaskId::new("terminal-permission-task")?;
     let plan_hash = crate::plan_text_hash("terminal permission plan");

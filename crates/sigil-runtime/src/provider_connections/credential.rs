@@ -59,14 +59,6 @@ impl PreparedCredential {
         }
     }
 
-    pub(crate) fn api_key_secret(provider_family: ProviderFamily, secret: SecretString) -> Self {
-        Self {
-            provider_family,
-            auth_kind: CredentialAuthKind::ApiKey,
-            secret,
-        }
-    }
-
     #[must_use]
     pub fn secret(&self) -> &SecretString {
         &self.secret
@@ -177,7 +169,6 @@ impl CredentialEnvironment for ProcessCredentialEnvironment {
 #[derive(Clone)]
 pub enum LoadedCredentialRef {
     Config(CredentialRefConfig),
-    LegacyInline(SecretString),
 }
 
 impl fmt::Debug for LoadedCredentialRef {
@@ -187,14 +178,10 @@ impl fmt::Debug for LoadedCredentialRef {
                 .debug_struct("Environment")
                 .field("name", name)
                 .finish(),
-            Self::Config(CredentialRefConfig::SystemKeyring { .. }) => {
-                formatter.write_str("SystemKeyring([redacted])")
-            }
             Self::Config(CredentialRefConfig::Stored { .. }) => {
                 formatter.write_str("Stored([redacted])")
             }
             Self::Config(CredentialRefConfig::None) => formatter.write_str("None"),
-            Self::LegacyInline(_) => formatter.write_str("LegacyInline([redacted])"),
         }
     }
 }
@@ -202,10 +189,8 @@ impl fmt::Debug for LoadedCredentialRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedCredentialSource {
     Environment,
-    SystemKeyring,
     Stored,
     None,
-    LegacyInline,
     ProcessStaged,
 }
 
@@ -276,11 +261,6 @@ pub async fn resolve_connection_credential(
     environment: &dyn CredentialEnvironment,
 ) -> Result<ResolvedCredential, ProviderCredentialError> {
     match loaded_ref {
-        LoadedCredentialRef::LegacyInline(secret) => Ok(ResolvedCredential {
-            secret: Some(secret.clone()),
-            source: ResolvedCredentialSource::LegacyInline,
-            generation_id: None,
-        }),
         LoadedCredentialRef::Config(CredentialRefConfig::Environment { name }) => {
             let secret = environment.read(name).ok_or_else(|| {
                 ProviderCredentialError::new(
@@ -294,19 +274,7 @@ pub async fn resolve_connection_credential(
                 generation_id: None,
             })
         }
-        LoadedCredentialRef::Config(
-            credential @ (CredentialRefConfig::SystemKeyring { .. }
-            | CredentialRefConfig::Stored { .. }),
-        ) => {
-            let (id, source) = match credential {
-                CredentialRefConfig::SystemKeyring { id } => {
-                    (id, ResolvedCredentialSource::SystemKeyring)
-                }
-                CredentialRefConfig::Stored { id } => (id, ResolvedCredentialSource::Stored),
-                CredentialRefConfig::Environment { .. } | CredentialRefConfig::None => {
-                    unreachable!("stored credential pattern was checked")
-                }
-            };
+        LoadedCredentialRef::Config(CredentialRefConfig::Stored { id }) => {
             let record = store.load(id).await?.ok_or_else(|| {
                 ProviderCredentialError::new(
                     ProviderCredentialErrorCode::CredentialMissing,
@@ -324,7 +292,7 @@ pub async fn resolve_connection_credential(
             }
             Ok(ResolvedCredential {
                 secret: Some(record.secret.clone()),
-                source,
+                source: ResolvedCredentialSource::Stored,
                 generation_id: Some(record.generation_id),
             })
         }

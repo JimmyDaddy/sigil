@@ -42,7 +42,7 @@ fn test_config() -> RootConfig {
         std::process::id()
     ));
     let base = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -57,8 +57,10 @@ fn test_config() -> RootConfig {
         },
         session: SessionConfig::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(
+                sigil_kernel::ConnectionId::new("deepseek-default").expect("valid test connection"),
+            ),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -74,13 +76,16 @@ fn test_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": "https://api.deepseek.com"
+        connections: BTreeMap::from([(
+            "deepseek-default".to_owned(),
+            serde_json::json!({
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {"source": "environment", "name": "SIGIL_API_KEY"}
             }),
         )]),
-        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     };
@@ -95,7 +100,7 @@ fn test_config() -> RootConfig {
     .expect("test provider connection");
     let default_model =
         sigil_kernel::ModelRef::new(connection_id.clone(), model_id).expect("test model");
-    sigil_runtime::provider_connections::materialize_v2_root_config(
+    sigil_runtime::provider_connections::materialize_root_config(
         &base,
         &BTreeMap::from([(connection_id, connection)]),
         &default_model,
@@ -1303,7 +1308,7 @@ fn render_openai_responses_model_picker_has_no_deepseek_fallback() -> anyhow::Re
         "OpenAI",
     )?;
     let default_model = sigil_kernel::ModelRef::new(connection_id.clone(), "deepseek-v4-flash")?;
-    let config = sigil_runtime::provider_connections::materialize_v2_root_config(
+    let config = sigil_runtime::provider_connections::materialize_root_config(
         &base,
         &BTreeMap::from([(connection_id, connection)]),
         &default_model,
@@ -1600,11 +1605,11 @@ fn render_config_plugins_keeps_hook_summary_and_mcp_details_visible_on_narrow_sc
 }
 
 #[test]
-fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()> {
+fn render_config_short_terminal_shows_current_compaction_fields() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     open_config_panel_for_test(&mut app)?;
     select_config_section_for_test(&mut app, ConfigSection::Compaction);
-    for _ in 0..6 {
+    for _ in 0..2 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     }
     let backend = TestBackend::new(96, 12);
@@ -1613,14 +1618,13 @@ fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("> Tail messages"));
-    assert!(rendered.contains("more ^"));
-    assert!(rendered.contains("more v"));
+    assert!(rendered.contains("> Fallback window"));
+    assert!(!rendered.contains("Tail messages"));
     let rows = rendered_rows(&terminal);
     let selected_row = rows
         .iter()
-        .position(|row| row.contains("> Tail messages"))
-        .expect("selected tail messages row should render");
+        .position(|row| row.contains("> Fallback window"))
+        .expect("selected fallback-window row should render");
     let buffer = terminal.backend().buffer();
     let selected_bg_cells = (0..buffer.area.width)
         .filter(|x| {
@@ -2230,7 +2234,7 @@ fn docs_checkpoint_restore_app() -> anyhow::Result<AppState> {
     let note = workspace.join("release-notes.md");
     fs::write(&note, "alpha\nbeta\n")?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: workspace.display().to_string(),
         },
@@ -2315,7 +2319,18 @@ fn docs_compaction_preview_app() -> anyhow::Result<AppState> {
         "Now synchronize the current main capabilities",
     )))?;
     let preview = store
-        .v2_compaction_preview(1, None)?
+        .adaptive_compaction_preview(
+            sigil_kernel::AdaptiveTailPolicyV3 {
+                tail_min_complete_turns: 1,
+                tail_target_min_tokens: 1,
+                tail_target_max_tokens: 32,
+                tail_recent_turn_p95_multiplier_ppm: 1_000_000,
+                tail_max_usable_context_ratio_ppm: 250_000,
+                recent_turn_sample_limit: 20,
+            },
+            8 * 1024,
+            None,
+        )?
         .ok_or_else(|| anyhow::anyhow!("compaction preview fixture was not foldable"))?;
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {

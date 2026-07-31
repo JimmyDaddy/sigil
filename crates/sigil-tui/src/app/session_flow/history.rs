@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use sigil_kernel::{JsonlSessionStore, SessionLogEntry, SessionStreamCompatibilityError};
+use sigil_kernel::{JsonlSessionStore, SessionLogEntry};
 
 use super::super::{
     AppState, PaneFocus, SESSION_HISTORY_TITLE_SCAN_LIMIT, SessionHistoryEntry,
@@ -57,13 +57,6 @@ pub(super) fn session_history_title_from_log(path: &Path) -> Option<String> {
             physical_line,
         ) {
             Ok(entry) => entry,
-            Err(error)
-                if error
-                    .downcast_ref::<SessionStreamCompatibilityError>()
-                    .is_some() =>
-            {
-                return Some("legacy session format unsupported".to_owned());
-            }
             Err(_) => continue,
         };
         let Some(entry) = entry else {

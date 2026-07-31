@@ -8,7 +8,6 @@ use sigil_kernel::{
 };
 
 use super::*;
-use crate::{default_provider_config_fields, set_provider_config_fields};
 
 fn qualified_gate(task_config_digest: String) -> OrchestrationEvalRouteGateV1 {
     let commit = ORCHESTRATION_RUNTIME_BUILD_ID
@@ -68,16 +67,7 @@ fn qualified_report(task_config_digest: String) -> OrchestrationEvalReportManife
 }
 
 fn default_setup_config() -> Result<RootConfig> {
-    let mut config: RootConfig = toml::from_str(
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
-    let fields = default_provider_config_fields("deepseek", "deepseek-v4-flash");
-    set_provider_config_fields(&mut config, "deepseek", &fields, None)?;
-    Ok(config)
+    v2_setup_config()
 }
 
 fn v2_setup_config() -> Result<RootConfig> {
@@ -175,7 +165,7 @@ fn quick_setup_applies_the_qualified_route_after_v2_materialization() -> Result<
     let decision = apply_new_install_orchestration_rollout(&mut config);
 
     assert!(decision.is_qualified());
-    assert!(config.agent.provider.is_empty());
+    assert!(config.agent.runtime_provider.is_empty());
     assert_eq!(
         config.agent.connection.as_ref().map(|id| id.as_str()),
         Some("deepseek-default")
@@ -244,9 +234,15 @@ fn rollout_rejects_tampered_gate_and_custom_endpoint() -> Result<()> {
     write_rollout_manifest(&path, task_digest)?;
     let _manifest =
         crate::test_env::EnvScope::set(SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST_ENV, path.as_os_str());
-    let mut fields = default_provider_config_fields("deepseek", "deepseek-v4-flash");
-    fields.base_url = "https://proxy.example.test".to_owned();
-    set_provider_config_fields(&mut config, "deepseek", &fields, None)?;
+    config
+        .connections
+        .get_mut("deepseek-default")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("DeepSeek connection object")
+        .insert(
+            "base_url".to_owned(),
+            serde_json::Value::String("https://proxy.example.test".to_owned()),
+        );
 
     let decision = apply_new_install_orchestration_rollout(&mut config);
     assert_eq!(

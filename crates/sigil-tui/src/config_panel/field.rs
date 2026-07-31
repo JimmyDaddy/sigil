@@ -25,11 +25,7 @@ pub(crate) enum ConfigField {
     MemoryEnabled,
     CompactionEnabled,
     CompactionNativeCarrierEnabled,
-    CompactionStrategy,
-    CompactionSoftThresholdRatio,
-    CompactionHardThresholdRatio,
     CompactionContextWindowTokens,
-    CompactionTailMessages,
     CodeIntelEnabled,
     CodeIntelServerStartup,
     // Discovery details stay in sigil.toml / doctor; the default TUI keeps only
@@ -91,14 +87,10 @@ impl ConfigField {
         Self::WebBundledSearchEnabled,
     ];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
-    const COMPACTION_FIELDS: [Self; 7] = [
+    const COMPACTION_FIELDS: [Self; 3] = [
         Self::CompactionEnabled,
         Self::CompactionNativeCarrierEnabled,
-        Self::CompactionStrategy,
         Self::CompactionContextWindowTokens,
-        Self::CompactionSoftThresholdRatio,
-        Self::CompactionHardThresholdRatio,
-        Self::CompactionTailMessages,
     ];
     const CODE_INTELLIGENCE_FIELDS: [Self; 2] =
         [Self::CodeIntelEnabled, Self::CodeIntelServerStartup];
@@ -157,11 +149,7 @@ impl ConfigField {
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
             Self::CompactionNativeCarrierEnabled => "native_carrier",
-            Self::CompactionStrategy => "strategy",
-            Self::CompactionSoftThresholdRatio => "soft_threshold",
-            Self::CompactionHardThresholdRatio => "hard_threshold",
             Self::CompactionContextWindowTokens => "fallback_window",
-            Self::CompactionTailMessages => "tail_messages",
             Self::CodeIntelEnabled => "enabled",
             Self::CodeIntelServerStartup => "server_startup",
             Self::CodeIntelAutoDiscover => "auto_discover",
@@ -206,11 +194,7 @@ impl ConfigField {
             Self::MemoryEnabled => "Memory",
             Self::CompactionEnabled => "Auto compact",
             Self::CompactionNativeCarrierEnabled => "Native carrier",
-            Self::CompactionStrategy => "Strategy",
-            Self::CompactionSoftThresholdRatio => "Soft threshold",
-            Self::CompactionHardThresholdRatio => "Hard threshold",
             Self::CompactionContextWindowTokens => "Fallback window",
-            Self::CompactionTailMessages => "Tail messages",
             Self::CodeIntelEnabled => "Code intelligence",
             Self::CodeIntelServerStartup => "Server startup",
             Self::CodeIntelAutoDiscover => "Auto discover",
@@ -285,20 +269,8 @@ impl ConfigField {
             Self::CompactionNativeCarrierEnabled => {
                 "After portable continuity is durable, explicitly allows one extra provider-native compaction request on an exact supported route. Portable truth remains authoritative."
             }
-            Self::CompactionStrategy => {
-                "Cache-aware V3 uses whole turns, portable continuity, cache economics, and provider capability gates. Legacy V2 remains available for rollback."
-            }
-            Self::CompactionSoftThresholdRatio => {
-                "Prompt pressure where the UI starts warning that compaction may be useful."
-            }
-            Self::CompactionHardThresholdRatio => {
-                "Prompt pressure where the runner compacts after the current turn returns idle."
-            }
             Self::CompactionContextWindowTokens => {
                 "Used only when provider/model metadata cannot resolve the model context window."
-            }
-            Self::CompactionTailMessages => {
-                "Recent messages retained verbatim after older history is folded into a summary."
             }
             Self::CodeIntelEnabled => {
                 "Registers read-only workspace symbol, definition, reference, and diagnostics tools."
@@ -374,10 +346,7 @@ impl ConfigField {
                 | Self::ModelRequestStreamIdleTimeoutSecs
                 | Self::ProviderBaseUrl
                 | Self::ProviderFimModel
-                | Self::CompactionSoftThresholdRatio
-                | Self::CompactionHardThresholdRatio
                 | Self::CompactionContextWindowTokens
-                | Self::CompactionTailMessages
                 | Self::TerminalScrollSensitivity
                 | Self::TerminalNotificationMinimumRunDurationMs
                 | Self::AppearanceColorOverride
@@ -396,7 +365,6 @@ impl ConfigField {
             | Self::WebNetworkMode
             | Self::WebSearchRoute
             | Self::VerificationAutoRun
-            | Self::CompactionStrategy
             | Self::CodeIntelServerStartup
             | Self::TerminalNotificationMethod
             | Self::AppearanceTheme

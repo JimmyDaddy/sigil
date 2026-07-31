@@ -114,12 +114,6 @@ pub(in crate::runner) enum RunPlanCommand {
         request: sigil_kernel::TaskPauseRequest,
     },
     CancelRun,
-    ApprovePlan {
-        plan_text: String,
-        permission: PlanApprovalPermission,
-        scope_summary: String,
-        clear_planning_context: bool,
-    },
     RejectPlan {
         plan_id: String,
         expected_plan_hash: String,
@@ -405,17 +399,6 @@ pub(in crate::runner) fn classify_worker_command(
             ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovalCommand(command))
         }
         WorkerCommand::CancelRun => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::CancelRun),
-        WorkerCommand::ApprovePlan {
-            plan_text,
-            permission,
-            scope_summary,
-            clear_planning_context,
-        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovePlan {
-            plan_text,
-            permission,
-            scope_summary,
-            clear_planning_context,
-        }),
         WorkerCommand::RejectPlan {
             plan_id,
             expected_plan_hash,

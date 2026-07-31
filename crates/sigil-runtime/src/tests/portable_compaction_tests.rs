@@ -37,6 +37,15 @@ struct SemanticSummaryProvider {
     mode: SemanticSummaryMode,
 }
 
+fn folding_tail_policy() -> sigil_kernel::AdaptiveTailPolicyV3 {
+    sigil_kernel::AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 1,
+        tail_max_usable_context_ratio_ppm: 1_000_000,
+        ..sigil_kernel::AdaptiveTailPolicyV3::default()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SemanticSummaryMode {
     Valid,
@@ -146,10 +155,10 @@ impl Provider for SemanticSummaryProvider {
 }
 
 #[tokio::test]
-async fn semantic_summary_preserves_old_prefix_and_records_separate_usage() -> Result<()> {
+async fn semantic_summary_preserves_stable_prefix_and_records_separate_usage() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = sigil_kernel::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::new("mock-summary", "model").with_store(store.clone());
+    let mut session = Session::load_from_store("mock-summary", "model", store.clone())?;
     for index in 0..4 {
         session.append_user_message(ModelMessage::user(format!("request {index}")))?;
         session.append_assistant_message(ModelMessage::assistant(
@@ -159,7 +168,12 @@ async fn semantic_summary_preserves_old_prefix_and_records_separate_usage() -> R
     }
     session.append_user_message(ModelMessage::user("active request"))?;
     let records = store.read_event_records_writer()?;
-    let plan = CompactionFoldPlan::from_records_after(&records, 3, None)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        folding_tail_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let before = CompletionRequest {
         provider_name: "mock-summary".to_owned(),
         model_name: "model".to_owned(),
@@ -269,7 +283,12 @@ fn semantic_summary_fixture() -> Result<(
     }
     session.append_user_message(ModelMessage::user("active request"))?;
     let records = store.read_event_records_writer()?;
-    let plan = CompactionFoldPlan::from_records_after(&records, 3, None)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        folding_tail_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let frozen = FrozenProviderRequestMaterial::freeze(
         session.session_scope_id(),
         CompletionRequest {
@@ -815,7 +834,6 @@ fn runtime_attaches_forecast_and_trusted_cost_to_the_existing_portable_proof() -
             compactor_output_tokens: 0,
             rollout_mode: CompactionRolloutModeV1::Preview,
             user_confirmed: true,
-            legacy_v2_would_compact: true,
         },
     )?;
     let extension = attached
@@ -841,7 +859,7 @@ fn runtime_attaches_forecast_and_trusted_cost_to_the_existing_portable_proof() -
 }
 
 #[test]
-fn fit_required_bypasses_legacy_savings_threshold_but_remains_exactly_proven() -> Result<()> {
+fn fit_required_bypasses_cost_savings_threshold_but_remains_exactly_proven() -> Result<()> {
     let binding = exact_binding();
     let before =
         FrozenProviderRequestMaterial::freeze("fit-bypass-session", request("before request"))?;
@@ -883,7 +901,6 @@ fn fit_required_bypasses_legacy_savings_threshold_but_remains_exactly_proven() -
             compactor_output_tokens: 0,
             rollout_mode: CompactionRolloutModeV1::Automatic,
             user_confirmed: false,
-            legacy_v2_would_compact: false,
         },
     )?;
     let extension = attached

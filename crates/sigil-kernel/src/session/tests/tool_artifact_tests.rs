@@ -382,12 +382,12 @@ fn invalid_pre_captured_descriptor_fails_closed_without_recapturing_inline_previ
 }
 
 #[test]
-fn oversized_legacy_inline_capture_hits_hard_guard_without_publishing_raw_body() -> Result<()> {
+fn oversized_inline_capture_hits_hard_guard_without_publishing_raw_body() -> Result<()> {
     let (_temp, store) = store_fixture()?;
     let body = format!(
         "head:{}:guarded-secret-sentinel:{}:tail",
-        "h".repeat(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES),
-        "t".repeat(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES)
+        "h".repeat(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES),
+        "t".repeat(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES)
     );
     let result = ToolResult::ok(
         "legacy-large",
@@ -403,18 +403,18 @@ fn oversized_legacy_inline_capture_hits_hard_guard_without_publishing_raw_body()
     )?;
 
     let ToolArtifactBindingV1::Unavailable { unavailable } = &recorded.artifact else {
-        panic!("oversized legacy inline body must not be published");
+        panic!("oversized inline body must not be published");
     };
     assert_eq!(
         unavailable.availability,
-        ToolArtifactAvailability::LegacyUnavailable
+        ToolArtifactAvailability::Unavailable
     );
     assert_eq!(
         recorded.capture_telemetry,
         ToolResultCaptureTelemetryV1 {
-            capture_path: ToolResultCapturePathV1::LegacyInlineCapture,
+            capture_path: ToolResultCapturePathV1::InlineCapture,
             observed_inline_bytes: result.content.len() as u64,
-            hard_guard_bytes: Some(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64),
+            hard_guard_bytes: Some(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64),
             hard_guard_exceeded: true,
             inline_projection_truncated: true,
         }
@@ -435,7 +435,7 @@ fn oversized_legacy_inline_capture_hits_hard_guard_without_publishing_raw_body()
 }
 
 #[test]
-fn bounded_legacy_inline_capture_remains_available_and_reports_telemetry() -> Result<()> {
+fn bounded_inline_capture_remains_available_and_reports_telemetry() -> Result<()> {
     let (_temp, store) = store_fixture()?;
     let result = ToolResult::ok(
         "legacy-small",
@@ -454,9 +454,9 @@ fn bounded_legacy_inline_capture_remains_available_and_reports_telemetry() -> Re
     assert_eq!(
         recorded.capture_telemetry,
         ToolResultCaptureTelemetryV1 {
-            capture_path: ToolResultCapturePathV1::LegacyInlineCapture,
+            capture_path: ToolResultCapturePathV1::InlineCapture,
             observed_inline_bytes: result.content.len() as u64,
-            hard_guard_bytes: Some(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64),
+            hard_guard_bytes: Some(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64),
             hard_guard_exceeded: false,
             inline_projection_truncated: false,
         }

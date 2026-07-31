@@ -49,7 +49,7 @@
   .pin-indicator { display: inline-flex; flex: 0 0 auto; color: var(--sg-sys-color-on-surface-subtle); }
   .pin-indicator .sg-icon { width: 13px; height: 13px; }
   .source-oversized, .source-scan_budget_exceeded { color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); }
-  .source-invalid, .source-unsupported_legacy { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
+  .source-invalid { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
   .history-empty { display: grid; min-height: 140px; place-content: center; gap: var(--sg-sys-space-1); padding: var(--sg-sys-space-4); color: var(--sg-sys-color-on-surface-variant); text-align: center; }
   .history-empty p { margin: 0; color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; }
   .history-skeleton { display: grid; gap: 6px; padding: 2px 4px; }

@@ -14,16 +14,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
+    AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ConnectionId, ControlEntry,
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
     ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
     InteractionMode, JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup,
-    McpServerTrustPolicy, MemoryConfig, MutationEventRecorder, NetworkEffect, PermissionConfig,
-    ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig,
-    Session, SessionConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory,
-    ToolContext, ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind, WorkspaceConfig, WorkspaceTrust,
+    McpServerTrustPolicy, ModelRef, MutationEventRecorder, NetworkEffect, ProviderCapabilities,
+    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionLogEntry,
+    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, Tool, ToolAccess,
+    ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolLifecycleOwner,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubjectKind, WorkspaceTrust,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -32,7 +32,7 @@ use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 
 use super::{
-    ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher, SecretSource,
+    ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher,
     activate_eager_remote_mcp_server, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
     activate_or_refresh_configured_remote_mcp_server, build_plan_prompt_tool_registry,
     build_provider, build_role_provider, build_role_run_options, build_role_skill_tool_registry,
@@ -45,12 +45,7 @@ use super::{
     load_openai_responses_config, provider_capabilities_for_name, provider_capability_view,
     refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
-    register_lazy_mcp_activation_tool, require_default_deepseek_v4_flash_portable_transport,
-    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
-    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
-    resolve_openai_compat_api_key_with_session, resolve_openai_responses_api_key,
-    resolve_openai_responses_api_key_with_session, secret_redactor_for_root_config,
-    shutdown_registered_tools,
+    register_lazy_mcp_activation_tool, secret_redactor_for_root_config, shutdown_registered_tools,
 };
 
 fn sandbox_execution_config(
@@ -67,89 +62,65 @@ fn sandbox_execution_config(
 }
 
 fn test_root_config(provider: &str) -> RootConfig {
-    let model = match provider {
-        "openai_compat" | "openai_responses" => "gpt-test",
-        "anthropic" => "claude-test",
-        "gemini" => "gemini-test",
-        _ => "deepseek-v4-flash",
+    let (family, protocol, connection_id, model) = match provider {
+        "openai_compat" => (
+            crate::provider_connections::ProviderFamily::Custom,
+            crate::provider_connections::ProviderProtocol::OpenAiChatCompletions,
+            "openai-compatible-default",
+            "gpt-test",
+        ),
+        "openai_responses" => (
+            crate::provider_connections::ProviderFamily::OpenAi,
+            crate::provider_connections::ProviderProtocol::OpenAiResponses,
+            "openai-default",
+            "gpt-test",
+        ),
+        "anthropic" => (
+            crate::provider_connections::ProviderFamily::Anthropic,
+            crate::provider_connections::ProviderProtocol::AnthropicMessages,
+            "anthropic-default",
+            "claude-test",
+        ),
+        "gemini" => (
+            crate::provider_connections::ProviderFamily::Gemini,
+            crate::provider_connections::ProviderProtocol::GeminiGenerateContent,
+            "gemini-default",
+            "gemini-test",
+        ),
+        "deepseek" => (
+            crate::provider_connections::ProviderFamily::DeepSeek,
+            crate::provider_connections::ProviderProtocol::DeepSeek,
+            "deepseek-default",
+            "deepseek-v4-flash",
+        ),
+        other => panic!("unsupported current test provider {other}"),
     };
-    RootConfig {
-        config_version: None,
-        workspace: WorkspaceConfig {
-            root: ".".to_owned(),
-        },
-        storage: Default::default(),
-        session: SessionConfig {
-            log_dir: Some(".sigil/sessions".to_owned()),
-            retention: Default::default(),
-        },
-        agent: AgentConfig {
-            provider: provider.to_owned(),
-            connection: None,
-            model: model.to_owned(),
-            max_turns: Some(12),
-            tool_timeout_secs: 45,
-        },
-        permission: PermissionConfig::default(),
-        model_request: Default::default(),
-        memory: MemoryConfig { enabled: true },
-        skills: Default::default(),
-        compaction: sigil_kernel::CompactionConfig::default(),
-        code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: TaskConfig::default(),
-        providers: BTreeMap::from([
-            (
-                "deepseek".to_owned(),
-                json!({
-                    "base_url": "https://example.com",
-                    "beta_base_url": "https://example.com/beta",
-                    "anthropic_base_url": "https://example.com/anthropic",
-                    "fim_model": "deepseek-v4-pro",
-                    "api_key": "test-key",
-                    "strict_tools_mode": "auto"
-                }),
-            ),
-            (
-                "openai_compat".to_owned(),
-                json!({
-                    "base_url": "https://openai.example.com/v1",
-                    "api_key": "openai-config-key",
-                    "organization": "org-test",
-                    "project": "project-test"
-                }),
-            ),
-            (
-                "openai_responses".to_owned(),
-                json!({
-                    "base_url": "https://responses.example.com/v1",
-                    "api_key": "responses-config-key"
-                }),
-            ),
-            (
-                "anthropic".to_owned(),
-                json!({
-                    "base_url": "https://anthropic.example.com",
-                    "api_key": "anthropic-config-key",
-                    "anthropic_version": "2023-06-01",
-                    "max_tokens": 1024
-                }),
-            ),
-            (
-                "gemini".to_owned(),
-                json!({
-                    "base_url": "https://gemini.example.com/v1beta",
-                    "api_key": "gemini-config-key"
-                }),
-            ),
-        ]),
-        connections: BTreeMap::new(),
-        web: Default::default(),
-        mcp_servers: Vec::new(),
-    }
+    let connection_id = ConnectionId::new(connection_id).expect("connection id");
+    let connection = crate::provider_connections::provider_connection_template(
+        family,
+        protocol,
+        connection_id.clone(),
+        "Test connection",
+    )
+    .expect("connection template")
+    .0;
+    let base: RootConfig = toml::from_str(
+        "config_version = 2\n[agent]\nconnection = \"bootstrap\"\nmodel = \"bootstrap\"\n",
+    )
+    .expect("base root config");
+    let mut root = crate::provider_connections::materialize_root_config(
+        &base,
+        &BTreeMap::from([(connection_id.clone(), connection)]),
+        &ModelRef::new(connection_id, model).expect("model ref"),
+    )
+    .expect("current root config");
+    root.workspace.root = ".".to_owned();
+    root.session.log_dir = Some(".sigil/sessions".to_owned());
+    root.agent.runtime_provider = provider.to_owned();
+    root.agent.max_turns = Some(12);
+    root.agent.tool_timeout_secs = 45;
+    root.memory.enabled = true;
+    root
 }
 
 fn command_exists_on_path(command: &str) -> bool {
@@ -383,244 +354,6 @@ impl Tool for ShutdownFailingMcpTool {
 }
 
 #[test]
-fn load_deepseek_config_reads_provider_block() -> Result<()> {
-    let config = load_deepseek_config(&test_root_config("deepseek"))?;
-
-    assert_eq!(config.base_url, "https://example.com");
-    assert_eq!(config.model, "deepseek-v4-flash");
-    assert_eq!(config.fim_model, "deepseek-v4-pro");
-    assert_eq!(config.api_key.as_deref(), Some("test-key"));
-    Ok(())
-}
-
-#[test]
-fn portable_compaction_requires_the_resolved_default_deepseek_transport() -> Result<()> {
-    let mut config = test_root_config("deepseek");
-    let error = require_default_deepseek_v4_flash_portable_transport(&config)
-        .expect_err("a custom DeepSeek route must not inherit the default local token proof");
-    assert!(
-        error
-            .to_string()
-            .contains("resolved default DeepSeek V4 Flash transport")
-    );
-
-    config.providers.insert(
-        "deepseek".to_owned(),
-        json!({
-            "api_key": "test-key",
-        }),
-    );
-    require_default_deepseek_v4_flash_portable_transport(&config)?;
-    Ok(())
-}
-
-#[test]
-fn load_openai_compat_config_reads_provider_block() -> Result<()> {
-    let config = load_openai_compat_config(&test_root_config("openai_compat"))?;
-
-    assert_eq!(config.base_url, "https://openai.example.com/v1");
-    assert_eq!(config.model, "gpt-test");
-    assert_eq!(config.api_key.as_deref(), Some("openai-config-key"));
-    assert_eq!(config.organization.as_deref(), Some("org-test"));
-    assert_eq!(config.project.as_deref(), Some("project-test"));
-    Ok(())
-}
-
-#[test]
-fn load_openai_responses_config_reads_provider_block() -> Result<()> {
-    let config = load_openai_responses_config(&test_root_config("openai_responses"))?;
-
-    assert_eq!(config.base_url, "https://responses.example.com/v1");
-    assert_eq!(config.api_key.as_deref(), Some("responses-config-key"));
-    assert_eq!(config.model, "gpt-test");
-    Ok(())
-}
-
-#[test]
-fn load_anthropic_and_gemini_config_read_provider_blocks() -> Result<()> {
-    let anthropic = load_anthropic_config(&test_root_config("anthropic"))?;
-    assert_eq!(anthropic.base_url, "https://anthropic.example.com");
-    assert_eq!(anthropic.model, "claude-test");
-    assert_eq!(anthropic.api_key.as_deref(), Some("anthropic-config-key"));
-    assert_eq!(anthropic.max_tokens, 1024);
-
-    let gemini = load_gemini_config(&test_root_config("gemini"))?;
-    assert_eq!(gemini.base_url, "https://gemini.example.com/v1beta");
-    assert_eq!(gemini.model, "gemini-test");
-    assert_eq!(gemini.api_key.as_deref(), Some("gemini-config-key"));
-    Ok(())
-}
-
-#[test]
-fn resolve_deepseek_api_key_uses_env_before_plaintext_config() -> Result<()> {
-    let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "env-key")]);
-    let config = load_deepseek_config(&test_root_config("deepseek"))?;
-
-    let resolved = resolve_deepseek_api_key(&config).expect("expected api key");
-
-    assert_eq!(resolved.value, "env-key");
-    assert_eq!(
-        resolved.source,
-        SecretSource::Environment(SIGIL_API_KEY_ENV)
-    );
-    Ok(())
-}
-
-#[test]
-fn resolve_deepseek_api_key_ignores_deepseek_env_and_uses_config_fallback() -> Result<()> {
-    let _guard = crate::test_env::lock();
-    let _base_scope =
-        EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), ("DEEPSEEK_API_KEY", "   ")]);
-    let config = load_deepseek_config(&test_root_config("deepseek"))?;
-
-    {
-        let _scope = EnvScope::set_many(&[("DEEPSEEK_API_KEY", "deepseek-env-key")]);
-        let resolved = resolve_deepseek_api_key(&config).expect("expected deepseek api key");
-        assert_eq!(resolved.value, "test-key");
-        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    }
-
-    let resolved = resolve_deepseek_api_key(&config).expect("expected config api key");
-    assert_eq!(resolved.value, "test-key");
-    assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    Ok(())
-}
-
-#[test]
-fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()> {
-    let _guard = crate::test_env::lock();
-    let _base_scope = EnvScope::set_many(&[
-        (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
-        ("OPENAI_API_KEY", "   "),
-    ]);
-    let config = load_openai_compat_config(&test_root_config("openai_compat"))?;
-
-    {
-        let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "sigil-openai-key")]);
-        let resolved =
-            resolve_openai_compat_api_key(&config).expect("expected OpenAI-compatible api key");
-        assert_eq!(resolved.value, "sigil-openai-key");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(OPENAI_COMPATIBLE_API_KEY_ENV)
-        );
-    }
-
-    {
-        let _scope = EnvScope::set_many(&[
-            (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
-            ("OPENAI_API_KEY", "openai-env-key"),
-        ]);
-        let resolved =
-            resolve_openai_compat_api_key(&config).expect("expected OpenAI-compatible api key");
-        assert_eq!(resolved.value, "openai-config-key");
-        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    }
-
-    let resolved = resolve_openai_compat_api_key_with_session(&config, Some(" session-key "))
-        .expect("expected session api key");
-    assert_eq!(resolved.value, "session-key");
-    assert_eq!(resolved.source, SecretSource::Session);
-
-    let resolved = resolve_openai_compat_api_key_with_session(&config, Some("   "))
-        .expect("expected config fallback");
-    assert_eq!(resolved.value, "openai-config-key");
-    assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    Ok(())
-}
-
-#[test]
-fn resolve_openai_responses_api_key_prefers_env_session_then_config() -> Result<()> {
-    let _guard = crate::test_env::lock();
-    let _base_scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "   ")]);
-    let config = load_openai_responses_config(&test_root_config("openai_responses"))?;
-
-    {
-        let _scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "responses-env-key")]);
-        let resolved =
-            resolve_openai_responses_api_key(&config).expect("expected OpenAI Responses api key");
-        assert_eq!(resolved.value, "responses-env-key");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(OPENAI_RESPONSES_API_KEY_ENV)
-        );
-    }
-
-    let resolved = resolve_openai_responses_api_key_with_session(&config, Some(" session-key "))
-        .expect("expected session api key");
-    assert_eq!(resolved.value, "session-key");
-    assert_eq!(resolved.source, SecretSource::Session);
-    Ok(())
-}
-
-#[test]
-fn resolve_anthropic_and_gemini_api_keys_prefer_env_session_then_config() -> Result<()> {
-    let _guard = crate::test_env::lock();
-    let _base_scope = EnvScope::set_many(&[
-        (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
-        ("ANTHROPIC_API_KEY", "   "),
-        (SIGIL_GEMINI_API_KEY_ENV, "   "),
-        ("GEMINI_API_KEY", "   "),
-        ("GOOGLE_API_KEY", "   "),
-    ]);
-    let anthropic = load_anthropic_config(&test_root_config("anthropic"))?;
-    let gemini = load_gemini_config(&test_root_config("gemini"))?;
-
-    {
-        let _scope = EnvScope::set_many(&[(SIGIL_ANTHROPIC_API_KEY_ENV, "anthropic-env")]);
-        let resolved = resolve_anthropic_api_key(&anthropic).expect("expected Anthropic api key");
-        assert_eq!(resolved.value, "anthropic-env");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(SIGIL_ANTHROPIC_API_KEY_ENV)
-        );
-    }
-
-    {
-        let _scope = EnvScope::set_many(&[
-            (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
-            ("ANTHROPIC_API_KEY", "anthropic-provider-env"),
-        ]);
-        let resolved = resolve_anthropic_api_key(&anthropic).expect("expected Anthropic api key");
-        assert_eq!(resolved.value, "anthropic-config-key");
-        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    }
-
-    let resolved = super::resolve_anthropic_api_key_with_session(&anthropic, Some(" session-key "))
-        .expect("expected Anthropic session key");
-    assert_eq!(resolved.value, "session-key");
-    assert_eq!(resolved.source, SecretSource::Session);
-
-    {
-        let _scope = EnvScope::set_many(&[(SIGIL_GEMINI_API_KEY_ENV, "gemini-env")]);
-        let resolved = resolve_gemini_api_key(&gemini).expect("expected Gemini api key");
-        assert_eq!(resolved.value, "gemini-env");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(SIGIL_GEMINI_API_KEY_ENV)
-        );
-    }
-
-    {
-        let _scope = EnvScope::set_many(&[
-            (SIGIL_GEMINI_API_KEY_ENV, "   "),
-            ("GEMINI_API_KEY", "gemini-provider-env"),
-            ("GOOGLE_API_KEY", "google-env"),
-        ]);
-        let resolved = resolve_gemini_api_key(&gemini).expect("expected Gemini api key");
-        assert_eq!(resolved.value, "gemini-config-key");
-        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    }
-
-    let resolved = resolve_gemini_api_key_with_session(&gemini, Some(" gemini-session "))
-        .expect("expected Gemini session key");
-    assert_eq!(resolved.value, "gemini-session");
-    assert_eq!(resolved.source, SecretSource::Session);
-    Ok(())
-}
-
-#[test]
 fn secret_redactor_for_root_config_redacts_resolved_api_key() {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "env-secret-key")]);
@@ -663,80 +396,79 @@ fn secret_redactor_for_root_config_redacts_openai_responses_api_key() {
 fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
-        (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
-        ("ANTHROPIC_API_KEY", "   "),
-        (SIGIL_GEMINI_API_KEY_ENV, "   "),
-        ("GEMINI_API_KEY", "   "),
-        ("GOOGLE_API_KEY", "   "),
+        (SIGIL_ANTHROPIC_API_KEY_ENV, "anthropic-env-secret"),
+        (SIGIL_GEMINI_API_KEY_ENV, "gemini-env-secret"),
     ]);
 
-    let redactor = secret_redactor_for_root_config(&test_root_config("anthropic"));
+    let anthropic_redactor = secret_redactor_for_root_config(&test_root_config("anthropic"));
+    let gemini_redactor = secret_redactor_for_root_config(&test_root_config("gemini"));
 
     assert_eq!(
-        redactor.redact_text("x-api-key: anthropic-config-key; key=gemini-config-key"),
-        "x-api-key: [redacted]; key=[redacted]"
+        anthropic_redactor.redact_text("x-api-key: anthropic-env-secret"),
+        "x-api-key: [redacted]"
+    );
+    assert_eq!(
+        gemini_redactor.redact_text("key=gemini-env-secret"),
+        "key=[redacted]"
     );
 }
 
 #[test]
-fn build_provider_rejects_unsupported_provider() {
-    let error = match build_provider(&test_root_config("other")) {
-        Ok(_) => panic!("expected unsupported provider error"),
-        Err(error) => error,
-    };
-
-    assert!(error.to_string().contains("unsupported provider other"));
-}
-
-#[test]
 fn build_provider_supports_deepseek_and_missing_provider_config_errors() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "deepseek-test-secret")]);
     let provider = build_provider(&test_root_config("deepseek"))?;
     assert_eq!(provider.name(), "deepseek");
 
     let mut missing = test_root_config("deepseek");
-    missing.providers.clear();
-    let error = load_deepseek_config(&missing).expect_err("missing provider config should fail");
-    assert!(error.to_string().contains("missing [providers.deepseek]"));
+    missing.connections.clear();
+    let error = load_deepseek_config(&missing).expect_err("missing connection should fail");
+    assert!(error.to_string().contains("connection_config_invalid"));
     Ok(())
 }
 
 #[test]
 fn build_provider_supports_openai_compat_and_missing_config_errors() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[(
+        OPENAI_COMPATIBLE_API_KEY_ENV,
+        "openai-compatible-test-secret",
+    )]);
     let provider = build_provider(&test_root_config("openai_compat"))?;
     assert_eq!(provider.name(), "openai_compat");
 
     let mut missing = test_root_config("openai_compat");
-    missing.providers.remove("openai_compat");
+    missing.connections.clear();
     let error = load_openai_compat_config(&missing)
-        .expect_err("missing OpenAI-compatible provider config should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("missing [providers.openai_compat]")
-    );
+        .expect_err("missing OpenAI-compatible connection should fail");
+    assert!(error.to_string().contains("connection_config_invalid"));
     Ok(())
 }
 
 #[test]
 fn build_provider_supports_openai_responses_and_missing_config_errors() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope =
+        EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "openai-responses-test-secret")]);
     let provider = build_provider(&test_root_config("openai_responses"))?;
     assert_eq!(provider.name(), "openai_responses");
 
     let mut missing = test_root_config("openai_responses");
-    missing.providers.remove("openai_responses");
+    missing.connections.clear();
     let error = load_openai_responses_config(&missing)
-        .expect_err("missing OpenAI Responses provider config should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("missing [providers.openai_responses]")
-    );
+        .expect_err("missing OpenAI Responses connection should fail");
+    assert!(error.to_string().contains("connection_config_invalid"));
     Ok(())
 }
 
 #[test]
 fn build_provider_supports_canonical_anthropic_and_gemini_and_missing_config_errors() -> Result<()>
 {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_ANTHROPIC_API_KEY_ENV, "anthropic-test-secret"),
+        (SIGIL_GEMINI_API_KEY_ENV, "gemini-test-secret"),
+    ]);
     let anthropic = build_provider(&test_root_config("anthropic"))?;
     assert_eq!(anthropic.name(), "anthropic");
 
@@ -744,39 +476,17 @@ fn build_provider_supports_canonical_anthropic_and_gemini_and_missing_config_err
     assert_eq!(gemini.name(), "gemini");
 
     let mut missing_anthropic = test_root_config("anthropic");
-    missing_anthropic.providers.remove("anthropic");
+    missing_anthropic.connections.clear();
     let error = load_anthropic_config(&missing_anthropic)
-        .expect_err("missing Anthropic provider config should fail");
-    assert!(error.to_string().contains("missing [providers.anthropic]"));
+        .expect_err("missing Anthropic connection should fail");
+    assert!(error.to_string().contains("connection_config_invalid"));
 
     let mut missing_gemini = test_root_config("gemini");
-    missing_gemini.providers.remove("gemini");
-    let error = load_gemini_config(&missing_gemini)
-        .expect_err("missing Gemini provider config should fail");
-    assert!(error.to_string().contains("missing [providers.gemini]"));
+    missing_gemini.connections.clear();
+    let error =
+        load_gemini_config(&missing_gemini).expect_err("missing Gemini connection should fail");
+    assert!(error.to_string().contains("connection_config_invalid"));
     Ok(())
-}
-
-#[test]
-fn build_provider_rejects_provider_aliases() {
-    for provider_name in [
-        "openai-compatible",
-        "openai_compatible",
-        "claude",
-        "google",
-        "google_gemini",
-        "google-gemini",
-    ] {
-        let error = match build_provider(&test_root_config(provider_name)) {
-            Ok(_) => panic!("provider aliases should not be accepted"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("unsupported provider {provider_name}"))
-        );
-    }
 }
 
 #[test]
@@ -957,9 +667,17 @@ fn build_role_run_options_applies_reasoning_override() {
 
 #[test]
 fn build_role_provider_uses_role_provider_override() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "openai-role-test-secret")]);
     let mut config = test_root_config("deepseek");
+    let mut openai = test_root_config("openai_compat");
+    let (connection_id, connection) = openai
+        .connections
+        .pop_first()
+        .expect("OpenAI-compatible connection");
+    config.connections.insert(connection_id.clone(), connection);
     config.task.planner = RoleModelConfig {
-        provider: Some("openai_compat".to_owned()),
+        connection: Some(ConnectionId::new(connection_id)?),
         model: Some("gpt-role".to_owned()),
         ..RoleModelConfig::default()
     };
@@ -1136,29 +854,13 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
     Ok(())
 }
 
-#[test]
-fn resolve_deepseek_api_key_prefers_session_over_plaintext_and_skips_blank_values() -> Result<()> {
-    let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), ("DEEPSEEK_API_KEY", "   ")]);
-    let config = load_deepseek_config(&test_root_config("deepseek"))?;
-
-    let resolved = resolve_deepseek_api_key_with_session(&config, Some("  session-secret  "))
-        .expect("session api key should resolve");
-    assert_eq!(resolved.value, "session-secret");
-    assert_eq!(resolved.source, SecretSource::Session);
-
-    let resolved = resolve_deepseek_api_key_with_session(&config, Some("   "))
-        .expect("config fallback should resolve");
-    assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
-    Ok(())
-}
-
 #[tokio::test]
 async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let registry = build_tool_registry(
         &test_root_config("deepseek"),
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
     )
     .await?;
@@ -1172,7 +874,8 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 
 #[tokio::test]
 async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.execution = sandbox_execution_config(
         ExecutionBackendKind::Local,
@@ -1182,7 +885,7 @@ async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<(
     );
 
     let result =
-        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await;
+        build_tool_registry(&config, &provider_capabilities, std::env::current_dir()?).await;
     let Err(error) = result else {
         panic!("local backend must not satisfy required sandbox policy");
     };
@@ -1197,7 +900,8 @@ async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<(
 
 #[tokio::test]
 async fn build_tool_registry_fails_closed_when_profile_requires_sandbox() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.execution = sandbox_execution_config(
         ExecutionBackendKind::Local,
@@ -1207,7 +911,7 @@ async fn build_tool_registry_fails_closed_when_profile_requires_sandbox() -> Res
     );
 
     let result =
-        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await;
+        build_tool_registry(&config, &provider_capabilities, std::env::current_dir()?).await;
     let Err(error) = result else {
         panic!("local backend must not satisfy sandbox profile");
     };
@@ -1351,7 +1055,8 @@ async fn configured_mcp_process_launcher_network_ask_with_evidence_spawns() -> R
 #[tokio::test]
 async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     for (label, admission, expected_code) in [
         (
             "ask",
@@ -1388,7 +1093,7 @@ async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<(
             refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
                 &mut registry,
                 &config,
-                &provider.capabilities(),
+                &provider_capabilities,
                 temp.path().to_path_buf(),
                 &format!("refresh-{label}"),
                 sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -1619,7 +1324,8 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
 #[tokio::test]
 #[cfg(target_os = "macos")]
 async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.execution = sandbox_execution_config(
         ExecutionBackendKind::MacosSeatbelt,
@@ -1629,7 +1335,7 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
     );
 
     let registry =
-        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await?;
+        build_tool_registry(&config, &provider_capabilities, std::env::current_dir()?).await?;
 
     assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
     Ok(())
@@ -1640,7 +1346,8 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
 async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_backend() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.execution = sandbox_execution_config(
         ExecutionBackendKind::MacosSeatbelt,
@@ -1649,7 +1356,7 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
         None,
     );
     let registry =
-        build_tool_registry(&config, &provider.capabilities(), temp.path().to_path_buf()).await?;
+        build_tool_registry(&config, &provider_capabilities, temp.path().to_path_buf()).await?;
 
     let result = registry
         .execute(
@@ -1690,7 +1397,8 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
 
 #[tokio::test]
 async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.code_intelligence = CodeIntelligenceConfig {
         enabled: true,
@@ -1711,7 +1419,7 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
     };
 
     let registry =
-        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await?;
+        build_tool_registry(&config, &provider_capabilities, std::env::current_dir()?).await?;
 
     assert!(registry.spec_for("code_symbols").is_some());
     assert!(registry.spec_for("code_diagnostics").is_some());
@@ -1722,14 +1430,15 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
 async fn runtime_tool_surface_shares_code_intelligence_with_context_resolver() -> Result<()> {
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n")?;
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.code_intelligence.enabled = true;
     config.code_intelligence.server_startup = CodeIntelStartup::Lazy;
 
     let surface = build_tool_surface_without_eager_mcp_with_workspace_trust(
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
@@ -1765,7 +1474,8 @@ async fn explicit_workspace_trust_reaches_code_intelligence_services() -> Result
         "[package]\nname='runtime-trust-test'\nversion='0.1.0'\n",
     )?;
     std::fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n")?;
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.code_intelligence = CodeIntelligenceConfig {
         enabled: true,
@@ -1787,7 +1497,7 @@ async fn explicit_workspace_trust_reaches_code_intelligence_services() -> Result
 
     let registry = build_tool_registry_without_eager_mcp_with_workspace_trust(
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
@@ -1856,7 +1566,8 @@ while True:
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{}})
 "#,
     )?;
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
@@ -1868,7 +1579,7 @@ while True:
     });
 
     let registry =
-        build_tool_registry(&config, &provider.capabilities(), temp.path().to_path_buf()).await?;
+        build_tool_registry(&config, &provider_capabilities, temp.path().to_path_buf()).await?;
 
     assert!(registry.spec_for("mcp_activate_server").is_some());
     assert!(registry.spec_for("mcp__lazy__echo").is_none());
@@ -1924,7 +1635,8 @@ while True:
 
 #[tokio::test]
 async fn explicit_optional_lazy_activation_fails_instead_of_reporting_empty_ready() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "optional-missing".to_owned(),
@@ -1939,7 +1651,7 @@ async fn explicit_optional_lazy_activation_fails_instead_of_reporting_empty_read
     activate_lazy_mcp_tools_detailed(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         Some("optional-missing"),
     )
@@ -1988,7 +1700,8 @@ while True:
 "#,
     )?;
 
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
@@ -2003,7 +1716,7 @@ while True:
     let result = refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         "lazy",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2053,7 +1766,8 @@ while True:
 "#,
     )?;
 
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let long_name = format!("long-{}", "server".repeat(40));
     let servers = ["a-b".to_owned(), "a_b".to_owned(), long_name.clone()]
         .into_iter()
@@ -2074,7 +1788,7 @@ while True:
         &mut registry,
         &servers,
         sigil_mcp::McpToolRegistrationOptions::eager()?
-            .with_capabilities(&provider.capabilities())
+            .with_capabilities(&provider_capabilities)
             .with_working_dir(temp.path().to_path_buf()),
     )
     .await?;
@@ -2096,7 +1810,7 @@ while True:
     assert!(
         initial_names
             .iter()
-            .all(|name| name.chars().count() <= provider.capabilities().tool_name_max_chars)
+            .all(|name| name.chars().count() <= provider_capabilities.tool_name_max_chars)
     );
     assert_eq!(
         registry
@@ -2115,7 +1829,7 @@ while True:
         let refreshed = refresh_mcp_server_tools_with_mcp_handlers(
             &mut registry,
             &config,
-            &provider.capabilities(),
+            &provider_capabilities,
             temp.path().to_path_buf(),
             server_name,
             sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2207,7 +1921,8 @@ while True:
     .replace("__GENERATION_FILE__", &generation_path);
     std::fs::write(&script, script_body)?;
 
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     let server = mcp_server_config! {
         name: "poisoned".to_owned(),
@@ -2235,7 +1950,7 @@ while True:
     let refresh = refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         "poisoned",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2312,7 +2027,8 @@ while True:
     .replace("__DESCENDANT_PID_FILE__", &descendant_path);
     std::fs::write(&script, script_body)?;
 
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     let server = mcp_server_config! {
         name: "healthy-retired".to_owned(),
@@ -2331,7 +2047,7 @@ while True:
     let refresh = refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         "healthy-retired",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2394,7 +2110,8 @@ while True:
 "#,
     )?;
 
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "rollback".to_owned(),
@@ -2409,7 +2126,7 @@ while True:
     let error = refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         "rollback",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2483,7 +2200,8 @@ async fn clearing_remote_credentials_retires_the_server_generation_before_shutdo
 
 #[tokio::test]
 async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
@@ -2497,7 +2215,7 @@ async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -
     let error = refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         "lazy",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2546,7 +2264,8 @@ while True:
     sys.stdout.buffer.flush()
 "#,
     )?;
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let healthy = mcp_server_config! {
         name: "optional-refresh".to_owned(),
         command: "python3".to_owned(),
@@ -2566,7 +2285,7 @@ while True:
     refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         temp.path().to_path_buf(),
         "optional-refresh",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2592,7 +2311,8 @@ while True:
 
 #[tokio::test]
 async fn refresh_mcp_server_tools_returns_zero_for_unknown_server() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let config = test_root_config("deepseek");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ExistingMcpTool));
@@ -2600,7 +2320,7 @@ async fn refresh_mcp_server_tools_returns_zero_for_unknown_server() -> Result<()
     let result = refresh_mcp_server_tools_with_mcp_handlers(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         "missing",
         sigil_mcp::unsupported_mcp_elicitation_handler(),
@@ -2617,7 +2337,8 @@ async fn refresh_mcp_server_tools_returns_zero_for_unknown_server() -> Result<()
 
 #[tokio::test]
 async fn activate_lazy_mcp_tools_ignores_nonmatching_server_name() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
@@ -2630,7 +2351,7 @@ async fn activate_lazy_mcp_tools_ignores_nonmatching_server_name() -> Result<()>
     let added = activate_lazy_mcp_tools(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         Some("other"),
     )
@@ -2643,7 +2364,8 @@ async fn activate_lazy_mcp_tools_ignores_nonmatching_server_name() -> Result<()>
 
 #[tokio::test]
 async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "optional-lazy".to_owned(),
@@ -2657,7 +2379,7 @@ async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() 
     let added = activate_lazy_mcp_tools(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         None,
     )
@@ -2670,7 +2392,8 @@ async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() 
 
 #[tokio::test]
 async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "optional-lazy".to_owned(),
@@ -2684,7 +2407,7 @@ async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()
     let result = activate_lazy_mcp_tools_detailed(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         None,
     )
@@ -2697,14 +2420,15 @@ async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()
 
 #[test]
 fn lazy_mcp_activation_tool_is_not_registered_without_lazy_servers() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let config = test_root_config("deepseek");
     let mut registry = ToolRegistry::new();
 
     register_lazy_mcp_activation_tool(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
@@ -2717,7 +2441,8 @@ fn lazy_mcp_activation_tool_is_not_registered_without_lazy_servers() -> Result<(
 #[test]
 fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_is_missing()
 -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "required-eager".to_owned(),
@@ -2728,7 +2453,7 @@ fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_i
 
     let registry = build_tool_registry_without_eager_mcp(
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
@@ -2741,7 +2466,8 @@ fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_i
 
 #[tokio::test]
 async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
@@ -2753,7 +2479,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     register_lazy_mcp_activation_tool(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
@@ -2891,7 +2617,8 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
 
 #[tokio::test]
 async fn mcp_activate_server_uses_its_own_lifecycle_mutation_evidence() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "lifecycle-owned".to_owned(),
@@ -2902,7 +2629,7 @@ async fn mcp_activate_server_uses_its_own_lifecycle_mutation_evidence() -> Resul
     let workspace = tempfile::tempdir()?;
     let registry = build_tool_registry_without_eager_mcp_with_workspace_trust(
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         workspace.path().to_path_buf(),
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
@@ -2927,7 +2654,8 @@ async fn mcp_activate_server_uses_its_own_lifecycle_mutation_evidence() -> Resul
 
 #[test]
 fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
-    let provider = build_provider(&test_root_config("deepseek"))?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(mcp_server_config! {
         name: "quiet-lazy".to_owned(),
@@ -2943,7 +2671,7 @@ fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
     register_lazy_mcp_activation_tool(
         &mut registry,
         &config,
-        &provider.capabilities(),
+        &provider_capabilities,
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),

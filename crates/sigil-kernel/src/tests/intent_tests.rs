@@ -53,7 +53,7 @@ struct AuthorityBoundaries {
     fork: IntentAuthorityState,
     worktree_child: IntentAuthorityState,
     workspace_switch: IntentAuthorityState,
-    old_session: PublicIntentStackStateV1,
+    not_created: PublicIntentStackStateV1,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,8 +280,8 @@ fn locked_decision_fixtures_round_trip_through_strict_contracts() -> Result<()> 
         IntentAuthorityState::OutOfScope
     );
     assert!(matches!(
-        boundaries.old_session,
-        PublicIntentStackStateV1::HistoryUnavailable { .. }
+        boundaries.not_created,
+        PublicIntentStackStateV1::NotCreated { .. }
     ));
     Ok(())
 }
@@ -425,7 +425,6 @@ fn event_type_names_and_payload_variants_are_frozen() -> Result<()> {
 fn operation_error_taxonomy_is_frozen() -> Result<()> {
     let codes = [
         IntentOperationErrorCode::UnsupportedSchema,
-        IntentOperationErrorCode::IntentHistoryUnavailable,
         IntentOperationErrorCode::UnknownIntent,
         IntentOperationErrorCode::UnknownOperation,
         IntentOperationErrorCode::StaleIntentVersion,

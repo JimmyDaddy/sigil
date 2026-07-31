@@ -28,7 +28,7 @@
 
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `config_version` | 快速设置写入 `2` | 选择 provider connection 配置 schema；未来版本和 V1/V2 混用会 fail closed。 |
+| `config_version` | 必填：`2` | 选择当前 provider connection schema；其他值都会 fail closed。 |
 | `[agent].connection` | 快速设置中的选择 | 保存默认 connection ID。 |
 | `[agent].model` | 模型服务设置中的选择 | 保存默认 connection 中的模型。 |
 | `[agent].tool_timeout_secs` | `30` | 工具超时秒数。 |
@@ -37,18 +37,17 @@
 | `[connections.<id>].provider` | 必填 | `deepseek`、`openai`、`anthropic`、`gemini` 或 `custom`。 |
 | `[connections.<id>].protocol` | 必填 | `deepseek`、`responses`、`chat_completions`、`anthropic_messages` 或 `generate_content`，并受 provider 约束。 |
 | `[connections.<id>].base_url` | provider 默认值 | 此 connection 独立拥有的端点；带凭据的远端必须使用 HTTPS，无认证 HTTP 仅限回环地址。 |
-| `[connections.<id>].credential` | 快速设置中的选择 | `{ source = "environment", name = "..." }`、`{ source = "stored", id = "..." }` 或 `{ source = "none" }`。stored ID 由 Sigil 生成，不应手写；旧 `keyring` 引用仍可读取。 |
+| `[connections.<id>].credential` | 快速设置中的选择 | `{ source = "environment", name = "..." }`、`{ source = "stored", id = "..." }` 或 `{ source = "none" }`。stored ID 由 Sigil 生成，不应手写。 |
 | `[connections.<id>].options` | provider 默认值 | 由 provider 校验的 wire 选项；类似凭据的键会被拒绝。 |
 | `[model_request].request_timeout_secs` | `120` | 模型请求等待上限；单次启动可用 `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_idle_timeout_secs` | `180` | 两个流式响应事件之间的最长等待时间；可用 `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_total_timeout_secs` | 未设置 | 整个流式响应的可选时限；可用 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 覆盖。 |
 
-活动会话会保留自己的 `connection-id/model-id` 解析 route。修改保存默认值不会重写当前会话；空闲
-状态切换到 ready route 时会创建新会话。现有 V1 `[agent].provider` 与 `[providers.*]` 文件仍可
-读取；`/config` 会报告 legacy 模式，只有显式确认才迁移，并保留准确的 provider/model，同时从
-V2 中移除已迁移明文。
+活动会话会保留自己的 `connection-id/model-id` 解析 route。修改保存默认值不会重写当前会话；
+空闲状态切换到 ready route 时会创建新会话。旧 `[agent].provider` 与 `[providers.*]` 文件会被
+拒绝，需要直接替换为当前 connection schema。
 
-provider 模板、凭据来源、模型发现与迁移排障见[模型服务指南](providers.md)。
+provider 模板、凭据来源、模型发现与排障见[模型服务指南](providers.md)。
 
 ## 执行
 
@@ -103,15 +102,15 @@ provider 模板、凭据来源、模型发现与迁移排障见[模型服务指�
 | `[task].max_planning_research_agents` | `3` | 每次 Planner attempt 最多使用多少个只读 Explore probe；`0` 表示关闭，超过硬上限 `4` 的值会被截断。 |
 | `[task].multi_agent_mode` | `"explicit_request_only"` | `none`、`explicit_request_only` 或 `proactive`。 |
 | `[task].allow_write_subagents` | `true` | 符合条件的子智能体能否请求修改文件。 |
-| `[task.<role>].connection` / `.model` / `.reasoning_effort` | 继承 `[agent]` | 可按角色单独选择 V2 路由；`connection` 与 `model` 必须同时设置，V2 会拒绝旧 `provider` 字段。 |
+| `[task.<role>].connection` / `.model` / `.reasoning_effort` | 继承 `[agent]` | 可按角色单独选择当前路由；`connection` 与 `model` 必须同时设置，`provider` 不是合法字段。 |
 | `[task.<role>.tools].names` / `.prefixes` / `.allow_all` | 角色默认值 | 可按角色限制能够看到的工具。 |
 
 可配置的角色包括 `planner`、`executor`、`subagent_read` 和 `subagent_write`。
 
-表中列出的是 schema 与 legacy 兼容默认值。只有新安装的 provider、model、endpoint、
+表中列出的是当前 schema 默认值。只有新安装的 provider、model、endpoint、
 task-config digest 与 binary build 全部精确匹配 qualified release manifest 时，Quick Setup
 才会写入 `auto + proactive`。manifest 缺失、无效、过期或 route 不匹配时，一律 fail closed
-到 `manual + explicit_request_only`；已有配置文件不会被静默迁移。
+到 `manual + explicit_request_only`；不兼容的配置会被拒绝。
 
 ## 权限
 
@@ -154,11 +153,9 @@ task-config digest 与 binary build 全部精确匹配 qualified release manifes
 | `[skills].compatibility_auto_discover` | `true` | 导入标准 `.agents/skills`、Codex `.codex/agents`、OpenCode `.opencode/{skills,commands,agents}` 和 Claude Code `.claude/{skills,commands,agents}` 工作区资源。设为 `false` 可关闭默认兼容集合。 |
 | `[skills].compatibility_sources` | `[]` | 在默认集合之外添加兼容来源，例如为 `.reasonix/agents` 加入 `"reasonix"`；也可配合 `compatibility_auto_discover = false` 精确选择来源。 |
 | `[compaction].enabled` | `true` | 开启对话上下文精简。 |
-| `[compaction].strategy` | `"cache_aware_v3"` | cache-stable 的完整回合与成本准入策略；正常 semantic compact 会在当前 route 额外调用一次无工具 LLM 摘要并核算实际 usage，`"legacy_v2"` 仅用于回滚或不支持 route 的回退。 |
-| `[compaction].native_carrier_enabled` | `false` | 迁移预留开关。精确 route 的 resume contract 落地前，native materialization 保持 fail-closed；当前设为 `true` 也不会额外发起 provider 请求。 |
-| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | Legacy V2 的提醒/空闲阈值；迁移期继续可读，但不再是 V3 的经济性准入规则。 |
+| `[compaction].strategy` | `"cache_aware_v3"` | cache-stable 的完整回合与成本准入策略；正常 semantic compact 会在当前 route 额外调用一次无工具 LLM 摘要并核算实际 usage。 |
+| `[compaction].native_carrier_enabled` | `false` | 显式 provider-native 加速开关。精确 route 的 resume contract 落地前，native materialization 保持 fail-closed；当前设为 `true` 也不会额外发起 provider 请求。 |
 | `[compaction].fallback_context_window_tokens` | 未设置 | 无法获知模型上下文窗口时使用的备用值。 |
-| `[compaction].tail_messages` | `6` | 兼容旧配置；V3 会将其翻译成至少保留多少个完整 recent turn。 |
 
 ## 代码智能、终端、插件与 MCP
 

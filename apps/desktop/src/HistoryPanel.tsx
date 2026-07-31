@@ -287,7 +287,6 @@ function sourceLabel(state: CatalogSourceState, t: ReturnType<typeof useLocale>[
     case "ready": return t("ready");
     case "oversized": return t("oversized");
     case "scan_budget_exceeded": return t("scanLimited");
-    case "unsupported_legacy": return t("unavailable");
     case "invalid": return t("invalid");
   }
 }

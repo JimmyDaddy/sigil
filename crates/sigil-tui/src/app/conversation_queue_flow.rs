@@ -356,10 +356,9 @@ impl AppState {
             "next" | "send" => Ok(self.queue_action_for_target(target, |queue_id| {
                 AppAction::PromoteQueuedConversationInput { queue_id }
             })),
-            "now" | "send-now" | "interrupt" => Ok(self
-                .queue_action_for_target(target, |queue_id| {
-                    AppAction::SendQueuedConversationInputNow { queue_id }
-                })),
+            "interrupt" => Ok(self.queue_action_for_target(target, |queue_id| {
+                AppAction::SendQueuedConversationInputNow { queue_id }
+            })),
             "delete" | "cancel" | "remove" => Ok(self
                 .queue_action_for_target(target, |queue_id| {
                     AppAction::CancelQueuedConversationInput { queue_id }

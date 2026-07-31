@@ -323,20 +323,13 @@ fn refresh_plan_after_semantic_compaction(
     {
         bail!("semantic compaction physical-attempt lineage is incomplete");
     }
-    let refreshed = if let Some(adaptive) = &original_plan.adaptive_tail {
-        CompactionFoldPlan::from_records_after_adaptive_tail(
-            &records,
-            adaptive.policy.clone(),
-            adaptive.exact_fit_limit_tokens,
-            original_plan.prior_folded_through.as_ref(),
-        )?
-    } else {
-        CompactionFoldPlan::from_records_after(
-            &records,
-            original_plan.requested_tail_message_count,
-            original_plan.prior_folded_through.as_ref(),
-        )?
-    };
+    let adaptive = &original_plan.adaptive_tail;
+    let refreshed = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        adaptive.policy.clone(),
+        adaptive.exact_fit_limit_tokens,
+        original_plan.prior_folded_through.as_ref(),
+    )?;
     if refreshed.folded_event_ids != original_plan.folded_event_ids {
         bail!("semantic compaction fold set changed while the summary was generated");
     }
@@ -366,7 +359,6 @@ pub struct PortableCompactionEconomicsV2Input {
     pub compactor_output_tokens: u64,
     pub rollout_mode: CompactionRolloutModeV1,
     pub user_confirmed: bool,
-    pub legacy_v2_would_compact: bool,
 }
 
 /// Returns whether this exact runtime provider route can execute a native acceleration carrier.
@@ -514,7 +506,6 @@ pub fn attach_portable_compaction_economics_v2(
         CompactionAdmissionOptionsV2 {
             rollout_mode: input.rollout_mode,
             user_confirmed: input.user_confirmed,
-            legacy_v2_would_compact: input.legacy_v2_would_compact,
         },
     )?;
     material.with_compaction_economics_v2(extension)
@@ -542,8 +533,8 @@ pub fn is_openai_responses_portable_target_profile(provider_name: &str, model_na
 /// Returns whether automatic cache-aware V3 rotation has both a local exact portable proof
 /// profile and a trusted route capability.
 ///
-/// Model identity alone is insufficient: compatible/custom routes remain on the legacy
-/// threshold path until their adapter advertises a validated cache contract. Profiles that need
+/// Model identity alone is insufficient: compatible/custom routes remain ineligible until their
+/// adapter advertises a validated cache contract. Profiles that need
 /// provider-side token measurement (currently OpenAI Responses) are reserved for the separately
 /// bounded overflow-recovery path and cannot enter the idle automatic path.
 #[must_use]
@@ -775,8 +766,8 @@ pub fn deepseek_v4_flash_portable_target_material_with_economics(
 
 /// Builds the exact positive-savings candidate consumed immediately by RFC-0057 admission.
 ///
-/// Unlike the legacy helper, this does not pre-apply the old 64-token threshold; the attached V2
-/// record decides fit-required bypass and the 4K/5% or trusted-price policy.
+/// The attached economics record decides fit-required bypass and the 4K/5% or trusted-price
+/// policy.
 pub fn deepseek_v4_flash_portable_target_material_with_economics_v2_candidate(
     cache_root: &Path,
     frozen_before_request: &FrozenProviderRequestMaterial,

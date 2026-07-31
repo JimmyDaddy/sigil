@@ -11,29 +11,39 @@ fn write_config(path: &Path, compaction_enabled: bool) -> Result<()> {
     std::fs::write(
         path,
         format!(
-            r#"[workspace]
+            r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
 [compaction]
 enabled = {compaction_enabled}
-tail_messages = 2
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 "#,
         ),
     )?;
     Ok(())
 }
 
-fn session_with_messages(path: &Path, messages: &[&str]) -> Result<String> {
+fn session_with_messages(path: &Path, config_path: &Path, messages: &[&str]) -> Result<String> {
+    let root = RootConfig::load(config_path)?;
+    let (provider_name, route) = crate::provider_connections::resolve_default_model_route(&root)?;
     let store = JsonlSessionStore::new(path)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let mut session = Session::new(provider_name, "deepseek-v4-flash").with_store(store);
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
-        resolved_model_route: None,
+        resolved_model_route: Some(route),
     })?;
     for message in messages {
         session.append_user_message(ModelMessage::user(*message))?;
@@ -51,7 +61,7 @@ async fn preview_reports_no_foldable_history_without_creating_lifecycle_entries(
     let config_path = temp.path().join("sigil.toml");
     let session_path = temp.path().join("session.jsonl");
     write_config(&config_path, true)?;
-    let scope = session_with_messages(&session_path, &["hello"])?;
+    let scope = session_with_messages(&session_path, &config_path, &["hello"])?;
     let before = std::fs::read(&session_path)?;
 
     let (review, pending) =
@@ -63,7 +73,7 @@ async fn preview_reports_no_foldable_history_without_creating_lifecycle_entries(
         review.admission,
         ApplicationCompactionAdmission::NoFoldableHistory {
             durable_message_count: 2,
-            configured_tail_message_count: 2,
+            minimum_tail_turn_count: 2,
         }
     ));
     assert_eq!(std::fs::read(&session_path)?, before);
@@ -76,7 +86,7 @@ async fn preview_preserves_disabled_and_scope_failure_semantics() -> Result<()> 
     let config_path = temp.path().join("sigil.toml");
     let session_path = temp.path().join("session.jsonl");
     write_config(&config_path, false)?;
-    let scope = session_with_messages(&session_path, &["one", "two"])?;
+    let scope = session_with_messages(&session_path, &config_path, &["one", "two"])?;
 
     let (review, pending) =
         prepare_application_compaction(&config_path, temp.path(), &session_path, &scope).await?;
@@ -106,6 +116,7 @@ fn local_preview_builds_continuity_without_provider_or_durable_mutation() -> Res
     let large = format!("one {}", "history ".repeat(4_000));
     let scope = session_with_messages(
         &session_path,
+        &config_path,
         &[
             large.as_str(),
             large.as_str(),
@@ -144,29 +155,34 @@ fn local_preview_exposes_bounded_recoverable_and_redacted_tool_artifact_details(
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", secret);
     std::fs::write(
         &config_path,
-        format!(
-            r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
-
-[providers.deepseek]
-api_key = "{secret}"
 
 [compaction]
 enabled = true
-tail_messages = 2
-"#
-        ),
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#,
     )?;
     let store = JsonlSessionStore::new(&session_path)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let root = RootConfig::load(&config_path)?;
+    let (_, route) = crate::provider_connections::resolve_default_model_route(&root)?;
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
-        resolved_model_route: None,
+        resolved_model_route: Some(route),
     })?;
     session.append_user_message(ModelMessage::user("inspect the old build log"))?;
     session.append_assistant_message(ModelMessage::assistant(
@@ -177,7 +193,7 @@ tail_messages = 2
             args_json: "{}".to_owned(),
         }],
     ))?;
-    let legacy_inline_body = serde_json::json!({
+    let historical_inline_body = serde_json::json!({
         "status": "completed",
         "content": format!(
             "head {secret} {} tail {secret}",
@@ -191,8 +207,8 @@ tail_messages = 2
     let descriptor = artifact_store.capture_policy_safe_bytes(
         "call-build-log",
         "cargo_test",
-        legacy_inline_body.as_bytes(),
-        legacy_inline_body.len() as u64,
+        historical_inline_body.as_bytes(),
+        historical_inline_body.len() as u64,
         "text/plain; charset=utf-8",
         ToolArtifactEncoding::Utf8,
         ToolArtifactSensitivity::Ordinary,
@@ -201,7 +217,7 @@ tail_messages = 2
     let result = ToolResult::ok(
         "call-build-log",
         "cargo_test",
-        legacy_inline_body,
+        historical_inline_body,
         ToolResultMeta::default(),
     )
     .with_captured_artifact(descriptor);
@@ -330,11 +346,10 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 
 [compaction]
 enabled = true
-tail_messages = 2
 "#,
     )?;
     let root = RootConfig::load(&config_path)?;
-    assert_eq!(root.config_version, Some(2));
+    assert_eq!(root.config_version, 2);
     assert_eq!(
         root.agent.connection.as_ref().map(ConnectionId::as_str),
         Some("default-a")
@@ -369,8 +384,7 @@ tail_messages = 2
     }
     let (selected_session, selected_model_ref) = load_application_compaction_session(&root, store)?;
     assert_eq!(
-        selected_model_ref.as_ref(),
-        Some(&model_ref),
+        selected_model_ref, model_ref,
         "compaction must retain the durable connection instead of the configured default"
     );
     assert_eq!(

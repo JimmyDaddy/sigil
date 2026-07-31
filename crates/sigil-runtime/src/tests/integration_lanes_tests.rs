@@ -1719,7 +1719,7 @@ async fn interrupted_promotion_fixture(
     )?;
     let lane_session = ready_lane_session(&root, &plan, &artifacts).await?;
     let store = JsonlSessionStore::new(temp.path().join("recovery-session.jsonl"))?;
-    let mut session = Session::new("mock", "model").with_store(store.clone());
+    let mut session = Session::load_from_store("mock", "model", store.clone())?;
     for entry in lane_session.entries() {
         session.append(entry.clone())?;
     }

@@ -2,6 +2,29 @@ use anyhow::Result;
 
 use super::*;
 
+fn cache_layout_proof() -> crate::CacheLayoutProofV1 {
+    crate::CacheLayoutProofV1::from_request(
+        &crate::CompletionRequest {
+            provider_name: "test-provider".to_owned(),
+            model_name: "test-model".to_owned(),
+            messages: vec![crate::ModelMessage::user("current request")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+        None,
+    )
+    .expect("cache layout proof")
+}
+
 fn started() -> ProviderPhysicalAttemptStartedEntry {
     ProviderPhysicalAttemptStartedEntry {
         schema_version: PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION,
@@ -11,7 +34,7 @@ fn started() -> ProviderPhysicalAttemptStartedEntry {
         request_material_fingerprint: "hmac-sha256:started".to_owned(),
         provider_name: "test-provider".to_owned(),
         model_name: "test-model".to_owned(),
-        cache_layout_proof: None,
+        cache_layout_proof: Some(cache_layout_proof()),
         started_at_unix_ms: 1,
     }
 }
@@ -464,19 +487,5 @@ async fn non_generating_attempt_records_an_input_measurement_lifecycle() -> Resu
             .kind,
         crate::CacheLayoutMutationKind::Identical
     );
-    Ok(())
-}
-
-#[test]
-fn physical_attempt_schema_v2_remains_readable_without_cache_layout() -> Result<()> {
-    let mut legacy = started();
-    legacy.schema_version = 2;
-    legacy.cache_layout_proof = None;
-
-    legacy.validate_shape()?;
-    let round_trip: ProviderPhysicalAttemptStartedEntry =
-        serde_json::from_value(serde_json::to_value(legacy)?)?;
-    round_trip.validate_shape()?;
-    assert!(round_trip.cache_layout_proof.is_none());
     Ok(())
 }

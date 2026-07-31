@@ -828,9 +828,8 @@ impl CacheTokenCountV1 {
 
 /// Provider-neutral cache read/write/uncached accounting for one request.
 ///
-/// Missing fields are unknown, not zero. Legacy `cache_hit_tokens` / `cache_miss_tokens` remain
-/// available during migration, while this shape preserves the provider-report provenance needed
-/// by economics admission.
+/// Missing fields are unknown, not zero. This shape preserves the provider-report provenance
+/// needed by economics admission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct CacheUsageV1 {
@@ -868,18 +867,11 @@ impl CacheUsageV1 {
     ///
     /// A positive value never claims why the provider missed; TTL expiry, eviction and remote
     /// routing remain unproven.
-    pub fn observe_local_layout(
-        &mut self,
-        mutation: crate::CacheLayoutMutationKind,
-        legacy_cache_miss_tokens: u64,
-    ) {
+    pub fn observe_local_layout(&mut self, mutation: crate::CacheLayoutMutationKind) {
         self.local_layout_mutation = Some(mutation);
-        let uncached_tokens = self
-            .uncached
-            .as_ref()
-            .map_or(legacy_cache_miss_tokens, |count| count.tokens);
-        self.provider_miss_without_local_mutation =
-            mutation == crate::CacheLayoutMutationKind::Identical && uncached_tokens > 0;
+        self.provider_miss_without_local_mutation = mutation
+            == crate::CacheLayoutMutationKind::Identical
+            && self.uncached.as_ref().is_some_and(|count| count.tokens > 0);
     }
 
     /// Validates schema and rejects internally inconsistent cache totals.

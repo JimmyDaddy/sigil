@@ -88,9 +88,8 @@ pub async fn connection_inventory_with_cancellation(
         let Some(connection) = loaded.connections.get(&entry.id) else {
             continue;
         };
-        let LoadedCredentialRef::Config(
-            CredentialRefConfig::SystemKeyring { id } | CredentialRefConfig::Stored { id },
-        ) = &connection.credential
+        let LoadedCredentialRef::Config(CredentialRefConfig::Stored { id }) =
+            &connection.credential
         else {
             continue;
         };
@@ -184,14 +183,6 @@ fn offline_credential_state(
     Option<ConnectionIssueView>,
 ) {
     match credential {
-        LoadedCredentialRef::LegacyInline(_) => (
-            CredentialSourceView::LegacyPlaintext,
-            ConnectionReadiness::Unverified,
-            Some(ConnectionIssueView {
-                code: "legacy_plaintext_migration_required".to_owned(),
-                message: "legacy plaintext credential requires migration".to_owned(),
-            }),
-        ),
         LoadedCredentialRef::Config(CredentialRefConfig::Environment { name }) => {
             if environment.read(name).is_some() {
                 (
@@ -212,14 +203,6 @@ fn offline_credential_state(
                 )
             }
         }
-        LoadedCredentialRef::Config(CredentialRefConfig::SystemKeyring { .. }) => (
-            CredentialSourceView::SystemKeyring,
-            ConnectionReadiness::Unverified,
-            Some(ConnectionIssueView {
-                code: "credential_unverified".to_owned(),
-                message: "native credential is not checked by offline inventory".to_owned(),
-            }),
-        ),
         LoadedCredentialRef::Config(CredentialRefConfig::Stored { .. }) => (
             CredentialSourceView::Stored,
             ConnectionReadiness::Unverified,

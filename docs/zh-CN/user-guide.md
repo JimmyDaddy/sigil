@@ -117,7 +117,7 @@ TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显�
 
 ### Intent Stack 检查
 
-当前会话具有已接受的 Intent Stack 历史时，按 `Alt-S` 或运行 `/intents`，可以检查每个 intent 的依赖、验证状态、保留 artifact 与冲突。用 `Up/Down` 选择 intent，按 `D` 生成精确 Drop 预览，只有再次按 `Enter` 才会执行刚刚检查过的预览。shared、drifted、unavailable、read-only 或 out-of-scope 的贡献仍可查看，但不能 Drop。Shell、网络、远端服务及其他不支持的副作用永远不会被撤销。缺少 durable intent 历史的旧会话会明确显示不可用，不会根据当前文件猜测一个 stack。
+当前会话具有已接受的 Intent Stack 历史时，按 `Alt-S` 或运行 `/intents`，可以检查每个 intent 的依赖、验证状态、保留 artifact 与冲突。用 `Up/Down` 选择 intent，按 `D` 生成精确 Drop 预览，只有再次按 `Enter` 才会执行刚刚检查过的预览。shared、drifted、unavailable、read-only 或 out-of-scope 的贡献仍可查看，但不能 Drop。Shell、网络、远端服务及其他不支持的副作用永远不会被撤销。当前 session 若没有已接受的 durable intent 历史，会明确显示不可用，不会根据当前文件猜测一个 stack。
 
 ## 长上下文和压缩
 

@@ -8454,16 +8454,44 @@ fn seed_two_step_task(
         reason: None,
     }))?;
     if first_step_completed {
+        let task_id = TaskId::new("task_1")?;
+        let step_id = TaskStepId::new("step_1")?;
         session.append_control(ControlEntry::TaskStep(crate::TaskStepEntry {
-            task_id: TaskId::new("task_1")?,
+            task_id: task_id.clone(),
             plan_version: 1,
-            step_id: TaskStepId::new("step_1")?,
+            step_id: step_id.clone(),
             role: crate::AgentRole::Executor,
             status: TaskStepStatus::Completed,
             title: Some("already done".to_owned()),
             summary: Some("done".to_owned()),
             reason: None,
         }))?;
+        let attempt_id = task_participant_attempt_id(
+            &task_id,
+            TaskParticipantPurpose::Step,
+            Some(1),
+            Some(&step_id),
+            1,
+        )?;
+        let mut attempt = TaskParticipantAttemptEntry {
+            child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
+            attempt_id,
+            task_id,
+            purpose: TaskParticipantPurpose::Step,
+            ordinal: 1,
+            plan_version: Some(1),
+            step_id: Some(step_id),
+            role: crate::AgentRole::Executor,
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        };
+        session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+        let mut result =
+            participant_result_entry(&attempt, "done", None, Vec::new(), Vec::new(), Vec::new())?;
+        result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
+        session.append_control(ControlEntry::TaskParticipantResult(result))?;
+        attempt.status = TaskParticipantAttemptStatus::Completed;
+        session.append_control(ControlEntry::TaskParticipantAttempt(attempt))?;
     }
     Ok(())
 }

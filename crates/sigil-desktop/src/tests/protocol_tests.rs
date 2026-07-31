@@ -30,8 +30,7 @@ fn valid_server_info() -> DesktopServerInfo {
             "agent_activity": true,
             "support_diagnostics": true,
             "provider_connections": true,
-            "provider_setup": true,
-            "provider_migration": true
+            "provider_setup": true
         }
     }))
     .expect("fixture should decode")
@@ -91,8 +90,7 @@ fn exact_server_info_rejects_unknown_fields() {
             "agent_activity": true,
             "support_diagnostics": true,
             "provider_connections": true,
-            "provider_setup": true,
-            "provider_migration": true
+            "provider_setup": true
         },
         "unexpected": "drift"
     }));

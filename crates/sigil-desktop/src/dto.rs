@@ -78,10 +78,8 @@ pub struct DesktopSupportBundleExport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopProviderConfigMode {
-    LegacyV1,
     V2,
-    Mixed,
-    UnsupportedFuture,
+    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -95,10 +93,8 @@ pub struct DesktopProviderModelRef {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopProviderCredentialSource {
     Environment,
-    SystemKeyring,
     Stored,
     None,
-    LegacyPlaintext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -135,15 +131,6 @@ pub struct DesktopProviderConnectionEntry {
     pub issue: Option<DesktopProviderConnectionIssue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct DesktopProviderLegacyMigrationPreview {
-    pub revision: String,
-    pub connection_count: u64,
-    pub inline_credential_count: u64,
-    pub environment_reference_count: u64,
-}
-
 /// Secret-free provider settings projection owned by native Rust code.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -153,8 +140,6 @@ pub struct DesktopProviderConnectionInventory {
     pub default_model: Option<DesktopProviderModelRef>,
     pub connections: Vec<DesktopProviderConnectionEntry>,
     pub issues: Vec<DesktopProviderConnectionIssue>,
-    #[serde(default)]
-    pub legacy_migration: Option<DesktopProviderLegacyMigrationPreview>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -245,32 +230,6 @@ pub struct DesktopProviderSetupSaveResult {
     pub default_model: DesktopProviderModelRef,
     pub inventory: DesktopProviderConnectionInventory,
     pub save_warning: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DesktopProviderLegacyMigrationOutcome {
-    Published,
-    PublishedWithWarning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DesktopProviderLegacyMigrationWarning {
-    FilesystemDurabilityUncertain,
-    PublicationVisibilityReconciled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct DesktopProviderLegacyMigrationResult {
-    pub default_model: DesktopProviderModelRef,
-    pub inventory: DesktopProviderConnectionInventory,
-    pub migrated_connection_count: u64,
-    pub moved_inline_credential_count: u64,
-    pub preserved_environment_reference_count: u64,
-    pub outcome: DesktopProviderLegacyMigrationOutcome,
-    pub warnings: Vec<DesktopProviderLegacyMigrationWarning>,
 }
 
 /// Request body for creating one process-local session handle.
@@ -931,7 +890,7 @@ pub enum DesktopToolArtifactAvailability {
     Missing,
     HashMismatch,
     PolicyRevoked,
-    LegacyUnavailable,
+    Unavailable,
 }
 
 /// Typed, bounded selector accepted by the display artifact endpoint.
@@ -1042,8 +1001,6 @@ pub enum DesktopSessionCatalogState {
     Oversized,
     /// The reconciliation scan budget was exhausted.
     ScanBudgetExceeded,
-    /// The source predates the supported durable session format.
-    UnsupportedLegacy,
     /// The durable source is malformed or inconsistent.
     Invalid,
 }
@@ -1680,7 +1637,7 @@ pub enum DesktopCompactionAdmission {
     },
     NoFoldableHistory {
         durable_message_count: usize,
-        configured_tail_message_count: usize,
+        minimum_tail_turn_count: usize,
     },
     Unavailable {
         reason: String,
@@ -1697,8 +1654,6 @@ pub struct DesktopCompactionPolicy {
     #[serde(default)]
     pub admission_reason: Option<String>,
     pub native_carrier_available: bool,
-    #[serde(default)]
-    pub legacy_migration_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

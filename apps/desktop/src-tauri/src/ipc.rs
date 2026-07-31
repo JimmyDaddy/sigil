@@ -32,9 +32,7 @@ use sigil_desktop::{
     DesktopIntegrationLaneCandidateKind, DesktopIntegrationPromotionStatus,
     DesktopIntegrationPromotionTargetKind, DesktopModelSelectionPolicy, DesktopPermissionMode,
     DesktopProviderConnectionInventory, DesktopProviderConnectionReadiness,
-    DesktopProviderCredentialSource, DesktopProviderLegacyMigrationOutcome,
-    DesktopProviderLegacyMigrationPreview, DesktopProviderLegacyMigrationResult,
-    DesktopProviderLegacyMigrationWarning, DesktopProviderSetupCatalog,
+    DesktopProviderCredentialSource, DesktopProviderSetupCatalog,
     DesktopProviderSetupCatalogRequest, DesktopProviderSetupCredentialSource,
     DesktopProviderSetupProtocol, DesktopProviderSetupSaveRequest, DesktopProviderSetupSaveResult,
     DesktopProviderSetupTemplate, DesktopPublicTaskPhase, DesktopReasoningEffort,
@@ -303,28 +301,6 @@ pub(crate) struct DesktopProviderConnectionInventorySummary {
     default_model: Option<DesktopProviderModelRefSummary>,
     connections: Vec<DesktopProviderConnectionSummary>,
     issues: Vec<DesktopProviderConnectionIssueSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    legacy_migration: Option<DesktopProviderLegacyMigrationPreviewSummary>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DesktopProviderLegacyMigrationPreviewSummary {
-    revision: String,
-    connection_count: u64,
-    inline_credential_count: u64,
-    environment_reference_count: u64,
-}
-
-impl From<DesktopProviderLegacyMigrationPreview> for DesktopProviderLegacyMigrationPreviewSummary {
-    fn from(value: DesktopProviderLegacyMigrationPreview) -> Self {
-        Self {
-            revision: value.revision,
-            connection_count: value.connection_count,
-            inline_credential_count: value.inline_credential_count,
-            environment_reference_count: value.environment_reference_count,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -354,10 +330,8 @@ impl From<DesktopProviderConnectionInventory> for DesktopProviderConnectionInven
     fn from(value: DesktopProviderConnectionInventory) -> Self {
         Self {
             config_mode: match value.config_mode {
-                sigil_desktop::DesktopProviderConfigMode::LegacyV1 => "legacy_v1",
                 sigil_desktop::DesktopProviderConfigMode::V2 => "v2",
-                sigil_desktop::DesktopProviderConfigMode::Mixed => "mixed",
-                sigil_desktop::DesktopProviderConfigMode::UnsupportedFuture => "unsupported_future",
+                sigil_desktop::DesktopProviderConfigMode::Invalid => "invalid",
             },
             default_model: value.default_model.map(Into::into),
             connections: value
@@ -390,7 +364,6 @@ impl From<DesktopProviderConnectionInventory> for DesktopProviderConnectionInven
                     message: issue.message,
                 })
                 .collect(),
-            legacy_migration: value.legacy_migration.map(Into::into),
         }
     }
 }
@@ -458,77 +431,11 @@ impl From<DesktopProviderSetupSaveResult> for DesktopProviderSetupSaveSummary {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DesktopProviderLegacyMigrationSummary {
-    default_model: DesktopProviderModelRefSummary,
-    inventory: DesktopProviderConnectionInventorySummary,
-    migrated_connection_count: u64,
-    moved_inline_credential_count: u64,
-    preserved_environment_reference_count: u64,
-    outcome: DesktopProviderLegacyMigrationOutcomeSummary,
-    warnings: Vec<DesktopProviderLegacyMigrationWarningSummary>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DesktopProviderLegacyMigrationOutcomeSummary {
-    Published,
-    PublishedWithWarning,
-}
-
-impl From<DesktopProviderLegacyMigrationOutcome> for DesktopProviderLegacyMigrationOutcomeSummary {
-    fn from(value: DesktopProviderLegacyMigrationOutcome) -> Self {
-        match value {
-            DesktopProviderLegacyMigrationOutcome::Published => Self::Published,
-            DesktopProviderLegacyMigrationOutcome::PublishedWithWarning => {
-                Self::PublishedWithWarning
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DesktopProviderLegacyMigrationWarningSummary {
-    FilesystemDurabilityUncertain,
-    PublicationVisibilityReconciled,
-}
-
-impl From<DesktopProviderLegacyMigrationWarning> for DesktopProviderLegacyMigrationWarningSummary {
-    fn from(value: DesktopProviderLegacyMigrationWarning) -> Self {
-        match value {
-            DesktopProviderLegacyMigrationWarning::FilesystemDurabilityUncertain => {
-                Self::FilesystemDurabilityUncertain
-            }
-            DesktopProviderLegacyMigrationWarning::PublicationVisibilityReconciled => {
-                Self::PublicationVisibilityReconciled
-            }
-        }
-    }
-}
-
-impl From<DesktopProviderLegacyMigrationResult> for DesktopProviderLegacyMigrationSummary {
-    fn from(value: DesktopProviderLegacyMigrationResult) -> Self {
-        Self {
-            default_model: value.default_model.into(),
-            inventory: value.inventory.into(),
-            migrated_connection_count: value.migrated_connection_count,
-            moved_inline_credential_count: value.moved_inline_credential_count,
-            preserved_environment_reference_count: value.preserved_environment_reference_count,
-            outcome: value.outcome.into(),
-            warnings: value.warnings.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 fn provider_credential_source_label(value: DesktopProviderCredentialSource) -> &'static str {
     match value {
         DesktopProviderCredentialSource::Environment => "environment",
-        DesktopProviderCredentialSource::SystemKeyring => "system_keyring",
         DesktopProviderCredentialSource::Stored => "stored",
         DesktopProviderCredentialSource::None => "none",
-        DesktopProviderCredentialSource::LegacyPlaintext => "legacy_plaintext",
     }
 }
 
@@ -588,7 +495,6 @@ pub(crate) enum DesktopCatalogState {
     Ready,
     Oversized,
     ScanBudgetExceeded,
-    UnsupportedLegacy,
     Invalid,
 }
 
@@ -1018,7 +924,6 @@ pub(crate) struct DesktopCompactionPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) admission_reason: Option<String>,
     pub(crate) native_carrier_available: bool,
-    pub(crate) legacy_migration_fields: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1083,7 +988,7 @@ pub(crate) enum DesktopCompactionAdmission {
     },
     NoFoldableHistory {
         durable_message_count: usize,
-        configured_tail_message_count: usize,
+        minimum_tail_turn_count: usize,
     },
     Unavailable {
         reason: String,
@@ -1988,7 +1893,6 @@ impl From<DesktopSessionCatalogState> for DesktopCatalogState {
             DesktopSessionCatalogState::Ready => Self::Ready,
             DesktopSessionCatalogState::Oversized => Self::Oversized,
             DesktopSessionCatalogState::ScanBudgetExceeded => Self::ScanBudgetExceeded,
-            DesktopSessionCatalogState::UnsupportedLegacy => Self::UnsupportedLegacy,
             DesktopSessionCatalogState::Invalid => Self::Invalid,
         }
     }
@@ -2309,7 +2213,6 @@ impl From<NativeCompactionReview> for DesktopCompactionReview {
                 forecast_confidence: policy.forecast_confidence,
                 admission_reason: policy.admission_reason,
                 native_carrier_available: policy.native_carrier_available,
-                legacy_migration_fields: policy.legacy_migration_fields,
             }),
             details: value.details.map(|details| DesktopCompactionDetails {
                 active_objective: details.active_objective,
@@ -2382,10 +2285,10 @@ impl From<NativeCompactionReview> for DesktopCompactionReview {
                 }
                 NativeCompactionAdmission::NoFoldableHistory {
                     durable_message_count,
-                    configured_tail_message_count,
+                    minimum_tail_turn_count,
                 } => DesktopCompactionAdmission::NoFoldableHistory {
                     durable_message_count,
-                    configured_tail_message_count,
+                    minimum_tail_turn_count,
                 },
                 NativeCompactionAdmission::Unavailable { reason } => {
                     DesktopCompactionAdmission::Unavailable { reason }
@@ -2800,7 +2703,7 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                         NativeToolArtifactAvailability::Missing => "missing",
                         NativeToolArtifactAvailability::HashMismatch => "hash_mismatch",
                         NativeToolArtifactAvailability::PolicyRevoked => "policy_revoked",
-                        NativeToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
+                        NativeToolArtifactAvailability::Unavailable => "unavailable",
                     }
                     .to_owned()
                 }),

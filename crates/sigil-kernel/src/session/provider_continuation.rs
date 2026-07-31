@@ -2055,16 +2055,6 @@ impl ProviderContinuationProjection {
                     bail!("provider continuation stream repeats a tool-call event id")
                 }
             }
-            SessionLogEntry::ToolResult(message) if message.role == crate::MessageRole::Tool => {
-                if let Some(tool_call_id) = message.tool_call_id.filter(|id| !id.trim().is_empty())
-                    && self
-                        .tool_result_events
-                        .insert(event.event_id.clone(), tool_call_id)
-                        .is_some()
-                {
-                    bail!("provider continuation stream repeats a tool-result event id")
-                }
-            }
             SessionLogEntry::ToolResultV2(result) => {
                 if self
                     .tool_result_events
@@ -2076,7 +2066,6 @@ impl ProviderContinuationProjection {
             }
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
-            | SessionLogEntry::ToolResult(_)
             | SessionLogEntry::Control(_) => {}
         }
         Ok(())

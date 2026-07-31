@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{CodeIntelligenceConfig, RootConfig, SecretString};
 use sigil_runtime::{
     ModelRequestConfigFields, deepseek_provider_config_fields, model_request_config_fields,
-    provider_connections::materialize_v2_root_config, set_model_request_config_fields,
+    provider_connections::materialize_root_config, set_model_request_config_fields,
     supported_provider_name,
 };
 
@@ -31,7 +31,6 @@ impl ConfigDraft {
             connection_drafts,
             selected_connection_id,
             default_model,
-            confirmed_legacy_environment: Default::default(),
             provider_beta_base_url: deepseek_fields.beta_base_url,
             provider_anthropic_base_url: deepseek_fields.anthropic_base_url,
             provider_user_id_strategy: deepseek_fields.user_id_strategy,
@@ -48,21 +47,11 @@ impl ConfigDraft {
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
             compaction_native_carrier_enabled: root_config.compaction.native_carrier_enabled,
-            compaction_strategy: root_config.compaction.strategy,
-            compaction_soft_threshold_ratio: root_config
-                .compaction
-                .soft_threshold_ratio
-                .to_string(),
-            compaction_hard_threshold_ratio: root_config
-                .compaction
-                .hard_threshold_ratio
-                .to_string(),
             compaction_context_window_tokens: root_config
                 .compaction
                 .context_window_tokens
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
-            compaction_tail_messages: root_config.compaction.tail_messages.to_string(),
             code_intelligence_enabled: root_config.code_intelligence.enabled,
             code_intelligence_server_startup: root_config.code_intelligence.server_startup,
             code_intelligence_auto_discover: root_config.code_intelligence.auto_discover,
@@ -99,7 +88,7 @@ impl ConfigDraft {
     pub(crate) fn to_root_config(&self) -> Result<RootConfig> {
         let root_config = self.to_base_root_config()?;
         let connection_save = self.connection_save_draft()?;
-        materialize_v2_root_config(
+        materialize_root_config(
             &root_config,
             &connection_save.connections,
             &connection_save.default_model,
@@ -132,26 +121,6 @@ impl ConfigDraft {
             }
         }
 
-        let soft_threshold_ratio = self
-            .compaction_soft_threshold_ratio
-            .trim()
-            .parse::<f32>()
-            .map_err(|error| anyhow!("soft_threshold_ratio must be a decimal number: {error}"))?;
-        let hard_threshold_ratio = self
-            .compaction_hard_threshold_ratio
-            .trim()
-            .parse::<f32>()
-            .map_err(|error| anyhow!("hard_threshold_ratio must be a decimal number: {error}"))?;
-        if !(0.0..=1.0).contains(&soft_threshold_ratio) {
-            bail!("soft_threshold_ratio must be between 0.0 and 1.0");
-        }
-        if !(0.0..=1.0).contains(&hard_threshold_ratio) {
-            bail!("hard_threshold_ratio must be between 0.0 and 1.0");
-        }
-        if hard_threshold_ratio < soft_threshold_ratio {
-            bail!("hard_threshold_ratio must be greater than or equal to soft_threshold_ratio");
-        }
-
         let context_window_tokens = if self.compaction_context_window_tokens.trim().is_empty() {
             None
         } else {
@@ -168,14 +137,6 @@ impl ConfigDraft {
             Some(parsed)
         };
 
-        let tail_messages = self
-            .compaction_tail_messages
-            .trim()
-            .parse::<usize>()
-            .map_err(|error| anyhow!("tail_messages must be a positive integer: {error}"))?;
-        if tail_messages == 0 {
-            bail!("tail_messages must be greater than 0");
-        }
         let terminal_scroll_sensitivity = self
             .terminal_scroll_sensitivity
             .trim()
@@ -204,11 +165,7 @@ impl ConfigDraft {
         root_config.memory.enabled = self.memory_enabled;
         root_config.compaction.enabled = self.compaction_enabled;
         root_config.compaction.native_carrier_enabled = self.compaction_native_carrier_enabled;
-        root_config.compaction.strategy = self.compaction_strategy;
-        root_config.compaction.soft_threshold_ratio = soft_threshold_ratio;
-        root_config.compaction.hard_threshold_ratio = hard_threshold_ratio;
         root_config.compaction.context_window_tokens = context_window_tokens;
-        root_config.compaction.tail_messages = tail_messages;
         root_config.code_intelligence = self.code_intelligence_config();
         root_config.terminal.mouse_capture = self.terminal_mouse_capture;
         root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;

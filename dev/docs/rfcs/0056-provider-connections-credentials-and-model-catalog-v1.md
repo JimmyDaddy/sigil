@@ -4,6 +4,12 @@
 
 创建日期：2026-07-24
 
+### 2026-07-31 current-only cutover
+
+当前实现只接受 `config_version = 2` 的 provider connection 配置、当前 credential source 和当前
+catalog schema。本文后续关于 V1 配置读取、迁移、旧 credential source 或旧 catalog 状态的段落仅保留
+为历史设计记录，不再对应可执行代码；非当前数据直接报错，用户应替换配置或删除无效本地数据。
+
 依赖：
 
 - [Rust agent core technical solution](../sigil-rust-agent-core-technical-solution.md)
@@ -667,7 +673,7 @@ pub struct ResolvedCredential {
   config admission，不能读取任意 ambient variable；
 - stored `credential_id` 是随机 128-bit opaque ID，不从 label、path、endpoint 或 secret 派生；
 - credential record 绑定 version、credential ID、provider family、auth kind 和 rotation generation；
-- legacy `source = "keyring"` 可读取，新的 writer 只产生 provider-neutral `source = "stored"`；
+- 凭据引用只使用 provider-neutral `source = "stored"`；
 - `storage.credential_store` 决定 `stored` record 的 backend，而 connection schema 不绑定 backend；
 - secret 使用 `SecretString`/zeroizing carrier，`Debug` 永远 redacted；
 - environment value 不进入 persistent catalog cache identity；

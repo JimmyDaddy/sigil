@@ -6,6 +6,7 @@ use crate::ToolCall;
 fn store_backed_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    append_current_test_session_identity(&store)?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
     Ok((temp, store, session))
 }
@@ -14,15 +15,40 @@ fn records(store: &JsonlSessionStore) -> Result<Vec<SessionStreamRecord>> {
     JsonlSessionStore::read_event_records(store.path())
 }
 
-fn large_tool_message(call_id: &str) -> ModelMessage {
-    ModelMessage::tool(
+fn large_tool_result(call_id: &str) -> ToolResult {
+    ToolResult::ok(
         call_id,
+        "shell",
         serde_json::json!({
             "status": "ok",
             "content": format!("head:{}:tail", "middle-".repeat(1_000)),
         })
         .to_string(),
+        ToolResultMeta::default(),
     )
+}
+
+fn compact_test_policy() -> AdaptiveTailPolicyV3 {
+    AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 1,
+        ..AdaptiveTailPolicyV3::default()
+    }
+}
+
+fn append_followup_tail(session: &mut Session, label: &str) -> Result<()> {
+    session.append_user_message(ModelMessage::user(format!("{label} follow-up one")))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some(format!("{label} response one")),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user(format!("{label} follow-up two")))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some(format!("{label} response two")),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user(format!("{label} active request")))?;
+    Ok(())
 }
 
 fn started() -> CompactionStartedEntry {
@@ -48,7 +74,7 @@ fn applied(plan: &CompactionFoldPlan) -> CompactionAppliedV2 {
         folded_through: plan
             .folded_through
             .clone()
-            .expect("fixture has old foldable history"),
+            .expect("fixture has foldable history"),
         applied_at_unix_ms: 2,
     }
 }
@@ -65,10 +91,19 @@ fn shrink_sidecar_binds_to_applied_compaction_and_rebuilds_from_raw_history() ->
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_tool_message(large_tool_message("call-1"))?;
-    session.append_user_message(ModelMessage::user("latest request"))?;
+    session.append_test_tool_result(large_tool_result("call-1"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("semantic tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session, "semantic")?;
     let source_records = records(&store)?;
-    let plan = CompactionFoldPlan::from_records(&source_records, 1)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &source_records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let policy = ToolOutputProjectionPolicy {
         max_projected_content_bytes: 512,
         retained_head_bytes: 200,
@@ -86,10 +121,11 @@ fn shrink_sidecar_binds_to_applied_compaction_and_rebuilds_from_raw_history() ->
         policy,
         &projection,
     )?;
-    assert!(entry.epoch_transition.as_ref().is_some_and(|transition| {
-        transition.reason == ToolOutputContextEpochTransitionReasonV1::SemanticCompaction
-            && transition.source_epoch_id != transition.target_epoch_id
-    }));
+    assert!(
+        entry.epoch_transition.reason
+            == ToolOutputContextEpochTransitionReasonV1::SemanticCompaction
+            && entry.epoch_transition.source_epoch_id != entry.epoch_transition.target_epoch_id
+    );
     let sidecar = store.append_tool_output_projection_shrink_recorded(entry)?;
     assert_eq!(
         sidecar.correlation_id.as_deref(),
@@ -170,12 +206,21 @@ fn standalone_tool_output_shrink_rotates_projection_without_semantic_checkpoint(
             args_json: "{}".to_owned(),
         }],
     ))?;
-    let raw_tool = large_tool_message("call-standalone");
-    let raw_content = raw_tool.content.clone().expect("fixture tool content");
-    session.append_tool_message(raw_tool)?;
-    session.append_user_message(ModelMessage::user("latest request"))?;
+    let raw_tool = large_tool_result("call-standalone");
+    let raw_content = raw_tool.content.clone();
+    session.append_test_tool_result(raw_tool)?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("standalone tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session, "standalone")?;
     let source_records = records(&store)?;
-    let plan = CompactionFoldPlan::from_records(&source_records, 1)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &source_records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let appended = store
         .append_standalone_tool_output_projection(
             "context-epoch:raw",
@@ -227,11 +272,20 @@ fn repeated_standalone_shrink_records_only_new_historical_outputs() -> Result<()
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_tool_message(large_tool_message("call-standalone-one"))?;
-    session.append_user_message(ModelMessage::user("latest request one"))?;
+    session.append_test_tool_result(large_tool_result("call-standalone-one"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("first tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session, "first")?;
 
     let first_records = records(&store)?;
-    let first_plan = CompactionFoldPlan::from_records(&first_records, 1)?;
+    let first_plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &first_records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     store
         .append_standalone_tool_output_projection(
             "context-epoch:root",
@@ -254,11 +308,20 @@ fn repeated_standalone_shrink_records_only_new_historical_outputs() -> Result<()
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_tool_message(large_tool_message("call-standalone-two"))?;
-    session.append_user_message(ModelMessage::user("latest request two"))?;
+    session.append_test_tool_result(large_tool_result("call-standalone-two"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("second tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session, "second")?;
 
     let second_records = records(&store)?;
-    let second_plan = CompactionFoldPlan::from_records(&second_records, 1)?;
+    let second_plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &second_records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let second = store
         .append_standalone_tool_output_projection(
             "context-epoch:standalone:one",
@@ -282,7 +345,12 @@ fn repeated_standalone_shrink_records_only_new_historical_outputs() -> Result<()
         final_projection.active_standalone_source_event_ids().len(),
         2
     );
-    let final_plan = CompactionFoldPlan::from_records(&final_records, 1)?;
+    let final_plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &final_records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     assert!(
         store
             .append_standalone_tool_output_projection(
@@ -313,10 +381,19 @@ fn shrink_sidecar_rejects_tampered_descriptor_before_persistence() -> Result<()>
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_tool_message(large_tool_message("call-1"))?;
-    session.append_user_message(ModelMessage::user("latest request"))?;
+    session.append_test_tool_result(large_tool_result("call-1"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("tamper fixture tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session, "tamper")?;
     let source_records = records(&store)?;
-    let plan = CompactionFoldPlan::from_records(&source_records, 1)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &source_records,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let policy = ToolOutputProjectionPolicy {
         max_projected_content_bytes: 512,
         retained_head_bytes: 200,
@@ -339,60 +416,5 @@ fn shrink_sidecar_rejects_tampered_descriptor_before_persistence() -> Result<()>
             .is_err()
     );
     assert_eq!(records(&store)?.len(), source_records.len() + 2);
-    Ok(())
-}
-
-#[test]
-fn pre_cutover_shrink_sidecar_is_rejected_instead_of_faking_recoverability() -> Result<()> {
-    let (_temp, store, mut session) = store_backed_session()?;
-    session.append_user_message(ModelMessage::user("old request"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        None,
-        vec![ToolCall {
-            id: "call-1".to_owned(),
-            name: "shell".to_owned(),
-            args_json: "{}".to_owned(),
-        }],
-    ))?;
-    session.append_tool_message(large_tool_message("call-1"))?;
-    session.append_user_message(ModelMessage::user("latest request"))?;
-    let source_records = records(&store)?;
-    let plan = CompactionFoldPlan::from_records(&source_records, 1)?;
-    let policy = ToolOutputProjectionPolicy {
-        max_projected_content_bytes: 512,
-        retained_head_bytes: 200,
-        retained_tail_bytes: 200,
-    };
-    let projection = ToolOutputProjection::from_fold_plan(&source_records, &plan, &policy)?;
-    store.append_compaction_started(started())?;
-    store.append_compaction_applied_v2(applied(&plan))?;
-    let mut entry = ToolOutputProjectionShrinkRecorded::from_projection(
-        "compaction-shrink",
-        "attempt-shrink",
-        &plan,
-        policy,
-        &projection,
-    )?;
-    entry.epoch_transition = None;
-    for shrink in &mut entry.shrinks {
-        shrink.schema_version = 1;
-        shrink.tool_name = None;
-        shrink.status = None;
-        shrink.content_sha256 = None;
-        shrink.content_token_upper_bound = None;
-        shrink.artifact_ref = None;
-        shrink.reason = None;
-    }
-    let error = store
-        .append_tool_output_projection_shrink_recorded(entry)
-        .expect_err("pre-cutover fake transcript refs must fail closed");
-    assert!(
-        error
-            .to_string()
-            .contains("missing its context epoch transition")
-            || error
-                .to_string()
-                .contains("tool-output projection shrink metadata is invalid")
-    );
     Ok(())
 }

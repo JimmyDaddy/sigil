@@ -31,7 +31,7 @@ use super::super::{
 
 pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -41,7 +41,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: provider.to_owned(),
+            runtime_provider: provider.to_owned(),
             connection: None,
             model: model.to_owned(),
             max_turns: None,
@@ -58,7 +58,6 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
@@ -68,7 +67,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
 pub(super) fn routed_test_root_config(workspace_root: &Path, model: &str) -> RootConfig {
     let mut config = test_root_config(workspace_root, "", model);
     let connection_id = ConnectionId::new("test-default").expect("test connection id");
-    config.config_version = Some(sigil_kernel::CONFIG_VERSION_V2);
+    config.config_version = sigil_kernel::CONFIG_VERSION_V2;
     config.agent.connection = Some(connection_id);
     config.connections.insert(
         "test-default".to_owned(),

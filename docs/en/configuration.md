@@ -1,4 +1,4 @@
-<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,task-rollout-and-migration,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
+<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,task-rollout-and-defaults,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
 
 # Sigil Configuration Guide
 
@@ -31,10 +31,14 @@ Quick Setup writes the user config. A workspace `sigil.toml` is not loaded autom
 Open the repository and run `sigil`. Quick Setup handles the workspace, provider, model, and authentication; saving also explicitly trusts the launch directory. Provider is the first Quick Setup decision. In `/config`, Enter on **Connection** opens the explicit saved-connection/provider-template chooser, while `A` starts adding a provider. A minimal hand-written base is:
 
 ```toml
+config_version = 2
+
 [workspace]
 root = "."
 
 [agent]
+connection = "my-connection"
+model = "my-model"
 tool_timeout_secs = 30
 
 [appearance]
@@ -42,13 +46,9 @@ info_rail = true
 theme = "sigil_dark"
 ```
 
-Add one provider block from the chosen provider page. Copyable starting points are under [`docs/examples/config`](../examples/config).
-
-For a valid legacy `[providers]` file, do not rewrite the file by hand. In TUI, open `/config`,
-review the **Legacy migration** row, and press Enter; in Desktop, choose **Migrate securely** on
-the project-opening or Settings migration card. Sigil preserves the saved provider/model route
-without catalog loading. Inline keys move to `[storage].credential_store`; environment references
-remain environment references. The current session route is not changed.
+Add the matching `[connections.my-connection]` block from the chosen provider page. Copyable
+starting points are under [`docs/examples/config`](../examples/config). Sigil accepts only the
+current schema; an older config must be replaced with a current template.
 
 ## Workspace
 
@@ -62,20 +62,19 @@ Shell choice and terminal behavior are covered by [Terminal compatibility](termi
 
 Retention limits are applied only through an explicit preview and confirmation under `/config` → **Storage**. Normal startup, resume, runs, and `sigil serve` do not delete sessions automatically. See [Manage saved sessions](user-guide.md#manage-saved-sessions).
 
-## Task Rollout And Migration
+## Task Rollout And Defaults
 
-The Rust schema and every existing configuration keep the compatibility values
+The current schema defaults to
 `routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"`
 unless you explicitly changed them. A missing-config Quick Setup may select
 `auto + proactive` only when the installed binary is accompanied by a qualified
 rollout manifest and the selected provider, model, official endpoint family,
 task config, and build all match its exact route.
 
-Upgrades never rewrite an existing config, including legacy
-`default_mode = "chat"`. A missing, malformed, stale, or non-matching manifest
-also stays conservative. Use `sigil doctor` to inspect the effective release
-qualification. Restoring the two compatibility values is the coarse rollback;
-it does not delete durable Task or agent history.
+Sigil never rewrites an incompatible config. A missing, malformed, stale, or non-matching
+manifest also stays conservative. Use `sigil doctor` to inspect the effective release
+qualification. Restoring the two default values is the coarse rollout rollback; it does not
+delete durable Task or agent history.
 
 ## Use Doctor When Setup Looks Wrong
 

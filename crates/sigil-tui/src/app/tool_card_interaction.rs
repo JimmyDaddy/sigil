@@ -939,7 +939,7 @@ fn tool_artifact_availability_label(availability: ToolArtifactAvailability) -> &
         ToolArtifactAvailability::Missing => "missing",
         ToolArtifactAvailability::HashMismatch => "hash_mismatch",
         ToolArtifactAvailability::PolicyRevoked => "policy_revoked",
-        ToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
+        ToolArtifactAvailability::Unavailable => "unavailable",
     }
 }
 

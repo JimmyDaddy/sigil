@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::modal_flow::ModelCatalogState;
+use crate::app::tests::common::adaptive_test_compaction_preview;
 use crate::runner::{
     ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview,
     V2ContinuityPreview,
@@ -55,12 +56,12 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     format!(
         r#"Plan:
 
-```sigil-plan-v1
+```sigil-plan-v2
 {{
   "summary": "{summary}",
   "steps": [
     {{
-      "id": "step-1",
+      "step_id": "step-1",
       "title": "{title}",
       "target_paths": ["{path}"]
     }}
@@ -325,22 +326,6 @@ fn plan_actions_map_to_worker_commands() {
         plan_prompt,
         WorkerCommand::SubmitPlanPrompt { ref prompt, .. }
             if prompt == "inspect before editing"
-    ));
-
-    let approve_plan = app.into_worker_command(AppAction::ApprovePlan {
-        plan_text: "do the safe thing".to_owned(),
-        permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
-        scope_summary: "safe thing".to_owned(),
-        clear_planning_context: true,
-    });
-    assert!(matches!(
-        approve_plan,
-        WorkerCommand::ApprovePlan {
-            ref plan_text,
-            permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
-            ref scope_summary,
-            clear_planning_context: true,
-        } if plan_text == "do the safe thing" && scope_summary == "safe thing"
     ));
 
     let continue_task = app.into_worker_command(AppAction::ContinueTask {
@@ -669,47 +654,6 @@ fn plan_rejected_message_syncs_session_and_clears_pending_surface() -> Result<()
 }
 
 #[test]
-fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let draft = sigil_kernel::plan_draft_created_entry(
-        &structured_plan_text("Approved plan", "Inspect README.md", "README.md"),
-        sigil_kernel::PlanSourceRef::default(),
-        1,
-        None,
-    )?
-    .expect("structured plan should create draft");
-    app.set_pending_plan_approval_from_draft(&draft);
-    let entry = sigil_kernel::PlanApprovedEntry {
-        plan_version: 1,
-        plan_hash: sigil_kernel::plan_text_hash("approved plan"),
-        approved_at_ms: 42,
-        permission: sigil_kernel::PlanApprovalPermission::Ask,
-        scope: sigil_kernel::PlanApprovalScope {
-            summary: "approved plan".to_owned(),
-            workspace_paths: Vec::new(),
-        },
-        expires: sigil_kernel::PlanApprovalExpiry::NextUserPrompt,
-        clear_planning_context: true,
-    };
-
-    app.handle_worker_message(WorkerMessage::PlanApproved {
-        entry: entry.clone(),
-        entries: vec![SessionLogEntry::Control(ControlEntry::PlanApproved(
-            entry.clone(),
-        ))],
-    })?;
-
-    assert!(app.pending_plan_approval().is_none());
-    assert_eq!(app.last_notice(), Some("plan grant: ask"));
-    assert_eq!(
-        sigil_kernel::PlanApprovalProjection::from_entries(&app.session_browser.current_entries)
-            .latest_approval,
-        Some(entry)
-    );
-    Ok(())
-}
-
-#[test]
 fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.review.checkpoint_action_pending = true;
@@ -738,11 +682,9 @@ fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
 #[test]
 fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_history() -> Result<()> {
     let mut config = test_config();
-    config.agent.provider = "planned".to_owned();
+    config.agent.runtime_provider = "planned".to_owned();
     config.agent.model = "planned-model".to_owned();
     config.compaction.context_window_tokens = Some(100);
-    config.compaction.soft_threshold_ratio = 0.5;
-    config.compaction.hard_threshold_ratio = 0.8;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.handle(RunEvent::Usage(UsageStats {
         prompt_tokens: 90,
@@ -756,20 +698,20 @@ fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_histor
         cache_usage: None,
         pricing_snapshot: None,
     }))?;
-    assert_eq!(app.runtime.compaction_status, "hard");
+    assert_eq!(app.runtime.compaction_status, "soft");
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::NoFoldableHistory {
             durable_message_count: 4,
-            configured_tail_message_count: 6,
+            minimum_tail_turn_count: 6,
         },
     })?;
 
-    assert_eq!(app.runtime.compaction_status, "hard");
+    assert_eq!(app.runtime.compaction_status, "soft");
     assert_eq!(app.runtime.stats.last_prompt_tokens, 90);
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice
-            && entry.text == "no newly foldable history: 4 durable message(s); raw tail is 6. Add completed turns or lower compaction.tail_messages."
+            && entry.text == "no newly foldable history: 4 durable message(s); at least 6 complete turns remain live. Add completed turns before compacting again."
     }));
     Ok(())
 }
@@ -778,7 +720,7 @@ fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_histor
 fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1128,13 +1070,18 @@ fn schedule_balance_refresh_handles_missing_config_and_auth() {
 #[test]
 fn schedule_balance_refresh_skips_non_deepseek_provider() {
     let mut config = test_config();
-    config.agent.provider = "openai_compat".to_owned();
+    config.agent.runtime_provider = "custom".to_owned();
+    config.agent.connection =
+        Some(sigil_kernel::ConnectionId::new("openai-compatible").expect("connection id"));
     config.agent.model = "gpt-test".to_owned();
-    config.providers.insert(
-        "openai_compat".to_owned(),
+    config.connections.insert(
+        "openai-compatible".to_owned(),
         json!({
+            "label": "OpenAI compatible",
+            "provider": "custom",
+            "protocol": "chat_completions",
             "base_url": "https://openai.example.com/v1",
-            "api_key": "openai-key"
+            "credential": {"source": "none"}
         }),
     );
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
@@ -1357,7 +1304,12 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
                 Vec::new(),
                 sigil_kernel::AssistantMessageKind::FinalAnswer,
             )),
-            SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "post-final fact")),
+            v2_tool_result_entry(
+                "call-1",
+                "test_tool",
+                "post-final fact",
+                ToolResultMeta::default(),
+            ),
         ],
     })?;
     assert_eq!(
@@ -1505,7 +1457,7 @@ fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
 fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -3225,9 +3177,7 @@ fn v2_compaction_review_requires_admission_before_it_can_apply() -> Result<()> {
         Vec::new(),
     )))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
-    let preview = store
-        .v2_compaction_preview(1, None)?
-        .expect("fixture should have foldable history");
+    let preview = adaptive_test_compaction_preview(&store)?;
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
@@ -3273,9 +3223,7 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
         Vec::new(),
     )))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
-    let preview = store
-        .v2_compaction_preview(1, None)?
-        .expect("fixture should have foldable history");
+    let preview = adaptive_test_compaction_preview(&store)?;
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
@@ -3333,9 +3281,7 @@ fn locally_prepared_compaction_requires_an_explicit_billed_summary_choice() -> R
         Vec::new(),
     )))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
-    let preview = store
-        .v2_compaction_preview(1, None)?
-        .expect("fixture should have foldable history");
+    let preview = adaptive_test_compaction_preview(&store)?;
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 45,
@@ -3372,9 +3318,7 @@ fn locally_prepared_compaction_can_choose_standalone_tool_output_cleanup() -> Re
         Vec::new(),
     )))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
-    let preview = store
-        .v2_compaction_preview(1, None)?
-        .expect("fixture should have foldable history");
+    let preview = adaptive_test_compaction_preview(&store)?;
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 46,
@@ -3425,7 +3369,6 @@ fn adaptive_compaction_review_shows_protected_tail_and_recoverable_artifact_refs
                 tail_recent_turn_p95_multiplier_ppm: 2_000_000,
                 tail_max_usable_context_ratio_ppm: 250_000,
                 recent_turn_sample_limit: 20,
-                translated_legacy_tail_messages: Some(6),
             },
             8 * 1024,
             None,
@@ -3492,9 +3435,7 @@ fn dismissed_v2_compaction_review_clears_the_worker_pending_state() -> Result<()
         Vec::new(),
     )))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
-    let preview = store
-        .v2_compaction_preview(1, None)?
-        .expect("fixture should have foldable history");
+    let preview = adaptive_test_compaction_preview(&store)?;
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
         state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {

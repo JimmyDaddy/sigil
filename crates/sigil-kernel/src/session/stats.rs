@@ -132,7 +132,6 @@ pub fn session_stats_from_entries(entries: &[SessionLogEntry]) -> SessionStats {
             SessionLogEntry::Control(control) => apply_usage_control_entry(&mut stats, control),
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
-            | SessionLogEntry::ToolResult(_)
             | SessionLogEntry::ToolResultV2(_) => {}
         }
     }
@@ -184,28 +183,21 @@ pub(super) fn session_identity_from_entries(
     entries: &[SessionLogEntry],
 ) -> Option<(String, String)> {
     let mut identity = None;
-    let mut identity_is_explicit = false;
     for entry in entries {
         match entry {
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name,
                 model_name,
                 ..
-            }) if !identity_is_explicit => {
+            }) if identity.is_none() => {
                 identity = Some((provider_name.clone(), model_name.clone()));
-                identity_is_explicit = true;
             }
             SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
-                if identity_is_explicit =>
+                if identity.is_some() =>
             {
                 if let Some((_, current_model)) = identity.as_mut() {
                     *current_model = model_name.clone();
                 }
-            }
-            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot))
-                if identity.is_none() =>
-            {
-                identity = Some((snapshot.provider_name.clone(), snapshot.model_name.clone()));
             }
             _ => {}
         }

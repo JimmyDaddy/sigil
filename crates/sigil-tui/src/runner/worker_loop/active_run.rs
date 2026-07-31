@@ -197,7 +197,7 @@ pub(in crate::runner) fn cancel_active_run(
         };
     if !request_persisted {
         if let Ok(session) = load_active_run_session(
-            &root_config.agent.provider,
+            &root_config.agent.runtime_provider,
             &root_config.agent.model,
             current_session_log_path,
             url_capability_registrar.clone(),
@@ -231,7 +231,7 @@ pub(in crate::runner) fn cancel_active_run(
         return;
     }
     match load_active_run_session(
-        &root_config.agent.provider,
+        &root_config.agent.runtime_provider,
         &root_config.agent.model,
         current_session_log_path,
         url_capability_registrar,
@@ -305,7 +305,7 @@ pub(in crate::runner) fn cancel_active_run(
                     provider_name: current_session
                         .as_ref()
                         .map(|session| session.provider_name().to_owned())
-                        .unwrap_or_else(|| root_config.agent.provider.clone()),
+                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
                     model_name: current_session
                         .as_ref()
                         .map(|session| session.model_name().to_owned())
@@ -318,7 +318,7 @@ pub(in crate::runner) fn cancel_active_run(
                         provider_name: current_session
                             .as_ref()
                             .map(|session| session.provider_name().to_owned())
-                            .unwrap_or_else(|| root_config.agent.provider.clone()),
+                            .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
                         model_name: current_session
                             .as_ref()
                             .map(|session| session.model_name().to_owned())
@@ -331,7 +331,7 @@ pub(in crate::runner) fn cancel_active_run(
                     provider_name: current_session
                         .as_ref()
                         .map(|session| session.provider_name().to_owned())
-                        .unwrap_or_else(|| root_config.agent.provider.clone()),
+                        .unwrap_or_else(|| root_config.agent.runtime_provider.clone()),
                     model_name: current_session
                         .as_ref()
                         .map(|session| session.model_name().to_owned())

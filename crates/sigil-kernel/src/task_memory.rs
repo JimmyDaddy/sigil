@@ -31,9 +31,7 @@ pub struct SourcedFact {
     pub source_artifact_id: Option<ArtifactId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_percent: Option<u8>,
-    #[serde(default)]
     pub model_generated: bool,
-    #[serde(default)]
     pub verified: bool,
 }
 
@@ -545,9 +543,7 @@ impl TaskMemoryExtractionBuilder {
                     self.latest_user_objective = Some((content.to_owned(), event_id.to_owned()));
                 }
             }
-            SessionLogEntry::Assistant(_)
-            | SessionLogEntry::ToolResult(_)
-            | SessionLogEntry::ToolResultV2(_) => {}
+            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV2(_) => {}
             SessionLogEntry::Control(control) => match control {
                 ControlEntry::TaskRun(task) => {
                     self.push_source(event_id);

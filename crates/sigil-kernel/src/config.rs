@@ -36,10 +36,9 @@ pub const SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct RootConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_version: Option<u32>,
+    pub config_version: u32,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
     #[serde(default)]
@@ -72,8 +71,6 @@ pub struct RootConfig {
     #[serde(default)]
     pub web: WebConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub providers: BTreeMap<String, Value>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub connections: BTreeMap<String, Value>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -100,10 +97,6 @@ impl fmt::Debug for RootConfig {
             .field("appearance", &self.appearance)
             .field("task", &self.task)
             .field("web", &self.web)
-            .field(
-                "providers",
-                &format_args!("[{} redacted]", self.providers.len()),
-            )
             .field(
                 "connections",
                 &format_args!("[{} redacted]", self.connections.len()),
@@ -1128,8 +1121,8 @@ impl RootConfig {
 
     /// Loads the exact persisted configuration without applying process environment overrides.
     ///
-    /// Mutation and migration paths use this view so a temporary runtime override cannot become a
-    /// durable setting as a side effect of publishing an unrelated configuration change.
+    /// Mutation paths use this view so a temporary runtime override cannot become a durable
+    /// setting as a side effect of publishing an unrelated configuration change.
     pub fn load_persisted(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
@@ -1139,13 +1132,9 @@ impl RootConfig {
 
     /// Parses persisted TOML without consulting process environment overrides.
     pub fn parse_persisted(raw: &str) -> Result<Self> {
-        let raw_value: toml::Value =
-            toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"))?;
-        let providers_present = raw_value.get("providers").is_some();
-        let connections_present = raw_value.get("connections").is_some();
         let config: Self =
             toml::from_str(raw).map_err(|_| anyhow::anyhow!("failed to parse config"))?;
-        config.validate_config_schema(providers_present, connections_present)?;
+        config.validate_config_schema()?;
         Ok(config)
     }
 
@@ -1155,13 +1144,9 @@ impl RootConfig {
     ) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        let raw_value: toml::Value = toml::from_str(&raw)
-            .map_err(|_| anyhow::anyhow!("failed to parse {}", path.display()))?;
-        let providers_present = raw_value.get("providers").is_some();
-        let connections_present = raw_value.get("connections").is_some();
         let mut config: Self = toml::from_str(&raw)
             .map_err(|_| anyhow::anyhow!("failed to parse {}", path.display()))?;
-        config.validate_config_schema(providers_present, connections_present)?;
+        config.validate_config_schema()?;
         config.apply_model_request_env_overrides_with(read_env)?;
         Ok(config)
     }
@@ -1214,27 +1199,10 @@ impl RootConfig {
             lock.config_path == path,
             "config update lock does not match publication path"
         );
-        anyhow::ensure!(
-            !self.contains_legacy_inline_provider_secret(),
-            "legacy_secret_migration_required: migrate provider credentials before saving config"
-        );
         let rendered =
             toml::to_string_pretty(self).context("failed to serialize root config to toml")?;
         atomic_publish_private_file(path, rendered.as_bytes())
             .with_context(|| format!("failed to write config at {}", path.display()))
-    }
-
-    fn contains_legacy_inline_provider_secret(&self) -> bool {
-        self.providers.values().any(|provider| {
-            provider
-                .as_object()
-                .and_then(|object| object.get("api_key"))
-                .is_some_and(|value| match value {
-                    Value::Null => false,
-                    Value::String(secret) => !secret.is_empty(),
-                    _ => true,
-                })
-        })
     }
 
     /// Applies provider-neutral model request timeout environment overrides.
@@ -1268,54 +1236,26 @@ impl RootConfig {
         Ok(())
     }
 
-    fn validate_config_schema(
-        &self,
-        providers_present: bool,
-        connections_present: bool,
-    ) -> Result<()> {
-        match self.config_version {
-            None => {
-                anyhow::ensure!(
-                    !connections_present
-                        && self.connections.is_empty()
-                        && self.agent.connection.is_none()
-                        && self
-                            .task
-                            .role_configs()
-                            .all(|(_, role)| role.connection.is_none()),
-                    "config_version = 2 is required when [connections], agent.connection, or a task role connection is present"
-                );
+    fn validate_config_schema(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.config_version == CONFIG_VERSION_V2,
+            "config_version = {CONFIG_VERSION_V2} is required"
+        );
+        anyhow::ensure!(
+            self.agent.connection.is_some(),
+            "config_version = {CONFIG_VERSION_V2} requires [agent].connection"
+        );
+        for (name, role) in self.task.role_configs() {
+            anyhow::ensure!(
+                role.connection.is_some() == role.model.is_some(),
+                "config_version = {CONFIG_VERSION_V2} requires [{name}].connection and [{name}].model to be configured together"
+            );
+            if let (Some(connection), Some(model)) = (role.connection.as_ref(), role.model.as_ref())
+            {
+                ModelRef::new(connection.clone(), model.clone())
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| format!("invalid [{name}] model route"))?;
             }
-            Some(CONFIG_VERSION_V2) => {
-                anyhow::ensure!(
-                    self.agent.connection.is_some(),
-                    "config_version = 2 requires [agent].connection"
-                );
-                anyhow::ensure!(
-                    self.agent.provider.trim().is_empty()
-                        && !providers_present
-                        && self.providers.is_empty(),
-                    "config_version = 2 cannot include legacy agent.provider or [providers]"
-                );
-                for (name, role) in self.task.role_configs() {
-                    anyhow::ensure!(
-                        role.provider.is_none(),
-                        "config_version = 2 cannot include legacy [{name}].provider"
-                    );
-                    anyhow::ensure!(
-                        role.connection.is_some() == role.model.is_some(),
-                        "config_version = 2 requires [{name}].connection and [{name}].model to be configured together"
-                    );
-                    if let (Some(connection), Some(model)) =
-                        (role.connection.as_ref(), role.model.as_ref())
-                    {
-                        ModelRef::new(connection.clone(), model.clone())
-                            .map_err(anyhow::Error::new)
-                            .with_context(|| format!("invalid [{name}] model route"))?;
-                    }
-                }
-            }
-            Some(version) => anyhow::bail!("unsupported config_version {version}"),
         }
         Ok(())
     }
@@ -2868,8 +2808,9 @@ impl<'de> Deserialize<'de> for StorageRoot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AgentConfig {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub provider: String,
+    /// Runtime-only provider adapter selected from the active connection.
+    #[serde(skip)]
+    pub runtime_provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionId>,
     pub model: String,
@@ -2887,8 +2828,8 @@ pub struct TaskConfig {
     pub enabled: bool,
     /// Controls whether ordinary conversation input may hand off to durable task orchestration.
     ///
-    /// Compatibility defaults to `manual`; `default_mode` remains a composer preference and does
-    /// not grant autonomous routing authority.
+    /// The default is `manual`; `default_mode` remains a composer preference and does not grant
+    /// autonomous routing authority.
     #[serde(default)]
     pub routing_policy: TaskRoutingPolicy,
     #[serde(default)]
@@ -2996,7 +2937,6 @@ pub enum TaskMode {
 pub enum MultiAgentMode {
     None,
     #[default]
-    #[serde(alias = "explicitRequestOnly")]
     ExplicitRequestOnly,
     Proactive,
 }
@@ -3024,8 +2964,6 @@ impl TaskMode {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct RoleModelConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3106,10 +3044,6 @@ pub struct CompactionConfig {
     /// This can cause one additional provider request and therefore defaults off.
     #[serde(default)]
     pub native_carrier_enabled: bool,
-    #[serde(default = "default_soft_threshold_ratio")]
-    pub soft_threshold_ratio: f32,
-    #[serde(default = "default_hard_threshold_ratio")]
-    pub hard_threshold_ratio: f32,
     /// Fallback model window used only when provider/model metadata cannot resolve one.
     #[serde(
         default,
@@ -3117,8 +3051,6 @@ pub struct CompactionConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub context_window_tokens: Option<u32>,
-    #[serde(default = "default_tail_messages")]
-    pub tail_messages: usize,
 }
 
 /// Threshold state derived from the latest provider-reported prompt size.
@@ -3131,12 +3063,16 @@ pub enum CompactionThresholdStatus {
     Hard,
 }
 
+/// Current cache-aware compaction preparation boundary.
+pub const COMPACTION_PREPARATION_RATIO: f32 = 0.70;
+
+/// Current cache-aware compaction emergency boundary.
+pub const COMPACTION_EMERGENCY_RATIO: f32 = 0.92;
+
 /// Configured compaction rollout policy.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionStrategy {
-    /// Legacy fixed-threshold behavior, retained for deterministic migration and rollback.
-    LegacyV2,
     /// Cache-stable epoch rotation with adaptive tail and economics admission.
     #[default]
     CacheAwareV3,
@@ -3146,16 +3082,7 @@ impl CompactionStrategy {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyV2 => "legacy_v2",
             Self::CacheAwareV3 => "cache_aware_v3",
-        }
-    }
-
-    #[must_use]
-    pub const fn next(self) -> Self {
-        match self {
-            Self::LegacyV2 => Self::CacheAwareV3,
-            Self::CacheAwareV3 => Self::LegacyV2,
         }
     }
 }
@@ -3166,29 +3093,13 @@ impl Default for CompactionConfig {
             strategy: CompactionStrategy::default(),
             enabled: default_compaction_enabled(),
             native_carrier_enabled: false,
-            soft_threshold_ratio: default_soft_threshold_ratio(),
-            hard_threshold_ratio: default_hard_threshold_ratio(),
             context_window_tokens: None,
-            tail_messages: default_tail_messages(),
         }
     }
 }
 
 impl CompactionConfig {
-    /// Returns legacy field names that remain readable but no longer define V3 semantics.
-    #[must_use]
-    pub fn legacy_migration_fields(&self) -> &'static [&'static str] {
-        match self.strategy {
-            CompactionStrategy::LegacyV2 => &[],
-            CompactionStrategy::CacheAwareV3 => &[
-                "soft_threshold_ratio",
-                "hard_threshold_ratio",
-                "tail_messages",
-            ],
-        }
-    }
-
-    /// Classifies the latest prompt token count against the configured compaction thresholds.
+    /// Classifies the latest prompt token count against the current V3 pressure boundaries.
     pub fn threshold_status(&self, prompt_tokens: u64) -> CompactionThresholdStatus {
         if !self.enabled {
             return CompactionThresholdStatus::Off;
@@ -3202,9 +3113,9 @@ impl CompactionConfig {
         }
 
         let ratio = prompt_tokens as f32 / window as f32;
-        if ratio >= self.hard_threshold_ratio {
+        if ratio >= COMPACTION_EMERGENCY_RATIO {
             CompactionThresholdStatus::Hard
-        } else if ratio >= self.soft_threshold_ratio {
+        } else if ratio >= COMPACTION_PREPARATION_RATIO {
             CompactionThresholdStatus::Soft
         } else {
             CompactionThresholdStatus::Ready
@@ -3994,18 +3905,6 @@ fn default_skill_compatibility_sources() -> Vec<String> {
 
 fn default_compaction_enabled() -> bool {
     true
-}
-
-fn default_soft_threshold_ratio() -> f32 {
-    0.5
-}
-
-fn default_hard_threshold_ratio() -> f32 {
-    0.8
-}
-
-fn default_tail_messages() -> usize {
-    6
 }
 
 #[cfg(test)]

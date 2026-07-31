@@ -1,4 +1,4 @@
-<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,migrate-a-legacy-configuration,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
+<!-- public-doc-role: providers; authority: provider-selection-authority; sections: choose-a-provider,authentication-priority,copyable-starting-points,troubleshooting-path; cta: open-provider-guide -->
 
 # Provider Guide
 
@@ -21,7 +21,7 @@ fallback.
 | [Gemini](provider-gemini.md) | Gemini and function calling | Recognized Gemini IDs | `gemini` |
 
 Quick Setup is the shortest first-use path: choose provider, credential source, and model, then
-review and save. Use manual V2 config for repeatable local or CI defaults.
+review and save. Use a manual current-schema config for repeatable local or CI defaults.
 In `/config` → **Provider**, Enter on **Connection** opens an explicit chooser for saved
 connections and provider templates; `A` opens the add-provider group directly. Up/Down works on
 standard macOS keyboards, and adding never guesses the next provider.
@@ -38,47 +38,9 @@ connection/fingerprint view for ten minutes. An older in-process view remains vi
 unverified while Sigil refreshes it in the background, so menu navigation does not repeatedly
 replace the list with a blocking loading state.
 
-## Migrate A Legacy Configuration
-
-When Sigil finds a valid V1 `[providers]` configuration, it keeps the old route usable but asks
-before upgrading it. Migration is local: it preserves every projected connection, endpoint,
-provider option, active default model, and role route without loading a model catalog or contacting
-the provider.
-
-- Desktop shows **Migrate your existing provider setup** both when opening the project and in
-  Settings. Review the connection/key/environment counts and default route, then choose
-  **Migrate securely**. **Continue for now** leaves the compatible V1 route unchanged for that
-  launch; adding a connection stays unavailable until migration succeeds.
-- TUI shows **Legacy migration** as the first Provider row in `/config`. Press Enter once to
-  migrate all legacy connections atomically. No PageUp/PageDown sequence or separate save is
-  required. If the file changed after `/config` opened, close and reopen `/config`, review it
-  again, and retry.
-
-Inline V1 keys move directly from the runtime-loaded config to the configured protected credential
-store; they do not pass through the Desktop renderer or a TUI field. Existing environment-variable
-references remain references. Existing conversations and the current TUI session keep their
-resolved route; the migrated saved default applies to new conversations.
-
-Before writing each migrated credential, Sigil publishes a bounded, typed, secret-free,
-owner-only recovery record beside the config. The record can contain only the opaque credential
-IDs that the native owner must reconcile plus the original credential-storage mode; those values
-never enter the renderer, HTTP responses, logs, or diagnostics. Recheck holds the config update
-lock and confirms that both the config bytes and recovery record are still the reviewed versions
-before cleanup. `auto` reconciles only its owner-only credential file; an older native-system
-record is outside that operation and must be managed explicitly by the user.
-The record is removed after a confirmed publish or complete rollback. If either result is
-uncertain, the block survives Desktop/TUI restarts and project switches. Desktop changes the
-primary action to **Recheck configuration**; TUI changes the first row to
-**Migration recovery** / **Enter recheck**. Repair the current config or credential source, then
-use that explicit action. Recheck preserves IDs referenced by a healthy V2 config, deletes tracked
-unreferenced credentials, and can return an exact unchanged valid V1 config to migration-ready
-state after rollback cleanup. Publication reconciliation still requires a complete healthy V2
-config. If the config is missing or malformed while a recovery record remains, TUI setup also
-stays fail-closed. Sigil never converts the action into a blind retry.
-
 ## Authentication Priority
 
-V2 never writes a newly entered API key to `sigil.toml`. Choose one credential source per
+The current schema never writes a newly entered API key to `sigil.toml`. Choose one credential source per
 connection:
 
 | Source | Use it for | Stored in config |
@@ -90,8 +52,7 @@ connection:
 Provider environment names are `SIGIL_API_KEY`, `SIGIL_OPENAI_COMPATIBLE_API_KEY`,
 `SIGIL_OPENAI_RESPONSES_API_KEY`, `SIGIL_ANTHROPIC_API_KEY`, and `SIGIL_GEMINI_API_KEY`.
 `[storage].credential_store` accepts `file`, `auto`, or `keyring`. The default `file` and
-non-interactive `auto` modes use only the owner-only `~/.sigil/credentials.json`; `auto` never
-queries an older native-system record. If the file does not contain the credential, reopen
+non-interactive `auto` modes use only the owner-only `~/.sigil/credentials.json`. If the file does not contain the credential, reopen
 `/config` and enter the key once. Strict `keyring` mode explicitly uses macOS Keychain, Windows
 Credential Manager, or Linux Secret Service and may show platform authentication UI. The
 dedicated file contains protected plaintext credential material; it is not encryption. No mode
@@ -107,9 +68,8 @@ Templates are available under [`docs/examples/config`](../examples/config). Revi
 
 Check, in order: `[agent].connection`, `[agent].model`, the matching
 `[connections.<id>]` block, endpoint, credential-source readiness, and provider-specific limits.
-`/config` shows the current session route separately from the saved default. Existing V1
-`[providers]` configuration remains readable; follow **Migrate A Legacy Configuration** above
-instead of adding a duplicate connection or hand-editing credential IDs. Keep
+`/config` shows the current session route separately from the saved default. Incompatible
+configuration is rejected rather than migrated; replace it with a current template. Keep
 `permission.mode = "manual"` while diagnosing, then use
 [Troubleshooting](troubleshooting.md) for shared symptoms.
 

@@ -7,7 +7,7 @@ mod dto;
 mod file_store;
 mod inventory;
 mod keyring_store;
-mod migration;
+mod loader;
 mod persistence;
 mod recent;
 mod route;
@@ -43,16 +43,11 @@ pub use inventory::{
     connection_inventory_with_cancellation,
 };
 pub use keyring_store::SystemProviderCredentialStore;
-pub use migration::{load_provider_connections, materialize_v2_root_config};
+pub use loader::{load_provider_connections, materialize_root_config};
 pub use persistence::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, ConnectionSaveError,
-    ConnectionSaveOutcome, LegacyConnectionMigrationError, LegacyConnectionMigrationOutcome,
-    LegacyConnectionMigrationPreview, LegacyConnectionMigrationPublishStatus,
-    LegacyConnectionMigrationTransactionError, LegacyMigrationRecoveryError,
-    LegacyMigrationRecoveryState, ProviderConfigPublisher, RootConfigPublisher,
-    legacy_connection_migration_preview, legacy_migration_recovery_state,
-    migrate_legacy_provider_config, recheck_legacy_migration_recovery_native,
-    save_connection_config, save_connection_config_with_base,
+    ConnectionSaveOutcome, ProviderConfigPublisher, RootConfigPublisher, save_connection_config,
+    save_connection_config_with_base,
 };
 pub use recent::{load_recent_model_refs, recent_models_path, record_recent_model_ref};
 pub use route::{

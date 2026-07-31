@@ -387,7 +387,7 @@ fn markdown_timeline_lines_render_sigil_plan_blocks_as_summary() {
     let lines = render_markdown_timeline_lines(
         Color::Cyan,
         Style::default(),
-        r#"```sigil-plan-v1
+        r#"```sigil-plan-v2
 {
   "summary": "Clean up workspace and run checks",
   "steps": [
@@ -403,7 +403,7 @@ fn markdown_timeline_lines_render_sigil_plan_blocks_as_summary() {
     );
     let plain = plain_text(&lines);
 
-    assert!(plain.contains("sigil-plan-v1"));
+    assert!(plain.contains("sigil-plan-v2"));
     assert!(plain.contains("Clean up workspace and run checks"));
     assert!(plain.contains("2 steps"));
     assert!(plain.contains("Clean git state"));

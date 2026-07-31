@@ -483,7 +483,7 @@ where
     let conversation_coordinator =
         ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
             .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
-                &root_config.agent.provider,
+                &root_config.agent.runtime_provider,
                 &root_config.agent.model,
                 sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
             ));
@@ -921,7 +921,7 @@ pub(in crate::runner) fn close_agent_thread(
     reason: Option<String>,
 ) -> std::result::Result<(AgentThreadId, Vec<SessionLogEntry>), String> {
     let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.provider,
+        &root_config.agent.runtime_provider,
         &root_config.agent.model,
         current_session_log_path,
         current_session.as_ref(),

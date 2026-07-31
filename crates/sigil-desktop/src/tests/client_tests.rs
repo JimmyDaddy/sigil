@@ -65,9 +65,9 @@ fn intent_stack_projection_accepts_only_bounded_private_free_contract() {
     validate_intent_stack_state(&state).expect("bounded stack should validate");
 
     let with_private_field = serde_json::json!({
-        "status": "history_unavailable",
+        "status": "not_created",
         "schema_version": 1,
-        "safe_message": "No durable Intent history is available.",
+        "safe_message": "No Intent Stack has been created.",
         "session_path": "/private/session.jsonl"
     });
     assert!(serde_json::from_value::<DesktopIntentStackState>(with_private_field).is_err());
@@ -256,8 +256,7 @@ fn compaction_review_and_apply_action_preserve_exact_preview_binding() {
             "phase": "prepare",
             "forecast_confidence": "medium",
             "admission_reason": "qualified_cost_savings",
-            "native_carrier_available": true,
-            "legacy_migration_fields": ["tail_messages"]
+            "native_carrier_available": true
         },
         "admission": {
             "kind": "ready",

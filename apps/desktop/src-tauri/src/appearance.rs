@@ -16,9 +16,7 @@ pub(crate) const DESKTOP_APPEARANCE_EVENT_NAME: &str = "sigil-appearance-changed
 pub(crate) enum ThemePreference {
     #[default]
     System,
-    #[serde(alias = "light")]
     SigilLight,
-    #[serde(alias = "dark")]
     SigilDark,
     SolarizedLight,
     SolarizedDark,

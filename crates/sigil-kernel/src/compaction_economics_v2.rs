@@ -587,7 +587,7 @@ pub enum CompactionAdmissionReasonV2 {
     InsufficientSavings,
 }
 
-/// Durable comparison between V3 admission and the legacy threshold decision.
+/// Durable V3 admission decision and its rollout guards.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct CompactionAdmissionV2 {
@@ -598,7 +598,6 @@ pub struct CompactionAdmissionV2 {
     pub automatic_allowed: bool,
     pub user_confirmation_required: bool,
     pub v3_would_admit: bool,
-    pub legacy_v2_would_compact: bool,
 }
 
 /// V2 extension carried by the existing portable economics proof.
@@ -619,7 +618,6 @@ pub struct CompactionEconomicsV2 {
 pub struct CompactionAdmissionOptionsV2 {
     pub rollout_mode: CompactionRolloutModeV1,
     pub user_confirmed: bool,
-    pub legacy_v2_would_compact: bool,
 }
 
 impl CompactionEconomicsV2 {
@@ -686,7 +684,6 @@ impl CompactionEconomicsV2 {
             CompactionAdmissionOptionsV2 {
                 rollout_mode: self.admission.rollout_mode,
                 user_confirmed: self.admission.user_confirmed,
-                legacy_v2_would_compact: self.admission.legacy_v2_would_compact,
             },
         );
         if rebuilt != self.admission {
@@ -768,7 +765,6 @@ fn derive_admission(
         automatic_allowed,
         user_confirmation_required,
         v3_would_admit,
-        legacy_v2_would_compact: options.legacy_v2_would_compact,
     }
 }
 

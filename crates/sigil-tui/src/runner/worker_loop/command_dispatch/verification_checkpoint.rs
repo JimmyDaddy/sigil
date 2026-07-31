@@ -126,7 +126,7 @@ where
                     }
                 };
                 match load_session_with_runtime_attachments(
-                    &root_config.agent.provider,
+                    &root_config.agent.runtime_provider,
                     &root_config.agent.model,
                     &state.session.log_path,
                     state.session.current.as_ref(),

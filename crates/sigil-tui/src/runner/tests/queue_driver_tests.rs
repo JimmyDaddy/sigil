@@ -10,6 +10,29 @@ use super::*;
 
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=queue-secret-value exactly";
 
+fn cache_layout_proof() -> sigil_kernel::CacheLayoutProofV1 {
+    sigil_kernel::CacheLayoutProofV1::from_request(
+        &sigil_kernel::CompletionRequest {
+            provider_name: "test".to_owned(),
+            model_name: "model".to_owned(),
+            messages: vec![sigil_kernel::ModelMessage::user("current request")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+        None,
+    )
+    .expect("current cache layout proof")
+}
+
 fn append_queue_physical_attempt(
     store: &JsonlSessionStore,
     logical_run_id: &str,
@@ -44,7 +67,7 @@ fn append_queue_physical_attempt_named(
         request_material_fingerprint: request_material_fingerprint.to_owned(),
         provider_name: "test".to_owned(),
         model_name: "model".to_owned(),
-        cache_layout_proof: None,
+        cache_layout_proof: Some(cache_layout_proof()),
         started_at_unix_ms: 1,
     };
     let started_record = DurableAuditRecord::new(
@@ -86,7 +109,10 @@ fn committed_queued_chat_candidate(
     temp: &tempfile::TempDir,
     store: &JsonlSessionStore,
 ) -> Result<(Session, String, String)> {
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(
+        Session::load_from_store("test", "model", store.clone())
+            .expect("initialize current queue session"),
+    );
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -125,7 +151,7 @@ fn task_guidance_session(
     status: TaskRunStatus,
 ) -> Result<(Session, TaskId)> {
     let task_id = TaskId::new("task_guidance_queue_driver")?;
-    let mut session = Session::new("test", "model").with_store(store.clone());
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
@@ -186,7 +212,7 @@ fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
-    let mut session = Session::new("test", "model").with_store(store.clone());
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
     let mut controls = (0..1_024)
         .map(|ordinal| {
             Ok(ControlEntry::TaskRun(TaskRunEntry {
@@ -321,7 +347,10 @@ fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
     let temp = tempfile::tempdir().expect("temporary queue store should create");
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))
         .expect("queue store should create");
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(
+        Session::load_from_store("test", "model", store.clone())
+            .expect("initialize current queue session"),
+    );
     let mut exact_prompts = ExactConversationPromptStore::new();
 
     queue_conversation_input(
@@ -369,7 +398,7 @@ fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
 fn queued_candidate_freezes_the_internal_auto_handoff_tool() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -414,7 +443,10 @@ fn sensitive_queue_prompt_without_process_local_exact_material_becomes_stale() {
     let temp = tempfile::tempdir().expect("temporary queue store should create");
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))
         .expect("queue store should create");
-    let mut original = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut original = Some(
+        Session::load_from_store("test", "model", store.clone())
+            .expect("initialize current queue session"),
+    );
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -455,7 +487,7 @@ fn sensitive_queue_prompt_without_process_local_exact_material_becomes_stale() {
 fn queued_chat_candidate_freezes_exact_request_without_mutating_durable_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -516,7 +548,7 @@ fn queued_chat_candidate_freezes_exact_request_without_mutating_durable_state() 
 fn queued_candidate_commit_promotes_once_and_persists_only_safe_user_material() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -609,7 +641,7 @@ fn queued_candidate_commit_promotes_once_and_persists_only_safe_user_material() 
 fn queued_candidate_commit_rejects_a_stale_source_frontier_before_promotion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut current_session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut current_session = Some(Session::load_from_store("test", "model", store.clone())?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -882,7 +914,11 @@ fn promoted_queue_with_unfinished_provider_attempt_stays_stale_on_recovery() -> 
 fn queued_pressure_candidate_binds_explicit_output_reservation_without_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -934,7 +970,7 @@ fn queued_pressure_candidate_binds_explicit_output_reservation_without_mutation(
 fn queued_candidate_freezes_context_v1_for_the_exact_prompt_without_durable_leak() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -1012,7 +1048,11 @@ fn queued_pressure_admission_blocks_without_verified_local_tokenizer_without_mut
 {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -1060,7 +1100,11 @@ fn queued_pressure_admission_blocks_without_verified_local_tokenizer_without_mut
 fn queued_pressure_admission_blocks_unadmitted_profile_without_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("openai_compat", "gpt-test").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store(
+        "openai_compat",
+        "gpt-test",
+        store.clone(),
+    )?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -1105,7 +1149,7 @@ fn queued_pressure_admission_blocks_unadmitted_profile_without_mutation() -> Res
 fn queued_plan_candidate_is_blocked_without_changing_queue_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),

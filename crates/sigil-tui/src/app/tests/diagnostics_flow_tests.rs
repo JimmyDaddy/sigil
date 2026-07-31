@@ -1,56 +1,11 @@
 use std::collections::BTreeMap;
 
-use serde_json::json;
 use sigil_kernel::ThemeColorOverrides;
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tempfile::tempdir;
 
 use super::super::tests::common::test_config;
 use super::*;
-
-#[test]
-fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Result<()> {
-    let _env_guard = crate::test_env::lock();
-    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let mut config = test_config();
-    config.workspace.root = ".".to_owned();
-    config.providers.insert(
-        "deepseek".to_owned(),
-        json!({
-            "base_url": "https://example.com",
-            "api_key": "super-secret-test-key"
-        }),
-    );
-    // Deliberately materialize a legacy fixture. Product saves must reject new inline secrets.
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    let mut app = AppState::from_root_config(&config_path, &config);
-    app.composer.input = "/doctor".to_owned();
-
-    let action = app.submit_input()?;
-
-    assert!(action.is_none());
-    assert!(matches!(
-        app.last_notice(),
-        Some(notice) if notice.starts_with("doctor:")
-    ));
-    assert!(app.events.iter().any(|event| event.label == "doctor"));
-    let rendered = app
-        .timeline
-        .iter()
-        .find(|entry| entry.role == TimelineRole::Notice && entry.text.starts_with("doctor:"))
-        .expect("doctor report should be rendered")
-        .text
-        .clone();
-    assert!(rendered.contains("[ok] config:load\n  config parsed"));
-    assert!(rendered.contains("summary:"));
-    assert!(rendered.contains("needs attention:"));
-    assert!(rendered.contains("provider:auth"));
-    assert!(rendered.contains("fix: prefer SIGIL_API_KEY"));
-    assert!(!rendered.contains("super-secret-test-key"));
-    Ok(())
-}
 
 #[test]
 fn doctor_slash_command_renders_appearance_warnings() -> anyhow::Result<()> {

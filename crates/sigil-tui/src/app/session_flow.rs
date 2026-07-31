@@ -36,19 +36,19 @@ use audit_log::{
     agent_invocation_mode_label, agent_route_status_label, agent_terminal_status_label,
     agent_thread_status_label, agent_trust_state_label, check_discovery_source_label,
     check_promotion_label, child_verification_link_status_label,
-    child_verification_parent_recheck_label, evidence_scope_label, plan_approval_expiry_label,
-    plan_approval_permission_label, readiness_reason_label, readiness_required_actions_label,
-    receipt_status_label, required_action_label, run_status_label, task_child_session_status_label,
+    child_verification_parent_recheck_label, evidence_scope_label, plan_approval_permission_label,
+    readiness_reason_label, readiness_required_actions_label, receipt_status_label,
+    required_action_label, run_status_label, task_child_session_status_label,
     task_plan_status_label, task_route_status_label, task_run_status_label, task_step_status_label,
     tool_approval_action_label, tool_execution_status_label, verification_check_run_status_label,
     verification_stale_reason_label, verification_verdict_label, workspace_trust_label,
 };
 use audit_log::{
-    render_legacy_tool_result_unavailable_content, render_model_message_line,
-    render_session_log_entry, render_tool_execution_line, render_tool_result_v2_content_with_store,
-    restored_reasoning_note, restored_tool_call_index, restored_tool_execution_content,
-    restored_tool_execution_index, restored_tool_preview_snapshot_index,
-    restored_tool_result_call_ids, should_render_restored_tool_execution, unix_time_ms,
+    render_model_message_line, render_session_log_entry, render_tool_execution_line,
+    render_tool_result_v2_content_with_store, restored_reasoning_note, restored_tool_call_index,
+    restored_tool_execution_content, restored_tool_execution_index,
+    restored_tool_preview_snapshot_index, restored_tool_result_call_ids,
+    should_render_restored_tool_execution, unix_time_ms,
 };
 pub(super) use history::{current_focus_label, session_history_display_label, short_session_token};
 #[cfg(test)]
@@ -74,7 +74,7 @@ impl AppState {
 
         self.restore_session_path_from_disk(
             session_log_path,
-            &root_config.agent.provider,
+            &root_config.agent.runtime_provider,
             &root_config.agent.model,
             "restored latest session",
         )
@@ -560,28 +560,6 @@ impl AppState {
                     {
                         self.push_timeline(TimelineRole::Assistant, content);
                     }
-                }
-                SessionLogEntry::ToolResult(message) => {
-                    let execution = message
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|call_id| restored_tool_executions.get(call_id));
-                    let preview = message
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|call_id| restored_tool_previews.get(call_id));
-                    let tool_call = message
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|call_id| restored_tool_calls.get(call_id));
-                    self.replace_or_push_tool_card(format_tool_content_block_redacted_for_restore(
-                        message.tool_call_id.as_deref(),
-                        &render_legacy_tool_result_unavailable_content(&message),
-                        execution,
-                        tool_call,
-                        preview,
-                        &self.secret_redactor,
-                    ));
                 }
                 SessionLogEntry::ToolResultV2(result) => {
                     let execution = restored_tool_executions.get(&result.call_id);

@@ -297,11 +297,32 @@ fn agent_profile_rejects_missing_invocation_policy() {
 }
 
 #[test]
+fn agent_profile_rejects_missing_invocability_fields() {
+    for missing in ["user_invocable", "model_invocable"] {
+        let mut value = serde_json::json!({
+            "id": "explore",
+            "kind": "subagent",
+            "invocation_policy": "manual_only",
+            "user_invocable": true,
+            "model_invocable": false
+        });
+        value
+            .as_object_mut()
+            .expect("fixture is an object")
+            .remove(missing);
+        let error =
+            serde_json::from_value::<AgentProfile>(value).expect_err("current field is required");
+        assert!(error.to_string().contains(missing));
+    }
+}
+
+#[test]
 fn explicit_agent_invocation_policy_controls_effective_access() -> Result<()> {
     let manual: AgentProfile = serde_json::from_value(serde_json::json!({
         "id": "manual",
         "kind": "subagent",
         "invocation_policy": "manual_only",
+        "user_invocable": true,
         "model_invocable": true
     }))?;
     assert!(manual.user_invocation_allowed());
@@ -1126,9 +1147,15 @@ fn agent_unknown_enum_values_deserialize_without_failing() -> Result<()> {
                     "profile_snapshot_id": "snap_1",
                     "provider": "deepseek",
                     "model": "deepseek-v4-pro",
-                    "workspace_root": "/workspace"
+                    "workspace_root": "/workspace",
+                    "effective_tool_scope_hash": "sha256:tools",
+                    "effective_permission_policy_hash": "sha256:permissions",
+                    "effective_mcp_scope_hash": "sha256:mcp",
+                    "provider_capability_hash": "sha256:provider",
+                    "budget_policy_hash": "sha256:budget"
                 },
                 "objective": "inspect kernel",
+                "prompt_hash": "sha256:prompt",
                 "invocation_mode": "future_mode",
                 "invocation_source": "future_source"
             }
@@ -1145,6 +1172,12 @@ fn agent_unknown_enum_values_deserialize_without_failing() -> Result<()> {
         "snapshot_id": "snap_1",
         "profile_id": "explore",
         "source": { "kind": "future_source" },
+        "source_hash": "sha256:source",
+        "profile_hash": "sha256:profile",
+        "resolved_tool_scope_hash": "sha256:tools",
+        "resolved_permission_policy_hash": "sha256:permissions",
+        "resolved_mcp_scope_hash": "sha256:mcp",
+        "resolved_skill_hashes": [],
         "trust_state": "future_trust"
     }))?;
     assert_eq!(profile.source, AgentProfileSource::Unknown);
@@ -1153,10 +1186,44 @@ fn agent_unknown_enum_values_deserialize_without_failing() -> Result<()> {
 }
 
 #[test]
+fn agent_durable_entries_reject_missing_current_fields() {
+    let started = serde_json::from_value::<SessionLogEntry>(serde_json::json!({
+        "control": {
+            "agent_thread_started": {
+                "thread_id": "thread_1",
+                "parent_session_ref": { "path": "parent.jsonl" },
+                "thread_session_ref": { "path": "children/thread_1.jsonl" },
+                "profile_id": "explore",
+                "profile_snapshot_id": "snap_1",
+                "run_context": {
+                    "profile_snapshot_id": "snap_1",
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "workspace_root": "/workspace"
+                },
+                "objective": "inspect kernel",
+                "invocation_mode": "foreground",
+                "invocation_source": "user"
+            }
+        }
+    }));
+    assert!(started.is_err());
+
+    let snapshot = serde_json::from_value::<AgentProfileSnapshot>(serde_json::json!({
+        "snapshot_id": "snap_1",
+        "profile_id": "explore",
+        "source": { "kind": "built_in" },
+        "trust_state": "trusted"
+    }));
+    assert!(snapshot.is_err());
+}
+
+#[test]
 fn load_from_store_marks_orphan_agent_attempt_as_interrupted() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
         sample_started_entry()?,
     )))?;
@@ -1197,6 +1264,7 @@ fn load_from_store_reconciles_agent_batch_without_replaying_missing_live_handles
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     let batch_id = AgentBatchId::new("batch_restart")?;
     store.append(&SessionLogEntry::Control(
         ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
@@ -1346,6 +1414,7 @@ fn load_from_store_fails_started_parent_continuation_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(
         ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
             snapshot: sample_snapshot()?,
@@ -1474,6 +1543,7 @@ fn load_from_store_closes_orphan_agent_routes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
         AgentApprovalRouteEntry {
             route_id: route_id("route_1")?,
@@ -1540,6 +1610,7 @@ fn load_from_store_marks_expired_agent_approval_stale_before_route_closure() -> 
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
         AgentApprovalRouteEntry {
             route_id: route_id("route_expired")?,
@@ -1708,6 +1779,7 @@ fn session_restore_appends_interrupted_mailbox_message() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(
         ControlEntry::AgentMailboxMessage(AgentMailboxMessageEntry {
             route_id: route_id("restore_mailbox")?,

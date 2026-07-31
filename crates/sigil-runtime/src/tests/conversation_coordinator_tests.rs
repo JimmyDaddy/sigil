@@ -581,7 +581,7 @@ fn synthesis_result_only_crash_prefix_completes_without_provider_replay() -> Res
     let temp = tempdir()?;
     let parent_store_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&parent_store_path)?;
-    let mut session = Session::new("mock", "model").with_store(store);
+    let mut session = Session::load_from_store("mock", "model", store)?;
     let task_id = sigil_kernel::TaskId::new("task-result-only-prefix")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -631,7 +631,7 @@ fn synthesis_result_only_crash_prefix_completes_without_provider_replay() -> Res
     let child_store = JsonlSessionStore::new(
         child_session_ref.resolve(parent_store_path.parent().expect("parent store directory")),
     )?;
-    let mut child_session = Session::new("mock", "model").with_store(child_store);
+    let mut child_session = Session::load_from_store("mock", "model", child_store)?;
     let mut child_message = ModelMessage::assistant_with_kind(
         Some(final_text.to_owned()),
         Vec::new(),

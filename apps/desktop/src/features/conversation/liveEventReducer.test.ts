@@ -124,7 +124,7 @@ describe("live event reducer", () => {
     expect(selectTaskEvents(state).some((item) => item.kind === "task_run_finished")).toBe(false);
   });
 
-  it("orders semantic items by exact decimal run sequence and ignores legacy numeric sequence", () => {
+  it("orders semantic items by exact decimal run sequence and ignores removed numeric sequence", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({
       sequence: 999,

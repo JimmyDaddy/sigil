@@ -2,10 +2,7 @@ use anyhow::Result;
 use sigil_kernel::{ConnectionId, ModelRef};
 use sigil_runtime::{
     normalize_provider_model_alias,
-    provider_connections::{
-        ConfigMode, ConnectionReadiness, resolve_default_model_route, resolve_model_route,
-    },
-    set_active_provider_model,
+    provider_connections::{ConnectionReadiness, resolve_default_model_route, resolve_model_route},
 };
 
 use super::{AppAction, AppState, TimelineRole, formatting::parse_reasoning_effort};
@@ -44,7 +41,7 @@ impl AppState {
         let Some(root_config) = self.config_snapshot.as_ref() else {
             return Ok(None);
         };
-        let (default_provider, default_route) =
+        let (_, default_route) =
             resolve_default_model_route(root_config).map_err(anyhow::Error::new)?;
         let current_connection = self
             .runtime
@@ -67,11 +64,7 @@ impl AppState {
                 model_id.to_owned(),
             )?
         } else {
-            let provider_name = if root_config.config_version.is_none() {
-                default_provider.as_str()
-            } else {
-                self.runtime.provider_name.as_str()
-            };
+            let provider_name = self.runtime.provider_name.as_str();
             let model_id = normalize_provider_model_alias(provider_name, trimmed)
                 .unwrap_or_else(|| trimmed.to_owned());
             ModelRef::new(current_connection, model_id)?
@@ -87,11 +80,7 @@ impl AppState {
                     .entries
                     .iter()
                     .find(|entry| entry.id == model_ref.connection_id)
-                    .is_some_and(|entry| {
-                        entry.readiness == ConnectionReadiness::Ready
-                            || (inventory.mode == ConfigMode::LegacyV1
-                                && entry.readiness == ConnectionReadiness::Unverified)
-                    })
+                    .is_some_and(|entry| entry.readiness == ConnectionReadiness::Ready)
             });
         if !ready {
             let notice = format!(
@@ -133,16 +122,8 @@ impl AppState {
         }
 
         let mut next_config = root_config.clone();
-        if next_config.config_version.is_some() {
-            next_config.agent.connection = Some(model_ref.connection_id.clone());
-            next_config.agent.model = model_ref.model_id.clone();
-        } else {
-            anyhow::ensure!(
-                model_ref.connection_id == default_route.model_ref.connection_id,
-                "legacy config cannot switch to another connection before migration"
-            );
-            set_active_provider_model(&mut next_config, &model_ref.model_id)?;
-        }
+        next_config.agent.connection = Some(model_ref.connection_id.clone());
+        next_config.agent.model = model_ref.model_id.clone();
         self.reset_for_new_session(
             provider_name,
             model_ref.model_id.clone(),

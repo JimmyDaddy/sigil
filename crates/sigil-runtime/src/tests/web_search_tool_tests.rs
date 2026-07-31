@@ -10,6 +10,27 @@ use super::*;
 
 struct AcceptingPresenter;
 
+fn current_root(extra: &str) -> RootConfig {
+    toml::from_str(&format!(
+        r#"config_version = 2
+
+[agent]
+connection = "local"
+model = "test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = {{ source = "none" }}
+
+{extra}
+"#
+    ))
+    .expect("current root config should parse")
+}
+
 #[async_trait::async_trait]
 impl EgressDisclosurePresenter for AcceptingPresenter {
     async fn present(
@@ -82,13 +103,7 @@ fn bundled_search_result_requires_the_active_session_scope() {
 
 #[test]
 fn public_websearch_description_discourages_unnecessary_fetch_fanout() {
-    let config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
-model = "test"
-"#,
-    )
-    .expect("root config should parse");
+    let config = current_root("");
     let mut registry = ToolRegistry::new();
     register_web_search_tool(&mut registry, &config, 64, Arc::new(AcceptingPresenter));
     let spec = registry
@@ -101,12 +116,8 @@ model = "test"
 
 #[test]
 fn configured_websearch_query_disclosure_uses_the_remote_mcp_origin() {
-    let config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
-model = "test"
-
-[web]
+    let config = current_root(
+        r#"[web]
 proxy_mode = "direct"
 search_route = "mcp"
 
@@ -120,8 +131,7 @@ transport = "streamable_http"
 url = "https://search.example.test/mcp"
 startup = "lazy"
 "#,
-    )
-    .expect("root config should parse");
+    );
     let binding = config.web.search_mcp.as_ref().expect("configured binding");
 
     let destination = configured_query_egress_destination(&config, binding)
@@ -140,13 +150,7 @@ startup = "lazy"
 
 #[test]
 fn bundled_websearch_query_disclosure_uses_the_environment_proxy_route() {
-    let config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
-model = "test"
-"#,
-    )
-    .expect("root config should parse");
+    let config = current_root("");
 
     let destination = query_egress_destination_with_proxy(
         &config,

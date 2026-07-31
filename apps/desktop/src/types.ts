@@ -91,7 +91,6 @@ export type CatalogSourceState =
   | "ready"
   | "oversized"
   | "scan_budget_exceeded"
-  | "unsupported_legacy"
   | "invalid";
 
 export interface CatalogRequest {
@@ -313,17 +312,16 @@ export type CompactionAdmission =
   | {
       kind: "no_foldable_history";
       durableMessageCount: number;
-      configuredTailMessageCount: number;
+      minimumTailTurnCount: number;
     }
   | { kind: "unavailable"; reason: string };
 
 export interface CompactionPolicy {
-  strategy: "cache_aware_v3" | "legacy_v2";
+  strategy: "cache_aware_v3";
   phase: "below_observe" | "observe" | "prepare" | "admit" | "emergency";
   forecastConfidence?: "low" | "medium" | "high";
   admissionReason?: string;
   nativeCarrierAvailable: boolean;
-  legacyMigrationFields: string[];
 }
 
 export interface CompactionConstraint {
@@ -782,7 +780,7 @@ export type ToolArtifactAvailability =
   | "missing"
   | "hash_mismatch"
   | "policy_revoked"
-  | "legacy_unavailable";
+  | "unavailable";
 
 export type ToolArtifactSelector =
   | {
@@ -973,13 +971,11 @@ export interface ProviderModelRef {
   modelId: string;
 }
 
-export type ProviderConfigMode = "legacy_v1" | "v2" | "mixed" | "unsupported_future";
+export type ProviderConfigMode = "v2" | "invalid";
 export type ProviderCredentialSource =
   | "environment"
-  | "system_keyring"
   | "stored"
-  | "none"
-  | "legacy_plaintext";
+  | "none";
 export type ProviderConnectionReadiness =
   | "ready"
   | "needs_credential"
@@ -1010,12 +1006,6 @@ export interface ProviderConnectionInventory {
   defaultModel?: ProviderModelRef;
   connections: ProviderConnection[];
   issues: ProviderConnectionIssue[];
-  legacyMigration?: {
-    revision: string;
-    connectionCount: number;
-    inlineCredentialCount: number;
-    environmentReferenceCount: number;
-  };
 }
 
 export type ProviderSetupTemplate =
@@ -1061,24 +1051,6 @@ export interface ProviderSetupSaveResult {
     defaultModel: ProviderModelRef;
     inventory: ProviderConnectionInventory;
     saveWarning: boolean;
-}
-
-export interface ProviderLegacyMigrationResult {
-  defaultModel: ProviderModelRef;
-  inventory: ProviderConnectionInventory;
-  migratedConnectionCount: number;
-  movedInlineCredentialCount: number;
-  preservedEnvironmentReferenceCount: number;
-  outcome: "published" | "published_with_warning";
-  warnings: Array<
-    "filesystem_durability_uncertain" | "publication_visibility_reconciled"
-  >;
-}
-
-export function providerInventoryNeedsLegacyMigration(
-  inventory: ProviderConnectionInventory | undefined,
-): boolean {
-  return inventory?.configMode === "legacy_v1" && inventory.legacyMigration !== undefined;
 }
 
 export function providerInventoryIsUsable(
@@ -1231,7 +1203,6 @@ export interface IntentVersionRef {
 
 export type IntentOperationErrorCode =
   | "unsupported_schema"
-  | "intent_history_unavailable"
   | "unknown_intent"
   | "unknown_operation"
   | "stale_intent_version"
@@ -1330,7 +1301,7 @@ export interface IntentStackDetails {
 
 export type IntentStackState =
   | { status: "available"; schemaVersion: number; stack: IntentStackDetails }
-  | { status: "history_unavailable"; schemaVersion: number; safeMessage: string };
+  | { status: "not_created"; schemaVersion: number; safeMessage: string };
 
 export interface IntentFileEffect {
   normalizedRelativePath: string;

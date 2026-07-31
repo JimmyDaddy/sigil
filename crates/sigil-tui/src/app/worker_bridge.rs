@@ -28,8 +28,8 @@ use super::{
 };
 use crate::runner::{WorkerCommand, WorkerMessage};
 use message_labels::{
-    plan_approval_permission_label, queued_prompt_summary_noun, summarize_queued_prompt,
-    task_run_finish_notice, task_run_status_label,
+    queued_prompt_summary_noun, summarize_queued_prompt, task_run_finish_notice,
+    task_run_status_label,
 };
 use run_event_helpers::notice_is_timeline_worthy;
 #[cfg(test)]
@@ -342,21 +342,6 @@ impl AppState {
                         result.tool_calls,
                         result.final_text.len()
                     ),
-                );
-            }
-            WorkerMessage::PlanApproved { entry, entries } => {
-                self.runtime.is_busy = false;
-                self.approval.pending = None;
-                self.clear_pending_plan_approval();
-                self.sync_current_session_state(entries);
-                self.refresh_session_history();
-                self.last_notice = Some(format!(
-                    "plan grant: {}",
-                    plan_approval_permission_label(entry.permission)
-                ));
-                self.push_event(
-                    "plan:grant",
-                    format!("v{} {}", entry.plan_version, entry.plan_hash),
                 );
             }
             WorkerMessage::PlanRejected { entry, entries } => {

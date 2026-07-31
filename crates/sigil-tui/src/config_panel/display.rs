@@ -19,16 +19,9 @@ impl ConfigState {
             }
             ConfigField::ProviderBaseUrl => Some(&self.draft.provider_base_url),
             ConfigField::ProviderFimModel => Some(&self.draft.provider_fim_model),
-            ConfigField::CompactionSoftThresholdRatio => {
-                Some(&self.draft.compaction_soft_threshold_ratio)
-            }
-            ConfigField::CompactionHardThresholdRatio => {
-                Some(&self.draft.compaction_hard_threshold_ratio)
-            }
             ConfigField::CompactionContextWindowTokens => {
                 Some(&self.draft.compaction_context_window_tokens)
             }
-            ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
             ConfigField::TerminalScrollSensitivity => Some(&self.draft.terminal_scroll_sensitivity),
             ConfigField::TerminalNotificationMinimumRunDurationMs => {
                 Some(&self.draft.terminal_notification_minimum_run_duration_ms)
@@ -61,7 +54,6 @@ impl ConfigState {
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
             | ConfigField::CompactionNativeCarrierEnabled
-            | ConfigField::CompactionStrategy
             | ConfigField::CodeIntelEnabled
             | ConfigField::CodeIntelServerStartup
             | ConfigField::CodeIntelAutoDiscover
@@ -93,16 +85,9 @@ impl ConfigState {
             }
             ConfigField::ProviderBaseUrl => Some(&mut self.draft.provider_base_url),
             ConfigField::ProviderFimModel => Some(&mut self.draft.provider_fim_model),
-            ConfigField::CompactionSoftThresholdRatio => {
-                Some(&mut self.draft.compaction_soft_threshold_ratio)
-            }
-            ConfigField::CompactionHardThresholdRatio => {
-                Some(&mut self.draft.compaction_hard_threshold_ratio)
-            }
             ConfigField::CompactionContextWindowTokens => {
                 Some(&mut self.draft.compaction_context_window_tokens)
             }
-            ConfigField::CompactionTailMessages => Some(&mut self.draft.compaction_tail_messages),
             ConfigField::TerminalScrollSensitivity => {
                 Some(&mut self.draft.terminal_scroll_sensitivity)
             }
@@ -131,7 +116,6 @@ impl ConfigState {
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
             | ConfigField::CompactionNativeCarrierEnabled
-            | ConfigField::CompactionStrategy
             | ConfigField::CodeIntelEnabled
             | ConfigField::CodeIntelServerStartup
             | ConfigField::CodeIntelAutoDiscover
@@ -152,25 +136,6 @@ impl ConfigState {
 
     pub(crate) fn display_value(&self, field: ConfigField) -> String {
         let text_value = match field {
-            ConfigField::ProviderName
-                if self.legacy_migration_recovery
-                    == Some(
-                        sigil_runtime::provider_connections::LegacyMigrationRecoveryState::RollbackIncomplete,
-                    ) =>
-            {
-                return "credential rollback incomplete · repair, then recheck".to_owned();
-            }
-            ConfigField::ProviderName
-                if self.legacy_migration_recovery
-                    == Some(
-                        sigil_runtime::provider_connections::LegacyMigrationRecoveryState::ReconcileRequired,
-                    ) =>
-            {
-                return "published state uncertain · repair, then recheck".to_owned();
-            }
-            ConfigField::ProviderName if self.draft.requires_legacy_config_migration() => {
-                return self.draft.legacy_config_migration_summary();
-            }
             ConfigField::ProviderName => return self.draft.selected_connection_summary(),
             ConfigField::ProviderFimModel
                 if normalize_provider_name(&self.draft.provider_name) != DEEPSEEK_PROVIDER_KEY =>
@@ -234,9 +199,6 @@ impl ConfigState {
             ConfigField::CompactionNativeCarrierEnabled => {
                 return bool_label(self.draft.compaction_native_carrier_enabled).to_owned();
             }
-            ConfigField::CompactionStrategy => {
-                return self.draft.compaction_strategy.as_str().to_owned();
-            }
             ConfigField::CodeIntelEnabled => {
                 return bool_label(self.draft.code_intelligence_enabled).to_owned();
             }
@@ -295,9 +257,6 @@ impl ConfigState {
         };
 
         match field {
-            ConfigField::CompactionSoftThresholdRatio
-            | ConfigField::CompactionHardThresholdRatio => display_ratio(text_value),
-            ConfigField::CompactionTailMessages => format!("{text_value} messages"),
             ConfigField::ModelRequestTimeoutSecs
             | ConfigField::ModelRequestStreamIdleTimeoutSecs
             | ConfigField::McpStartupTimeoutSecs => format!("{text_value} seconds"),
@@ -319,26 +278,12 @@ pub(crate) fn render_config_value_row(state: &ConfigState, field: ConfigField) -
     let selected = !state.footer_selected && state.selected_field == Some(field);
     let marker = if selected { ">" } else { " " };
     let action = if selected && state.editing_field() != Some(field) {
-        if field == ConfigField::ProviderName && state.legacy_migration_recovery.is_some() {
-            "Enter recheck"
-        } else if field == ConfigField::ProviderName
-            && state.draft.requires_legacy_config_migration()
-        {
-            "Enter migrate"
-        } else {
-            field.action_label()
-        }
+        field.action_label()
     } else {
         ""
     };
 
-    let label = if field == ConfigField::ProviderName && state.legacy_migration_recovery.is_some() {
-        "Migration recovery"
-    } else if field == ConfigField::ProviderName && state.draft.requires_legacy_config_migration() {
-        "Legacy migration"
-    } else {
-        field.display_label()
-    };
+    let label = field.display_label();
     if action.is_empty() {
         format!("{marker} {}: {}", label, state.display_value(field))
     } else {
@@ -358,15 +303,11 @@ pub(crate) fn render_config_readonly_row(label: &str, value: &str) -> String {
 pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> bool {
     match field {
         ConfigField::CompactionContextWindowTokens
-        | ConfigField::CompactionTailMessages
         | ConfigField::ModelRequestTimeoutSecs
         | ConfigField::ModelRequestStreamIdleTimeoutSecs
         | ConfigField::TerminalScrollSensitivity
         | ConfigField::TerminalNotificationMinimumRunDurationMs
         | ConfigField::McpStartupTimeoutSecs => character.is_ascii_digit(),
-        ConfigField::CompactionSoftThresholdRatio | ConfigField::CompactionHardThresholdRatio => {
-            character.is_ascii_digit() || character == '.'
-        }
         ConfigField::ProviderModel
         | ConfigField::ProviderBaseUrl
         | ConfigField::ProviderFimModel
@@ -385,7 +326,6 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled
         | ConfigField::CompactionNativeCarrierEnabled
-        | ConfigField::CompactionStrategy
         | ConfigField::CodeIntelEnabled
         | ConfigField::CodeIntelServerStartup
         | ConfigField::CodeIntelAutoDiscover
@@ -431,12 +371,5 @@ fn verification_auto_run_label(policy: VerificationAutoRunPolicy) -> &'static st
         VerificationAutoRunPolicy::Manual => "manual",
         VerificationAutoRunPolicy::TrustedOnly => "auto trusted",
         VerificationAutoRunPolicy::Never => "off",
-    }
-}
-
-pub(super) fn display_ratio(value: &str) -> String {
-    match value.trim().parse::<f32>() {
-        Ok(ratio) if ratio.is_finite() => format!("{}% ({})", (ratio * 100.0).round(), value),
-        _ => value.to_owned(),
     }
 }

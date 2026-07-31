@@ -95,7 +95,6 @@ export function SessionRail({
               <option value="ready">{t("ready")}</option>
               <option value="oversized">{t("oversized")}</option>
               <option value="scan_budget_exceeded">{t("scanLimited")}</option>
-              <option value="unsupported_legacy">{t("unsupported")}</option>
               <option value="invalid">{t("invalid")}</option>
             </Select>
             <Checkbox label={t("pinnedOnly")} checked={pinnedOnly} onChange={(event) => onPinnedOnlyChange(event.target.checked)} />

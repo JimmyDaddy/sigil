@@ -15,8 +15,7 @@ pub struct SseFrameBuffer {
 impl SseFrameBuffer {
     /// Appends already-decoded SSE text and emits complete frames.
     ///
-    /// This compatibility API shares state with [`Self::push_bytes`], so callers may migrate to
-    /// byte-oriented transport reads without changing frame parsing.
+    /// This string-oriented API shares state with [`Self::push_bytes`].
     ///
     /// # Errors
     ///

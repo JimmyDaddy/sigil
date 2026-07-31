@@ -9,7 +9,7 @@ fn config_for_workspace(workspace_root: &Path) -> RootConfig {
 
 fn multi_connection_v2_config() -> Result<RootConfig> {
     use sigil_runtime::provider_connections::{
-        ProviderFamily, ProviderProtocol, materialize_v2_root_config, provider_connection_template,
+        ProviderFamily, ProviderProtocol, materialize_root_config, provider_connection_template,
     };
 
     let openai = provider_connection_template(
@@ -27,7 +27,7 @@ fn multi_connection_v2_config() -> Result<RootConfig> {
     )?
     .0;
     let default_model = sigil_kernel::ModelRef::new(openai.id.clone(), "gpt-5")?;
-    materialize_v2_root_config(
+    materialize_root_config(
         &test_config(),
         &std::collections::BTreeMap::from([
             (openai.id.clone(), openai),

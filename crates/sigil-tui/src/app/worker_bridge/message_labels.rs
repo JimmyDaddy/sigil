@@ -1,14 +1,5 @@
 use sigil_kernel::{ControlEntry, ConversationInputTarget};
 
-pub(super) fn plan_approval_permission_label(
-    permission: sigil_kernel::PlanApprovalPermission,
-) -> &'static str {
-    match permission {
-        sigil_kernel::PlanApprovalPermission::Ask => "ask",
-        sigil_kernel::PlanApprovalPermission::WorkspaceEdits => "workspace_edits",
-    }
-}
-
 pub(super) fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
     match status {
         sigil_kernel::TaskRunStatus::Started => "started",

@@ -59,7 +59,7 @@ fn legacy_anchor_rejects_a_hash_bound_value_with_the_wrong_field_path() -> Resul
     let message = messages.first().context("durable user message")?;
     let statement = AnchoredStatementV1 {
         exact_text: "exact objective".to_owned(),
-        authority: ObjectiveAuthorityRefV1::LegacySourceTurn {
+        authority: ObjectiveAuthorityRefV1::UserSourceTurn {
             event_id: records[0].event_id().to_owned(),
             message_id: message.id.clone(),
         },

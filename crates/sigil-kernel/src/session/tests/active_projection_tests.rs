@@ -118,6 +118,7 @@ fn first_hot_append_seeds_a_new_stream_projection_without_a_second_scan() -> Res
 fn session_startup_reuses_the_single_reconciled_full_replay() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("startup.jsonl"))?;
+    append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(ControlEntry::Note {
         kind: "startup_fixture".to_owned(),
         data: serde_json::Value::Null,

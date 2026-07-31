@@ -46,7 +46,7 @@ fn tui_tool_artifact_reads_share_budget_and_fail_closed_on_descriptor_drift() ->
         .expect("published artifact")
         .artifact_ref
         .clone();
-    let mut session = sigil_kernel::Session::new("deepseek", "model").with_store(durable_store);
+    let mut session = sigil_kernel::Session::load_from_store("deepseek", "model", durable_store)?;
     session.append(SessionLogEntry::ToolResultV2(recorded))?;
 
     let shared_budget = sigil_kernel::ToolArtifactReadBudgetV1::default();
@@ -435,7 +435,10 @@ fn worker_checkpoint_restore_fails_closed_when_file_drifts_after_preview() -> Re
     fs::write(&note, "before\n")?;
     let session_log_path = temp.path().join(".sigil/sessions/session-conflict.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
+    let mut session =
+        sigil_kernel::Session::load_from_store("default-provider", "default-model", store.clone())?;
+    session.append_user_message(ModelMessage::user("edit note"))?;
+    drop(session);
     let recorder = MutationEventRecorder::new(store.clone());
     write_file_with_mutation(
         Some(&recorder),

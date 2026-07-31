@@ -229,51 +229,6 @@ fn runtime_config_update_invalidates_connection_model_views() -> Result<()> {
 }
 
 #[test]
-fn environment_only_legacy_migration_preserves_compatible_model_view() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let source = r#"
-[agent]
-provider = "anthropic"
-model = "claude-private"
-
-[providers.anthropic]
-base_url = "https://api.anthropic.com"
-"#;
-    std::fs::write(&config_path, source)?;
-    let legacy = RootConfig::parse_persisted(source)?;
-    let mut app = AppState::from_root_config(&config_path, &legacy);
-    app.open_model_picker(ModelPickerTarget::Provider, "claude-private");
-    apply_available_connection_models(&mut app, &["claude-private", "claude-alt"])?;
-    assert_eq!(app.runtime.connection_model_catalog_views.len(), 1);
-
-    app.modal_state = None;
-    app.runtime.active_model_picker_refresh = None;
-    app.runtime.pending_worker_commands.clear();
-    app.open_config_panel();
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(matches!(action, Some(AppAction::ConfigSaved { .. })));
-    assert_eq!(app.runtime.connection_model_catalog_views.len(), 1);
-
-    app.modal_state = None;
-    app.runtime.active_model_picker_refresh = None;
-    app.runtime.pending_worker_commands.clear();
-    app.open_model_picker(ModelPickerTarget::Provider, "claude-private");
-    assert!(app.runtime.active_model_picker_refresh.is_none());
-    assert!(
-        !app.runtime
-            .pending_worker_commands
-            .iter()
-            .any(|command| matches!(command, WorkerCommand::RefreshConnectionModels { .. }))
-    );
-    assert_eq!(
-        app.last_notice(),
-        Some("reused cached models for anthropic-default")
-    );
-    Ok(())
-}
-
-#[test]
 fn connection_model_picker_reuses_a_fresh_empty_catalog() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
@@ -358,9 +313,9 @@ fn connection_model_picker_reuses_unsupported_catalog_without_losing_its_meaning
 }
 
 #[test]
-fn invalid_connection_picker_does_not_fall_back_to_legacy_provider_discovery() -> Result<()> {
+fn invalid_connection_picker_does_not_guess_a_provider() -> Result<()> {
     let mut config = test_config();
-    config.agent.provider = "anthropic".to_owned();
+    config.agent.connection = Some(sigil_kernel::ConnectionId::new("missing")?);
     config.agent.model = "claude-sonnet-4-5".to_owned();
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
@@ -372,7 +327,6 @@ fn invalid_connection_picker_does_not_fall_back_to_legacy_provider_discovery() -
         Some("model list unavailable: repair the exact connection settings")
     );
     let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("provider: anthropic"));
     assert!(lines.contains("exact connection draft is unavailable"));
     assert!(lines.contains("claude-sonnet-4-5"));
     assert!(!lines.contains("M manual model id"));
@@ -933,39 +887,6 @@ fn mcp_elicitation_cycles_enum_and_boolean_fields() -> Result<()> {
 }
 
 #[test]
-fn config_tail_messages_text_modal_updates_value_after_validation() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.open_config_panel();
-    let state = app
-        .config_state
-        .as_mut()
-        .expect("config state should exist after opening /config");
-    state.set_section(ConfigSection::Compaction);
-    state.selected_field = Some(ConfigField::CompactionTailMessages);
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(app.modal_title(), Some("Tail messages"));
-    assert_eq!(app.modal_input_cursor(), Some(("value".to_owned(), 1, 4)));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
-    assert!(app.modal_lines().join("\n").contains("value: 6|"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    let state = app
-        .config_state
-        .as_ref()
-        .expect("config state should remain open");
-    assert!(!app.has_modal());
-    assert_eq!(state.draft.compaction_tail_messages, "9");
-    assert!(state.dirty);
-    Ok(())
-}
-
-#[test]
 fn mcp_elicitation_modal_validates_multiple_field_kinds_and_accepts_response() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -1220,16 +1141,12 @@ fn config_inline_api_key_uses_secret_modal_without_persisting_plaintext() -> Res
     let Some(AppAction::ConfigSaved { root_config }) = action else {
         panic!("expected config save action");
     };
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
+    assert_eq!(root_config.config_version, sigil_kernel::CONFIG_VERSION_V2);
     assert!(!toml::to_string(&root_config)?.contains("runtime-secret"));
-    assert!(root_config.providers.is_empty());
     assert!(root_config.connections.contains_key("deepseek-default"));
 
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(saved.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+    assert_eq!(saved.config_version, sigil_kernel::CONFIG_VERSION_V2);
     assert!(!std::fs::read_to_string(&config_path)?.contains("runtime-secret"));
     Ok(())
 }
@@ -1261,14 +1178,11 @@ fn config_modal_ctrl_s_applies_field_and_saves() -> Result<()> {
         panic!("expected config save action");
     };
     assert!(!app.has_modal());
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
+    assert_eq!(root_config.config_version, sigil_kernel::CONFIG_VERSION_V2);
     assert!(!toml::to_string(&root_config)?.contains("saved-from-modal"));
     assert!(root_config.connections.contains_key("deepseek-default"));
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(saved.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+    assert_eq!(saved.config_version, sigil_kernel::CONFIG_VERSION_V2);
     assert!(!std::fs::read_to_string(&config_path)?.contains("saved-from-modal"));
     Ok(())
 }
@@ -1310,15 +1224,12 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
     };
     assert_eq!(saved_path, config_path);
     assert!(!app.has_modal());
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
+    assert_eq!(root_config.config_version, sigil_kernel::CONFIG_VERSION_V2);
     assert!(!toml::to_string(&root_config)?.contains("setup-saved-key"));
     assert!(root_config.connections.contains_key("deepseek-default"));
 
     let saved = RootConfig::load(&saved_path)?;
-    assert_eq!(saved.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+    assert_eq!(saved.config_version, sigil_kernel::CONFIG_VERSION_V2);
     assert!(!std::fs::read_to_string(saved_path)?.contains("setup-saved-key"));
     Ok(())
 }

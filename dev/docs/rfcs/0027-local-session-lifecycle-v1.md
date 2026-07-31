@@ -4,6 +4,12 @@
 
 创建日期：2026-07-15
 
+### 2026-07-31 current-only cutover
+
+Session lifecycle 当前只读取当前 session/export/journal schema。本文中的 legacy catalog 状态与旧
+session 兼容规则仅保留为历史设计记录；非当前记录不恢复、不导出、不迁移，但仍可通过 invalid-source
+删除流程清理。
+
 基线：
 
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)

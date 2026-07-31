@@ -16,13 +16,6 @@ use crate::{
 pub enum SessionLogEntry {
     User(ModelMessage),
     Assistant(ModelMessage),
-    /// Parser sentinel for an unsupported pre-cutover record.
-    ///
-    /// Session/store append APIs reject this variant, durable loading reports
-    /// `LegacyUnavailable`, and provider context excludes it. It remains in the enum only long
-    /// enough to recognize the old serialized tag and return a bounded compatibility diagnostic.
-    #[doc(hidden)]
-    ToolResult(ModelMessage),
     /// Artifact-backed result used by all new tool executions.
     ToolResultV2(ToolResultRecordedV2),
     Control(ControlEntry),
@@ -133,7 +126,6 @@ pub const AGENT_PROFILE_POLICY_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const AGENT_RESULT_CONTINUATION_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const CHANGESET_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const CONVERSATION_QUEUE_PROJECTION_SCHEMA_VERSION: u16 = 1;
-pub const PLAN_APPROVAL_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PLAN_ARTIFACT_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PLUGIN_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const SKILL_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -183,7 +175,6 @@ pub enum ControlEntry {
     SessionIdentity {
         provider_name: String,
         model_name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_model_route: Option<crate::ResolvedModelRoute>,
     },
     SessionModelSelected {
@@ -219,7 +210,6 @@ pub enum ControlEntry {
     ChangeSetProposed(ChangeSet),
     ChangeSetApplied(ChangeSetResult),
     TerminalTask(TerminalTaskEntry),
-    PlanApproved(PlanApprovedEntry),
     PlanDraftCreated(PlanDraftCreatedEntry),
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
     PlanPermissionGranted(PlanPermissionGrantedEntry),

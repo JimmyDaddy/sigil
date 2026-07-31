@@ -926,7 +926,7 @@ impl HttpProductionRunDriver {
             }
             ToolArtifactAvailability::Expired
             | ToolArtifactAvailability::Missing
-            | ToolArtifactAvailability::LegacyUnavailable => {
+            | ToolArtifactAvailability::Unavailable => {
                 Err(HttpToolArtifactReadDriverError::Unavailable)
             }
         }
@@ -1334,7 +1334,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             }
             ToolArtifactAvailability::Expired
             | ToolArtifactAvailability::Missing
-            | ToolArtifactAvailability::LegacyUnavailable => {
+            | ToolArtifactAvailability::Unavailable => {
                 return Err(HttpToolArtifactReadDriverError::Unavailable);
             }
         }

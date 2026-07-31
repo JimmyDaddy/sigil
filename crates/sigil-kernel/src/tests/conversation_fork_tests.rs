@@ -5,13 +5,13 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    AssistantMessageKind, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionFoldPlan,
-    CompactionInitiation, CompletionRequest, ConnectionId, ContinuationCheckpointV1,
-    ContinuationItemPriority, ContinuationModelOutputItemV1, ContinuationModelOutputV1,
-    ControlledCheckpointProjection, ConversationInputKind, ConversationInputPromotedEntry,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputTarget,
-    EffectiveTokenBudget, ExternalEvidenceLevel, ExternalSourceRecord, ExternalTrust,
-    FrozenProviderRequestMaterial, InputTokenEvidence, ModelMessage, ModelRef,
+    AdaptiveTailPolicyV3, AssistantMessageKind, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+    CompactionFoldPlan, CompactionInitiation, CompletionRequest, ConnectionId,
+    ContinuationCheckpointV1, ContinuationItemPriority, ContinuationModelOutputItemV1,
+    ContinuationModelOutputV1, ControlledCheckpointProjection, ConversationInputKind,
+    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputTarget, EffectiveTokenBudget, ExternalEvidenceLevel, ExternalSourceRecord,
+    ExternalTrust, FrozenProviderRequestMaterial, InputTokenEvidence, ModelMessage, ModelRef,
     MutationEventRecorder, PortableSemanticCompactionRequest, PortableTargetRequestMaterial,
     RequestFitProof, SourceCacheStatus, SourceFreshness, TaskMemoryV1, TokenMeasurementBinding,
     TokenMeasurementScope, ToolArtifactBindingV1, ToolArtifactSensitivity, ToolArtifactStore,
@@ -160,8 +160,29 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
             "error": null
         }),
     )?;
+    source.append_user_message(ModelMessage::user("verify the fork boundary"))?;
+    source.append_assistant_message(ModelMessage::assistant(
+        Some("The fork boundary is verified.".to_owned()),
+        Vec::new(),
+    ))?;
+    source.append_user_message(ModelMessage::user("finish the source session"))?;
+    source.append_assistant_message(ModelMessage::assistant_with_kind(
+        Some("Source session is ready to fork.".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    ))?;
     let compaction_source_records = JsonlSessionStore::read_event_records(&source_path)?;
-    let plan = CompactionFoldPlan::from_records(&compaction_source_records, 1)?;
+    let policy = AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 1,
+        ..AdaptiveTailPolicyV3::default()
+    };
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &compaction_source_records,
+        policy,
+        u64::MAX / 4,
+        None,
+    )?;
     let model_source_event_id = plan
         .folded_event_ids
         .first()

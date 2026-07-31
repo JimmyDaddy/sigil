@@ -4,6 +4,12 @@
 
 创建日期：2026-07-22
 
+### 2026-07-31 current-only cutover
+
+当前实现只接受当前 Task/Plan/Agent durable schema 和当前 routing 配置。本文后续关于旧
+`default_mode` 映射、旧 task/session projection 或缺字段 agent entry 的段落仅保留为历史设计记录，
+不再对应可执行代码；非当前数据直接拒绝，不投影、不恢复、不迁移。
+
 依赖：
 
 - [RFC-0001](0001-durable-event-stream-and-event-taxonomy.md)

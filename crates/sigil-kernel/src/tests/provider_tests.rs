@@ -169,7 +169,7 @@ fn identical_local_layout_with_uncached_input_records_a_narrow_provider_miss_dia
         provider_miss_without_local_mutation: false,
     };
 
-    usage.observe_local_layout(crate::CacheLayoutMutationKind::Identical, 100);
+    usage.observe_local_layout(crate::CacheLayoutMutationKind::Identical);
     assert!(usage.provider_miss_without_local_mutation);
 
     let mut stats = SessionStats::default();
@@ -193,29 +193,8 @@ fn a_local_history_rewrite_never_blames_an_uncached_request_on_the_provider() {
         provider_miss_without_local_mutation: false,
     };
 
-    usage.observe_local_layout(
-        crate::CacheLayoutMutationKind::ConversationHistoryRewritten,
-        100,
-    );
+    usage.observe_local_layout(crate::CacheLayoutMutationKind::ConversationHistoryRewritten);
     assert!(!usage.provider_miss_without_local_mutation);
-}
-
-#[test]
-fn legacy_usage_json_keeps_new_cache_evidence_unknown() -> Result<()> {
-    let usage: UsageStats = serde_json::from_value(serde_json::json!({
-        "prompt_tokens": 100,
-        "completion_tokens": 20,
-        "cache_hit_tokens": 80,
-        "cache_miss_tokens": 20,
-        "input_cost": 0.1,
-        "output_cost": 0.2,
-        "cache_savings": 0.3,
-        "system_fingerprint": null
-    }))?;
-
-    assert!(usage.cache_usage.is_none());
-    assert!(usage.pricing_snapshot.is_none());
-    Ok(())
 }
 
 #[test]

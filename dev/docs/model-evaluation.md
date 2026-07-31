@@ -128,7 +128,7 @@ and prepends its `bin` directory to model-case PATH. It does not inherit `RUSTUP
 into an implicit rustup install.
 
 The source config is read only to select the active provider/model and secret-free provider options.
-Both legacy provider blocks and V2 connection routes are accepted. The Plan harness retains only
+Only the current connection schema is accepted. The Plan harness retains only
 the active route, replaces stored credential references with an environment reference, and never
 copies connection labels, credential IDs, inline keys, or inactive connections into the generated
 config. The active credential must be present in its configured environment variable. Raw

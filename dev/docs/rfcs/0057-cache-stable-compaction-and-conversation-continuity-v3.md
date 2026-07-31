@@ -4,6 +4,12 @@
 
 创建日期：2026-07-28
 
+### 2026-07-31 current-only cutover
+
+当前实现只接受 `CacheAwareV3`、当前 compaction 配置字段和当前 continuity/session schema。
+本文后续关于 V2 replay、旧阈值字段、`tail_messages` translation 或 compatibility fallback 的段落仅保留
+为历史设计记录，不再对应可执行代码；非当前数据直接拒绝，不执行迁移或重建。
+
 依赖：
 
 - [Rust agent core technical solution](../sigil-rust-agent-core-technical-solution.md)

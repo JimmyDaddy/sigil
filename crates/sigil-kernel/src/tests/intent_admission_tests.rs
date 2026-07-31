@@ -380,17 +380,17 @@ fn chat_root_admission_is_durable_idempotent_and_has_no_task_authority() -> Resu
 }
 
 #[test]
-fn old_session_projects_explicit_history_unavailable_state() -> Result<()> {
+fn current_session_without_intents_projects_not_created_state() -> Result<()> {
     let temp = tempdir()?;
-    let path = temp.path().join("legacy-session.jsonl");
+    let path = temp.path().join("session.jsonl");
     let (_store, session) = session_at(&path)?;
     let projection = session.intent_stack_projection()?;
     assert!(projection.latest_accepted_plan().is_none());
     assert_eq!(
         projection.public_state()?,
-        PublicIntentStackStateV1::HistoryUnavailable {
+        PublicIntentStackStateV1::NotCreated {
             schema_version: INTENT_PUBLIC_DTO_SCHEMA_VERSION,
-            safe_message: INTENT_HISTORY_UNAVAILABLE_MESSAGE.to_owned(),
+            safe_message: INTENT_STACK_NOT_CREATED_MESSAGE.to_owned(),
         }
     );
     Ok(())

@@ -876,7 +876,7 @@ fn cell_colors_at_text(
 
 fn test_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -886,8 +886,10 @@ fn test_config() -> RootConfig {
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(
+                sigil_kernel::ConnectionId::new("deepseek-default").expect("valid test connection"),
+            ),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -903,8 +905,16 @@ fn test_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
-        connections: BTreeMap::new(),
+        connections: BTreeMap::from([(
+            "deepseek-default".to_owned(),
+            serde_json::json!({
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {"source": "environment", "name": "SIGIL_API_KEY"}
+            }),
+        )]),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }

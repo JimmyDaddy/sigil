@@ -62,8 +62,6 @@ mod task_plan;
 mod tool_audit;
 mod tool_results;
 #[cfg(test)]
-use approval_policy::active_plan_approval;
-#[cfg(test)]
 use approval_policy::session_grant_covers_decision;
 use approval_policy::{
     active_plan_approval_authority, interactive_external_directory_approval_override,

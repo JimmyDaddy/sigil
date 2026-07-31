@@ -18,7 +18,7 @@ pub(crate) fn test_config() -> RootConfig {
     };
 
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -33,8 +33,10 @@ pub(crate) fn test_config() -> RootConfig {
         },
         session: SessionConfig::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(
+                sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id"),
+            ),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -50,37 +52,26 @@ pub(crate) fn test_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: std::collections::BTreeMap::from([(
-            "deepseek".to_owned(),
+        connections: std::collections::BTreeMap::from([(
+            "deepseek-default".to_owned(),
             serde_json::json!({
-                "base_url": "https://api.deepseek.com"
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {
+                    "source": "environment",
+                    "name": "SIGIL_API_KEY"
+                }
             }),
         )]),
-        connections: std::collections::BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }
 
 pub(crate) fn v2_test_config() -> RootConfig {
-    let base = test_config();
-    let connection_id =
-        sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id");
-    let (connection, model_id) = sigil_runtime::provider_connections::provider_connection_template(
-        sigil_runtime::provider_connections::ProviderFamily::DeepSeek,
-        sigil_runtime::provider_connections::ProviderProtocol::DeepSeek,
-        connection_id.clone(),
-        "DeepSeek",
-    )
-    .expect("test provider connection");
-    let default_model =
-        sigil_kernel::ModelRef::new(connection_id.clone(), model_id).expect("test model");
-    sigil_runtime::provider_connections::materialize_v2_root_config(
-        &base,
-        &std::collections::BTreeMap::from([(connection_id, connection)]),
-        &default_model,
-    )
-    .expect("test V2 config")
+    test_config()
 }
 
 pub(crate) fn resolved_session_log_dir(config: &RootConfig, workspace_root: &Path) -> PathBuf {
@@ -116,13 +107,45 @@ pub(crate) fn v2_tool_result_entry(
     metadata: ToolResultMeta,
 ) -> SessionLogEntry {
     let result = ToolResult::ok(call_id, tool_name, content, metadata);
+    v2_tool_result_from_result(&result)
+}
+
+pub(crate) fn v2_tool_result_from_result(result: &ToolResult) -> SessionLogEntry {
     let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
-        &result,
+        result,
         None,
         sigil_kernel::ToolArtifactSensitivity::Ordinary,
     )
     .expect("bounded TUI test tool result must project to V2");
     SessionLogEntry::ToolResultV2(recorded)
+}
+
+pub(crate) fn adaptive_test_compaction_preview(
+    store: &JsonlSessionStore,
+) -> Result<sigil_kernel::V2CompactionPreview> {
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("current response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("newest request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("newest response".to_owned()),
+        Vec::new(),
+    )))?;
+    store
+        .adaptive_compaction_preview(
+            sigil_kernel::AdaptiveTailPolicyV3 {
+                tail_min_complete_turns: 2,
+                tail_target_min_tokens: 64,
+                tail_target_max_tokens: 128,
+                tail_recent_turn_p95_multiplier_ppm: 1_000_000,
+                tail_max_usable_context_ratio_ppm: 250_000,
+                recent_turn_sample_limit: 20,
+            },
+            8 * 1024,
+            None,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("test fixture should have foldable history"))
 }
 
 pub(crate) fn integration_review_entries(
@@ -404,33 +427,7 @@ pub(crate) fn select_root_slash_command(app: &mut AppState, command: &str) -> Re
 pub(crate) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
     for entry in entries {
-        if let SessionLogEntry::ToolResult(message) = entry {
-            let envelope = message
-                .content
-                .as_deref()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
-            let content = envelope
-                .as_ref()
-                .and_then(|value| value.get("content"))
-                .and_then(serde_json::Value::as_str)
-                .or(message.content.as_deref())
-                .unwrap_or_default();
-            let metadata = envelope
-                .as_ref()
-                .and_then(|value| value.get("meta"))
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default();
-            let migrated = v2_tool_result_entry(
-                message.tool_call_id.as_deref().unwrap_or("test-call"),
-                "test_tool",
-                content,
-                metadata,
-            );
-            store.append(&migrated)?;
-        } else {
-            store.append(entry)?;
-        }
+        store.append(entry)?;
     }
     Ok(())
 }

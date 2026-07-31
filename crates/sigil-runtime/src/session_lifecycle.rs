@@ -18,9 +18,8 @@ use sigil_kernel::{
     AssistantMessageKind, ControlEntry, ConversationForkOutput, ConversationForkProjection,
     ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
     JsonlSessionStore, MessageRole, ModelMessage, RootConfig, SessionLogEntry, SessionRef,
-    SessionStreamCompatibilityError, SessionStreamRecord, ToolArtifactBindingV1,
-    ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactStore, fork_conversation_at_turn,
-    safe_persistence_text,
+    SessionStreamRecord, ToolArtifactBindingV1, ToolArtifactGcReportV1, ToolArtifactGcRootsV1,
+    ToolArtifactStore, fork_conversation_at_turn, safe_persistence_text,
 };
 use thiserror::Error as ThisError;
 
@@ -91,7 +90,6 @@ pub enum LocalSessionCatalogState {
     Ready,
     Oversized,
     ScanBudgetExceeded,
-    UnsupportedLegacy,
     Invalid,
 }
 
@@ -123,7 +121,6 @@ pub struct LocalSessionCatalogEntry {
     pub title: Option<String>,
     pub transcript_message_count: usize,
     pub finalized_turn_count: usize,
-    #[serde(default)]
     pub pinned: bool,
 }
 
@@ -1290,15 +1287,8 @@ impl LocalSessionLifecycleService {
         }
         let records = match JsonlSessionStore::read_event_records(&candidate.path) {
             Ok(records) => records,
-            Err(error) => {
-                entry.state = if error
-                    .downcast_ref::<SessionStreamCompatibilityError>()
-                    .is_some()
-                {
-                    LocalSessionCatalogState::UnsupportedLegacy
-                } else {
-                    LocalSessionCatalogState::Invalid
-                };
+            Err(_) => {
+                entry.state = LocalSessionCatalogState::Invalid;
                 return entry;
             }
         };
@@ -1682,9 +1672,7 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
             continue;
         };
         match entry {
-            SessionLogEntry::User(message)
-            | SessionLogEntry::Assistant(message)
-            | SessionLogEntry::ToolResult(message) => {
+            SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
                 if projection.title.is_none() && message.role == MessageRole::User {
                     projection.title = message
                         .content

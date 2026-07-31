@@ -280,55 +280,6 @@
 .provider-connection-list small[data-readiness="invalid"],
 .provider-connection-list small[data-readiness="credential_unavailable"] { color: var(--sg-sys-color-error); }
 .settings-provider-setup { grid-column: 1 / -1; width: 100%; }
-.provider-legacy-migration {
-  display: grid;
-  width: min(760px, calc(100% - 2 * var(--sg-sys-space-6)));
-  margin: auto;
-  padding: var(--sg-sys-space-6);
-  border: 1px solid var(--sg-domain-color-warning);
-  border-radius: var(--sg-sys-radius-xl);
-  background: var(--sg-sys-color-surface-container-low);
-  box-shadow: var(--sg-sys-elevation-2);
-}
-.provider-legacy-migration-settings {
-  width: 100%;
-  margin: 0;
-  padding: var(--sg-sys-space-4);
-  box-shadow: none;
-}
-.provider-legacy-migration h1 { margin: 0; font-size: 24px; letter-spacing: -.025em; }
-.provider-legacy-migration > p:not(.eyebrow) {
-  margin: var(--sg-sys-space-2) 0 0;
-  color: var(--sg-sys-color-on-surface-variant);
-  line-height: 1.5;
-}
-.provider-legacy-migration-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sg-sys-space-2);
-  margin: var(--sg-sys-space-4) 0;
-}
-.provider-legacy-migration-summary > div {
-  display: grid;
-  gap: 3px;
-  padding: var(--sg-sys-space-3);
-  border-radius: var(--sg-sys-radius-md);
-  background: var(--sg-sys-color-surface-container);
-}
-.provider-legacy-migration-summary dt {
-  color: var(--sg-sys-color-on-surface-variant);
-  font-size: 11px;
-  font-weight: 600;
-}
-.provider-legacy-migration-summary dd { margin: 0; font-size: 13px; font-weight: 650; }
-.provider-legacy-migration-note {
-  padding: var(--sg-sys-space-3);
-  border-radius: var(--sg-sys-radius-md);
-  background: var(--sg-sys-color-surface-container);
-  font-size: 13px;
-}
-.provider-legacy-migration .provider-setup-actions { margin-top: var(--sg-sys-space-4); }
-
 .provider-setup {
   display: grid;
   width: min(760px, calc(100% - 2 * var(--sg-sys-space-6)));
@@ -443,9 +394,6 @@
   .theme-option-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .settings-inline-error { grid-column: 1; }
   .settings-provider-setup { grid-column: 1; }
-  .provider-legacy-migration { width: calc(100% - 2 * var(--sg-sys-space-3)); padding: var(--sg-sys-space-4); }
-  .provider-legacy-migration-settings { width: 100%; }
-  .provider-legacy-migration-summary { grid-template-columns: minmax(0, 1fr); }
   .support-summary { align-items: stretch; flex-direction: column; }
   .support-counts { width: 100%; }
   .support-privacy-columns { grid-template-columns: minmax(0, 1fr); }

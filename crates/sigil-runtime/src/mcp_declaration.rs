@@ -279,7 +279,7 @@ impl std::fmt::Debug for ResolvedMcpServerDeclaration {
 }
 
 impl ResolvedMcpServerDeclaration {
-    /// Promotes one legacy root-config stdio entry into the runtime declaration carrier.
+    /// Promotes one root-config stdio entry into the runtime declaration carrier.
     pub fn user_root(
         config: McpServerConfig,
         workspace_root: impl AsRef<Path>,

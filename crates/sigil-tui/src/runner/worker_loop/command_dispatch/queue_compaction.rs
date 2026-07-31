@@ -292,16 +292,15 @@ where
                             .filter(|entry| {
                                 matches!(
                                     entry,
-                                    SessionLogEntry::User(_)
-                                        | SessionLogEntry::Assistant(_)
-                                        | SessionLogEntry::ToolResult(_)
+                                    SessionLogEntry::User(_) | SessionLogEntry::Assistant(_)
                                 )
                             })
                             .count();
                         let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
                             state: V2CompactionPreviewState::NoFoldableHistory {
                                 durable_message_count,
-                                configured_tail_message_count: effective_config.tail_messages,
+                                minimum_tail_turn_count:
+                                    sigil_kernel::DEFAULT_TAIL_MIN_COMPLETE_TURNS,
                             },
                         });
                     }
@@ -413,16 +412,15 @@ where
                             .filter(|entry| {
                                 matches!(
                                     entry,
-                                    SessionLogEntry::User(_)
-                                        | SessionLogEntry::Assistant(_)
-                                        | SessionLogEntry::ToolResult(_)
+                                    SessionLogEntry::User(_) | SessionLogEntry::Assistant(_)
                                 )
                             })
                             .count();
                         let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
                             state: V2CompactionPreviewState::NoFoldableHistory {
                                 durable_message_count,
-                                configured_tail_message_count: effective_config.tail_messages,
+                                minimum_tail_turn_count:
+                                    sigil_kernel::DEFAULT_TAIL_MIN_COMPLETE_TURNS,
                             },
                         });
                     }

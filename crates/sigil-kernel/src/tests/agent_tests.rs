@@ -25,9 +25,9 @@ use crate::{
     EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel,
     ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
     MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
-    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
-    PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, PreparedToolExecution, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
+    PlanPermissionGrantedEntry, PreparedToolExecution, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
     ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent,
@@ -4520,7 +4520,7 @@ fn typed_retrieval_receipt_and_result_recover_as_one_provider_consumable_bundle(
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
-    let mut session = Session::new("test", "model").with_store(store.clone());
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
     let artifact_ref = ToolArtifactRefV1 {
         artifact_id: "ta1_0123456789abcdef0123456789abcdef".to_owned(),
     };
@@ -4768,14 +4768,14 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
                 if kind == "side_effect_loaded" && data["id"] == "repo-review"
         )
     }));
-    assert!(!session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::User(message)
-                | SessionLogEntry::Assistant(message)
-                | SessionLogEntry::ToolResult(message)
-                if message.content.as_deref() == Some("loaded transient skill body")
-        )
+    assert!(!session.entries().iter().any(|entry| match entry {
+        SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
+            message.content.as_deref() == Some("loaded transient skill body")
+        }
+        SessionLogEntry::ToolResultV2(result) => {
+            result.initial_model_view.preview == "loaded transient skill body"
+        }
+        SessionLogEntry::Control(_) => false,
     }));
     Ok(())
 }
@@ -6537,25 +6537,6 @@ impl Provider for LoopingToolProvider {
         ])))
     }
 }
-
-fn approved_workspace_plan(workspace_paths: Vec<&str>) -> PlanApprovedEntry {
-    PlanApprovedEntry {
-        plan_version: 1,
-        plan_hash: plan_text_hash("approved workspace edits"),
-        approved_at_ms: 42,
-        permission: PlanApprovalPermission::WorkspaceEdits,
-        scope: PlanApprovalScope {
-            summary: "workspace edits approved for the accepted plan".to_owned(),
-            workspace_paths: workspace_paths
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        },
-        expires: PlanApprovalExpiry::NextUserPrompt,
-        clear_planning_context: true,
-    }
-}
-
 fn required_preview_file_spec(name: &str) -> crate::ToolSpec {
     crate::ToolSpec {
         name: name.to_owned(),
@@ -6567,13 +6548,6 @@ fn required_preview_file_spec(name: &str) -> crate::ToolSpec {
         preview: ToolPreviewCapability::Required,
     }
 }
-
-fn session_scoped_approved_workspace_plan(workspace_paths: Vec<&str>) -> PlanApprovedEntry {
-    let mut approval = approved_workspace_plan(workspace_paths);
-    approval.expires = PlanApprovalExpiry::Session;
-    approval
-}
-
 fn task_bound_plan_permission_grant(workspace_paths: Vec<&str>) -> PlanPermissionGrantedEntry {
     PlanPermissionGrantedEntry {
         plan_id: PlanId::new("plan_test").expect("plan id"),
@@ -6592,44 +6566,6 @@ fn task_bound_plan_permission_grant(workspace_paths: Vec<&str>) -> PlanPermissio
         granted_at_ms: 42,
     }
 }
-
-#[test]
-fn plan_approval_override_keeps_destructive_tools_behind_approval() -> Result<()> {
-    let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(
-        session_scoped_approved_workspace_plan(vec!["file.txt"]),
-    ))?;
-
-    let delete_decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        "delete_file",
-        ToolAccess::Write,
-        vec![ToolSubject::path("file.txt", "file.txt")],
-        false,
-    );
-    let delete_decision = super::plan_approval_decision_override(
-        &session,
-        &required_preview_file_spec("delete_file"),
-        delete_decision,
-    );
-    assert_eq!(delete_decision.mode, ApprovalMode::Ask);
-
-    let changeset_decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        "apply_changeset",
-        ToolAccess::Write,
-        vec![ToolSubject::path("file.txt", "file.txt")],
-        false,
-    );
-    let changeset_decision = super::plan_approval_decision_override(
-        &session,
-        &required_preview_file_spec("apply_changeset"),
-        changeset_decision,
-    );
-    assert_eq!(changeset_decision.mode, ApprovalMode::Ask);
-    Ok(())
-}
-
 #[test]
 fn task_bound_plan_permission_grant_allows_only_scoped_file_edits() -> Result<()> {
     let mut session = Session::new("mock-write", "mock-model");
@@ -6695,128 +6631,6 @@ fn task_bound_plan_permission_grant_expires_after_task_terminal_status() -> Resu
     assert_eq!(decision.mode, ApprovalMode::Ask);
     Ok(())
 }
-
-#[test]
-fn plan_approval_override_still_allows_ordinary_file_edits() -> Result<()> {
-    let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(
-        session_scoped_approved_workspace_plan(vec!["file.txt"]),
-    ))?;
-    let decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        "write_file",
-        ToolAccess::Write,
-        vec![ToolSubject::path("file.txt", "file.txt")],
-        false,
-    );
-
-    let decision = super::plan_approval_decision_override(
-        &session,
-        &required_preview_file_spec("write_file"),
-        decision,
-    );
-
-    assert_eq!(decision.mode, ApprovalMode::Allow);
-    Ok(())
-}
-
-#[test]
-fn prepared_authority_identities_track_durable_source_entries() -> Result<()> {
-    let spec = required_preview_file_spec("write_file");
-    let decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        "write_file",
-        ToolAccess::Write,
-        vec![ToolSubject::path("file.txt", "file.txt")],
-        false,
-    );
-    let mut plan_session = Session::new("mock-write", "mock-model");
-    let first_plan = session_scoped_approved_workspace_plan(vec!["file.txt"]);
-    plan_session.append_control(ControlEntry::PlanApproved(first_plan.clone()))?;
-    let first_authority = super::active_plan_approval_authority(&plan_session, &spec, &decision)
-        .expect("first plan should authorize");
-    let first_plan_identity = super::preparation_plan_approval_identity(&first_authority)?;
-    let mut replacement_plan = first_plan;
-    replacement_plan.approved_at_ms = replacement_plan.approved_at_ms.saturating_add(1);
-    plan_session.append_control(ControlEntry::PlanApproved(replacement_plan))?;
-    let replacement_authority =
-        super::active_plan_approval_authority(&plan_session, &spec, &decision)
-            .expect("replacement plan should authorize");
-    let replacement_plan_identity =
-        super::preparation_plan_approval_identity(&replacement_authority)?;
-    assert_ne!(first_plan_identity, replacement_plan_identity);
-
-    let call = ToolCall {
-        id: "authority-call".to_owned(),
-        name: "write_file".to_owned(),
-        args_json: r#"{"path":"file.txt"}"#.to_owned(),
-    };
-    let prepared_digest = "sha256:interactive-authority";
-    let mut interactive_session = Session::new("mock-write", "mock-model");
-    assert!(
-        super::resolved_interactive_approval_identity(
-            &interactive_session,
-            &call.id,
-            prepared_digest,
-        )?
-        .is_none()
-    );
-    super::append_tool_approval_audit(
-        &mut interactive_session,
-        &call,
-        &decision,
-        ToolApprovalAuditAction::Resolved,
-        Some(ToolApprovalUserDecision::Approved),
-        None,
-        Some(prepared_digest.to_owned()),
-    )?;
-    assert!(
-        super::resolved_interactive_approval_identity(
-            &interactive_session,
-            &call.id,
-            prepared_digest,
-        )?
-        .is_some_and(|identity| identity.starts_with("interactive:"))
-    );
-
-    let read_decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        "read_path",
-        ToolAccess::Read,
-        vec![ToolSubject::path("file.txt", "file.txt")],
-        false,
-    );
-    let read_call = ToolCall {
-        id: "grant-call".to_owned(),
-        name: "read_path".to_owned(),
-        args_json: r#"{"path":"file.txt"}"#.to_owned(),
-    };
-    let mut grant_session = Session::new("mock-read", "mock-model");
-    let mut events = RecordingEventHandler::default();
-    super::append_tool_approval_session_grant(
-        &mut grant_session,
-        &mut events,
-        &read_call,
-        &read_decision,
-    )?;
-    let (_, first_grant) = super::tool_session_grant_decision_override(
-        &grant_session,
-        &read_call.name,
-        read_decision.clone(),
-    );
-    let first_grant = first_grant.expect("first session grant should match");
-    let first_grant_identity = super::preparation_session_grant_identity(&first_grant)?;
-    let mut replacement_grant = first_grant;
-    replacement_grant.granted_at_ms = replacement_grant.granted_at_ms.saturating_add(1);
-    grant_session.append_control(ControlEntry::ToolApprovalSessionGrant(replacement_grant))?;
-    let (_, replacement_grant) =
-        super::tool_session_grant_decision_override(&grant_session, &read_call.name, read_decision);
-    let replacement_grant = replacement_grant.expect("replacement session grant should match");
-    let replacement_grant_identity = super::preparation_session_grant_identity(&replacement_grant)?;
-    assert_ne!(first_grant_identity, replacement_grant_identity);
-    Ok(())
-}
-
 #[test]
 fn mcp_session_grant_does_not_reuse_after_exact_process_binding_changes() -> Result<()> {
     let tool_name = "mcp__same_server__echo";
@@ -7168,208 +6982,6 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
     }));
     Ok(())
 }
-
-#[tokio::test]
-async fn approved_plan_workspace_edits_allows_required_preview_write_without_prompt() -> Result<()>
-{
-    let executed = Arc::new(AtomicBool::new(false));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(WriteTool {
-        executed: Arc::clone(&executed),
-    }));
-    let agent = Agent::new(WriteMockProvider, registry);
-    let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(vec![
-        "file.txt",
-    ])))?;
-    let mut handler = RecordingEventHandler::default();
-    let mut approval_handler = PanicApprovalHandler;
-
-    let result = agent
-        .run_with_approval(
-            &mut session,
-            "execute the approved plan",
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig { enabled: false },
-                compaction_config: CompactionConfig::default(),
-            },
-            &mut handler,
-            &mut approval_handler,
-        )
-        .await?;
-
-    assert_eq!(result.final_text, "done");
-    assert!(executed.load(Ordering::SeqCst));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-write-1"
-                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
-                    && approval.policy_decision == ApprovalMode::Allow
-        )
-    }));
-    assert!(!session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-write-1"
-                    && approval.action == ToolApprovalAuditAction::Requested
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
-                if snapshot.call_id == "call-write-1"
-                    && snapshot.tool_name == "write_file"
-                    && snapshot.file_diffs.len() == 1
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.call_id == "call-write-1"
-                    && execution.status == ToolExecutionStatus::Started
-                    && execution.metadata.details["prepared_mutation"]["approval_identity"]
-                        .as_str()
-                        .is_some_and(|identity| identity.starts_with("plan:"))
-        )
-    }));
-    Ok(())
-}
-
-#[tokio::test]
-async fn approved_plan_workspace_edits_requires_reapproval_for_empty_scope() -> Result<()> {
-    let executed = Arc::new(AtomicBool::new(false));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(WriteTool {
-        executed: Arc::clone(&executed),
-    }));
-    let agent = Agent::new(WriteMockProvider, registry);
-    let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(
-        Vec::new(),
-    )))?;
-    let mut handler = RecordingEventHandler::default();
-    let mut approval_handler = DenyWritesHandler;
-
-    let result = agent
-        .run_with_approval(
-            &mut session,
-            "execute the approved plan",
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig { enabled: false },
-                compaction_config: CompactionConfig::default(),
-            },
-            &mut handler,
-            &mut approval_handler,
-        )
-        .await?;
-
-    assert_eq!(result.final_text, "done");
-    assert!(!executed.load(Ordering::SeqCst));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-write-1"
-                    && approval.action == ToolApprovalAuditAction::Requested
-        )
-    }));
-    Ok(())
-}
-
-#[tokio::test]
-async fn approved_plan_workspace_edits_keeps_out_of_scope_write_behind_approval() -> Result<()> {
-    let executed = Arc::new(AtomicBool::new(false));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(WriteTool {
-        executed: Arc::clone(&executed),
-    }));
-    let agent = Agent::new(WriteMockProvider, registry);
-    let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(vec![
-        "crates/sigil-tui",
-    ])))?;
-    let mut handler = RecordingEventHandler::default();
-    let mut approval_handler = DenyWritesHandler;
-
-    let result = agent
-        .run_with_approval(
-            &mut session,
-            "execute the approved plan",
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig { enabled: false },
-                compaction_config: CompactionConfig::default(),
-            },
-            &mut handler,
-            &mut approval_handler,
-        )
-        .await?;
-
-    assert_eq!(result.final_text, "done");
-    assert!(!executed.load(Ordering::SeqCst));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-write-1"
-                    && approval.action == ToolApprovalAuditAction::Requested
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-write-1"
-                    && approval.action == ToolApprovalAuditAction::Resolved
-                    && approval.user_decision == Some(ToolApprovalUserDecision::Denied)
-        )
-    }));
-    Ok(())
-}
-
-#[test]
-fn approved_plan_next_user_prompt_expires_after_second_user_message() -> Result<()> {
-    let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(
-        Vec::new(),
-    )))?;
-
-    assert!(super::active_plan_approval(&session).is_none());
-    session.append_user_message(ModelMessage::user("first prompt"))?;
-    assert!(super::active_plan_approval(&session).is_some());
-    session.append_user_message(ModelMessage::user("second prompt"))?;
-    assert!(super::active_plan_approval(&session).is_none());
-    Ok(())
-}
-
 #[tokio::test]
 async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
@@ -8167,6 +7779,7 @@ async fn agent_restores_previous_response_handle_from_durable_control_state() ->
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(
         ControlEntry::ResponseHandleTracked(ResponseHandle {
             provider_name: "mock-resume".to_owned(),

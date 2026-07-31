@@ -10,9 +10,9 @@ use sigil_kernel::{
     ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
     IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
-    MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
-    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1,
-    ReasoningEffort, ResolvedModelRoute, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
+    MutationArtifactCleanupTarget, PlanApprovalPermission, PlanDecisionRecordedEntry,
+    PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1, ReasoningEffort,
+    ResolvedModelRoute, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
     TaskIntegrationReviewRequest, TaskPauseRequest, TaskRunStatus, TaskVerificationRerunRequest,
     TerminalTaskEntry, V2CompactionPreview,
 };
@@ -130,7 +130,7 @@ pub enum V2CompactionPreviewState {
     Review(Box<V2CompactionReview>),
     NoFoldableHistory {
         durable_message_count: usize,
-        configured_tail_message_count: usize,
+        minimum_tail_turn_count: usize,
     },
 }
 
@@ -229,12 +229,6 @@ pub enum WorkerCommand {
     SubmitPlanPrompt {
         prompt: String,
         reasoning_effort: ReasoningEffort,
-    },
-    ApprovePlan {
-        plan_text: String,
-        permission: PlanApprovalPermission,
-        scope_summary: String,
-        clear_planning_context: bool,
     },
     CreateTaskFromPlan {
         plan_id: String,
@@ -618,10 +612,6 @@ pub enum WorkerMessage {
     },
     PlanRunFinished {
         result: AgentRunResult,
-        entries: Vec<SessionLogEntry>,
-    },
-    PlanApproved {
-        entry: PlanApprovedEntry,
         entries: Vec<SessionLogEntry>,
     },
     PlanRejected {

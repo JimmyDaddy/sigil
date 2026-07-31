@@ -106,7 +106,7 @@
 - `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
 - 所有工具结果必须通过 `ToolResultRecordedV2` 拆成 immutable policy-safe artifact、bounded model view 和 bounded display view；artifact body 不得进入 JSONL、control entry、run event 或 Desktop IPC
-- 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；legacy inline adapter 只允许 bounded fallback，超过 hard guard 必须显式 `LegacyUnavailable`，不得通过提高 stored-event 上限兜底
+- 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；bounded inline adapter 只允许受限 fallback，超过 hard guard 必须显式 `Unavailable`，不得通过提高 stored-event 上限兜底
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
 - 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context
 - `read_file` / `ls` / `glob` / `grep` 必须支持 limit 类参数并写回 returned/total/truncated metadata
@@ -187,13 +187,13 @@
 - 避免无必要的动态 header、随机排序、临时字段抖动
 - 构造 JSON/schema 时尽量保持确定性
 
-### 4.3 序列化与兼容性
+### 4.3 序列化与当前 Schema
 
 - 写入 session log、control state、配置文件、provider wire payload 的结构体，要显式设计 `serde` 行为
 - 涉及外部命名约定时，优先显式使用 `#[serde(rename_all = "...")]` 或 `#[serde(rename = "...")]`，不要把 Rust 字段名当成隐式协议
-- 可选或后续可能新增的字段，优先补 `#[serde(default)]` 或默认函数，保证旧数据可继续反序列化
-- 只在确实需要省略输出时使用 `skip_serializing_if`；不要让“省略字段”破坏反序列化兼容
-- append-only 日志、持久化控制态和用户配置默认按“可追加演进”设计，避免轻易引入会卡死旧数据恢复的严格反序列化约束
+- 只为当前 schema 中真正可选的字段使用 `#[serde(default)]` 或默认函数；不得为了读取旧数据加入 alias、缺字段回填或版本迁移分支
+- 只在当前 schema 明确允许省略输出时使用 `skip_serializing_if`
+- append-only 日志、持久化控制态和用户配置必须严格校验当前 schema；旧 schema 直接标记为不可用，不读取、不迁移、不推断
 
 ### 4.4 路径建模
 
@@ -264,9 +264,9 @@
 - `module/test_support.rs`
 - crate root 下的裸 `src/tests.rs`
 
-## 6. 配置与兼容性
+## 6. 配置
 
-- 新增配置项时，必须考虑默认值、旧配置兼容性和 README 更新
+- 新增配置项时，必须明确当前 schema 的必填项、默认值和 README 更新；不为旧配置保留兼容读取或迁移路径
 - provider 配置项要尽量放在 provider 自己的配置块里
 - 不要把仅供调试的开关包装成默认用户能力
 

@@ -251,7 +251,7 @@ fn check_changed_files_runs_real_code_diagnostics_and_audits_control_state() -> 
     assert!(
         !entries
             .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
+            .any(|entry| matches!(entry, SessionLogEntry::ToolResultV2(_)))
     );
 
     worker.shutdown()?;
@@ -1051,7 +1051,7 @@ fn check_changed_files_diagnostics_returns_unsupported_when_tool_missing() -> Re
     let runtime = test_runtime()?;
     let store = JsonlSessionStore::new(session_log_path.clone())?;
     let mut session = Session::load_from_store(
-        root_config.agent.provider.clone(),
+        root_config.agent.runtime_provider.clone(),
         root_config.agent.model.clone(),
         store,
     )?;
@@ -1108,7 +1108,7 @@ fn check_changed_files_diagnostics_honors_permission_denial() -> Result<()> {
     ))?;
     let store = JsonlSessionStore::new(session_log_path.clone())?;
     let mut session = Session::load_from_store(
-        root_config.agent.provider.clone(),
+        root_config.agent.runtime_provider.clone(),
         root_config.agent.model.clone(),
         store,
     )?;

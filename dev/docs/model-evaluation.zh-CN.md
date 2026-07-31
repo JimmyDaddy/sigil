@@ -105,8 +105,8 @@ Runner 在重设各 child HOME 之前解析已经准入的 direct Rust toolchain
 model case PATH 最前面。它不继承 `RUSTUP_HOME`、`CARGO_HOME`、Cargo credential 或 Cargo
 registry state，因此 fixture check 不会隐式触发 rustup 安装。
 
-Source config 只用于选择 active provider/model 和无 secret 的 provider 选项，legacy provider
-block 与 V2 connection route 均可作为输入。Plan harness 只保留 active route，把 stored credential
+Source config 只用于选择 active provider/model 和无 secret 的 provider 选项，只接受当前
+connection schema。Plan harness 只保留 active route，把 stored credential
 reference 替换为 environment reference，并且不会把 connection label、credential ID、inline key
 或 inactive connection 复制到生成配置。Active credential 必须位于其配置的环境变量中。Raw
 PTY/session/model artifact 只保留在显式选择且已忽略的本地 output。Aggregate budget 仍只是准入

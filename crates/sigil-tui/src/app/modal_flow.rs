@@ -1028,7 +1028,7 @@ impl AppState {
             .or_else(|| {
                 self.config_snapshot
                     .as_ref()
-                    .map(|config| config.agent.provider.as_str())
+                    .map(|config| config.agent.runtime_provider.as_str())
             })
             .unwrap_or(DEFAULT_SETUP_PROVIDER_KEY);
         normalize_provider_name(provider_name).to_owned()
@@ -1254,7 +1254,7 @@ impl AppState {
                 .or_else(|| {
                     self.config_snapshot
                         .as_ref()
-                        .map(|config| config.agent.provider.as_str())
+                        .map(|config| config.agent.runtime_provider.as_str())
                 }),
         }
         .unwrap_or(DEFAULT_SETUP_PROVIDER_KEY);

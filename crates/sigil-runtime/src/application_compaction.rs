@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     CompactionAdmissionReasonV2, CompactionForecastConfidenceV1, CompactionForecastSourceV1,
     CompactionInitiation, CompactionPressureStateV1, CompactionRolloutModeV1, CompactionStrategy,
-    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExpectedRemainingTurnsV1,
-    ExtensionProcessNetworkAdmission, FrozenProviderRequestMaterial, InputTokenEvidence,
-    InteractionMode, JsonlSessionStore, MutationEventRecorder, PortableSemanticCompactionPreflight,
-    PortableSemanticCompactionRequest, PortableTargetRequestMaterial, RootConfig,
-    RuntimeContextCandidates, SecretRedactor, Session, SessionLogEntry, ToolOutputProjectionPolicy,
-    build_workspace_snapshot, resolve_workspace_root, stable_event_uuid, stable_workspace_id,
-    workspace_trust_from_entries,
+    ControlEntry, DEFAULT_TAIL_MIN_COMPLETE_TURNS, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    ExpectedRemainingTurnsV1, ExtensionProcessNetworkAdmission, FrozenProviderRequestMaterial,
+    InputTokenEvidence, InteractionMode, JsonlSessionStore, MutationEventRecorder,
+    PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
+    PortableTargetRequestMaterial, RootConfig, RuntimeContextCandidates, SecretRedactor, Session,
+    SessionLogEntry, ToolOutputProjectionPolicy, build_workspace_snapshot, resolve_workspace_root,
+    stable_event_uuid, stable_workspace_id, workspace_trust_from_entries,
 };
 
 /// Provider-native compaction remains fail-closed until the resulting carrier is consumed by the
@@ -57,7 +57,7 @@ pub enum ApplicationCompactionAdmission {
     },
     NoFoldableHistory {
         durable_message_count: usize,
-        configured_tail_message_count: usize,
+        minimum_tail_turn_count: usize,
     },
     Unavailable {
         reason: String,
@@ -75,8 +75,6 @@ pub struct ApplicationCompactionPolicyView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_reason: Option<CompactionAdmissionReasonV2>,
     pub native_carrier_available: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub legacy_migration_fields: Vec<String>,
 }
 
 /// One exact active constraint shown before compaction.
@@ -406,7 +404,7 @@ pub fn preview_application_compaction(
                 details: None,
                 admission: ApplicationCompactionAdmission::NoFoldableHistory {
                     durable_message_count: durable_message_count(session.entries()),
-                    configured_tail_message_count: effective_config.tail_messages,
+                    minimum_tail_turn_count: DEFAULT_TAIL_MIN_COMPLETE_TURNS,
                 },
             },
             None,
@@ -583,7 +581,7 @@ async fn prepare_application_compaction_for_preview(
                 details: None,
                 admission: ApplicationCompactionAdmission::NoFoldableHistory {
                     durable_message_count: durable_message_count(session.entries()),
-                    configured_tail_message_count: effective_config.tail_messages,
+                    minimum_tail_turn_count: DEFAULT_TAIL_MIN_COMPLETE_TURNS,
                 },
             },
             None,
@@ -617,24 +615,14 @@ async fn prepare_application_compaction_for_preview(
         session.provider_name(),
         session.model_name(),
     ) {
-        match exact_model_ref.as_ref() {
-            Some(model_ref) => {
-                crate::require_deepseek_v4_flash_portable_transport_for_model_ref(
-                    &root_config,
-                    model_ref,
-                )?;
-            }
-            None => crate::require_default_deepseek_v4_flash_portable_transport(&root_config)?,
-        }
+        crate::require_deepseek_v4_flash_portable_transport_for_model_ref(
+            &root_config,
+            &exact_model_ref,
+        )?;
     }
-    let provider = match exact_model_ref.as_ref() {
-        Some(model_ref) => crate::build_provider_for_model_ref_async(&root_config, model_ref)
-            .await
-            .context("failed to build the exact durable compaction provider")?,
-        None => crate::build_provider_async(&root_config)
-            .await
-            .context("failed to build the legacy compaction provider")?,
-    };
+    let provider = crate::build_provider_for_model_ref_async(&root_config, &exact_model_ref)
+        .await
+        .context("failed to build the exact durable compaction provider")?;
     let context_capabilities = provider.context_capabilities(session.model_name());
     let native_carrier_available = NATIVE_COMPACTION_RESUME_ENABLED
         && effective_config.native_carrier_enabled
@@ -647,7 +635,7 @@ async fn prepare_application_compaction_for_preview(
         InteractionMode::Interactive,
     );
     let mut reasoning_config = root_config.clone();
-    reasoning_config.agent.provider = session.provider_name().to_owned();
+    reasoning_config.agent.runtime_provider = session.provider_name().to_owned();
     reasoning_config.agent.model = session.model_name().to_owned();
     options.reasoning_effort =
         crate::reasoning_effort::configured_default_reasoning_effort(&reasoning_config);
@@ -794,36 +782,21 @@ async fn prepare_application_compaction_for_preview(
 fn load_application_compaction_session(
     root_config: &RootConfig,
     store: JsonlSessionStore,
-) -> Result<(Session, Option<sigil_kernel::ModelRef>)> {
-    let uses_connection_routes = root_config.config_version.is_some()
-        || !root_config.connections.is_empty()
-        || root_config.agent.connection.is_some();
-    if uses_connection_routes {
-        let (_, fallback_route) =
-            crate::provider_connections::resolve_default_model_route(root_config)
-                .map_err(anyhow::Error::new)
-                .context("failed to resolve the configured fallback model route")?;
-        let session = crate::application_run::load_application_session_for_route(
-            root_config,
-            &fallback_route,
-            store,
-        )
-        .context("failed to load the exact durable compaction route")?;
-        let model_ref = session
-            .resolved_model_route()
-            .map(|route| route.model_ref.clone())
-            .context("session_route_missing")?;
-        Ok((session, Some(model_ref)))
-    } else {
-        Ok((
-            Session::load_from_store(
-                root_config.agent.provider.clone(),
-                root_config.agent.model.clone(),
-                store,
-            )?,
-            None,
-        ))
-    }
+) -> Result<(Session, sigil_kernel::ModelRef)> {
+    let (_, fallback_route) = crate::provider_connections::resolve_default_model_route(root_config)
+        .map_err(anyhow::Error::new)
+        .context("failed to resolve the configured fallback model route")?;
+    let session = crate::application_run::load_application_session_for_route(
+        root_config,
+        &fallback_route,
+        store,
+    )
+    .context("failed to load the exact durable compaction route")?;
+    let model_ref = session
+        .resolved_model_route()
+        .map(|route| route.model_ref.clone())
+        .context("session_route_missing")?;
+    Ok((session, model_ref))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -863,8 +836,8 @@ async fn prepare_exact_application_compaction(
     let next_turn_p95_tokens = preview
         .plan
         .adaptive_tail
-        .as_ref()
-        .map_or(4_096, |tail| tail.recent_complete_turn_p95_tokens.max(1));
+        .recent_complete_turn_p95_tokens
+        .max(1);
     let source_key = format!(
         "{}:{}:application-manual:{preview_id}",
         session.session_scope_id(),
@@ -1055,7 +1028,6 @@ async fn prepare_exact_application_compaction(
             compactor_output_tokens: summary_output_tokens,
             rollout_mode: CompactionRolloutModeV1::Preview,
             user_confirmed: true,
-            legacy_v2_would_compact: true,
         },
     )?;
     let admission = target_material
@@ -1117,7 +1089,6 @@ fn durable_message_count(entries: &[SessionLogEntry]) -> usize {
                 entry,
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
-                    | SessionLogEntry::ToolResult(_)
                     | SessionLogEntry::ToolResultV2(_)
             )
         })
@@ -1138,11 +1109,6 @@ fn compaction_policy_view(
             .map(|economics| economics.forecast.input.expected_remaining_turns.confidence),
         admission_reason: economics.map(|economics| economics.admission.reason),
         native_carrier_available,
-        legacy_migration_fields: config
-            .legacy_migration_fields()
-            .iter()
-            .map(|field| (*field).to_owned())
-            .collect(),
     }
 }
 

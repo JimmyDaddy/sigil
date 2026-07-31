@@ -53,7 +53,7 @@ fn delete_preview(path: &Path) -> SessionDeletePreview {
 fn app_with_resume_target() -> Result<(tempfile::TempDir, AppState, PathBuf)> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -168,7 +168,7 @@ fn delete_requires_exact_preview_and_stale_responses_are_ignored() -> Result<()>
 fn retention_footer_uses_worker_preview_and_replays_exact_batch() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },

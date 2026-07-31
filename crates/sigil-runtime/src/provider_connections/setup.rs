@@ -13,14 +13,14 @@ use sigil_kernel::{
 #[must_use]
 pub fn default_setup_root_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: sigil_kernel::CONFIG_VERSION_V2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
         storage: Default::default(),
         session: SessionConfig::default(),
         agent: AgentConfig {
-            provider: String::new(),
+            runtime_provider: String::new(),
             connection: None,
             model: String::new(),
             max_turns: None,
@@ -37,7 +37,6 @@ pub fn default_setup_root_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),

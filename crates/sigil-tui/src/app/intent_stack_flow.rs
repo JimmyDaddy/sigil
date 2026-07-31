@@ -35,7 +35,7 @@ pub(crate) enum IntentStackModalPhase {
     Loading,
     Ready,
     ReadOnly,
-    HistoryUnavailable,
+    NotCreated,
     PreviewingDrop,
     ConfirmingDrop,
     ApplyingDrop,
@@ -370,9 +370,8 @@ impl AppState {
                         detail_lines = intent_detail_lines(stack, intent);
                     }
                 }
-                PublicIntentStackStateV1::HistoryUnavailable { safe_message, .. } => {
-                    summary_lines
-                        .push("This session predates durable Intent Stack history.".to_owned());
+                PublicIntentStackStateV1::NotCreated { safe_message, .. } => {
+                    summary_lines.push("No Intent Stack has been created yet.".to_owned());
                     detail_lines.push(safe_message.clone());
                 }
             }
@@ -536,9 +535,7 @@ fn intent_stack_phase(state: &IntentStackModalState) -> IntentStackModalPhase {
         IntentStackModalOperation::ConfirmingDrop => IntentStackModalPhase::ConfirmingDrop,
         IntentStackModalOperation::ApplyingDrop => IntentStackModalPhase::ApplyingDrop,
         IntentStackModalOperation::Idle => match state.stack_state.as_ref() {
-            Some(PublicIntentStackStateV1::HistoryUnavailable { .. }) => {
-                IntentStackModalPhase::HistoryUnavailable
-            }
+            Some(PublicIntentStackStateV1::NotCreated { .. }) => IntentStackModalPhase::NotCreated,
             Some(PublicIntentStackStateV1::Available { stack, .. })
                 if stack.authority_state != IntentAuthorityState::Active =>
             {
@@ -558,9 +555,7 @@ fn intent_stack_phase_detail(phase: IntentStackModalPhase) -> &'static str {
         IntentStackModalPhase::ReadOnly => {
             "Provenance is visible, but this workspace/session has no mutation authority"
         }
-        IntentStackModalPhase::HistoryUnavailable => {
-            "Durable Intent Stack history is unavailable for this session"
-        }
+        IntentStackModalPhase::NotCreated => "No Intent Stack has been created in this session",
         IntentStackModalPhase::PreviewingDrop => "Building an exact read-only Drop preview",
         IntentStackModalPhase::ConfirmingDrop => {
             "Review every file and conflict before confirming Drop"

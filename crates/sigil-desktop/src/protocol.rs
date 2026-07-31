@@ -55,8 +55,6 @@ pub struct DesktopServerCapabilities {
     pub provider_connections: bool,
     /// Provider catalog discovery and atomic connection setup are available.
     pub provider_setup: bool,
-    /// Stale-guarded legacy provider migration is available.
-    pub provider_migration: bool,
 }
 
 impl DesktopServerCapabilities {
@@ -80,7 +78,6 @@ impl DesktopServerCapabilities {
             && self.support_diagnostics
             && self.provider_connections
             && self.provider_setup
-            && self.provider_migration
     }
 }
 

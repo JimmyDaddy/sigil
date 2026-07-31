@@ -4,6 +4,12 @@
 
 创建日期：2026-07-19
 
+### 2026-07-31 current-only cutover
+
+Desktop runtime bridge 当前只重开通过当前 session/catalog schema 校验的记录。本文中的 legacy
+catalog/session 状态仅保留为历史设计记录；非当前记录标记为 invalid，可从会话管理中删除，但不会被
+恢复、转换或迁移。
+
 基线：
 
 - Desktop/app server: [RFC-0016](0016-desktop-app-server-productization.md)

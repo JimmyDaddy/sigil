@@ -483,15 +483,21 @@ routing_policy = "auto"
     std::fs::write(
         &config_path,
         format!(
-            r#"[workspace]
+            r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 {task_config}
 "#
         ),

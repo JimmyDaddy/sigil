@@ -6,10 +6,8 @@ use super::{LoadedCredentialRef, ProviderConnectionConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigMode {
-    LegacyV1,
     V2,
-    Mixed,
-    UnsupportedFuture,
+    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,14 +32,6 @@ pub struct LoadedProviderConnections {
 }
 
 impl LoadedProviderConnections {
-    #[must_use]
-    pub fn migration_required(&self) -> bool {
-        self.mode == ConfigMode::LegacyV1
-            && self.connections.values().any(|connection| {
-                matches!(connection.credential, LoadedCredentialRef::LegacyInline(_))
-            })
-    }
-
     pub fn default_connection(&self) -> anyhow::Result<&LoadedConnection> {
         let model_ref = self
             .default_model
@@ -77,10 +67,8 @@ pub struct ConnectionInventoryEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialSourceView {
     Environment,
-    SystemKeyring,
     Stored,
     None,
-    LegacyPlaintext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

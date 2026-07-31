@@ -7845,7 +7845,7 @@ fn supervisor(config: &RootConfig) -> Result<AgentSupervisor> {
 
 fn root_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -7855,7 +7855,7 @@ fn root_config() -> RootConfig {
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(4),
@@ -7872,12 +7872,6 @@ fn root_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": "https://example.com",
-            }),
-        )]),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),

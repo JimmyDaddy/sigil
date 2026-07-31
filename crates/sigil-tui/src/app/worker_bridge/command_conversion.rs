@@ -62,17 +62,6 @@ impl AppState {
                 prompt,
                 reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
-            AppAction::ApprovePlan {
-                plan_text,
-                permission,
-                scope_summary,
-                clear_planning_context,
-            } => WorkerCommand::ApprovePlan {
-                plan_text,
-                permission,
-                scope_summary,
-                clear_planning_context,
-            },
             AppAction::CreateTaskFromPlan {
                 plan_id,
                 expected_plan_hash,

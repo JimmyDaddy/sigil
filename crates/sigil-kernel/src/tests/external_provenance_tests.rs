@@ -180,6 +180,7 @@ fn external_source_title_accepts_limit_and_rejects_limit_plus_one() -> Result<()
 fn session_recovery_quarantines_tampered_external_sidecar_and_url_descriptor() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = crate::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    crate::session::append_current_test_session_identity(&store)?;
     let mut original = crate::Session::new("provider", "model").with_store(store.clone());
     let assistant = ModelMessage::assistant(Some("safe answer".to_owned()), Vec::new());
     original.append_assistant_message(assistant.clone())?;

@@ -22,10 +22,7 @@ pub fn resolve_default_model_route(
     root_config: &RootConfig,
 ) -> std::result::Result<(String, ResolvedModelRoute), ResolvedRouteError> {
     let loaded = load_provider_connections(root_config);
-    if matches!(
-        loaded.mode,
-        ConfigMode::Mixed | ConfigMode::UnsupportedFuture
-    ) {
+    if loaded.mode != ConfigMode::V2 {
         return Err(ResolvedRouteError::ConnectionConfigInvalid);
     }
     let model_ref = loaded
@@ -40,10 +37,7 @@ pub fn resolve_model_route(
     model_ref: &ModelRef,
 ) -> std::result::Result<(String, ResolvedModelRoute), ResolvedRouteError> {
     let loaded = load_provider_connections(root_config);
-    if matches!(
-        loaded.mode,
-        ConfigMode::Mixed | ConfigMode::UnsupportedFuture
-    ) {
+    if loaded.mode != ConfigMode::V2 {
         return Err(ResolvedRouteError::ConnectionConfigInvalid);
     }
     if loaded.issues.iter().any(|issue| {

@@ -5,7 +5,7 @@ use sigil_kernel::{WorkspaceTrust, WorkspaceTrustDecisionEntry, stable_workspace
 fn workspace_trust_gate_enter_persists_decision() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -46,7 +46,7 @@ fn workspace_trust_gate_enter_persists_decision() -> Result<()> {
 fn workspace_trust_history_detects_prior_trusted_session() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },

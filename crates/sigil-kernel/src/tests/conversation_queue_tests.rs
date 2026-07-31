@@ -232,6 +232,7 @@ fn direct_promotion_atomically_binds_a_safe_message_and_replays_after_reload() -
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     let queue_id = ConversationInputQueueId::new("queue_promote_1")?;
     let raw_prompt = "open https://example.com/private?token=raw-promotion-secret";
     let queued = durable_queue_entry(queue_id.clone(), raw_prompt);

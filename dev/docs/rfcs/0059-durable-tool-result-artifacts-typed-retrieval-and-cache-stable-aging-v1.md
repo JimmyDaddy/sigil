@@ -418,15 +418,15 @@ sink 同时执行：
 
 通用路径不得用 `read_to_string` 或无上限 `Vec<u8>` 收集完整子进程输出。
 
-### 8.2 Transitional adapter
+### 8.2 Bounded inline capture adapter
 
-首版允许现有小工具继续返回 `ToolResult { content: String }`。agent boundary 立即把它导入 sink，再
-生成 V2 record。该 adapter：
+当前小输出工具可以返回 `ToolResult { content: String }`。agent boundary 立即把它导入 sink，再
+生成 V2 record。该 adapter 是当前输入形态的有界规范化层，不读取旧日志或旧 event：
 
-- 只用于迁移，不是长期大输出 API；
-- 对 `content` 设置较小 hard guard，防止已有工具继续 materialize 任意大字符串；
-- 在 telemetry 中记录 `legacy_inline_capture`，推动高流量工具迁移；
-- 必须先迁移 shell、search、file read、test runner、MCP 和 agent-result 读取路径。
+- 只用于有界小输出，不是大输出 API；
+- 对 `content` 设置较小 hard guard，防止工具 materialize 任意大字符串；
+- telemetry 记录 `bounded_inline_capture`，用于识别应改用 streaming sink 的高流量工具；
+- shell、search、file read、test runner、MCP 和 agent-result 读取路径使用 streaming sink。
 
 ### 8.3 Store layout
 
@@ -925,7 +925,7 @@ pub enum ToolArtifactAvailability {
     Missing,
     HashMismatch,
     PolicyRevoked,
-    LegacyUnavailable,
+    Unavailable,
 }
 ```
 
@@ -1060,7 +1060,7 @@ hash，但仍不显示物理路径。
 
 1. 新 session schema 使用 `ToolResultRecordedV2` 和 real artifact ref；
 2. 不把旧 `DurableTranscriptEvent` envelope 迁移成“完整 artifact”；
-3. 没有 V2 descriptor 的 old result 标为 `LegacyUnavailable`；
+3. 没有 V2 descriptor 的 old result 标为 `Unavailable`；
 4. 不做启动期全量历史扫描、artifact backfill 或 destructive JSONL rewrite；
 5. old session 无法通过新 schema validation 时可以停止加载，并给出 bounded diagnostic；
 6. 不为兼容旧 session 保留双写路径；
@@ -1072,7 +1072,7 @@ hash，但仍不显示物理路径。
 - crate-local 测试迁移 helper 即使接收旧 `ModelMessage` 形状，也必须立即 capture 为
   `ToolResultRecordedV2`，不得产生 legacy event；
 - `tool_result_recorded` 只保留为 parser sentinel，用于返回 typed、bounded
-  `SessionStreamCompatibilityError`；其正文标记为 `LegacyUnavailable`，文件保持不修改；
+  `SessionStreamCompatibilityError`；其正文标记为 `Unavailable`，文件保持不修改；
 - provider、TUI、HTTP 与 Desktop 不会把旧 inline envelope 投影成完整 artifact，也不会通过
   `DurableTranscriptEvent` 伪造 retrieval capability。
 
@@ -1094,7 +1094,7 @@ Exit：schema 和 failure matrix 通过 review，未改变 production behavior�
 - 实现 session-scoped local store、staging/publish、hash、caps 和 orphan cleanup；
 - `ToolContext` 注入 sink factory；
 - 迁移 shell/process 和 MCP 大输出路径；
-- legacy inline adapter 加 telemetry 和 guard。
+- bounded inline capture adapter 加 telemetry 和 guard。
 
 Exit：10 MiB/100 MiB synthetic output 不进入单个 `String`，JSONL event 保持 bounded。
 
@@ -1138,8 +1138,7 @@ Exit：idle 时零 polling、零 full replay、零 data-file lock；legitimate a
 
 - 新 session 默认 V2 tool result；
 - 删除 old `content: String` durable 大输出主路径和 fake transcript artifact ref；
-- legacy append API fail closed；pre-V2 `tool_result_recorded` 只返回
-  `LegacyUnavailable` compatibility diagnostic；
+- 删除 pre-V2 append API 和 `tool_result_recorded` event；非当前记录在 session decode 阶段直接拒绝；
 - 同步 README、governance、core solution、TUI/Desktop/HTTP schema；
 - 运行全量 gate 和真实长会话 acceptance。
 
@@ -1163,7 +1162,7 @@ Exit：所有 acceptance criteria 满足后状态从 `draft` 升为 `accepted`�
 12. candidate frontier/epoch/policy/hash drift；
 13. full rebuild 与 incremental pressure projection 等价；
 14. orphan grace 和 GC root；
-15. legacy session 返回 unsupported/legacy unavailable，不尝试伪造 artifact。
+15. 非当前 session 在 decode 阶段直接拒绝，不尝试伪造 artifact。
 
 ### 22.2 Fault injection
 
@@ -1368,7 +1367,7 @@ truth。SQLite 不进入 live writer authority。
   `ToolResultRecordedV2`、`ToolArtifactReadRecordedV1`、三种 view、selector、availability、
   completeness、capture telemetry 和 root-owned read budget。
 - session append 只接受 V2 tool result。pre-V2 `tool_result_recorded` 仅由 parser sentinel 识别并
-  返回 bounded `LegacyUnavailable` compatibility error；不 backfill、不改写原文件、不伪造 artifact。
+  返回 bounded `Unavailable` compatibility error；不 backfill、不改写原文件、不伪造 artifact。
 - shell/process、persistent terminal、MCP、streaming file read、list/glob/grep/search 和 test-runner
   shell path 均在 upstream collector 或 artifact sink 处有 hard bound；artifact capture 记录
   source-observed、policy-projected、persisted bytes 和 truthful truncation。
@@ -1457,7 +1456,7 @@ shutdown 的 1 次 event 与 idle window 分开计数。该证据直接覆盖原
 - `cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`、
   `cargo clippy --all-targets -- -D warnings` 全部通过。
 - Desktop contract drift、UI-system、TypeScript、247 个 Vitest、production build 全部通过。
-- 中英文 changelog 已明确 clean cutover 与 `LegacyUnavailable` 行为。
+- 中英文 changelog 已明确 clean cutover 与 `Unavailable` 行为。
 
 R59.1 中“V2 feature gate 默认关闭”原本用于兼容 rollout；用户明确选择旧日志不兼容后，由 R59.7
 clean cutover 取代，因此最终实现不保留双写或旧-schema feature gate。

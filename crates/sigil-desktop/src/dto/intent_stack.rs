@@ -98,7 +98,6 @@ pub enum DesktopIntentOperationResolution {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopIntentOperationErrorCode {
     UnsupportedSchema,
-    IntentHistoryUnavailable,
     UnknownIntent,
     UnknownOperation,
     StaleIntentVersion,
@@ -206,7 +205,7 @@ pub struct DesktopIntentStack {
     pub conflicts: Vec<DesktopIntentConflict>,
 }
 
-/// Bounded availability state returned for both current and legacy sessions.
+/// Bounded availability state returned for loaded sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DesktopIntentStackState {
@@ -214,7 +213,7 @@ pub enum DesktopIntentStackState {
         schema_version: u16,
         stack: DesktopIntentStack,
     },
-    HistoryUnavailable {
+    NotCreated {
         schema_version: u16,
         safe_message: String,
     },

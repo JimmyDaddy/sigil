@@ -131,10 +131,10 @@ pub use compaction_token_proof::{
     VersionedProfileIdentity,
 };
 pub use config::{
-    AgentConfig, AppearanceConfig, CONFIG_VERSION_V2, CodeIntelStartup, CodeIntelligenceConfig,
-    CompactionConfig, CompactionStrategy, CompactionThresholdStatus, ConfigPublishError,
-    ConfigUpdateLockGuard, CredentialStorageMode,
-    DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
+    AgentConfig, AppearanceConfig, COMPACTION_EMERGENCY_RATIO, COMPACTION_PREPARATION_RATIO,
+    CONFIG_VERSION_V2, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
+    CompactionStrategy, CompactionThresholdStatus, ConfigPublishError, ConfigUpdateLockGuard,
+    CredentialStorageMode, DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS,
     DEFAULT_SESSION_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_MAX_SESSIONS,
@@ -320,7 +320,7 @@ pub use intent::{
 };
 pub use intent_admission::{
     AcceptedIntentPlanProjectionV1, INTENT_ADMISSION_PROJECTION_SCHEMA_VERSION,
-    INTENT_HISTORY_UNAVAILABLE_MESSAGE, IntentAcceptanceAuthorityV1, IntentAdmissionContextV1,
+    INTENT_STACK_NOT_CREATED_MESSAGE, IntentAcceptanceAuthorityV1, IntentAdmissionContextV1,
     IntentAdmissionWriteOutcomeV1, IntentPlanAdmissionV1, IntentStackProjectionV1,
     TaskStepIntentAliasBindingV1, USER_DECLARED_ROOT_INTENT_ALIAS, UserDeclaredIntentV1,
     admit_suggested_decomposition, admit_user_declared_root, append_chat_root_intent_admission,
@@ -400,13 +400,12 @@ pub use persistence::{
     safe_persistence_json_value, safe_persistence_text,
 };
 pub use plan::{
-    PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,
-    PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanDraftStep, PlanId,
-    PlanPermissionGrantedEntry, PlanSourceRef, PlanSuggestedCheck, PlanTaskStartMode,
-    PlanToTaskStepMapping, TaskCreatedFromPlanEntry, plan_draft_created_entry,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanArtifactProjection, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry,
+    PlanDraftCreatedEntry, PlanDraftStep, PlanId, PlanPermissionGrantedEntry, PlanSourceRef,
+    PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping, TaskCreatedFromPlanEntry,
+    plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
+    task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,
@@ -557,7 +556,7 @@ pub use session::{
     SESSION_ANCHOR_V1_SCHEMA_VERSION, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION,
     SemanticCompactionGeneration, Session, SessionAnchorRefV1, SessionAnchorV1,
     SessionContextProjection, SessionIoLockMetricsSnapshot, SessionLogEntry,
-    SessionProjectionEntry, SessionStreamCompatibilityError, SessionStreamRecord, SourceSpanRefV1,
+    SessionProjectionEntry, SessionStreamRecord, SourceSpanRefV1,
     TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_ARTIFACT_READ_BYTES_PER_TURN,
     TOOL_ARTIFACT_READ_SCHEMA_VERSION, TOOL_ARTIFACT_READS_PER_TURN,
     TOOL_OUTPUT_CONTEXT_EPOCH_TRANSITION_SCHEMA_VERSION,

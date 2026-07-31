@@ -106,7 +106,7 @@ fn inspect_emits_one_typed_path_free_record_for_the_exact_durable_session() {
     assert_eq!(record["protocol_version"], 1);
     assert_eq!(record["session_id"], session_id);
     assert_eq!(record["output"]["result"], "projection");
-    assert_eq!(record["output"]["state"]["status"], "history_unavailable");
+    assert_eq!(record["output"]["state"]["status"], "not_created");
     let encoded = record.to_string();
     let workspace_path = workspace.path().to_string_lossy();
     for forbidden in [

@@ -92,8 +92,6 @@ pub struct HttpServerCapabilities {
     pub provider_connections: bool,
     /// Authenticated provider catalog and atomic setup writes are available to the native owner.
     pub provider_setup: bool,
-    /// Stale-guarded, configuration-wide legacy provider migration is available.
-    pub provider_migration: bool,
 }
 
 impl HttpServerCapabilities {
@@ -120,7 +118,6 @@ impl HttpServerCapabilities {
             support_diagnostics: true,
             provider_connections: true,
             provider_setup: true,
-            provider_migration: true,
         }
     }
 }
@@ -267,10 +264,8 @@ pub struct HttpSupportBundleExport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpProviderConfigMode {
-    LegacyV1,
     V2,
-    Mixed,
-    UnsupportedFuture,
+    Invalid,
 }
 
 /// Compound connection/model identity used by settings surfaces.
@@ -286,10 +281,8 @@ pub struct HttpProviderModelRef {
 #[serde(rename_all = "snake_case")]
 pub enum HttpProviderCredentialSource {
     Environment,
-    SystemKeyring,
     Stored,
     None,
-    LegacyPlaintext,
 }
 
 /// Native-owner readiness state for one configured connection.
@@ -329,15 +322,6 @@ pub struct HttpProviderConnectionEntry {
     pub issue: Option<HttpProviderConnectionIssue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct HttpProviderLegacyMigrationPreview {
-    pub revision: String,
-    pub connection_count: u64,
-    pub inline_credential_count: u64,
-    pub environment_reference_count: u64,
-}
-
 /// Full secret-free inventory shared by Doctor, TUI runtime ownership, and Desktop native code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -347,8 +331,6 @@ pub struct HttpProviderConnectionInventory {
     pub default_model: Option<HttpProviderModelRef>,
     pub connections: Vec<HttpProviderConnectionEntry>,
     pub issues: Vec<HttpProviderConnectionIssue>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_migration: Option<HttpProviderLegacyMigrationPreview>,
 }
 
 /// Provider templates available to first-run and settings connection wizards.
@@ -445,40 +427,6 @@ pub struct HttpProviderSetupSaveResult {
     pub default_model: HttpProviderModelRef,
     pub inventory: HttpProviderConnectionInventory,
     pub save_warning: bool,
-}
-
-/// Stale-guarded confirmation body for a configuration-wide legacy provider migration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct HttpProviderLegacyMigrationRequest {
-    pub expected_revision: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpProviderLegacyMigrationOutcome {
-    Published,
-    PublishedWithWarning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpProviderLegacyMigrationWarning {
-    FilesystemDurabilityUncertain,
-    PublicationVisibilityReconciled,
-}
-
-/// Secret-free result after atomically publishing a legacy configuration as V2.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct HttpProviderLegacyMigrationResult {
-    pub default_model: HttpProviderModelRef,
-    pub inventory: HttpProviderConnectionInventory,
-    pub migrated_connection_count: u64,
-    pub moved_inline_credential_count: u64,
-    pub preserved_environment_reference_count: u64,
-    pub outcome: HttpProviderLegacyMigrationOutcome,
-    pub warnings: Vec<HttpProviderLegacyMigrationWarning>,
 }
 
 /// Immutable, secret-free metadata published after the local listener is ready.
@@ -2523,7 +2471,7 @@ pub enum HttpCompactionAdmission {
     },
     NoFoldableHistory {
         durable_message_count: usize,
-        configured_tail_message_count: usize,
+        minimum_tail_turn_count: usize,
     },
     Unavailable {
         reason: String,
@@ -2579,10 +2527,10 @@ impl From<ApplicationCompactionReview> for HttpCompactionReview {
                 }
                 ApplicationCompactionAdmission::NoFoldableHistory {
                     durable_message_count,
-                    configured_tail_message_count,
+                    minimum_tail_turn_count,
                 } => HttpCompactionAdmission::NoFoldableHistory {
                     durable_message_count,
-                    configured_tail_message_count,
+                    minimum_tail_turn_count,
                 },
                 ApplicationCompactionAdmission::Unavailable { reason } => {
                     HttpCompactionAdmission::Unavailable { reason }

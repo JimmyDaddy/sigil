@@ -1,5 +1,6 @@
 use super::*;
 use crate::{RunCancellationHandle, RunEffectClass, RunEffectKind};
+use anyhow::Context;
 
 /// Sequential planner/executor task orchestrator.
 pub struct SequentialTaskOrchestrator<R> {
@@ -3045,6 +3046,22 @@ fn completed_steps_for_replan(
                 step.step_id.as_str()
             );
         }
+        task.participant_attempts_for(
+            TaskParticipantPurpose::Step,
+            Some(current_plan_version),
+            Some(&step.step_id),
+        )
+        .into_iter()
+        .rev()
+        .find_map(|attempt| {
+            task.participant_results
+                .get(&attempt.attempt_id)
+                .map(|_| attempt)
+        })
+        .context(format!(
+            "completed task step {} has no participant result to carry forward",
+            step.step_id.as_str()
+        ))?;
         carried.push(TaskStepEntry {
             task_id: next_plan.task_id.clone(),
             plan_version: next_plan.plan_version,

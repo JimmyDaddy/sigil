@@ -48,15 +48,9 @@ sigil doctor
 Provider 生成请求与远程模型目录均遵循标准 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`
 环境变量。`[web].proxy_mode` 只控制 Web 工具，不用于配置 Provider 流量。
 
-如果 Doctor 报告 `mode=legacy_v1`，请使用 Desktop 迁移卡片，或在 `/config` →
-**Legacy migration** 上按 Enter。先检查连接数、密钥数、环境变量引用数和精确默认 route；
-迁移不需要 Provider 网络或模型 loading。普通的发布前凭据存储失败会保留旧配置；Sigil 会先
-重新加载当前 inventory，再允许重试。如果提示文件已变化，请重新打开页面并复核新版本；如果
-提示需要 reconcile 或 cleanup，不要盲目重试，请打开**支持**，用 Doctor 检查当前配置并先解决
-该状态。这个工作区在跨页面导航、项目切换、Desktop/TUI 重启和进程重启后仍会保持阻断；只有在
-Desktop 选择**重新检查配置**，或在 TUI 的 **Migration recovery** 行按 **Enter recheck**，
-并确认 credential-aware 的 V2 配置健康后才会解除。不要新增重复 connection 或手工编辑
-credential ID。V1/V2 混合配置和未来版本配置会失败关闭，必须修复或使用兼容版本的 Sigil 打开。
+如果 Doctor 报告 Provider 配置无效或 schema 不兼容，请直接替换为当前
+`config_version = 2` connection 模板。Sigil 不迁移或推断旧 Provider 区块。不要新增重复
+connection，也不要手工编辑 credential ID。
 
 ## 主题颜色难以阅读
 

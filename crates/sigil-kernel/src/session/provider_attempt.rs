@@ -10,7 +10,6 @@ use crate::{EventId, SessionId, projection_apply_decision};
 
 /// Schema version for the provider physical-attempt direct payloads.
 pub const PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION: u16 = 3;
-const MIN_SUPPORTED_PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION: u16 = 2;
 
 /// Projection schema version for provider physical attempts.
 pub const PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -74,17 +73,11 @@ pub struct ProviderPhysicalAttemptStartedEntry {
 
 impl ProviderPhysicalAttemptStartedEntry {
     pub(crate) fn validate_shape(&self) -> Result<()> {
-        if !(MIN_SUPPORTED_PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION
-            ..=PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION)
-            .contains(&self.schema_version)
-        {
+        if self.schema_version != PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION {
             bail!(
                 "unsupported provider physical-attempt schema version {}",
                 self.schema_version
             );
-        }
-        if self.schema_version < 3 && self.cache_layout_proof.is_some() {
-            bail!("provider physical-attempt cache layout requires schema version 3");
         }
         validate_identity("provider physical attempt id", &self.physical_attempt_id)?;
         validate_identity("provider logical run id", &self.logical_run_id)?;
@@ -94,9 +87,10 @@ impl ProviderPhysicalAttemptStartedEntry {
         )?;
         validate_label("provider name", &self.provider_name)?;
         validate_label("provider model name", &self.model_name)?;
-        if let Some(proof) = &self.cache_layout_proof {
-            proof.validate()?;
-        }
+        self.cache_layout_proof
+            .as_ref()
+            .context("provider physical-attempt cache layout proof is missing")?
+            .validate()?;
         Ok(())
     }
 }
@@ -132,10 +126,7 @@ pub struct ProviderPhysicalAttemptTerminalEntry {
 
 impl ProviderPhysicalAttemptTerminalEntry {
     pub(crate) fn validate_shape(&self) -> Result<()> {
-        if !(MIN_SUPPORTED_PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION
-            ..=PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION)
-            .contains(&self.schema_version)
-        {
+        if self.schema_version != PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION {
             bail!(
                 "unsupported provider physical-attempt schema version {}",
                 self.schema_version
@@ -928,7 +919,7 @@ pub async fn generate_semantic_compaction(
                             local_layout_mutation: None,
                             provider_miss_without_local_mutation: false,
                         })
-                        .observe_local_layout(mutation, usage.cache_miss_tokens);
+                        .observe_local_layout(mutation);
                     if let Some(cache_usage) = &usage.cache_usage {
                         cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
                     }

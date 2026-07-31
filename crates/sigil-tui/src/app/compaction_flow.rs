@@ -80,8 +80,8 @@ impl V2CompactionPreviewModalState {
                 "stage: semantic preparation failed; the current epoch remains active.".to_owned()
             }
         });
-        if let Some(adaptive) = &plan.adaptive_tail {
-            lines.push(format!(
+        let adaptive = &plan.adaptive_tail;
+        lines.push(format!(
                 "adaptive tail: fold {} complete turn(s) / {} tokens; keep {} complete turn(s) / {} raw token upper bound (target {} / effective {})",
                 adaptive.folded_complete_turns,
                 adaptive.folded_token_upper_bound,
@@ -91,18 +91,17 @@ impl V2CompactionPreviewModalState {
                     .saturating_add(adaptive.protected_tail_token_upper_bound),
                 adaptive.ordinary_target_tokens,
                 adaptive.effective_target_tokens,
-            ));
-            lines.push(format!(
-                "protected tail: {} event(s), {} token upper bound{}",
-                adaptive.protected_tail_events.len(),
-                adaptive.protected_tail_token_upper_bound,
-                if adaptive.active_turn_extended {
-                    " · active turn extended to exact-fit"
-                } else {
-                    ""
-                },
-            ));
-        }
+        ));
+        lines.push(format!(
+            "protected tail: {} event(s), {} token upper bound{}",
+            adaptive.protected_tail_events.len(),
+            adaptive.protected_tail_token_upper_bound,
+            if adaptive.active_turn_extended {
+                " · active turn extended to exact-fit"
+            } else {
+                ""
+            },
+        ));
         if let Some(continuity) = &self.review.continuity {
             lines.push(format!(
                 "continuity root: {}",
@@ -293,10 +292,10 @@ impl AppState {
         let review = match state {
             V2CompactionPreviewState::NoFoldableHistory {
                 durable_message_count,
-                configured_tail_message_count,
+                minimum_tail_turn_count,
             } => {
                 let notice = format!(
-                    "no newly foldable history: {durable_message_count} durable message(s); raw tail is {configured_tail_message_count}. Add completed turns or lower compaction.tail_messages."
+                    "no newly foldable history: {durable_message_count} durable message(s); at least {minimum_tail_turn_count} complete turns remain live. Add completed turns before compacting again."
                 );
                 self.last_notice = Some(notice.clone());
                 self.push_timeline(TimelineRole::Notice, notice.clone());

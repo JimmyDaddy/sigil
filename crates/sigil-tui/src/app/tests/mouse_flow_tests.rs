@@ -585,7 +585,7 @@ fn mouse_click_config_field_is_noop_when_mcp_has_no_servers() -> Result<()> {
 fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },

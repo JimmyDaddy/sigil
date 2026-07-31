@@ -44,22 +44,22 @@ use crate::{
         DesktopConversationRecoveryCommandReceipt, DesktopConversationRecoveryView,
         DesktopExternalUrlInput, DesktopIntentDropExecutionSummary, DesktopIntentDropInput,
         DesktopIntentDropPreviewInput, DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
-        DesktopProviderConnectionInventorySummary, DesktopProviderLegacyMigrationSummary,
-        DesktopProviderSetupCatalogInput, DesktopProviderSetupCatalogSummary,
-        DesktopProviderSetupSaveInput, DesktopProviderSetupSaveSummary, DesktopRunAttachInput,
-        DesktopRunAttachment, DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput,
-        DesktopRunSummary, DesktopSessionCatalogBatchExecuteInput,
-        DesktopSessionCatalogBatchPlanInput, DesktopSessionCatalogBatchPlanSummary,
-        DesktopSessionCatalogBatchReceiptSummary, DesktopSessionCreateInput,
-        DesktopSessionDeleteInput, DesktopSessionInvalidSourceDeleteInput,
-        DesktopSessionInvalidSourceDeleteSummary, DesktopSessionMutationSummary,
-        DesktopSessionOpenInput, DesktopSessionQuarantineInput, DesktopSessionQuarantineSummary,
-        DesktopSessionRenameInput, DesktopSessionSummary, DesktopSupportDoctorSummary,
-        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskIntegrationAcceptInput,
-        DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
-        DesktopTaskPauseInput, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
-        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopProviderConnectionInventorySummary, DesktopProviderSetupCatalogInput,
+        DesktopProviderSetupCatalogSummary, DesktopProviderSetupSaveInput,
+        DesktopProviderSetupSaveSummary, DesktopRunAttachInput, DesktopRunAttachment,
+        DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
+        DesktopSessionCatalogBatchExecuteInput, DesktopSessionCatalogBatchPlanInput,
+        DesktopSessionCatalogBatchPlanSummary, DesktopSessionCatalogBatchReceiptSummary,
+        DesktopSessionCreateInput, DesktopSessionDeleteInput,
+        DesktopSessionInvalidSourceDeleteInput, DesktopSessionInvalidSourceDeleteSummary,
+        DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
+        DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
+        DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTaskContinuationInput,
+        DesktopTaskIntegrationAcceptInput, DesktopTaskIntegrationAcceptanceSummary,
+        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopToolArtifactPage,
+        DesktopToolArtifactReadInput, DesktopToolArtifactSelector, DesktopTranscriptPage,
+        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
+        DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -163,51 +163,6 @@ pub(crate) async fn desktop_provider_connections(
 }
 
 #[tauri::command]
-pub(crate) async fn desktop_migrate_legacy_provider_connections(
-    workspace_id: String,
-    expected_revision: String,
-    state: State<'_, DesktopAppState>,
-) -> Result<DesktopProviderLegacyMigrationSummary, DesktopCommandError> {
-    validate_workspace_id(&workspace_id)?;
-    if expected_revision.is_empty() || expected_revision.len() > 128 {
-        return Err(DesktopCommandError::new(
-            "invalid_provider_migration_request",
-            "invalid provider migration revision",
-        ));
-    }
-    let client = state
-        .manager
-        .lock()
-        .await
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
-        .migrate_legacy_provider_connections(expected_revision)
-        .await
-        .map(Into::into)
-        .map_err(project_provider_migration_client_error)
-}
-
-#[tauri::command]
-pub(crate) async fn desktop_recheck_legacy_provider_migration(
-    workspace_id: String,
-    state: State<'_, DesktopAppState>,
-) -> Result<DesktopProviderConnectionInventorySummary, DesktopCommandError> {
-    validate_workspace_id(&workspace_id)?;
-    let client = state
-        .manager
-        .lock()
-        .await
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
-        .recheck_legacy_provider_migration()
-        .await
-        .map(Into::into)
-        .map_err(project_client_error)
-}
-
-#[tauri::command]
 pub(crate) async fn desktop_provider_setup_catalog(
     workspace_id: String,
     input: DesktopProviderSetupCatalogInput,
@@ -224,7 +179,7 @@ pub(crate) async fn desktop_provider_setup_catalog(
         .provider_setup_catalog(input.into_native())
         .await
         .map(Into::into)
-        .map_err(project_provider_migration_client_error)
+        .map_err(project_client_error)
 }
 
 #[tauri::command]
@@ -244,7 +199,7 @@ pub(crate) async fn desktop_save_provider_setup(
         .save_provider_setup(input.into_native())
         .await
         .map(Into::into)
-        .map_err(project_provider_migration_client_error)
+        .map_err(project_client_error)
 }
 
 #[tauri::command]
@@ -2581,67 +2536,6 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
     }
 }
 
-fn project_provider_migration_client_error(error: DesktopClientError) -> DesktopCommandError {
-    let DesktopClientError::Rejected {
-        code: Some(code), ..
-    } = &error
-    else {
-        return project_client_error(error);
-    };
-    match code.as_str() {
-        "provider_migration_stale" => DesktopCommandError::new(
-            "provider_migration_stale",
-            "Provider configuration changed. Reload the migration details before retrying.",
-        )
-        .with_recovery_actions([DesktopRecoveryAction::RetryCurrent]),
-        "provider_migration_not_required" => DesktopCommandError::new(
-            "provider_migration_not_required",
-            "Provider configuration no longer requires legacy migration.",
-        ),
-        "credential_store_unavailable"
-        | "credential_store_rejected"
-        | "credential_readback_mismatch"
-        | "provider_migration_publish_failed"
-        | "provider_migration_config_unavailable" => DesktopCommandError::new(
-            match code.as_str() {
-                "credential_store_unavailable" => "credential_store_unavailable",
-                "credential_store_rejected" => "credential_store_rejected",
-                "credential_readback_mismatch" => "credential_readback_mismatch",
-                "provider_migration_config_unavailable" => {
-                    "provider_migration_config_unavailable"
-                }
-                _ => "provider_migration_publish_failed",
-            },
-            "Provider migration did not complete. Review protected credential storage and retry.",
-        )
-        .with_recovery_actions([
-            DesktopRecoveryAction::RetryCurrent,
-            DesktopRecoveryAction::OpenDiagnostics,
-        ]),
-        "provider_migration_rollback_incomplete" => DesktopCommandError::new(
-            "provider_migration_rollback_incomplete",
-            "Provider migration stopped, but credential cleanup requires diagnostics.",
-        )
-        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
-        "provider_migration_reconcile_required" => DesktopCommandError::new(
-            "provider_migration_reconcile_required",
-            "Provider migration publication is uncertain. Reload configuration and open diagnostics before continuing.",
-        )
-        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
-        "provider_migration_recovery_unavailable" => DesktopCommandError::new(
-            "provider_migration_recovery_unavailable",
-            "Provider migration recovery state is unavailable. Open diagnostics before retrying.",
-        )
-        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
-        "provider_migration_blocked" => DesktopCommandError::new(
-            "provider_migration_blocked",
-            "The legacy provider configuration must be repaired before migration.",
-        )
-        .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics]),
-        _ => project_client_error(error),
-    }
-}
-
 fn project_conversation_display_client_error(error: DesktopClientError) -> DesktopCommandError {
     match error {
         DesktopClientError::Rejected {
@@ -2884,7 +2778,6 @@ impl From<DesktopCatalogState> for DesktopSessionCatalogState {
             DesktopCatalogState::Ready => Self::Ready,
             DesktopCatalogState::Oversized => Self::Oversized,
             DesktopCatalogState::ScanBudgetExceeded => Self::ScanBudgetExceeded,
-            DesktopCatalogState::UnsupportedLegacy => Self::UnsupportedLegacy,
             DesktopCatalogState::Invalid => Self::Invalid,
         }
     }

@@ -2449,7 +2449,7 @@ fn application_model_option_views(
         .map(|entry| {
             let model_name = entry.model_ref.model_id.clone();
             let mut model_config = root_config.clone();
-            model_config.agent.provider = provider_name.to_owned();
+            model_config.agent.runtime_provider = provider_name.to_owned();
             model_config.agent.model = model_name.clone();
             let available_reasoning_efforts =
                 crate::reasoning_effort::supported_reasoning_efforts(provider_name, &model_name);
@@ -2510,8 +2510,6 @@ pub fn bind_existing_application_session(
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
     let (_, fallback_route) = application_selected_model_route(&root_config, None, None)?;
-    migrate_exact_legacy_application_session_route(&root_config, &fallback_route, &store)
-        .map_err(ApplicationRunPrepareError::execution)?;
     let session = load_application_session_for_route(&root_config, &fallback_route, store)
         .map_err(ApplicationRunPrepareError::execution)?;
     Ok(ApplicationSessionBinding {
@@ -2531,36 +2529,6 @@ fn load_application_root_config(
         Ok(_) => {}
     }
     RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)
-}
-
-fn migrate_exact_legacy_application_session_route(
-    root_config: &RootConfig,
-    fallback_route: &ResolvedModelRoute,
-    store: &JsonlSessionStore,
-) -> Result<()> {
-    if root_config.config_version.is_some() {
-        return Ok(());
-    }
-    let entries = JsonlSessionStore::read_entries(store.path())
-        .context("failed to inspect legacy durable session route")?;
-    if entries.is_empty() || application_session_route(&entries).is_some() {
-        return Ok(());
-    }
-    let (provider_name, model_name) = application_session_identity(&entries)
-        .context("session_route_missing: legacy durable session identity is unavailable")?;
-    let expected_provider =
-        crate::provider_connections::validate_persisted_model_route(root_config, fallback_route)
-            .map_err(anyhow::Error::new)?;
-    anyhow::ensure!(
-        provider_name == expected_provider && model_name == fallback_route.model_ref.model_id,
-        "session_route_missing: legacy durable session identity does not match the configured route"
-    );
-    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name,
-        model_name,
-        resolved_model_route: Some(fallback_route.clone()),
-    }))?;
-    Ok(())
 }
 
 fn application_selected_model_route(
@@ -2600,9 +2568,7 @@ fn application_selected_model_route(
     let Some(model_name) = model_name else {
         return Ok((provider_name, default_route));
     };
-    let requested = if root_config.config_version.is_none() {
-        crate::normalize_provider_model_alias(&provider_name, model_name)
-    } else {
+    let requested = {
         let trimmed = model_name.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
@@ -2693,7 +2659,7 @@ pub fn application_run_context_view(
     let available_reasoning_efforts =
         crate::reasoning_effort::supported_reasoning_efforts(&provider_name, &model_name);
     let mut identity_config = root_config.clone();
-    identity_config.agent.provider = provider_name.clone();
+    identity_config.agent.runtime_provider = provider_name.clone();
     identity_config.agent.model = model_name.clone();
     let default_reasoning_effort =
         crate::reasoning_effort::configured_default_reasoning_effort(&identity_config);
@@ -2938,9 +2904,6 @@ pub fn application_session_transcript_page(
                     ApplicationTranscriptRole::Assistant,
                     MessageRole::Assistant,
                 )
-            }
-            SessionLogEntry::ToolResult(message) => {
-                (message, ApplicationTranscriptRole::Tool, MessageRole::Tool)
             }
             SessionLogEntry::ToolResultV2(result) => (
                 result.model_message()?,
@@ -3294,7 +3257,7 @@ fn prepare_application_run_blocking(
         crate::provider_connections::validate_persisted_model_route(&root_config, &session_route)
             .map_err(ApplicationRunPrepareError::configuration)?;
     let mut identity_config = root_config.clone();
-    identity_config.agent.provider = runtime_provider_name;
+    identity_config.agent.runtime_provider = runtime_provider_name;
     identity_config.agent.model = session_route.model_ref.model_id.clone();
     admit_application_reasoning_effort(&request, &identity_config)?;
     if request.skill_binding.is_some() && request.agent_binding.is_some() {
@@ -3527,13 +3490,19 @@ fn admit_application_reasoning_effort(
         }
         (Some(_), Some(_)) => {}
     }
+    let (provider_name, route) =
+        crate::provider_connections::resolve_default_model_route(root_config).map_err(|error| {
+            ApplicationRunPrepareError::InvalidInvocation {
+                message: format!("default model route is unavailable: {error}"),
+            }
+        })?;
     let supported = crate::reasoning_effort::supported_reasoning_efforts(
-        &root_config.agent.provider,
-        &root_config.agent.model,
+        &provider_name,
+        &route.model_ref.model_id,
     );
     let expected_binding = crate::reasoning_effort::reasoning_effort_binding(
-        &root_config.agent.provider,
-        &root_config.agent.model,
+        &provider_name,
+        &route.model_ref.model_id,
         &supported,
     );
     if expected_binding.as_deref() != request.reasoning_effort_binding.as_deref() {

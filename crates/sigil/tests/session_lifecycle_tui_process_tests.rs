@@ -77,55 +77,6 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     Ok(())
 }
 
-fn write_config_with_endpoints(
-    path: &Path,
-    workspace: &Path,
-    session_dir: &Path,
-    base_url: &str,
-    beta_base_url: &str,
-    anthropic_base_url: &str,
-) -> Result<()> {
-    let config = format!(
-        r#"[workspace]
-root = "{}"
-
-[storage]
-state_root = "{}"
-cache_root = "{}"
-credential_store = "file"
-
-[session]
-log_dir = "{}"
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-tool_timeout_secs = 5
-
-[model_request]
-request_timeout_secs = 2
-
-[terminal]
-keyboard_enhancement = "off"
-mouse_capture = false
-osc52_clipboard = false
-
-[providers.deepseek]
-base_url = "{base_url}"
-beta_base_url = "{beta_base_url}"
-anthropic_base_url = "{anthropic_base_url}"
-api_key = "test-key"
-strict_tools_mode = "auto"
-"#,
-        workspace.display(),
-        workspace.join("state").display(),
-        workspace.join("cache").display(),
-        session_dir.display()
-    );
-    fs::write(path, config)?;
-    Ok(())
-}
-
 fn write_trusted_finalized_session(
     path: &Path,
     workspace: &Path,
@@ -572,14 +523,13 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                 }
 
                 let root = RootConfig::load(&config_path)?;
-                assert_eq!(root.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
+                assert_eq!(root.config_version, sigil_kernel::CONFIG_VERSION_V2);
                 assert_eq!(
                     root.agent.connection.as_ref().map(|id| id.as_str()),
                     Some("custom-default")
                 );
                 assert_eq!(root.agent.model, "gpt-4.1");
-                assert!(root.agent.provider.is_empty());
-                assert!(root.providers.is_empty());
+                assert!(root.agent.runtime_provider.is_empty());
                 assert!(root.connections.contains_key("custom-default"));
                 assert_eq!(
                     fs::metadata(&config_path)?.permissions().mode() & 0o777,
@@ -619,100 +569,6 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
     let cleanup = fs::remove_dir_all(&workspace);
     result?;
     catalog_result?;
-    cleanup?;
-    Ok(())
-}
-
-#[test]
-fn real_tui_migrates_legacy_inline_secret_to_protected_store_without_backup() -> Result<()> {
-    let workspace = test_workspace()?;
-    let config_path = workspace.join("sigil.toml");
-    let session_dir = workspace.join("sessions");
-    fs::create_dir(&session_dir)?;
-    write_config_with_endpoints(
-        &config_path,
-        &workspace,
-        &session_dir,
-        "https://api.deepseek.com",
-        "https://api.deepseek.com/beta",
-        "https://api.deepseek.com/anthropic",
-    )?;
-    let legacy_config = RootConfig::load(&config_path)?;
-    let legacy_connections =
-        sigil_runtime::provider_connections::load_provider_connections(&legacy_config);
-    let legacy_default = legacy_connections.default_model.as_ref().with_context(|| {
-        format!(
-            "legacy provider projection must retain the default model: {:?}",
-            legacy_connections.issues
-        )
-    })?;
-    assert_eq!(legacy_default.connection_id.as_str(), "deepseek-default");
-    assert_eq!(legacy_default.model_id, "deepseek-v4-flash");
-    write_trusted_finalized_session(
-        &session_dir.join("session-migration-process-e2e.jsonl"),
-        &workspace,
-        None,
-    )?;
-
-    let result = (|| -> Result<()> {
-        run_tui_process(
-            &config_path,
-            &workspace,
-            "deepseek-v4-flash",
-            |output, writer| {
-                write_input(writer, b"/config\r")?;
-                wait_for_text(output, "Legacy migration")?;
-                write_input(writer, b"\r")?;
-                wait_for_text(output, "migrated 1 legacy connection(s)")?;
-
-                let root = RootConfig::load(&config_path)?;
-                assert_eq!(root.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
-                assert_eq!(
-                    root.agent.connection.as_ref().map(|id| id.as_str()),
-                    Some("deepseek-default")
-                );
-                assert_eq!(root.agent.model, "deepseek-v4-flash");
-                assert!(root.agent.provider.is_empty());
-                assert!(root.providers.is_empty());
-                let serialized = fs::read_to_string(&config_path)?;
-                assert!(!serialized.contains("test-key"));
-                assert!(serialized.contains("source = \"stored\""));
-                let credential_wire: serde_json::Value = serde_json::from_slice(&fs::read(
-                    workspace
-                        .join(".process-home")
-                        .join(".sigil")
-                        .join("credentials.json"),
-                )?)?;
-                assert_eq!(
-                    credential_wire["records"]
-                        .as_object()
-                        .context("credential records should be an object")?
-                        .len(),
-                    1
-                );
-                write_input(writer, &[0x1b])?;
-                thread::sleep(Duration::from_millis(200));
-                Ok(())
-            },
-        )?;
-
-        for entry in walkdir::WalkDir::new(&workspace) {
-            let entry = entry?;
-            if entry.file_type().is_file() {
-                assert!(
-                    !fs::read(entry.path())?
-                        .windows(b"test-key".len())
-                        .any(|window| window == b"test-key"),
-                    "legacy secret survived migration in {}",
-                    entry.path().display()
-                );
-            }
-        }
-        Ok(())
-    })();
-
-    let cleanup = fs::remove_dir_all(&workspace);
-    result?;
     cleanup?;
     Ok(())
 }

@@ -41,11 +41,11 @@
 ### 调整
 
 - Provider API key 存储现在默认使用 owner-only 凭据文件。已有显式 `auto` 配置改为非交互、严格文件落盘；它不会查询旧的原生系统记录。只有显式 `keyring` 模式可能显示系统密码框。
-- 上下文精简默认切换到 cache-aware V3：保持 provider/tool 稳定前缀，多次精简后仍通过带来源的 checkpoint 延续有效意图，按完整回合保留 tail，并以可信 cache 成本做准入。手动压缩首先只生成本地方案，明确区分保持当前上下文、可恢复工具输出清理和完整语义压缩；只有完整语义压缩会发送计费请求。正常 semantic compact 会在当前 route 额外调用一次 LLM，把旧 request 作为可缓存前缀，只将严格摘要指令追加到末尾；模型叙事不具备授权或验证权，实际 cache/输出成本会在最终激活确认前显示。provider-native materialization 在精确 route resume 落地前保持 fail-closed，避免产生尚不能复用结果的计费请求。旧 threshold/tail 字段继续可读，供迁移和回滚使用。
+- 上下文精简只使用 cache-aware V3：保持 provider/tool 稳定前缀，多次精简后仍通过带来源的 checkpoint 延续有效意图，按完整回合保留 tail，并以可信 cache 成本做准入。手动压缩会直接请求一个可恢复语义 checkpoint；正常 semantic compact 会在当前 route 额外调用一次无工具 LLM。provider-native materialization 在精确 route resume 落地前保持 fail-closed。
 - 围绕工作区/会话导航、单一对话任务表面和验证检查器重构桌面 dogfood 壳。它能够回放有边界的已保存消息，在工作区服务保持打开时跨导航保留运行控制，将最终回复与进度/工具输出分开，并提供聚焦的审批、差异、证据和会话草稿交互。
 - 为桌面壳增加统一视觉系统、自适应宽屏/双栏/紧凑布局、跟随系统的亮色与暗色主题、高对比度与减少动画适配、键盘焦点捕获/恢复、只在结束时播报流式运行摘要，以及低至 320 CSS 像素的可用重排。
-- 已有配置与 legacy 配置不会被静默迁移到自动编排。Doctor 会报告 release qualification；`manual + explicit_request_only` 仍是 coarse rollback，且不会删除 Task history。
-- 新 session 默认使用 V2 tool-result schema，并在 semantic compaction 之前先做 deterministic tool-output aging。pre-V2 开发日志明确不兼容：Sigil 以 bounded schema diagnostic 将 inline 正文标记为 `LegacyUnavailable`，保持原文件不变，不回填、改写或猜测缺失 artifact。
+- 不兼容配置会被拒绝，不会迁移。Doctor 会报告 release qualification；`manual + explicit_request_only` 仍是 rollout 的 coarse rollback，且不会删除 Task history。
+- 新 session 默认使用 V2 tool-result schema，并在 semantic compaction 之前先做 deterministic tool-output aging。pre-V2 开发日志明确不兼容：Sigil 以 bounded schema diagnostic 将 inline 正文标记为 `Unavailable`，保持原文件不变，不回填、改写或猜测缺失 artifact。
 
 ### 修复
 

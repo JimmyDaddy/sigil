@@ -46,7 +46,7 @@ pub(crate) enum DesktopIntentStackSummary {
         schema_version: u16,
         stack: DesktopIntentStackDetails,
     },
-    HistoryUnavailable {
+    NotCreated {
         #[serde(rename = "schemaVersion")]
         schema_version: u16,
         #[serde(rename = "safeMessage")]
@@ -222,10 +222,10 @@ impl From<DesktopIntentStackState> for DesktopIntentStackSummary {
                 schema_version,
                 stack: stack.into(),
             },
-            DesktopIntentStackState::HistoryUnavailable {
+            DesktopIntentStackState::NotCreated {
                 schema_version,
                 safe_message,
-            } => Self::HistoryUnavailable {
+            } => Self::NotCreated {
                 schema_version,
                 safe_message,
             },
@@ -461,7 +461,6 @@ fn intent_operation_resolution_label(value: DesktopIntentOperationResolution) ->
 fn intent_operation_error_label(value: DesktopIntentOperationErrorCode) -> &'static str {
     match value {
         DesktopIntentOperationErrorCode::UnsupportedSchema => "unsupported_schema",
-        DesktopIntentOperationErrorCode::IntentHistoryUnavailable => "intent_history_unavailable",
         DesktopIntentOperationErrorCode::UnknownIntent => "unknown_intent",
         DesktopIntentOperationErrorCode::UnknownOperation => "unknown_operation",
         DesktopIntentOperationErrorCode::StaleIntentVersion => "stale_intent_version",

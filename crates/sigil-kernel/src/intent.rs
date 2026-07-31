@@ -1073,7 +1073,6 @@ pub enum IntentOperationResolution {
 #[serde(rename_all = "snake_case")]
 pub enum IntentOperationErrorCode {
     UnsupportedSchema,
-    IntentHistoryUnavailable,
     UnknownIntent,
     UnknownOperation,
     StaleIntentVersion,
@@ -1632,7 +1631,7 @@ pub struct PublicIntentStackV1 {
     pub conflicts: Vec<IntentConflictV1>,
 }
 
-/// Top-level public availability contract for old sessions and active Intent Stacks.
+/// Top-level public availability contract for current durable Intent Stack projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublicIntentStackStateV1 {
@@ -1640,7 +1639,7 @@ pub enum PublicIntentStackStateV1 {
         schema_version: u16,
         stack: PublicIntentStackV1,
     },
-    HistoryUnavailable {
+    NotCreated {
         schema_version: u16,
         safe_message: String,
     },

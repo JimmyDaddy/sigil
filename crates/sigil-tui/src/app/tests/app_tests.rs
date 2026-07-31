@@ -4,8 +4,23 @@ use super::*;
 #[test]
 fn app_uses_provider_supported_default_reasoning_effort() {
     let mut config = test_config();
-    config.agent.provider = "openai_responses".to_owned();
+    config.agent.connection =
+        Some(sigil_kernel::ConnectionId::new("openai-responses").expect("connection id"));
+    config.agent.runtime_provider = "openai_responses".to_owned();
     config.agent.model = "gpt-5".to_owned();
+    config.connections.insert(
+        "openai-responses".to_owned(),
+        serde_json::json!({
+            "label": "OpenAI",
+            "provider": "openai",
+            "protocol": "responses",
+            "base_url": "https://api.openai.com/v1",
+            "credential": {
+                "source": "environment",
+                "name": "SIGIL_OPENAI_RESPONSES_API_KEY"
+            }
+        }),
+    );
 
     let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
@@ -48,12 +63,12 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     let draft = sigil_kernel::plan_draft_created_entry(
         r#"Plan:
 
-```sigil-plan-v1
+```sigil-plan-v2
 {
   "summary": "Inspect README",
   "steps": [
     {
-      "id": "inspect-readme",
+      "step_id": "inspect-readme",
       "title": "Inspect README.md",
       "target_paths": ["README.md"]
     }
@@ -1052,8 +1067,7 @@ fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Re
         "read_agent_result",
         ToolErrorKind::Internal,
         "child agent session has no assistant final answer",
-    )
-    .to_model_message();
+    );
 
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
@@ -1118,7 +1132,7 @@ fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Re
                 },
             },
         )),
-        SessionLogEntry::ToolResult(read_failure),
+        v2_tool_result_from_result(&read_failure),
     ]);
 
     let rows = app.agent_sidebar_rows();
@@ -2325,59 +2339,6 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     setup_app.active_pane = PaneFocus::Composer;
     let action = setup_app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    Ok(())
-}
-
-#[test]
-fn model_command_updates_openai_compat_provider_block() -> Result<()> {
-    let mut config = test_config();
-    config.agent.provider = "openai_compat".to_owned();
-    config.agent.model = "gpt-old".to_owned();
-    config.model_request.request_timeout_secs = 20;
-    config.providers.insert(
-        "openai_compat".to_owned(),
-        json!({
-            "base_url": "https://openai.example.com/v1",
-            "api_key": "openai-key"
-        }),
-    );
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    let connection_id = app
-        .runtime
-        .model_route
-        .as_ref()
-        .expect("legacy route should resolve")
-        .model_ref
-        .connection_id
-        .clone();
-    app.recent_model_refs
-        .push(sigil_kernel::ModelRef::new(connection_id, "gpt-new")?);
-
-    let action = app.execute_slash_command(
-        crate::slash::ResolvedSlashCommand {
-            canonical: "/model".to_owned(),
-            arg: "gpt-new".to_owned(),
-        },
-        "/model gpt-new".to_owned(),
-    )?;
-
-    let Some(AppAction::StartNewModelSession {
-        runtime_config: root_config,
-    }) = action
-    else {
-        panic!("expected runtime config update");
-    };
-    assert_eq!(root_config.agent.provider, "openai_compat");
-    assert_eq!(root_config.agent.model, "gpt-new");
-    assert!(
-        root_config.providers["openai_compat"]
-            .get("model")
-            .is_none()
-    );
-    assert_eq!(
-        root_config.providers["openai_compat"]["api_key"],
-        serde_json::Value::String("openai-key".to_owned())
-    );
     Ok(())
 }
 

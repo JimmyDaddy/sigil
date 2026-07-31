@@ -1543,9 +1543,9 @@ fn config_compaction_step_shows_effective_context_window_source() {
     assert!(detail.contains("- Effective window"));
     assert!(detail.contains("1,000,000 tokens  source=provider"));
     assert!(detail.contains("Fallback window"));
-    assert!(detail.contains("Soft threshold"));
-    assert!(detail.contains("Hard threshold"));
-    assert!(detail.contains("Tail messages"));
+    assert!(!detail.contains("Soft threshold"));
+    assert!(!detail.contains("Hard threshold"));
+    assert!(!detail.contains("Tail messages"));
     assert!(detail.contains("[details]"));
     assert!(detail.contains("selected: Auto compact"));
     assert!(!detail.contains("context_window_tokens"));
@@ -1554,11 +1554,10 @@ fn config_compaction_step_shows_effective_context_window_source() {
 #[test]
 fn config_compaction_step_uses_fallback_for_unknown_provider_window() {
     let mut config = test_config();
-    config.config_version = Some(CONFIG_VERSION_V2);
-    config.agent.provider.clear();
+    config.config_version = CONFIG_VERSION_V2;
+    config.agent.runtime_provider.clear();
     config.agent.connection = Some(ConnectionId::new("custom-default").expect("connection id"));
     config.agent.model = "custom-model".to_owned();
-    config.providers.clear();
     config.connections = std::collections::BTreeMap::from([(
         "custom-default".to_owned(),
         serde_json::json!({
@@ -3516,8 +3515,6 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.provider_fim_model = "deepseek-v4-flash".to_owned();
     state.draft.permission_mode = sigil_kernel::PermissionMode::AutoEdit;
     state.draft.memory_enabled = false;
-    state.draft.compaction_soft_threshold_ratio = "0.40".to_owned();
-    state.draft.compaction_hard_threshold_ratio = "0.75".to_owned();
     state.draft.compaction_context_window_tokens = "64000".to_owned();
     state.draft.code_intelligence_enabled = true;
     state.draft.code_intelligence_server_startup = sigil_kernel::CodeIntelStartup::Eager;
@@ -3542,8 +3539,6 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
         sigil_kernel::PermissionMode::AutoEdit
     );
     assert!(!root_config.memory.enabled);
-    assert_eq!(root_config.compaction.soft_threshold_ratio, 0.40);
-    assert_eq!(root_config.compaction.hard_threshold_ratio, 0.75);
     assert_eq!(root_config.compaction.context_window_tokens, Some(64_000));
     assert!(root_config.code_intelligence.enabled);
     assert_eq!(
@@ -3575,8 +3570,6 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
         sigil_kernel::PermissionMode::AutoEdit
     );
     assert!(!saved.memory.enabled);
-    assert_eq!(saved.compaction.soft_threshold_ratio, 0.40);
-    assert_eq!(saved.compaction.hard_threshold_ratio, 0.75);
     assert_eq!(saved.compaction.context_window_tokens, Some(64_000));
     assert!(saved.code_intelligence.enabled);
     assert_eq!(
@@ -3602,8 +3595,8 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
             .any(|line| line.trim_start().starts_with("context_window_tokens ="))
     );
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
-    assert_eq!(saved.config_version, Some(CONFIG_VERSION_V2));
-    assert_eq!(saved.agent.provider, "");
+    assert_eq!(saved.config_version, CONFIG_VERSION_V2);
+    assert_eq!(saved.agent.runtime_provider, "");
     let loaded = sigil_runtime::provider_connections::load_provider_connections(&saved);
     let default_model = loaded.default_model.as_ref().expect("default route");
     let connection = &loaded.connections[&default_model.connection_id].config;
@@ -3680,337 +3673,6 @@ fn config_verification_auto_run_persists_to_config() -> Result<()> {
         saved.verification.auto_run,
         sigil_kernel::VerificationAutoRunPolicy::TrustedOnly
     );
-    Ok(())
-}
-
-#[test]
-fn config_legacy_environment_migration_accepts_real_terminal_shifted_e() -> Result<()> {
-    let _env_guard = crate::test_env::lock();
-    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "environment-secret");
-    let legacy: RootConfig = toml::from_str(
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-api_key = "legacy-secret"
-"#,
-    )?;
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &legacy);
-    app.open_config_panel();
-    app.config_state
-        .as_mut()
-        .expect("config state")
-        .selected_field = Some(ConfigField::ProviderApiKey);
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT))?;
-
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("confirmed environment credential migration")
-    );
-    assert!(app.config_is_dirty());
-    Ok(())
-}
-
-#[test]
-fn config_enter_migrates_all_legacy_keys_and_publishes_v2() -> Result<()> {
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let source = r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-private"
-
-[providers.deepseek]
-base_url = "https://private.deepseek.example/v1"
-api_key = "deepseek-legacy-secret"
-
-[providers.anthropic]
-base_url = "https://api.anthropic.com"
-api_key = "anthropic-legacy-secret"
-"#;
-    std::fs::write(&config_path, source)?;
-    let legacy = RootConfig::parse_persisted(source)?;
-    let mut app = AppState::from_root_config(&config_path, &legacy);
-    let current_session_route = app.runtime.model_route.clone();
-    app.open_config_panel();
-    app.config_state
-        .as_mut()
-        .expect("config state")
-        .selected_field = Some(ConfigField::ProviderName);
-
-    let detail = app.config_detail_lines().join("\n");
-    assert!(detail.contains("Enter migrate"));
-    assert!(detail.contains("atomically upgrades every legacy connection"));
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    let Some(AppAction::ConfigSaved { root_config }) = action else {
-        panic!("expected migrated config save");
-    };
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
-    assert_eq!(
-        root_config
-            .agent
-            .connection
-            .as_ref()
-            .map(ToString::to_string),
-        Some("deepseek-default".to_owned())
-    );
-    assert_eq!(root_config.agent.model, "deepseek-private");
-    assert_eq!(app.runtime.model_route, current_session_route);
-    let persisted = std::fs::read_to_string(config_path)?;
-    assert!(persisted.contains("source = \"stored\""));
-    assert!(!persisted.contains("deepseek-legacy-secret"));
-    assert!(!persisted.contains("anthropic-legacy-secret"));
-    Ok(())
-}
-
-#[test]
-fn config_enter_migrates_environment_only_legacy_config() -> Result<()> {
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let source = r#"
-[agent]
-provider = "anthropic"
-model = "claude-private"
-
-[providers.anthropic]
-base_url = "https://api.anthropic.com"
-"#;
-    std::fs::write(&config_path, source)?;
-    let legacy = RootConfig::parse_persisted(source)?;
-    let mut app = AppState::from_root_config(&config_path, &legacy);
-    app.open_config_panel();
-
-    let detail = app.config_detail_lines().join("\n");
-    assert!(detail.contains("0 inline key(s)"));
-    assert!(detail.contains("1 environment ref(s)"));
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    let Some(AppAction::ConfigSaved { root_config }) = action else {
-        panic!("expected environment-only migration save");
-    };
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
-    assert_eq!(root_config.agent.model, "claude-private");
-    let persisted = std::fs::read_to_string(config_path)?;
-    assert!(persisted.contains("source = \"environment\""));
-    assert!(persisted.contains("SIGIL_ANTHROPIC_API_KEY"));
-    Ok(())
-}
-
-#[test]
-fn config_recovery_marker_survives_reopen_and_blocks_blind_legacy_retry() -> Result<()> {
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let marker_path = temp
-        .path()
-        .join("sigil.toml.provider-migration-recovery-v1");
-    let source = r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-private"
-
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-api_key = "legacy-secret"
-"#;
-    std::fs::write(&config_path, source)?;
-    std::fs::write(
-        &marker_path,
-        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
-    )?;
-    let legacy = RootConfig::parse_persisted(source)?;
-    let mut app = AppState::from_root_config(&config_path, &legacy);
-    app.open_config_panel();
-
-    let detail = app.config_detail_lines().join("\n");
-    assert!(detail.contains("Migration recovery"));
-    assert!(detail.contains("Enter recheck"));
-    assert!(!detail.contains("Enter migrate"));
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert!(action.is_none());
-    assert!(!app.has_modal());
-    assert_eq!(
-        app.last_notice(),
-        Some("resolve provider migration recovery before adding connections")
-    );
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some(
-            "provider migration recovery remains blocked; repair the config and press Enter to recheck"
-        )
-    );
-    assert_eq!(std::fs::read_to_string(&config_path)?, source);
-    assert!(marker_path.exists());
-    Ok(())
-}
-
-#[test]
-fn config_recovery_marker_keeps_add_blocked_when_persisted_config_is_malformed() -> Result<()> {
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let marker_path = temp
-        .path()
-        .join("sigil.toml.provider-migration-recovery-v1");
-    std::fs::write(&config_path, "not valid toml = [")?;
-    std::fs::write(
-        &marker_path,
-        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
-    )?;
-    let config = v2_test_config();
-    let mut app = AppState::from_root_config(&config_path, &config);
-
-    app.open_config_panel();
-
-    assert!(
-        app.config_detail_lines()
-            .join("\n")
-            .contains("Migration recovery")
-    );
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert!(action.is_none());
-    assert!(!app.has_modal());
-    assert_eq!(
-        app.last_notice(),
-        Some("resolve provider migration recovery before adding connections")
-    );
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(action.is_none());
-    assert!(
-        app.last_notice()
-            .is_some_and(|notice| notice.contains("provider migration recheck unavailable"))
-    );
-    assert!(marker_path.exists());
-    Ok(())
-}
-
-#[test]
-fn config_recovery_marker_clears_only_after_a_healthy_v2_recheck() -> Result<()> {
-    let _env_guard = crate::test_env::lock();
-    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "environment-secret");
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let marker_path = temp
-        .path()
-        .join("sigil.toml.provider-migration-recovery-v1");
-    let config = v2_test_config();
-    config.save(&config_path)?;
-    std::fs::write(
-        &marker_path,
-        b"sigil-provider-migration-recovery-v1\nreconcile_required\n",
-    )?;
-    let mut app = AppState::from_root_config(&config_path, &config);
-    let current_session_route = app.runtime.model_route.clone();
-    app.open_config_panel();
-
-    assert!(
-        app.config_detail_lines()
-            .join("\n")
-            .contains("Migration recovery")
-    );
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    let Some(AppAction::ConfigSaved { root_config }) = action else {
-        panic!("healthy V2 recheck should publish the refreshed runtime snapshot");
-    };
-    assert_eq!(root_config.config_version, Some(CONFIG_VERSION_V2));
-    assert!(!marker_path.exists());
-    assert_eq!(app.runtime.model_route, current_session_route);
-    assert_eq!(
-        app.last_notice(),
-        Some("provider migration recovery cleared after healthy V2 recheck")
-    );
-    assert!(
-        !app.config_detail_lines()
-            .join("\n")
-            .contains("Migration recovery")
-    );
-    Ok(())
-}
-
-#[test]
-fn config_enter_rejects_legacy_migration_after_source_changes() -> Result<()> {
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let source = r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-private"
-
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-api_key = "legacy-secret"
-"#;
-    std::fs::write(&config_path, source)?;
-    let legacy = RootConfig::parse_persisted(source)?;
-    let mut app = AppState::from_root_config(&config_path, &legacy);
-    app.open_config_panel();
-
-    let changed_source = format!("# changed outside Sigil\n{source}");
-    std::fs::write(&config_path, &changed_source)?;
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some(
-            "provider config changed since it was opened; close and reopen /config before migrating"
-        )
-    );
-    assert_eq!(std::fs::read_to_string(config_path)?, changed_source);
-    Ok(())
-}
-
-#[test]
-fn config_enter_rejects_relative_legacy_migration_after_source_changes() -> Result<()> {
-    let temp = tempfile::Builder::new()
-        .prefix(".sigil-relative-config-test")
-        .tempdir_in(".")?;
-    let config_path = std::path::PathBuf::from(
-        temp.path()
-            .file_name()
-            .context("relative config test directory should have a name")?,
-    )
-    .join("sigil.toml");
-    assert!(!config_path.is_absolute());
-    let source = r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-private"
-
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-api_key = "legacy-secret"
-"#;
-    std::fs::write(&config_path, source)?;
-    let legacy = RootConfig::parse_persisted(source)?;
-    let mut app = AppState::from_root_config(&config_path, &legacy);
-    app.open_config_panel();
-
-    let changed_source = format!("# changed outside Sigil\n{source}");
-    std::fs::write(&config_path, &changed_source)?;
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some(
-            "provider config changed since it was opened; close and reopen /config before migrating"
-        )
-    );
-    assert_eq!(std::fs::read_to_string(config_path)?, changed_source);
     Ok(())
 }
 
@@ -4343,8 +4005,8 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
     };
     assert_eq!(saved_path, config_path);
     assert_eq!(root_config.workspace.root, ".");
-    assert_eq!(root_config.config_version, Some(CONFIG_VERSION_V2));
-    assert_eq!(root_config.agent.provider, "");
+    assert_eq!(root_config.config_version, CONFIG_VERSION_V2);
+    assert_eq!(root_config.agent.runtime_provider, "");
     assert_eq!(
         root_config
             .agent
@@ -4355,8 +4017,8 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
     );
     assert_eq!(root_config.agent.model, "deepseek-v4-pro");
     let saved = RootConfig::load(&saved_path)?;
-    assert_eq!(saved.config_version, Some(CONFIG_VERSION_V2));
-    assert_eq!(saved.agent.provider, "");
+    assert_eq!(saved.config_version, CONFIG_VERSION_V2);
+    assert_eq!(saved.agent.runtime_provider, "");
     assert_eq!(
         saved.agent.connection.as_ref().map(ConnectionId::as_str),
         Some("deepseek-default")
@@ -4387,14 +4049,7 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
     assert!(!saved_raw.contains("test-inline-key"));
     assert!(saved_raw.contains("[model_request]"));
     assert!(saved_raw.contains("stream_idle_timeout_secs = 180"));
-    assert!(
-        !saved_raw
-            .split("[providers.deepseek]")
-            .nth(1)
-            .unwrap_or_default()
-            .lines()
-            .any(|line| line.trim_start().starts_with("request_timeout_secs ="))
-    );
+    assert!(!saved_raw.contains("[providers."));
     assert!(!saved_raw.contains("fallback_context_window_tokens"));
     assert!(
         !saved_raw
@@ -4968,23 +4623,6 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .draft
             .compaction_enabled
     );
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should exist");
-        state.selected_field = Some(ConfigField::CompactionStrategy);
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(
-        app.config_state
-            .as_ref()
-            .expect("config state should exist")
-            .draft
-            .compaction_strategy,
-        sigil_kernel::CompactionStrategy::LegacyV2
-    );
-
     {
         let state = app
             .config_state

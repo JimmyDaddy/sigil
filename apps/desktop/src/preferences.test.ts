@@ -19,7 +19,7 @@ describe("desktop provider model preferences", () => {
     });
   });
 
-  it("does not guess a connection for a legacy bare model preference", () => {
+  it("does not guess a connection for a removed bare model preference", () => {
     window.localStorage.setItem(
       "sigil.desktop.default-models.v1",
       JSON.stringify({ "workspace-1": "deepseek-v4-pro" }),

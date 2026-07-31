@@ -21,7 +21,7 @@ use crate::runner::WorkerMessage;
 
 fn test_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -31,8 +31,10 @@ fn test_config() -> RootConfig {
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(
+                sigil_kernel::ConnectionId::new("deepseek-default").expect("valid test connection"),
+            ),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -48,8 +50,16 @@ fn test_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
-        connections: BTreeMap::new(),
+        connections: BTreeMap::from([(
+            "deepseek-default".to_owned(),
+            serde_json::json!({
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {"source": "environment", "name": "SIGIL_API_KEY"}
+            }),
+        )]),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -1011,12 +1021,12 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     let draft = sigil_kernel::plan_draft_created_entry(
         r#"Plan:
 
-```sigil-plan-v1
+```sigil-plan-v2
 {
   "summary": "Inspect then implement",
   "steps": [
     {
-      "id": "inspect",
+      "step_id": "inspect",
       "title": "Inspect README.md",
       "target_paths": ["README.md"]
     }

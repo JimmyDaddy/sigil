@@ -61,9 +61,8 @@ use crate::{
         ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope, ToolOperation,
     },
     plan::{
-        PlanApprovalProjection, PlanApprovedEntry, PlanArtifactProjection,
-        PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanPermissionGrantedEntry,
-        TaskCreatedFromPlanEntry,
+        PlanArtifactProjection, PlanDecisionRecordedEntry, PlanDraftCreatedEntry,
+        PlanPermissionGrantedEntry, TaskCreatedFromPlanEntry,
     },
     plugin::{
         PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginManifestSnapshot,
@@ -293,7 +292,7 @@ pub use stats::session_stats_from_entries;
 pub(crate) use store::session_entry_from_domain_event;
 pub use store::{
     JsonlSessionStore, SessionIoBusyError, SessionIoBusyKind, SessionIoLockMetricsSnapshot,
-    SessionStreamCompatibilityError, session_io_lock_metrics,
+    session_io_lock_metrics,
 };
 pub use tool_artifact::{
     TOOL_ARTIFACT_DESCRIPTOR_SCHEMA_VERSION, TOOL_ARTIFACT_MAX_BYTES,
@@ -302,7 +301,7 @@ pub use tool_artifact::{
     TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES, TOOL_ARTIFACT_SEARCH_MAX_MATCHES,
     TOOL_ARTIFACT_SESSION_BUDGET_BYTES, TOOL_DISPLAY_VIEW_MAX_BYTES, TOOL_MODEL_VIEW_MAX_BYTES,
     TOOL_MODEL_VIEW_SCHEMA_VERSION, TOOL_RESULT_EVENT_TARGET_BYTES,
-    TOOL_RESULT_LEGACY_INLINE_MAX_BYTES, TOOL_RESULT_RECORDED_SCHEMA_VERSION,
+    TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES, TOOL_RESULT_RECORDED_SCHEMA_VERSION,
     ToolArtifactAvailability, ToolArtifactBindingV1, ToolArtifactBudgetedReadV1,
     ToolArtifactCaptureSink, ToolArtifactCompleteness, ToolArtifactDescriptorV1,
     ToolArtifactEncoding, ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactId,
@@ -350,8 +349,14 @@ use stats::*;
 use store::*;
 
 #[cfg(test)]
-#[path = "tests/network_legacy_session_tests.rs"]
-mod network_legacy_tests;
+pub(crate) fn append_current_test_session_identity(store: &JsonlSessionStore) -> Result<()> {
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "test".to_owned(),
+        model_name: "model".to_owned(),
+        resolved_model_route: None,
+    }))
+}
+
 #[cfg(test)]
 #[path = "tests/provider_native_compaction_tests.rs"]
 mod provider_native_compaction_tests;

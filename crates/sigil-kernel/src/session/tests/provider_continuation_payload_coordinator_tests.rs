@@ -21,6 +21,29 @@ fn profile(id: &str) -> VersionedProfileIdentity {
     VersionedProfileIdentity::from_content(id, 1, id.as_bytes())
 }
 
+fn cache_layout_proof() -> crate::CacheLayoutProofV1 {
+    crate::CacheLayoutProofV1::from_request(
+        &crate::CompletionRequest {
+            provider_name: "test-provider".to_owned(),
+            model_name: "test-model".to_owned(),
+            messages: vec![crate::ModelMessage::user("current request")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+        None,
+    )
+    .expect("cache layout proof")
+}
+
 fn append_started_manifest(
     store: &JsonlSessionStore,
     payload: &[u8],
@@ -259,7 +282,7 @@ fn append_observed_physical_start(store: &JsonlSessionStore) -> Result<()> {
         request_material_fingerprint: hmac('a'),
         provider_name: "test-provider".to_owned(),
         model_name: "test-model".to_owned(),
-        cache_layout_proof: None,
+        cache_layout_proof: Some(cache_layout_proof()),
         started_at_unix_ms: 1,
     };
     store

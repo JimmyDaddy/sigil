@@ -118,7 +118,7 @@ When the latest completed turn contains supported file edits, press `Ctrl-R` to 
 
 ### Intent Stack review
 
-When the current session has accepted Intent Stack history, press `Alt-S` or run `/intents` to review each intent, its dependencies, verification state, retained artifacts, and conflicts. Select an intent with `Up/Down`; `D` creates an exact Drop preview, and `Enter` confirms only that reviewed preview. Shared, drifted, unavailable, read-only, or out-of-scope contributions remain visible but cannot be dropped. Shell, network, remote, and other unsupported side effects are never undone. Older sessions without durable intent history show an explicit unavailable state rather than a guessed stack.
+When the current session has accepted Intent Stack history, press `Alt-S` or run `/intents` to review each intent, its dependencies, verification state, retained artifacts, and conflicts. Select an intent with `Up/Down`; `D` creates an exact Drop preview, and `Enter` confirms only that reviewed preview. Shared, drifted, unavailable, read-only, or out-of-scope contributions remain visible but cannot be dropped. Shell, network, remote, and other unsupported side effects are never undone. A current session without accepted durable intent history shows an explicit unavailable state rather than a guessed stack.
 
 ## Long Context and Compaction
 

@@ -264,7 +264,12 @@ fn portable_fold_projection_keeps_protected_messages_before_the_fold_cursor() ->
     session.append_user_message(ModelMessage::user("latest request"))?;
 
     let records = JsonlSessionStore::read_event_records(store.path())?;
-    let plan = CompactionFoldPlan::from_records(&records, 1)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records,
+        AdaptiveTailPolicyV3::default(),
+        u64::MAX / 4,
+        None,
+    )?;
     let unsafe_tool_call = plan
         .protected_events
         .iter()
@@ -352,34 +357,6 @@ fn applied_v2_without_task_memory_still_activates_its_durable_boundary() -> Resu
     );
     Ok(())
 }
-
-#[test]
-fn build_request_rejects_an_unsupported_legacy_stream_before_memory_snapshot_write() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let legacy = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("old")))?;
-    std::fs::write(&path, format!("{legacy}\n"))?;
-    let store = JsonlSessionStore::new(&path)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
-    let before = std::fs::read(&path)?;
-
-    let error = session
-        .build_request(
-            temp.path(),
-            &crate::MemoryConfig { enabled: false },
-            Vec::new(),
-            None,
-            None,
-            None,
-        )
-        .expect_err("legacy stream must fail before request-side durable writes");
-
-    assert!(format!("{error:#}").contains("unsupported legacy SessionLogEntry format"));
-    assert_eq!(std::fs::read(&path)?, before);
-    assert!(session.entries().is_empty());
-    Ok(())
-}
-
 #[test]
 fn pre_turn_candidate_request_keeps_exact_transient_input_out_of_session_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;

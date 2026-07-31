@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 use super::*;
 
 /// Stable system-level contract for the isolated task planner.
@@ -378,47 +380,29 @@ pub(super) fn task_synthesis_prompt(
                 step.step_id.as_str()
             );
         }
-        let result = task
-            .participant_attempts_for(
-                TaskParticipantPurpose::Step,
-                Some(plan_version),
-                Some(&step.step_id),
-            )
-            .into_iter()
-            .rev()
-            .find_map(|attempt| {
-                task.participant_results
-                    .get(&attempt.attempt_id)
-                    .map(|result| (attempt, result))
-            })
-            .map(|(attempt, result)| {
-                let result_ref = result
-                    .final_answer_ref
-                    .as_ref()
-                    .map(|reference| {
-                        format!(
-                            "{}#{}",
-                            reference.session_ref.as_path().display(),
-                            reference.message_id
-                        )
-                    })
-                    .unwrap_or_else(|| "-".to_owned());
+        let (attempt, result) = completed_step_participant_result(task, plan_version, step)
+            .context(format!(
+                "completed task step {} has no participant result",
+                step.step_id.as_str()
+            ))?;
+        let result_ref = result
+            .final_answer_ref
+            .as_ref()
+            .map(|reference| {
                 format!(
-                    "- {} [{}]\n  result_ref: {}\n  summary: {}",
-                    step.title,
-                    step.step_id.as_str(),
-                    result_ref,
-                    task_participant_handoff_text(session, attempt, result)
+                    "{}#{}",
+                    reference.session_ref.as_path().display(),
+                    reference.message_id
                 )
             })
-            .unwrap_or_else(|| {
-                format!(
-                    "- {} [{}]\n  result_ref: legacy\n  summary: {}",
-                    step.title,
-                    step.step_id.as_str(),
-                    step_projection.summary.as_deref().unwrap_or("completed")
-                )
-            });
+            .unwrap_or_else(|| "-".to_owned());
+        let result = format!(
+            "- {} [{}]\n  result_ref: {}\n  summary: {}",
+            step.title,
+            step.step_id.as_str(),
+            result_ref,
+            task_participant_handoff_text(session, attempt, result)
+        );
         results.push(result);
     }
 
@@ -433,6 +417,73 @@ pub(super) fn task_synthesis_prompt(
             .join("\n"),
         results.join("\n")
     ))
+}
+
+fn completed_step_participant_result<'a>(
+    task: &'a TaskRunProjection,
+    plan_version: u32,
+    step: &TaskStepSpec,
+) -> Option<(
+    &'a TaskParticipantAttemptEntry,
+    &'a TaskParticipantResultEntry,
+)> {
+    participant_result_for_plan_step(task, plan_version, &step.step_id).or_else(|| {
+        task.superseded_plan_versions
+            .iter()
+            .rev()
+            .copied()
+            .filter(|source_version| *source_version < plan_version)
+            .find_map(|source_version| {
+                let source_plan = task.plans.get(&source_version)?;
+                let source_step = source_plan
+                    .steps
+                    .iter()
+                    .find(|candidate| candidate.step_id == step.step_id)?;
+                if !task_step_specs_match(source_step, step)
+                    || task
+                        .steps
+                        .get(&(source_version, step.step_id.clone()))
+                        .is_none_or(|projected| projected.status != TaskStepStatus::Completed)
+                {
+                    return None;
+                }
+                participant_result_for_plan_step(task, source_version, &step.step_id)
+            })
+    })
+}
+
+fn participant_result_for_plan_step<'a>(
+    task: &'a TaskRunProjection,
+    plan_version: u32,
+    step_id: &TaskStepId,
+) -> Option<(
+    &'a TaskParticipantAttemptEntry,
+    &'a TaskParticipantResultEntry,
+)> {
+    task.participant_attempts_for(
+        TaskParticipantPurpose::Step,
+        Some(plan_version),
+        Some(step_id),
+    )
+    .into_iter()
+    .rev()
+    .find_map(|attempt| {
+        task.participant_results
+            .get(&attempt.attempt_id)
+            .map(|result| (attempt, result))
+    })
+}
+
+fn task_step_specs_match(left: &TaskStepSpec, right: &TaskStepSpec) -> bool {
+    left.step_id == right.step_id
+        && left.title == right.title
+        && left.display_name == right.display_name
+        && left.detail == right.detail
+        && left.role == right.role
+        && left.depends_on == right.depends_on
+        && left.intent_refs == right.intent_refs
+        && left.effective_mode() == right.effective_mode()
+        && left.effective_isolation() == right.effective_isolation()
 }
 
 pub(super) fn role_step_prompt(

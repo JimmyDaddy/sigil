@@ -1135,14 +1135,6 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2"
     ));
 
-    app.composer.input = "/queue now 2".to_owned();
-    app.composer.input_cursor = app.composer.input.chars().count();
-    let now = app.submit_input()?;
-    assert!(matches!(
-        now,
-        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
-            if queue_id.as_str() == "queue_2"
-    ));
     app.composer.input = "/queue interrupt 2".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
     let interrupt = app.submit_input()?;
@@ -1183,7 +1175,6 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         "/queue resume",
         "/queue next",
         "/queue send 1",
-        "/queue send-now 1",
         "/queue interrupt 1",
     ] {
         app.composer.input = command.to_owned();
@@ -1200,10 +1191,15 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         app.composer.input_cursor = app.composer.input.chars().count();
         assert!(app.submit_input()?.is_some());
     }
-    app.composer.input = "/queue now missing".to_owned();
-    app.composer.input_cursor = app.composer.input.chars().count();
-    assert!(app.submit_input()?.is_none());
-    assert_eq!(app.last_notice(), Some("queue item not found"));
+    for removed_alias in ["/queue now 1", "/queue send-now 1"] {
+        app.composer.input = removed_alias.to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
+        assert!(app.submit_input()?.is_none());
+        assert_eq!(
+            app.last_notice(),
+            Some("usage: /queue <show|next|interrupt|edit|delete>")
+        );
+    }
     app.composer.input = "/queue nonsense".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());

@@ -330,7 +330,7 @@ Then("Desktop completes one durable task with two overlapping read Agents", asyn
   }
 });
 
-When("an unsupported legacy conversation source is stored in the workspace", () => {
+When("an unsupported conversation source is stored in the workspace", () => {
   const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
   assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
   const currentSession = filesUnder(runtimeRoot).find((path) =>
@@ -343,9 +343,9 @@ When("an unsupported legacy conversation source is stored in the workspace", () 
     unavailableSessionPath,
     `${JSON.stringify({
       user: {
-        id: "desktop-e2e-legacy-message",
+        id: "desktop-e2e-unsupported-message",
         role: "user",
-        content: "legacy conversation source",
+        content: "unsupported conversation source",
         tool_calls: [],
         tool_call_id: null,
       },

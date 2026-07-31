@@ -378,7 +378,7 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
         .path()
         .join(".sigil/sessions/session-task-guidance-e2e.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let task_id = TaskId::new("task_guidance_e2e")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -649,7 +649,7 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
         .path()
         .join(".sigil/sessions/session-auto-handoff-recovery-e2e.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let parent_session_ref = SessionRef::new_relative(
         session_log_path
             .file_name()
@@ -969,7 +969,7 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
   "summary": "Inspect approved README plan",
   "steps": [
     {
-      "id": "inspect-approved-plan",
+      "step_id": "inspect-approved-plan",
       "title": "Inspect README.md",
       "role": "executor",
       "depends_on": [],
@@ -978,7 +978,7 @@ fn plan_handoff_run_now_promotes_approved_dag_without_replanning() -> Result<()>
       "target_paths": ["README.md"]
     },
     {
-      "id": "report-typo-status",
+      "step_id": "report-typo-status",
       "title": "Report whether the approved typo fix is needed",
       "role": "executor",
       "depends_on": ["inspect-approved-plan"],

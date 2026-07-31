@@ -282,17 +282,17 @@ fn global_projection_recovery_reports_cache_invalidation_and_sources_reconcile_a
 }
 
 #[test]
-fn projection_preserves_invalid_and_legacy_sources_without_message_content() -> Result<()> {
+fn projection_preserves_invalid_sources_without_message_content() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
     fs::create_dir_all(&lifecycle.session_dir)?;
     fs::write(lifecycle.session_dir.join("invalid.jsonl"), "not-json\n")?;
     fs::write(
-        lifecycle.session_dir.join("legacy.jsonl"),
+        lifecycle.session_dir.join("invalid-session-entry.jsonl"),
         format!(
             "{}\n",
             serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(
-                "legacy body must not be copied",
+                "invalid body must not be copied",
             )))?
         ),
     )?;
@@ -306,8 +306,8 @@ fn projection_preserves_invalid_and_legacy_sources_without_message_content() -> 
     assert!(rows.iter().all(|row| row.session_id.is_none()));
     assert!(
         !database_bytes
-            .windows("legacy body must not be copied".len())
-            .any(|window| window == b"legacy body must not be copied")
+            .windows("invalid body must not be copied".len())
+            .any(|window| window == b"invalid body must not be copied")
     );
     Ok(())
 }
@@ -327,10 +327,10 @@ fn stable_degraded_sources_reuse_generation_across_reconciled_pages() -> Result<
     }
     fs::write(lifecycle.session_dir.join("invalid.jsonl"), "not-json\n")?;
     fs::write(
-        lifecycle.session_dir.join("legacy.jsonl"),
+        lifecycle.session_dir.join("invalid-session-entry.jsonl"),
         format!(
             "{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("invalid")))?
         ),
     )?;
     projection.rebuild()?;
@@ -381,50 +381,6 @@ fn projection_rejects_incompatible_schema_without_deleting_it() -> Result<()> {
         }
     ));
     assert!(projection.database_path().exists());
-    Ok(())
-}
-
-#[test]
-fn projection_migrates_v1_and_rebuilds_rows_from_current_durable_semantics() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
-    fs::create_dir_all(&lifecycle.session_dir)?;
-    fs::write(
-        lifecycle.session_dir.join("broken.jsonl"),
-        b"not a session stream\n",
-    )?;
-    projection.rebuild()?;
-
-    let connection = Connection::open(projection.database_path())?;
-    connection.execute(
-        "UPDATE session_catalog_entry_v1 \
-         SET source_state = 'ready', session_id = 'stale-projected-identity'",
-        [],
-    )?;
-    connection.execute(
-        "ALTER TABLE session_catalog_workspace_v1 DROP COLUMN projection_revision",
-        [],
-    )?;
-    connection.pragma_update(None, "user_version", 1)?;
-    drop(connection);
-
-    let report = projection.reconcile()?;
-    let row = projection.list_workspace_entries()?.remove(0);
-    let connection = Connection::open(projection.database_path())?;
-    let user_version: i64 =
-        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let projection_revision: i64 = connection.query_row(
-        "SELECT projection_revision FROM session_catalog_workspace_v1 \
-         WHERE workspace_id = 'workspace-1'",
-        [],
-        |row| row.get(0),
-    )?;
-
-    assert!(report.generation_changed);
-    assert_eq!(row.source_state, LocalSessionCatalogState::Invalid);
-    assert!(row.session_id.is_none());
-    assert_eq!(user_version, i64::from(SESSION_CATALOG_SCHEMA_VERSION));
-    assert_eq!(projection_revision, 1);
     Ok(())
 }
 
@@ -620,7 +576,7 @@ fn invalid_catalog_source_can_only_be_quarantined_with_exact_metadata() -> Resul
 }
 
 #[test]
-fn invalid_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Result<()> {
+fn invalid_catalog_source_delete_requires_exact_metadata_and_an_idle_writer() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
     fs::create_dir_all(&lifecycle.session_dir)?;
@@ -668,27 +624,24 @@ fn invalid_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Re
 }
 
 #[test]
-fn legacy_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Result<()> {
+fn invalid_catalog_source_can_be_permanently_deleted_with_exact_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
     fs::create_dir_all(&lifecycle.session_dir)?;
-    let source = lifecycle.session_dir.join("legacy.jsonl");
+    let source = lifecycle.session_dir.join("invalid.jsonl");
     fs::write(
         &source,
         format!(
             "{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("invalid")))?
         ),
     )?;
     projection.rebuild()?;
     let entry = projection.list_workspace_entries()?.remove(0);
 
-    assert_eq!(
-        entry.source_state,
-        LocalSessionCatalogState::UnsupportedLegacy
-    );
+    assert_eq!(entry.source_state, LocalSessionCatalogState::Invalid);
     projection.delete_invalid_source(
-        "legacy.jsonl",
+        "invalid.jsonl",
         entry.source_bytes,
         entry.source_modified_at_unix_ms,
     )?;

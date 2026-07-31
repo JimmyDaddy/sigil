@@ -70,7 +70,7 @@ pub(in crate::runner) fn cancel_terminal_task(
     task_id: String,
 ) -> std::result::Result<(TerminalTaskEntry, Vec<SessionLogEntry>), String> {
     let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.provider,
+        &root_config.agent.runtime_provider,
         &root_config.agent.model,
         current_session_log_path,
         current_session.as_ref(),

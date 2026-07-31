@@ -21,9 +21,9 @@ use crate::{
 /// Projection schema for append-only Intent admission state.
 pub const INTENT_ADMISSION_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
-/// Stable adapter text for sessions that predate Intent Stack durable facts.
-pub const INTENT_HISTORY_UNAVAILABLE_MESSAGE: &str =
-    "Intent history is unavailable for this session.";
+/// Stable adapter text for a current session before its first Intent Stack admission.
+pub const INTENT_STACK_NOT_CREATED_MESSAGE: &str =
+    "No Intent Stack has been created in this session.";
 /// Host alias for the single automatically admitted user-declared root.
 pub const USER_DECLARED_ROOT_INTENT_ALIAS: &str = "root";
 
@@ -660,7 +660,7 @@ impl IntentStackProjectionV1 {
             .map(|header| header.workspace_id.as_str())
     }
 
-    /// Produces the bounded adapter contract without guessing legacy history or incomplete state.
+    /// Produces the bounded adapter contract without guessing unavailable or incomplete state.
     ///
     /// # Errors
     ///
@@ -703,9 +703,9 @@ impl IntentStackProjectionV1 {
         operations: Option<&crate::IntentOperationProjectionV1>,
     ) -> Result<PublicIntentStackStateV1> {
         let Some(header) = &self.header else {
-            return Ok(PublicIntentStackStateV1::HistoryUnavailable {
+            return Ok(PublicIntentStackStateV1::NotCreated {
                 schema_version: INTENT_PUBLIC_DTO_SCHEMA_VERSION,
-                safe_message: INTENT_HISTORY_UNAVAILABLE_MESSAGE.to_owned(),
+                safe_message: INTENT_STACK_NOT_CREATED_MESSAGE.to_owned(),
             });
         };
         if self.pending_acceptance.is_some()
@@ -1425,8 +1425,8 @@ pub fn append_chat_root_intent_admission(
 impl Session {
     /// Rebuilds Intent admission state from the durable stream.
     ///
-    /// In-memory/legacy sessions have no authoritative intent history and therefore return an
-    /// empty projection whose public state is `history_unavailable`.
+    /// In-memory sessions have no authoritative intent state and therefore return an
+    /// empty projection whose public state is `not_created`.
     pub fn intent_stack_projection(&self) -> Result<IntentStackProjectionV1> {
         let Some(store) = self.durable_store() else {
             return Ok(IntentStackProjectionV1::default());

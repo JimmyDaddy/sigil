@@ -2,13 +2,11 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ControlEntry, NetworkEffect, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalProjection, PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection,
-    PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, Session,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess,
-    ToolCategory, ToolPreviewCapability, ToolSpec, plan_draft_created_entry,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    ControlEntry, NetworkEffect, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
+    PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, SessionLogEntry,
+    TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess, ToolCategory,
+    ToolPreviewCapability, ToolSpec, plan_draft_created_entry, plan_task_input_from_draft,
+    plan_text_hash, plan_workspace_paths, task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 
 fn tool_spec(
@@ -28,27 +26,11 @@ fn tool_spec(
         preview,
     }
 }
-
-fn approved_entry(plan_text: &str, plan_version: u32) -> PlanApprovedEntry {
-    PlanApprovedEntry {
-        plan_version,
-        plan_hash: plan_text_hash(plan_text),
-        approved_at_ms: 42,
-        permission: PlanApprovalPermission::WorkspaceEdits,
-        scope: PlanApprovalScope {
-            summary: "edit workspace files described by the plan".to_owned(),
-            workspace_paths: vec!["crates/sigil-tui".to_owned()],
-        },
-        expires: PlanApprovalExpiry::NextUserPrompt,
-        clear_planning_context: true,
-    }
-}
-
 fn simple_structured_plan(summary: &str, title: &str, path: &str) -> String {
     format!(
         r#"Plan:
 
-```sigil-plan-v1
+```sigil-plan-v2
 {{
   "summary": "{summary}",
   "steps": [
@@ -172,7 +154,7 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
     let draft = plan_draft_created_entry(
         r#"计划如下。
 
-```sigil-plan-v1
+```sigil-plan-v2
 {
   "summary": "Fix README typo",
   "steps": [
@@ -215,7 +197,7 @@ fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
   "summary": "Inspect then report",
   "steps": [
     {
-      "id": "inspect",
+      "step_id": "inspect",
       "title": "Inspect README",
       "role": "executor",
       "depends_on": [],
@@ -224,7 +206,7 @@ fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
       "target_paths": ["README.md"]
     },
     {
-      "id": "report",
+      "step_id": "report",
       "title": "Report findings",
       "role": "subagent_read",
       "depends_on": ["inspect"],
@@ -354,43 +336,15 @@ fn sigil_plan_v2_rejects_intent_aliases_without_matching_proposal() {
             .contains("require a top-level intent proposal")
     );
 }
-
 #[test]
-fn sigil_plan_v1_never_direct_promotes_even_with_v2_fields() -> Result<()> {
+fn sigil_plan_v2_accepts_single_string_notes_and_acceptance() -> Result<()> {
     let draft = plan_draft_created_entry(
-        r#"```sigil-plan-v1
-{
-  "summary": "Legacy fully specified plan",
-  "steps": [{
-    "id": "inspect",
-    "title": "Inspect README",
-    "role": "executor",
-    "depends_on": [],
-    "mode": "read",
-    "isolation": "shared_read_only"
-  }]
-}
-```"#,
-        PlanSourceRef::default(),
-        42,
-        None,
-    )?
-    .expect("v1 plan should remain a durable compatibility draft");
-
-    assert_eq!(draft.schema_version, 1);
-    assert!(task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?.is_none());
-    Ok(())
-}
-
-#[test]
-fn sigil_plan_v1_accepts_single_string_notes_and_acceptance() -> Result<()> {
-    let draft = plan_draft_created_entry(
-        r#"```sigil-plan-v1
+        r#"```sigil-plan-v2
 {
   "summary": "Fix README typo",
   "steps": [
     {
-      "id": "fix-readme-typo",
+      "step_id": "fix-readme-typo",
       "title": "Fix README marker",
       "target_paths": ["README.md"],
       "notes": "One token replacement.",
@@ -420,11 +374,11 @@ fn sigil_plan_v1_accepts_single_string_notes_and_acceptance() -> Result<()> {
 }
 
 #[test]
-fn sigil_plan_v1_block_creates_structured_executable_plan() -> Result<()> {
+fn sigil_plan_v2_block_creates_structured_executable_plan() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"计划如下。
 
-```sigil-plan-v1
+```sigil-plan-v2
 {
   "summary": "Fix README typo",
   "steps": [
@@ -457,7 +411,7 @@ fn sigil_plan_v1_block_creates_structured_executable_plan() -> Result<()> {
     assert_eq!(draft.target_paths, vec!["README.md"]);
     assert_eq!(draft.steps.len(), 2);
     assert!(task_input.contains("Fix README.md line 3 typo"));
-    assert!(!task_input.contains("sigil-plan-v1"));
+    assert!(!task_input.contains("sigil-plan-v2"));
     assert!(task_input.contains("fix-readme-typo"));
     Ok(())
 }
@@ -536,95 +490,6 @@ fn plan_draft_projects_sensitive_model_text_before_hash_and_persistence() -> Res
     );
     Ok(())
 }
-
-#[test]
-fn legacy_approved_plan_input_is_stable_and_requires_planner_fallback() -> Result<()> {
-    let draft = plan_draft_created_entry(
-        r#"
-Plan:
-
-```sigil-plan-v1
-{
-  "summary": "Update quickstart docs",
-  "steps": [
-    {
-      "step_id": "inspect-readme",
-      "title": "Inspect README.md",
-      "mode": "read_only",
-      "target_paths": ["README.md"]
-    },
-    {
-      "step_id": "update-quickstart",
-      "title": "Update docs/en/quickstart.md copy",
-      "mode": "write",
-      "target_paths": ["docs/en/quickstart.md"]
-    },
-    {
-      "step_id": "verify-plan-tests",
-      "title": "Verify with cargo test -p sigil-kernel plan",
-      "mode": "verify"
-    }
-  ]
-}
-```
-"#,
-        PlanSourceRef::default(),
-        1,
-        None,
-    )?
-    .expect("draft");
-    let left = plan_task_input_from_draft(&draft);
-    let right = plan_task_input_from_draft(&draft);
-
-    assert_eq!(left, right);
-    assert!(left.contains("Update docs/en/quickstart.md copy"));
-    assert!(left.contains("authoritative task input"));
-    assert!(!left.contains("sigil-plan-v1"));
-    assert!(task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?.is_none());
-    Ok(())
-}
-
-#[test]
-fn plan_approved_control_entry_roundtrips() -> Result<()> {
-    let entry = approved_entry("inspect then edit", 3);
-    let session_entry = SessionLogEntry::Control(ControlEntry::PlanApproved(entry.clone()));
-
-    let encoded = serde_json::to_string(&session_entry)?;
-    let decoded: SessionLogEntry = serde_json::from_str(&encoded)?;
-
-    assert!(encoded.contains("plan_approved"));
-    assert!(encoded.contains("workspace_edits"));
-    assert!(matches!(
-        decoded,
-        SessionLogEntry::Control(ControlEntry::PlanApproved(restored)) if restored == entry
-    ));
-    Ok(())
-}
-
-#[test]
-fn plan_approval_projection_tracks_latest_and_latest_by_hash() -> Result<()> {
-    let first = approved_entry("first plan", 1);
-    let mut second = approved_entry("second plan", 2);
-    second.permission = PlanApprovalPermission::Ask;
-    let entries = vec![
-        SessionLogEntry::Control(ControlEntry::PlanApproved(first.clone())),
-        SessionLogEntry::Control(ControlEntry::PlanApproved(second.clone())),
-    ];
-
-    let projection = PlanApprovalProjection::from_entries(&entries);
-
-    assert_eq!(projection.approvals, vec![first.clone(), second.clone()]);
-    assert_eq!(projection.latest_approval, Some(second));
-    assert_eq!(
-        projection.latest_by_hash.get(&first.plan_hash),
-        Some(&first)
-    );
-
-    let session = Session::from_entries("mock", "model", entries);
-    assert_eq!(session.plan_approval_projection().latest_by_hash.len(), 2);
-    Ok(())
-}
-
 #[test]
 fn workspace_edits_plan_permission_does_not_cover_shell_network_mcp_or_agent() {
     let permission = PlanApprovalPermission::WorkspaceEdits;

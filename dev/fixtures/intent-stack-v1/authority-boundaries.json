@@ -3,9 +3,9 @@
   "fork": "read_only_provenance",
   "worktree_child": "read_only_provenance",
   "workspace_switch": "out_of_scope",
-  "old_session": {
-    "status": "history_unavailable",
+  "not_created": {
+    "status": "not_created",
     "schema_version": 1,
-    "safe_message": "Intent history unavailable"
+    "safe_message": "No Intent Stack has been created"
   }
 }

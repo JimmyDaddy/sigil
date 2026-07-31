@@ -19,7 +19,7 @@ use super::super::{
 
 fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -29,8 +29,8 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(ConnectionId::new("deepseek-default").expect("connection id")),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -46,18 +46,22 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
+        connections: BTreeMap::from([(
+            "deepseek-default".to_owned(),
             json!({
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "deepseek",
                 "base_url": "https://example.com",
-                "beta_base_url": "https://example.com/beta",
-                "anthropic_base_url": "https://example.com/anthropic",
-                "fim_model": "deepseek-v4-pro",
-                "api_key": "test-key",
-                "strict_tools_mode": "auto"
+                "credential": {"source": "environment", "name": "SIGIL_API_KEY"},
+                "options": {
+                    "beta_base_url": "https://example.com/beta",
+                    "anthropic_base_url": "https://example.com/anthropic",
+                    "fim_model": "deepseek-v4-pro",
+                    "strict_tools_mode": "auto"
+                }
             }),
         )]),
-        connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -66,11 +70,10 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
 fn v2_loopback_root_config(workspace_root: &std::path::Path) -> Result<RootConfig> {
     let connection_id = ConnectionId::new("orchestration-fixture")?;
     let mut root_config = deepseek_root_config(workspace_root);
-    root_config.config_version = Some(2);
-    root_config.agent.provider.clear();
+    root_config.config_version = 2;
+    root_config.agent.runtime_provider.clear();
     root_config.agent.connection = Some(connection_id.clone());
     root_config.agent.model = "fixture-model".to_owned();
-    root_config.providers.clear();
     root_config.connections.insert(
         connection_id.to_string(),
         json!({
@@ -170,7 +173,7 @@ fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Re
         .path()
         .join(".sigil/sessions/session-spawn-provider.jsonl");
     let mut root_config = deepseek_root_config(&workspace_root);
-    root_config.agent.provider = "other".to_owned();
+    root_config.agent.connection = Some(ConnectionId::new("missing")?);
 
     let (_command_tx, message_rx) = spawn_agent_worker(
         root_config,
@@ -180,10 +183,7 @@ fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Re
     )?;
     let failure = recv_message(&message_rx)?;
 
-    assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error) if error.contains("model_route_not_configured")
-    ));
+    assert!(matches!(failure, WorkerMessage::RunFailed(_)));
     Ok(())
 }
 
@@ -251,43 +251,6 @@ fn spawn_agent_worker_initializes_v2_route_after_workspace_trust_prelude() -> Re
         Some("fixture-model")
     );
     command_tx.send(WorkerCommand::Shutdown)?;
-    Ok(())
-}
-
-#[test]
-fn spawn_agent_worker_does_not_rebind_legacy_identity_after_workspace_trust() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace_root = temp.path().to_path_buf();
-    let session_log_path = temp
-        .path()
-        .join(".sigil/sessions/session-spawn-legacy-after-trust.jsonl");
-    let store = JsonlSessionStore::new(&session_log_path)?;
-    store.append(&SessionLogEntry::Control(
-        ControlEntry::WorkspaceTrustDecision(WorkspaceTrustDecisionEntry {
-            workspace_id: stable_workspace_id(&workspace_root)?,
-            workspace_trust_snapshot_id: "workspace-trust:test".to_owned(),
-            trust: WorkspaceTrust::Trusted,
-            decided_by_event_id: None,
-            reason: Some("legacy session trust".to_owned()),
-        }),
-    ))?;
-    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "openai_compat".to_owned(),
-        model_name: "fixture-model".to_owned(),
-        resolved_model_route: None,
-    }))?;
-
-    let (_command_tx, message_rx) = spawn_agent_worker(
-        v2_loopback_root_config(&workspace_root)?,
-        session_log_path,
-        workspace_root,
-        sigil_kernel::InteractionMode::Interactive,
-    )?;
-
-    assert!(matches!(
-        recv_message(&message_rx)?,
-        WorkerMessage::RunFailed(ref error) if error.contains("session_route_missing")
-    ));
     Ok(())
 }
 

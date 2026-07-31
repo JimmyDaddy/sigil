@@ -41,7 +41,6 @@ import type {
   RunAttachment,
   PermissionMode,
   ProviderConnectionInventory,
-  ProviderLegacyMigrationResult,
   ProviderModelRef,
   ProviderSetupCatalog,
   ProviderSetupCatalogInput,
@@ -87,13 +86,6 @@ export interface DesktopBridge {
   supportDoctor(workspaceId: string): Promise<SupportDoctorReport>;
   exportSupportBundle(workspaceId: string): Promise<SupportSaveSummary>;
   providerConnections(workspaceId: string): Promise<ProviderConnectionInventory>;
-  migrateLegacyProviderConnections(
-    workspaceId: string,
-    expectedRevision: string,
-  ): Promise<ProviderLegacyMigrationResult>;
-  recheckLegacyProviderMigration(
-    workspaceId: string,
-  ): Promise<ProviderConnectionInventory>;
   providerSetupCatalog(
     workspaceId: string,
     input: ProviderSetupCatalogInput,
@@ -255,15 +247,6 @@ export const desktopBridge: DesktopBridge = {
     invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId }),
   providerConnections: (workspaceId) =>
     invoke<ProviderConnectionInventory>("desktop_provider_connections", { workspaceId }),
-  migrateLegacyProviderConnections: (workspaceId, expectedRevision) =>
-    invoke<ProviderLegacyMigrationResult>("desktop_migrate_legacy_provider_connections", {
-      workspaceId,
-      expectedRevision,
-    }),
-  recheckLegacyProviderMigration: (workspaceId) =>
-    invoke<ProviderConnectionInventory>("desktop_recheck_legacy_provider_migration", {
-      workspaceId,
-    }),
   providerSetupCatalog: (workspaceId, input) =>
     invoke<ProviderSetupCatalog>("desktop_provider_setup_catalog", { workspaceId, input }),
   saveProviderSetup: (workspaceId, input) =>

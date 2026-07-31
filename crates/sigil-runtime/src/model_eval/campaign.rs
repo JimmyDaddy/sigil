@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 use sigil_kernel::{
     ApprovalMode, AutoApproveHandler, NetworkPolicy, PermissionMode, PublicRunEvent,
     PublicRunEventKind, RootConfig, StorageRoot, UsageStats,
@@ -182,9 +181,6 @@ pub fn write_isolated_model_eval_config(
         bail!("model eval requires a config that permits controlled workspace edits");
     }
 
-    for value in config.providers.values_mut() {
-        scrub_provider_secret_fields(value)?;
-    }
     let loaded = crate::provider_connections::load_provider_connections(&config);
     if !loaded.issues.is_empty() {
         let issue_codes = loaded
@@ -208,8 +204,7 @@ pub fn write_isolated_model_eval_config(
     let mut isolated_connection = selected_connection.config.clone();
     if matches!(
         isolated_connection.credential,
-        crate::provider_connections::CredentialRefConfig::SystemKeyring { .. }
-            | crate::provider_connections::CredentialRefConfig::Stored { .. }
+        crate::provider_connections::CredentialRefConfig::Stored { .. }
     ) {
         let environment_name = crate::provider_api_key_env_name(&active_provider)
             .context("model eval connection has no process-environment credential binding")?;
@@ -238,7 +233,7 @@ pub fn write_isolated_model_eval_config(
     config.web.network_mode = NetworkPolicy::Deny;
     config.web.search_mcp = None;
     config.mcp_servers.clear();
-    config = crate::provider_connections::materialize_v2_root_config(
+    config = crate::provider_connections::materialize_root_config(
         &config,
         &isolated_connections,
         &default_model,
@@ -469,8 +464,7 @@ fn preflight_campaign(
         crate::provider_connections::CredentialRefConfig::Environment { name } => {
             Some(name.as_str())
         }
-        crate::provider_connections::CredentialRefConfig::SystemKeyring { .. }
-        | crate::provider_connections::CredentialRefConfig::Stored { .. } => Some(
+        crate::provider_connections::CredentialRefConfig::Stored { .. } => Some(
             provider_api_key_env_name(active_provider).with_context(|| {
                 format!(
                     "model eval provider {active_provider} has no runtime credential environment mapping"
@@ -851,54 +845,6 @@ fn create_campaign_output_dir(requested: &Path) -> Result<PathBuf> {
     fs::create_dir(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     Ok(output_dir)
-}
-
-fn scrub_provider_secret_fields(value: &mut Value) -> Result<()> {
-    match value {
-        Value::Object(object) => {
-            let keys = object.keys().cloned().collect::<Vec<_>>();
-            for key in keys {
-                let normalized = key.to_ascii_lowercase();
-                if normalized.contains("api_key")
-                    || normalized.contains("token")
-                    || normalized.contains("secret")
-                    || normalized.contains("password")
-                    || normalized.contains("authorization")
-                    || normalized.contains("header")
-                {
-                    object.remove(&key);
-                    continue;
-                }
-                if normalized.contains("base_url")
-                    && let Some(raw) = object.get(&key).and_then(Value::as_str)
-                {
-                    validate_provider_base_url(raw)?;
-                }
-                if let Some(child) = object.get_mut(&key) {
-                    scrub_provider_secret_fields(child)?;
-                }
-            }
-        }
-        Value::Array(values) => {
-            for child in values {
-                scrub_provider_secret_fields(child)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn validate_provider_base_url(raw: &str) -> Result<()> {
-    let parsed = url::Url::parse(raw).context("model eval provider base URL is invalid")?;
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        bail!("model eval provider base URL contains a secret-capable carrier");
-    }
-    Ok(())
 }
 
 fn usd_to_microusd(value: f64) -> Option<u64> {

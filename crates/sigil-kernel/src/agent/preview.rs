@@ -83,14 +83,7 @@ pub(super) fn preparation_session_grant_identity(
 pub(super) fn preparation_plan_approval_identity(
     authority: &PlanApprovalAuthority,
 ) -> Result<String> {
-    let value = match authority {
-        PlanApprovalAuthority::PermissionGrant(grant) => {
-            json!({"kind": "plan_permission_grant", "entry": grant})
-        }
-        PlanApprovalAuthority::ApprovedPlan(approval) => {
-            json!({"kind": "approved_plan", "entry": approval})
-        }
-    };
+    let value = json!({"kind": "plan_permission_grant", "entry": authority});
     stable_json_hash(&value).map(|digest| format!("plan:{digest}"))
 }
 

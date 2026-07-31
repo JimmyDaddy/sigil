@@ -85,7 +85,7 @@ pub(in crate::runner) enum IdleAutoCompactionSchedulerBlockReason {
 pub(in crate::runner) enum IdleAutoCompactionNotEligibleReason {
     CompactionDisabled,
     ContextWindowUnavailable,
-    BelowPreparationThreshold,
+    ProviderCapabilityUnavailable,
     NotFitRequired,
 }
 
@@ -277,22 +277,16 @@ pub(in crate::runner) fn idle_auto_compaction_preflight(
         );
     };
 
-    let cache_aware_v3_supported =
-        (configured_compaction.strategy == CompactionStrategy::CacheAwareV3).then(|| {
-            sigil_runtime::cache_aware_v3_automatic_supported(
-                session.provider_name(),
-                session.model_name(),
-                provider_context_capabilities,
-            )
-        });
-    let mut effective_compaction = sigil_runtime::effective_compaction_config(
+    let cache_aware_v3_supported = Some(sigil_runtime::cache_aware_v3_automatic_supported(
+        session.provider_name(),
+        session.model_name(),
+        provider_context_capabilities,
+    ));
+    let effective_compaction = sigil_runtime::effective_compaction_config(
         session.provider_name(),
         session.model_name(),
         configured_compaction,
     );
-    if cache_aware_v3_supported == Some(false) {
-        effective_compaction.strategy = CompactionStrategy::LegacyV2;
-    }
     let prompt_tokens = session.stats().last_prompt_tokens;
     let threshold_status = effective_compaction.threshold_status(prompt_tokens);
     evidence.prompt_tokens = Some(prompt_tokens);
@@ -301,28 +295,27 @@ pub(in crate::runner) fn idle_auto_compaction_preflight(
     evidence.effective_strategy = Some(effective_compaction.strategy);
     evidence.cache_aware_v3_supported = cache_aware_v3_supported;
 
-    let decision = match threshold_status {
-        CompactionThresholdStatus::Off => IdleAutoCompactionPreflightDecision::NotEligible(
-            IdleAutoCompactionNotEligibleReason::CompactionDisabled,
-        ),
-        CompactionThresholdStatus::NotAvailable => {
-            IdleAutoCompactionPreflightDecision::NotEligible(
-                IdleAutoCompactionNotEligibleReason::ContextWindowUnavailable,
-            )
-        }
-        CompactionThresholdStatus::Ready | CompactionThresholdStatus::Soft
-            if effective_compaction.strategy == CompactionStrategy::LegacyV2 =>
-        {
-            IdleAutoCompactionPreflightDecision::NotEligible(
-                IdleAutoCompactionNotEligibleReason::BelowPreparationThreshold,
-            )
-        }
-        CompactionThresholdStatus::Ready => IdleAutoCompactionPreflightDecision::NotEligible(
-            IdleAutoCompactionNotEligibleReason::NotFitRequired,
-        ),
-        CompactionThresholdStatus::Soft | CompactionThresholdStatus::Hard => {
-            IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation {
-                effective_strategy: effective_compaction.strategy,
+    let decision = if cache_aware_v3_supported == Some(false) {
+        IdleAutoCompactionPreflightDecision::NotEligible(
+            IdleAutoCompactionNotEligibleReason::ProviderCapabilityUnavailable,
+        )
+    } else {
+        match threshold_status {
+            CompactionThresholdStatus::Off => IdleAutoCompactionPreflightDecision::NotEligible(
+                IdleAutoCompactionNotEligibleReason::CompactionDisabled,
+            ),
+            CompactionThresholdStatus::NotAvailable => {
+                IdleAutoCompactionPreflightDecision::NotEligible(
+                    IdleAutoCompactionNotEligibleReason::ContextWindowUnavailable,
+                )
+            }
+            CompactionThresholdStatus::Ready => IdleAutoCompactionPreflightDecision::NotEligible(
+                IdleAutoCompactionNotEligibleReason::NotFitRequired,
+            ),
+            CompactionThresholdStatus::Soft | CompactionThresholdStatus::Hard => {
+                IdleAutoCompactionPreflightDecision::ProceedToDetailedPreparation {
+                    effective_strategy: effective_compaction.strategy,
+                }
             }
         }
     };
@@ -1018,13 +1011,10 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         &options.compaction_config,
     );
     let threshold_status = effective_config.threshold_status(session.stats().last_prompt_tokens);
-    let threshold_allows_preparation = match effective_config.strategy {
-        CompactionStrategy::LegacyV2 => threshold_status == CompactionThresholdStatus::Hard,
-        CompactionStrategy::CacheAwareV3 => !matches!(
-            threshold_status,
-            CompactionThresholdStatus::Off | CompactionThresholdStatus::NotAvailable
-        ),
-    };
+    let threshold_allows_preparation = !matches!(
+        threshold_status,
+        CompactionThresholdStatus::Off | CompactionThresholdStatus::NotAvailable
+    );
     if !threshold_allows_preparation {
         state.consume_request();
         return Ok(IdleAutoCompactionPreparation::NotHardThreshold);
@@ -1036,35 +1026,33 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         state.consume_request();
         return Ok(IdleAutoCompactionPreparation::NoFoldableHistory);
     };
-    if effective_config.strategy == CompactionStrategy::CacheAwareV3 {
-        let next_turn_p95_tokens = preview
-            .plan
-            .adaptive_tail
-            .as_ref()
-            .map_or(4_096, |tail| tail.recent_complete_turn_p95_tokens.max(1));
-        let output_reserve = sigil_runtime::portable_compaction_target_output_tokens(
-            session.provider_name(),
-            session.model_name(),
-        )
-        .map_or(4_096, u64::from);
-        let fit_required = effective_config
-            .context_window_tokens
-            .is_some_and(|context_window| {
-                session
-                    .stats()
-                    .last_prompt_tokens
-                    .saturating_add(next_turn_p95_tokens)
-                    .saturating_add(output_reserve)
-                    .saturating_add(8_192)
-                    >= u64::from(context_window)
-            });
-        if !fit_required {
-            // Cost-only automatic compaction must eventually pass a pre-call upper-bound
-            // economics gate. Until that exact gate is available, do not spend a summary request
-            // merely to discover that rotation is uneconomic.
-            state.consume_request();
-            return Ok(IdleAutoCompactionPreparation::NotHardThreshold);
-        }
+    let next_turn_p95_tokens = preview
+        .plan
+        .adaptive_tail
+        .recent_complete_turn_p95_tokens
+        .max(1);
+    let output_reserve = sigil_runtime::portable_compaction_target_output_tokens(
+        session.provider_name(),
+        session.model_name(),
+    )
+    .map_or(4_096, u64::from);
+    let fit_required = effective_config
+        .context_window_tokens
+        .is_some_and(|context_window| {
+            session
+                .stats()
+                .last_prompt_tokens
+                .saturating_add(next_turn_p95_tokens)
+                .saturating_add(output_reserve)
+                .saturating_add(8_192)
+                >= u64::from(context_window)
+        });
+    if !fit_required {
+        // Cost-only automatic compaction must eventually pass a pre-call upper-bound
+        // economics gate. Until that exact gate is available, do not spend a summary request
+        // merely to discover that rotation is uneconomic.
+        state.consume_request();
+        return Ok(IdleAutoCompactionPreparation::NotHardThreshold);
     }
     let circuit_scope = idle_auto_circuit_scope(session, &preview)?;
     let scope_fingerprint =
@@ -1592,7 +1580,6 @@ async fn prepare_portable_v2_compaction(
         &preview,
         &preflight,
         &initiation,
-        root_config.compaction.strategy,
         summary_usage.as_ref(),
     );
     Ok(PreparedPortableV2Compaction {
@@ -1624,7 +1611,6 @@ fn portable_economics_v2_input(
     preview: &V2CompactionPreview,
     preflight: &PortableSemanticCompactionPreflight,
     initiation: &CompactionInitiation,
-    strategy: CompactionStrategy,
     summary_usage: Option<&sigil_kernel::UsageStats>,
 ) -> sigil_runtime::PortableCompactionEconomicsV2Input {
     let latest_usage = session.entries().iter().rev().find_map(|entry| {
@@ -1639,8 +1625,8 @@ fn portable_economics_v2_input(
     let next_turn_p95_tokens = preview
         .plan
         .adaptive_tail
-        .as_ref()
-        .map_or(4_096, |tail| tail.recent_complete_turn_p95_tokens.max(1));
+        .recent_complete_turn_p95_tokens
+        .max(1);
     let bulky_shrink_candidate_tokens = preflight
         .tool_output_shrink_candidates()
         .iter()
@@ -1649,14 +1635,9 @@ fn portable_economics_v2_input(
         });
     let (rollout_mode, user_confirmed, overflow_observed) = match initiation {
         CompactionInitiation::Manual => (CompactionRolloutModeV1::Preview, false, false),
-        CompactionInitiation::IdleAutomatic { .. } => (
-            match strategy {
-                CompactionStrategy::LegacyV2 => CompactionRolloutModeV1::Shadow,
-                CompactionStrategy::CacheAwareV3 => CompactionRolloutModeV1::Automatic,
-            },
-            false,
-            false,
-        ),
+        CompactionInitiation::IdleAutomatic { .. } => {
+            (CompactionRolloutModeV1::Automatic, false, false)
+        }
         CompactionInitiation::PreTurnPressure { .. } => {
             (CompactionRolloutModeV1::Automatic, false, false)
         }
@@ -1708,7 +1689,6 @@ fn portable_economics_v2_input(
         compactor_output_tokens: summary_usage.map_or(0, |usage| usage.completion_tokens),
         rollout_mode,
         user_confirmed,
-        legacy_v2_would_compact: true,
     }
 }
 
@@ -2032,8 +2012,10 @@ fn idle_auto_scope_fingerprint(
         "provider_name": session.provider_name(),
         "model_name": session.model_name(),
         "context_window_tokens": effective_config.context_window_tokens,
-        "hard_threshold_ratio_bits": effective_config.hard_threshold_ratio.to_bits(),
-        "tail_messages": effective_config.tail_messages,
+        "strategy": effective_config.strategy.as_str(),
+        "preparation_ratio_bits": sigil_kernel::COMPACTION_PREPARATION_RATIO.to_bits(),
+        "emergency_ratio_bits": sigil_kernel::COMPACTION_EMERGENCY_RATIO.to_bits(),
+        "adaptive_tail_policy": sigil_kernel::AdaptiveTailPolicyV3::default(),
         "target_output_tokens": sigil_runtime::deepseek_v4_flash_portable_target_output_tokens(),
         "target_policy_revision": 1,
         "circuit_scope": circuit_scope,
@@ -2082,9 +2064,7 @@ fn emergency_blocking_layer(
     preview: &V2CompactionPreview,
     current_input_tokens: u64,
 ) -> CompactionEmergencyBlockingLayerV1 {
-    let Some(adaptive_tail) = &preview.plan.adaptive_tail else {
-        return CompactionEmergencyBlockingLayerV1::Unknown;
-    };
+    let adaptive_tail = &preview.plan.adaptive_tail;
     if adaptive_tail.active_turn_extended {
         CompactionEmergencyBlockingLayerV1::ActiveTurn
     } else if adaptive_tail.retained_token_upper_bound.saturating_mul(2) >= current_input_tokens {

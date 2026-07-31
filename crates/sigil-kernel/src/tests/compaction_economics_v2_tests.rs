@@ -69,7 +69,6 @@ fn admission_options(rollout_mode: CompactionRolloutModeV1) -> CompactionAdmissi
     CompactionAdmissionOptionsV2 {
         rollout_mode,
         user_confirmed: false,
-        legacy_v2_would_compact: true,
     }
 }
 
@@ -175,7 +174,6 @@ fn unpriced_cost_only_candidate_is_preview_only() -> Result<()> {
         CompactionAdmissionOptionsV2 {
             rollout_mode: CompactionRolloutModeV1::Preview,
             user_confirmed: true,
-            legacy_v2_would_compact: true,
         },
     )?;
     assert_eq!(
@@ -250,7 +248,7 @@ fn cache_price_shapes_never_admit_a_cost_increasing_reset() -> Result<()> {
 }
 
 #[test]
-fn shadow_mode_records_v3_and_legacy_decisions_without_activating() -> Result<()> {
+fn shadow_mode_records_v3_decision_without_activating() -> Result<()> {
     let economics = CompactionEconomicsV2::evaluate(
         fit_forecast(75_000, 10_000, false, CompactionForecastConfidenceV1::High)?,
         CompactionEconomicsPolicyV1::default(),
@@ -260,7 +258,6 @@ fn shadow_mode_records_v3_and_legacy_decisions_without_activating() -> Result<()
         CompactionAdmissionOptionsV2 {
             rollout_mode: CompactionRolloutModeV1::Shadow,
             user_confirmed: false,
-            legacy_v2_would_compact: false,
         },
     )?;
 
@@ -269,7 +266,6 @@ fn shadow_mode_records_v3_and_legacy_decisions_without_activating() -> Result<()
         CompactionAdmissionDecisionV2::Shadow
     );
     assert!(economics.admission.v3_would_admit);
-    assert!(!economics.admission.legacy_v2_would_compact);
     assert!(!economics.admission.automatic_allowed);
     Ok(())
 }

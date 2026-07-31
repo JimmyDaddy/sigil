@@ -29,7 +29,7 @@ use crate::skills::compatibility_stable_id;
 
 fn root_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -39,8 +39,8 @@ fn root_config() -> RootConfig {
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(ConnectionId::new("deepseek-default").expect("connection id")),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(12),
             tool_timeout_secs: 45,
@@ -56,13 +56,28 @@ fn root_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: TaskConfig::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": "https://example.com",
-            }),
-        )]),
-        connections: BTreeMap::new(),
+        connections: BTreeMap::from([
+            (
+                "deepseek-default".to_owned(),
+                json!({
+                    "label": "DeepSeek",
+                    "provider": "deepseek",
+                    "protocol": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "credential": {"source": "environment", "name": "SIGIL_API_KEY"}
+                }),
+            ),
+            (
+                "anthropic-default".to_owned(),
+                json!({
+                    "label": "Anthropic",
+                    "provider": "anthropic",
+                    "protocol": "anthropic_messages",
+                    "base_url": "https://api.anthropic.com",
+                    "credential": {"source": "environment", "name": "SIGIL_ANTHROPIC_API_KEY"}
+                }),
+            ),
+        ]),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -1381,7 +1396,7 @@ Duplicate built-in profile.
 #[test]
 fn registry_projects_existing_task_roles_to_builtin_profiles() -> Result<()> {
     let mut config = root_config();
-    config.task.subagent_read.provider = Some("anthropic".to_owned());
+    config.task.subagent_read.connection = Some(ConnectionId::new("anthropic-default")?);
     config.task.subagent_read.model = Some("claude-opus".to_owned());
     config.task.subagent_read.tools = ToolAllowlistConfig {
         allow_all: false,

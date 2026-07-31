@@ -10,7 +10,7 @@ use sigil_runtime::provider_connections::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, CredentialRefConfig,
     PreparedCredential, ProviderConfigPublisher, ProviderConnectionConfig, ProviderFamily,
     ProviderProtocol, RootConfigPublisher, default_setup_root_config, load_provider_connections,
-    materialize_v2_root_config, provider_connection_template, save_connection_config,
+    materialize_root_config, provider_connection_template, save_connection_config,
 };
 
 use super::{
@@ -522,7 +522,7 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
 
 pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
     let (base, connections, default_model) = build_setup_draft(state)?;
-    let mut root_config = materialize_v2_root_config(&base, &connections, &default_model)?;
+    let mut root_config = materialize_root_config(&base, &connections, &default_model)?;
     let _ = apply_new_install_orchestration_rollout(&mut root_config);
     Ok(root_config)
 }
@@ -676,7 +676,6 @@ fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutc
                         state.api_key.expose_secret().trim().to_owned(),
                     ),
                 }],
-                confirmed_legacy_environment: Default::default(),
             },
             &credential_store,
             &RootConfigPublisher,

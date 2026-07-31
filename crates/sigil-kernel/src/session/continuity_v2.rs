@@ -20,7 +20,7 @@ pub const CONVERSATION_CONTINUITY_V2_SCHEMA_VERSION: u16 = 2;
 const MAX_ANCHOR_STATEMENTS: usize = 256;
 const MAX_CONTINUITY_SECTION_ITEMS: usize = 256;
 const MAX_CONTINUITY_TEXT_BYTES: usize = 16 * 1024;
-const MAX_LEGACY_OBJECTIVE_SPAN_BYTES: usize = 4 * 1024;
+const MAX_USER_OBJECTIVE_SPAN_BYTES: usize = 4 * 1024;
 const WHOLE_EVENT_SOURCE_PATH: &str = "$event";
 
 /// Bounded authority/evidence reference into the durable session stream.
@@ -156,7 +156,7 @@ pub enum ObjectiveAuthorityRefV1 {
         task_id: String,
         plan_version: u32,
     },
-    LegacySourceTurn {
+    UserSourceTurn {
         event_id: crate::EventId,
         message_id: String,
     },
@@ -189,12 +189,12 @@ impl AnchoredStatementV1 {
                     bail!("anchored task authority is invalid");
                 }
             }
-            ObjectiveAuthorityRefV1::LegacySourceTurn {
+            ObjectiveAuthorityRefV1::UserSourceTurn {
                 event_id,
                 message_id,
             } => {
                 if event_id.trim().is_empty() || message_id.trim().is_empty() {
-                    bail!("legacy anchored source turn is invalid");
+                    bail!("anchored user source turn is invalid");
                 }
             }
         }
@@ -282,17 +282,17 @@ impl AnchoredStatementV1 {
                     bail!("anchored task statement does not match its exact durable field");
                 }
             }
-            ObjectiveAuthorityRefV1::LegacySourceTurn {
+            ObjectiveAuthorityRefV1::UserSourceTurn {
                 event_id,
                 message_id,
             } => {
                 let Some(SessionLogEntry::User(message)) = session_entry(record)? else {
-                    bail!("legacy anchored statement does not reference a durable user turn");
+                    bail!("anchored statement does not reference a durable user turn");
                 };
                 let content = message
                     .content
                     .as_deref()
-                    .context("legacy anchored user turn has no text")?;
+                    .context("anchored user turn has no text")?;
                 if event_id != record.event_id()
                     || message_id != &message.id
                     || self.source.message_id.as_deref() != Some(message.id.as_str())
@@ -301,7 +301,7 @@ impl AnchoredStatementV1 {
                     || self.source.byte_end != u64::try_from(self.exact_text.len())?
                     || !content.starts_with(&self.exact_text)
                 {
-                    bail!("legacy anchored statement does not match its exact durable text span");
+                    bail!("anchored statement does not match its exact durable text span");
                 }
             }
         }
@@ -402,8 +402,8 @@ pub struct SessionAnchorV1 {
 }
 
 impl SessionAnchorV1 {
-    /// Derives an anchor exclusively from accepted Intent/Task/control state. Old sessions without
-    /// accepted Intent facts receive a clearly marked exact source-turn fallback.
+    /// Derives an anchor from accepted Intent/Task/control state or the current conversation's
+    /// exact source turn when no accepted Intent facts exist.
     pub fn derive(
         records: &[SessionStreamRecord],
         memory: &TaskMemoryV1,
@@ -475,13 +475,13 @@ impl SessionAnchorV1 {
                 (root_objective, constraints, source_turns)
             } else {
                 let (record, message) = first_durable_user_message(records)?
-                    .context("legacy session has no durable user source turn")?;
+                    .context("session has no durable user source turn")?;
                 let full_text = message
                     .content
                     .clone()
                     .filter(|text| !text.trim().is_empty())
-                    .context("legacy root user turn has no text")?;
-                let exact_text = bounded_legacy_objective_span(&full_text);
+                    .context("root user turn has no text")?;
+                let exact_text = bounded_user_objective_span(&full_text);
                 let source = source_span_for_event(
                     record,
                     "session_log_entry.user.content".to_owned(),
@@ -491,7 +491,7 @@ impl SessionAnchorV1 {
                 (
                     AnchoredStatementV1 {
                         exact_text,
-                        authority: ObjectiveAuthorityRefV1::LegacySourceTurn {
+                        authority: ObjectiveAuthorityRefV1::UserSourceTurn {
                             event_id: record.event_id().to_owned(),
                             message_id: message.id.clone(),
                         },
@@ -521,10 +521,10 @@ impl SessionAnchorV1 {
     }
 
     #[must_use]
-    pub fn uses_legacy_authority(&self) -> bool {
+    pub fn uses_user_turn_authority(&self) -> bool {
         matches!(
             self.root_objective.authority,
-            ObjectiveAuthorityRefV1::LegacySourceTurn { .. }
+            ObjectiveAuthorityRefV1::UserSourceTurn { .. }
         )
     }
 
@@ -1180,11 +1180,11 @@ fn derive_attachment_refs(
     Ok(attachments.into_values().collect())
 }
 
-fn bounded_legacy_objective_span(content: &str) -> String {
-    if content.len() <= MAX_LEGACY_OBJECTIVE_SPAN_BYTES {
+fn bounded_user_objective_span(content: &str) -> String {
+    if content.len() <= MAX_USER_OBJECTIVE_SPAN_BYTES {
         return content.to_owned();
     }
-    let mut end = MAX_LEGACY_OBJECTIVE_SPAN_BYTES;
+    let mut end = MAX_USER_OBJECTIVE_SPAN_BYTES;
     while !content.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }

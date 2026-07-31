@@ -14,17 +14,16 @@ use sigil_kernel::{
     AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
     ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, ExecutionCleanupStatus,
     JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
-    MutationEventRecorder, PlanApprovalPermission, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanSourceRef, PlanTaskStartMode, Provider,
-    PublicIntentStackStateV1, ReasoningEffort, RootConfig, Session, SessionLogEntry, SessionRef,
-    SessionStreamRecord, TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry,
-    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
-    TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolEffect, ToolExecutionEntry,
-    ToolExecutionStatus, ToolRegistry, ToolResultMeta, UsageStats, UserUrlCapabilityRegistrar,
-    VerificationScope, WorkspaceMutationDetected, WorkspaceRootSnapshot, plan_draft_created_entry,
-    plan_task_input_from_draft, project_user_message_for_persistence, session_io_lock_metrics,
-    task_id_from_plan_draft, task_plan_from_plan_draft,
+    MutationEventRecorder, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry,
+    PlanSourceRef, PlanTaskStartMode, Provider, PublicIntentStackStateV1, ReasoningEffort,
+    RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
+    ToolResultMeta, UsageStats, VerificationScope, WorkspaceMutationDetected,
+    WorkspaceRootSnapshot, plan_draft_created_entry, plan_task_input_from_draft,
+    session_io_lock_metrics, task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -36,11 +35,10 @@ use super::{
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         worker_event::WorkerMcpRuntimeEventSender,
         worker_loop::{
-            CreateTaskFromPlanRequest, PlanApprovalRequest, RuntimeTaskRoleProviderBuilder,
-            WorkerLoopMcpHandlers, agent_result_continuation_run_result,
-            append_mcp_elicitation_audits, approve_plan, artifact_gc_task_metrics,
-            cancel_terminal_task, close_agent_thread, create_task_from_plan, next_task_id,
-            partition_agent_result_continuations,
+            CreateTaskFromPlanRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
+            agent_result_continuation_run_result, append_mcp_elicitation_audits,
+            artifact_gc_task_metrics, cancel_terminal_task, close_agent_thread,
+            create_task_from_plan, next_task_id, partition_agent_result_continuations,
             pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
             queued_background_ready_transient_context, refresh_terminal_task_statuses,
@@ -98,10 +96,10 @@ fn task_from_plan_reconciles_decision_only_crash_prefix_with_the_same_task_id() 
     let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
-{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+{"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
         PlanSourceRef::default(),
         1,
@@ -177,7 +175,7 @@ fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents(
     let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
 {
@@ -208,7 +206,7 @@ fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents(
   ],
   "steps": [
     {
-      "id": "implement-retry",
+      "step_id": "implement-retry",
       "title": "Implement retry behavior",
       "role": "executor",
       "depends_on": [],
@@ -218,7 +216,7 @@ fn task_from_plan_acceptance_atomically_admits_and_binds_model_proposed_intents(
       "target_paths": ["src/retry.rs"]
     },
     {
-      "id": "add-telemetry",
+      "step_id": "add-telemetry",
       "title": "Add retry telemetry",
       "role": "executor",
       "depends_on": ["implement-retry"],
@@ -300,10 +298,10 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
     let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
-{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+{"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
         PlanSourceRef::default(),
         1,
@@ -419,10 +417,10 @@ fn task_from_plan_without_base_snapshot_uses_compatibility_planner() -> Result<(
         .join(".sigil/sessions/plan-no-base-snapshot.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
-{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+{"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
         PlanSourceRef::default(),
         1,
@@ -479,10 +477,10 @@ fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Resu
     let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
         .map_err(anyhow::Error::msg)?;
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
-{"summary":"Inspect","steps":[{"id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
+{"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
         PlanSourceRef::default(),
         1,
@@ -616,7 +614,7 @@ fn pending_agent_result_continuations_restore_started_statuses() -> Result<()> {
 fn detached_durable_continuation_is_visible_through_active_projection() -> Result<()> {
     let temp = tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("continuation-projection.jsonl"))?;
-    let session = Session::new("planned", "planned-model").with_store(store.clone());
+    let session = Session::load_from_store("planned", "planned-model", store.clone())?;
     let thread_id = AgentThreadId::new("detached_pending")?;
     store.append(&SessionLogEntry::Control(
         ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
@@ -1140,7 +1138,7 @@ fn close_agent_thread_appends_runtime_close_control() -> Result<()> {
     let root_config = test_root_config(temp.path(), "planned", "planned-model");
     let session_log_path = temp.path().join(".sigil/sessions/session-agent.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let thread_id = AgentThreadId::new("thread_1")?;
     let snapshot_id = AgentProfileSnapshotId::new("snapshot_1")?;
 
@@ -1215,76 +1213,6 @@ fn close_agent_thread_appends_runtime_close_control() -> Result<()> {
 }
 
 #[test]
-fn approve_plan_appends_plan_approved_control() -> Result<()> {
-    let temp = tempdir()?;
-    let root_config = test_root_config(temp.path(), "planned", "planned-model");
-    let session_log_path = temp.path().join(".sigil/sessions/session-plan.jsonl");
-    let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
-    let capability_store = sigil_runtime::attach_session_url_capability_store(&mut session)?;
-    let registrar: Arc<dyn UserUrlCapabilityRegistrar> = capability_store.clone();
-    let projection = project_user_message_for_persistence(
-        "url-message",
-        "remember https://example.com/private?token=live-after-control",
-        Some(&registrar),
-    )?;
-    let source_id = projection.capability_registrations[0].source_id.clone();
-    session.append_user_message(projection.durable_message)?;
-    capability_store.commit_message("url-message")?;
-    let session_scope_id = session.session_scope_id().to_owned();
-    let mut current_session = Some(session);
-
-    let (entry, entries) = approve_plan(
-        &root_config,
-        &session_log_path,
-        &mut current_session,
-        PlanApprovalRequest {
-            plan_text:
-                "1. inspect crates/sigil-tui\n2. edit crates/sigil-tui/src/app.rs with preview"
-                    .to_owned(),
-            permission: PlanApprovalPermission::WorkspaceEdits,
-            scope_summary: "inspect and edit".to_owned(),
-            clear_planning_context: true,
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
-
-    assert_eq!(entry.plan_version, 1);
-    assert_eq!(entry.permission, PlanApprovalPermission::WorkspaceEdits);
-    assert_eq!(entry.scope.summary, "inspect and edit");
-    assert_eq!(entry.scope.workspace_paths, vec!["crates/sigil-tui"]);
-    assert!(entry.clear_planning_context);
-    assert!(entries.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::PlanApproved(approved))
-                if approved.permission == PlanApprovalPermission::WorkspaceEdits
-        )
-    }));
-    let persisted = JsonlSessionStore::read_entries(&session_log_path)?;
-    assert!(persisted.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::PlanApproved(approved))
-                if approved.scope.summary == "inspect and edit"
-        )
-    }));
-    assert!(
-        capability_store
-            .resolve(&session_scope_id, &source_id)
-            .is_ok(),
-        "control-operation reload must preserve the live session URL capability"
-    );
-    assert!(
-        current_session
-            .as_ref()
-            .and_then(Session::user_url_capability_registrar)
-            .is_some()
-    );
-    Ok(())
-}
-
-#[test]
 fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Result<()> {
     let temp = tempdir()?;
     let root_config = test_root_config(temp.path(), "planned", "planned-model");
@@ -1306,7 +1234,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         .build()?;
     let session_log_path = temp.path().join(".sigil/sessions/session-terminal.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store.clone());
+    let mut session = Session::load_from_store("planned", "planned-model", store.clone())?;
     let recorder = MutationEventRecorder::new(store);
     let start_profile = recorder.execution_mutation_profile(
         temp.path(),
@@ -1470,7 +1398,7 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
         .build()?;
     let session_log_path = temp.path().join(".sigil/sessions/session-terminal.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store.clone());
+    let mut session = Session::load_from_store("planned", "planned-model", store.clone())?;
     let recorder = MutationEventRecorder::new(store);
     let start_profile = recorder.execution_mutation_profile(
         temp.path(),
@@ -1624,7 +1552,7 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         .path()
         .join(".sigil/sessions/session-terminal-failed.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     session.append_control(ControlEntry::TerminalTask(edge_terminal_entry(
         "terminal-missing-manager",
         TerminalTaskStatus::Running,

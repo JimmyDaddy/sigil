@@ -28,8 +28,8 @@ pub const TOOL_MODEL_VIEW_SCHEMA_VERSION: u16 = 1;
 pub const TOOL_ARTIFACT_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const TOOL_ARTIFACT_SESSION_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 pub const TOOL_RESULT_EVENT_TARGET_BYTES: usize = 64 * 1024;
-/// Legacy adapters must migrate to a policy-safe streaming sink before returning larger bodies.
-pub const TOOL_RESULT_LEGACY_INLINE_MAX_BYTES: usize = 256 * 1024;
+/// Inline adapters must use a policy-safe streaming sink before returning larger bodies.
+pub const TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES: usize = 256 * 1024;
 pub const TOOL_MODEL_VIEW_MAX_BYTES: usize = 32 * 1024;
 /// Maximum initial provider-visible preview for one ordinary tool result.
 pub const TOOL_MODEL_VIEW_INITIAL_MAX_BYTES: usize = TOOL_MODEL_VIEW_MAX_BYTES / 2;
@@ -308,7 +308,6 @@ pub struct ToolResultFactsV1 {
     pub verification_receipt_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_provenance_refs: Vec<String>,
-    #[serde(default)]
     pub tool_specific: Value,
 }
 
@@ -558,7 +557,7 @@ pub struct ToolResultViewsV2 {
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultCapturePathV1 {
     PreCapturedArtifact,
-    LegacyInlineCapture,
+    InlineCapture,
     TypedRetrievalReceipt,
 }
 
@@ -577,18 +576,19 @@ pub struct ToolResultCaptureTelemetryV1 {
 impl ToolResultCaptureTelemetryV1 {
     fn validate(&self) -> Result<()> {
         match self.capture_path {
-            ToolResultCapturePathV1::LegacyInlineCapture => {
-                if self.hard_guard_bytes != Some(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64)
+            ToolResultCapturePathV1::InlineCapture => {
+                if self.hard_guard_bytes != Some(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64)
                     || self.hard_guard_exceeded
-                        != (self.observed_inline_bytes > TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64)
+                        != (self.observed_inline_bytes
+                            > TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64)
                 {
-                    bail!("legacy inline capture telemetry is inconsistent");
+                    bail!("inline capture telemetry is inconsistent");
                 }
             }
             ToolResultCapturePathV1::PreCapturedArtifact
             | ToolResultCapturePathV1::TypedRetrievalReceipt => {
                 if self.hard_guard_bytes.is_some() || self.hard_guard_exceeded {
-                    bail!("streaming capture telemetry contains a legacy hard guard");
+                    bail!("streaming capture telemetry contains an inline hard guard");
                 }
             }
         }
@@ -616,7 +616,7 @@ pub struct ToolResultRecordedV2 {
 }
 
 impl ToolResultRecordedV2 {
-    /// Captures a legacy in-process result into the durable three-view contract.
+    /// Captures an in-process result into the durable three-view contract.
     ///
     /// Artifact publication failures are represented explicitly and never cause the tool to be
     /// rerun or its terminal facts to be dropped.
@@ -646,17 +646,16 @@ impl ToolResultRecordedV2 {
         } else if result.pre_captured_artifact().is_some() {
             ToolResultCapturePathV1::PreCapturedArtifact
         } else {
-            ToolResultCapturePathV1::LegacyInlineCapture
+            ToolResultCapturePathV1::InlineCapture
         };
-        let legacy_inline_guard_exceeded = capture_path
-            == ToolResultCapturePathV1::LegacyInlineCapture
-            && result.content.len() > TOOL_RESULT_LEGACY_INLINE_MAX_BYTES;
-        // Never apply persistence redaction to an unbounded legacy body. This bounds both the
+        let inline_guard_exceeded = capture_path == ToolResultCapturePathV1::InlineCapture
+            && result.content.len() > TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES;
+        // Never apply persistence redaction to an unbounded inline body. This bounds both the
         // transient allocation and the durable projection while retaining useful head/tail
         // diagnostics. Pre-captured adapters are also projected defensively if they accidentally
         // return an oversized inline view.
         let inline_projection_truncated =
-            result.content.len() > TOOL_RESULT_LEGACY_INLINE_MAX_BYTES;
+            result.content.len() > TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES;
         let guarded_inline_content = inline_projection_truncated
             .then(|| bounded_model_preview(&result.content, TOOL_MODEL_VIEW_INITIAL_MAX_BYTES).0);
         let safe_content = safe_persistence_text(
@@ -667,7 +666,7 @@ impl ToolResultRecordedV2 {
         let artifact = if result.tool_name == "read_tool_artifact" {
             ToolArtifactBindingV1::Unavailable {
                 unavailable: ToolArtifactUnavailableV1 {
-                    availability: ToolArtifactAvailability::LegacyUnavailable,
+                    availability: ToolArtifactAvailability::Unavailable,
                     observed_bytes: result.content.len() as u64,
                     reason: "typed retrieval receipts do not externalize another artifact"
                         .to_owned(),
@@ -699,7 +698,7 @@ impl ToolResultRecordedV2 {
                 (PreCapturedToolArtifact::Published(pre_captured), None) => {
                     ToolArtifactBindingV1::Unavailable {
                         unavailable: ToolArtifactUnavailableV1 {
-                            availability: ToolArtifactAvailability::LegacyUnavailable,
+                            availability: ToolArtifactAvailability::Unavailable,
                             observed_bytes: pre_captured.observed_bytes,
                             reason: "session has no durable artifact store".to_owned(),
                         },
@@ -716,12 +715,12 @@ impl ToolResultRecordedV2 {
                     }
                 }
             }
-        } else if legacy_inline_guard_exceeded {
+        } else if inline_guard_exceeded {
             ToolArtifactBindingV1::Unavailable {
                 unavailable: ToolArtifactUnavailableV1 {
-                    availability: ToolArtifactAvailability::LegacyUnavailable,
+                    availability: ToolArtifactAvailability::Unavailable,
                     observed_bytes: result.content.len() as u64,
-                    reason: "legacy inline content exceeded the hard guard; streaming artifact capture is required"
+                    reason: "inline content exceeded the hard guard; streaming artifact capture is required"
                         .to_owned(),
                 },
             }
@@ -748,7 +747,7 @@ impl ToolResultRecordedV2 {
                 },
                 None => ToolArtifactBindingV1::Unavailable {
                     unavailable: ToolArtifactUnavailableV1 {
-                        availability: ToolArtifactAvailability::LegacyUnavailable,
+                        availability: ToolArtifactAvailability::Unavailable,
                         observed_bytes: result.content.len() as u64,
                         reason: "session has no durable artifact store".to_owned(),
                     },
@@ -825,9 +824,9 @@ impl ToolResultRecordedV2 {
             capture_telemetry: ToolResultCaptureTelemetryV1 {
                 capture_path,
                 observed_inline_bytes: result.content.len() as u64,
-                hard_guard_bytes: (capture_path == ToolResultCapturePathV1::LegacyInlineCapture)
-                    .then_some(TOOL_RESULT_LEGACY_INLINE_MAX_BYTES as u64),
-                hard_guard_exceeded: legacy_inline_guard_exceeded,
+                hard_guard_bytes: (capture_path == ToolResultCapturePathV1::InlineCapture)
+                    .then_some(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64),
+                hard_guard_exceeded: inline_guard_exceeded,
                 inline_projection_truncated,
             },
             recorded_at_ms: current_unix_ms(),
@@ -1244,7 +1243,7 @@ pub enum ToolArtifactAvailability {
     Missing,
     HashMismatch,
     PolicyRevoked,
-    LegacyUnavailable,
+    Unavailable,
 }
 
 /// Manifest-only store inventory used by incremental reachability projection and GC.
@@ -1261,17 +1260,11 @@ pub struct ToolArtifactManifestEntryV1 {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ToolArtifactGcRootsV1 {
-    #[serde(default)]
     pub active_result_refs: BTreeSet<ToolArtifactRefV1>,
-    #[serde(default)]
     pub context_epoch_refs: BTreeSet<ToolArtifactRefV1>,
-    #[serde(default)]
     pub unresolved_read_refs: BTreeSet<ToolArtifactRefV1>,
-    #[serde(default)]
     pub fork_export_pins: BTreeSet<ToolArtifactRefV1>,
-    #[serde(default)]
     pub verification_review_pins: BTreeSet<ToolArtifactRefV1>,
-    #[serde(default)]
     pub explicit_holds: BTreeSet<ToolArtifactRefV1>,
 }
 

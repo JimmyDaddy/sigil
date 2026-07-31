@@ -94,16 +94,12 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
         panic!("Ctrl-S should complete setup")
     };
     assert_eq!(saved_path, config_path);
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
-    assert!(root_config.agent.provider.is_empty());
+    assert_eq!(root_config.config_version, sigil_kernel::CONFIG_VERSION_V2);
+    assert!(root_config.agent.runtime_provider.is_empty());
     assert_eq!(
         root_config.agent.connection.as_ref().map(|id| id.as_str()),
         Some("deepseek-default")
     );
-    assert!(root_config.providers.is_empty());
     assert_eq!(root_config.task.routing_policy, TaskRoutingPolicy::Manual);
     assert_eq!(
         root_config.task.multi_agent_mode,
@@ -149,7 +145,7 @@ fn setup_startup_recovery_error_blocks_publish_when_config_is_missing() -> Resul
     let mut app = AppState::from_setup(
         config_path.clone(),
         temp.path().to_path_buf(),
-        Some("provider migration recovery is pending".to_owned()),
+        Some("provider configuration recovery is pending".to_owned()),
     );
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.api_key = SecretString::new("staged-only");
@@ -485,17 +481,13 @@ fn setup_builder_persists_the_selected_provider() -> Result<()> {
 
     let root_config = build_setup_root_config(&state)?;
 
-    assert_eq!(
-        root_config.config_version,
-        Some(sigil_kernel::CONFIG_VERSION_V2)
-    );
-    assert!(root_config.agent.provider.is_empty());
+    assert_eq!(root_config.config_version, sigil_kernel::CONFIG_VERSION_V2);
+    assert!(root_config.agent.runtime_provider.is_empty());
     assert_eq!(
         root_config.agent.connection.as_ref().map(|id| id.as_str()),
         Some("anthropic-default")
     );
     assert_eq!(root_config.agent.model, "claude-sonnet-4-5");
-    assert!(root_config.providers.is_empty());
     assert!(root_config.connections.contains_key("anthropic-default"));
     assert!(!toml::to_string(&root_config)?.contains("anthropic-test-key"));
     Ok(())

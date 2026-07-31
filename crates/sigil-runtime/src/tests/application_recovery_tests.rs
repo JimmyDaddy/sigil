@@ -103,13 +103,18 @@ fn deepseek_root_config(directory: &Path) -> Result<RootConfig> {
     fs::write(
         &path,
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-api_key = ""
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     RootConfig::load(&path)

@@ -26,32 +26,6 @@ pub(super) fn apply_verification_projection_record(
     Ok(())
 }
 
-pub(super) fn apply_plan_approval_projection_record(
-    projection: &mut PlanApprovalProjection,
-    cursor: &mut Option<ProjectionCursor>,
-    record: &SessionStreamRecord,
-) -> Result<()> {
-    let next_cursor = record.projection_cursor(PLAN_APPROVAL_PROJECTION_SCHEMA_VERSION);
-    match projection_apply_decision_for_record(
-        cursor.as_ref(),
-        &next_cursor.session_id,
-        next_cursor.last_applied_stream_sequence,
-        &next_cursor.last_applied_event_id,
-        &next_cursor.last_applied_record_checksum,
-    )? {
-        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
-        ProjectionApplyDecision::Apply => {}
-    }
-    if let Some(domain_record) = record.domain_event_record()?
-        && let Some(SessionLogEntry::Control(control)) =
-            session_entry_from_domain_event(&domain_record.event)?
-    {
-        projection.apply_control_entry(&control);
-    }
-    *cursor = Some(next_cursor);
-    Ok(())
-}
-
 pub(super) fn apply_plan_artifact_projection_record(
     projection: &mut PlanArtifactProjection,
     cursor: &mut Option<ProjectionCursor>,

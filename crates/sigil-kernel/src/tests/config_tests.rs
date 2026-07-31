@@ -13,7 +13,7 @@ use super::{
     windows_replace_error_requires_recovery,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, CredentialStorageMode,
+    AgentConfig, AgentRole, ApprovalMode, ConnectionId, CredentialStorageMode,
     DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS, DEFAULT_SESSION_RETENTION_MAX_BYTES,
     DEFAULT_SESSION_RETENTION_MAX_SESSIONS, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
@@ -27,22 +27,21 @@ fn compaction_threshold_status_follows_configured_window() {
         strategy: Default::default(),
         enabled: true,
         native_carrier_enabled: false,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
         context_window_tokens: Some(100),
-        tail_messages: 6,
     };
 
     assert_eq!(config.threshold_status(0), CompactionThresholdStatus::Ready);
-    assert_eq!(config.threshold_status(50), CompactionThresholdStatus::Soft);
-    assert_eq!(config.threshold_status(80), CompactionThresholdStatus::Hard);
+    assert_eq!(config.threshold_status(70), CompactionThresholdStatus::Soft);
+    assert_eq!(config.threshold_status(92), CompactionThresholdStatus::Hard);
 }
 
 #[test]
 fn compaction_window_loads_and_saves_fallback_key() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [compaction]
@@ -62,11 +61,13 @@ fallback_context_window_tokens = 128000
 }
 
 #[test]
-fn compaction_strategy_defaults_to_cache_aware_v3_and_legacy_fields_still_parse() {
+fn compaction_strategy_defaults_to_cache_aware_v3_and_removed_fields_are_rejected() {
     let defaults: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 "#,
     )
@@ -76,44 +77,31 @@ model = "deepseek-v4-flash"
         CompactionStrategy::CacheAwareV3
     );
     assert!(!defaults.compaction.native_carrier_enabled);
-    assert_eq!(
-        defaults.compaction.legacy_migration_fields(),
-        &[
-            "soft_threshold_ratio",
-            "hard_threshold_ratio",
-            "tail_messages",
-        ]
-    );
 
-    let legacy: RootConfig = toml::from_str(
+    let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [compaction]
 strategy = "legacy_v2"
-native_carrier_enabled = true
-soft_threshold_ratio = 0.4
-hard_threshold_ratio = 0.75
-tail_messages = 9
 "#,
     )
-    .expect("legacy compaction config should remain readable");
-    assert_eq!(legacy.compaction.strategy, CompactionStrategy::LegacyV2);
-    assert!(legacy.compaction.native_carrier_enabled);
-    assert_eq!(legacy.compaction.soft_threshold_ratio, 0.4);
-    assert_eq!(legacy.compaction.hard_threshold_ratio, 0.75);
-    assert_eq!(legacy.compaction.tail_messages, 9);
-    assert!(legacy.compaction.legacy_migration_fields().is_empty());
+    .expect_err("removed compaction strategy must be rejected");
+    assert!(error.to_string().contains("unknown variant"));
 }
 
 #[test]
 fn web_config_defaults_and_explicit_policy_roundtrip() {
     let defaults: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 "#,
     )
@@ -125,8 +113,10 @@ model = "deepseek-v4-pro"
 
     let configured: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [web]
@@ -200,8 +190,10 @@ fn web_policy_cap_only_tightens_the_root_policy() {
 #[test]
 fn compaction_window_rejects_legacy_context_window_key() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [compaction]
@@ -232,8 +224,10 @@ fn skill_config_defaults_and_toml_overrides_are_stable() {
 
     let previous_alpha: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [skills]
@@ -245,8 +239,10 @@ compatibility_sources = []
     assert!(previous_alpha.skills.compatibility_sources.is_empty());
 
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [skills]
@@ -269,8 +265,10 @@ compatibility_sources = ["opencode"]
 fn removed_project_asset_config_keys_are_rejected() {
     assert_root_config_rejects(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [storage]
@@ -280,8 +278,10 @@ project_assets_root = "project-assets"
     );
     assert_root_config_rejects(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [skills]
@@ -291,8 +291,10 @@ workspace_dir = "skills"
     );
     assert_root_config_rejects(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [skills]
@@ -306,8 +308,10 @@ workspace_agents_dir = "agents"
 fn removed_permission_config_keys_are_rejected() {
     assert_root_config_rejects(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [permission]
@@ -317,8 +321,10 @@ preset = "balanced"
     );
     assert_root_config_rejects(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [permission]
@@ -328,8 +334,10 @@ default_mode = "ask"
     );
     assert_root_config_rejects(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [permission.access]
@@ -355,8 +363,10 @@ fn model_request_config_has_user_visible_defaults() {
 #[test]
 fn root_config_loads_model_request_from_toml() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [model_request]
@@ -414,8 +424,10 @@ fn root_config_load_applies_provider_neutral_model_request_env_overrides() {
     std::fs::write(
         &path,
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [model_request]
@@ -448,8 +460,10 @@ fn root_config_load_rejects_invalid_model_request_env_override() {
     std::fs::write(
         &path,
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 "#,
     )
@@ -593,15 +607,15 @@ fn root_config_save_roundtrips() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("nested").join("sigil.toml");
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(ConnectionId::new("deepseek").expect("connection id")),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(32),
             tool_timeout_secs: 30,
@@ -617,7 +631,6 @@ fn root_config_save_roundtrips() {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
@@ -627,7 +640,10 @@ fn root_config_save_roundtrips() {
     let loaded =
         RootConfig::load_with_model_request_env(&path, |_| None).expect("config should reload");
     assert_eq!(loaded.workspace.root, "/tmp/workspace");
-    assert_eq!(loaded.agent.provider, "deepseek");
+    assert_eq!(
+        loaded.agent.connection.as_ref().map(ConnectionId::as_str),
+        Some("deepseek")
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -673,8 +689,10 @@ fn root_config_save_replaces_public_files_privately_and_rejects_symlinks() {
     let link = temp.path().join("linked-sigil.toml");
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "openai_responses"
+connection = "openai_responses"
 model = "gpt-4.1"
 "#,
     )
@@ -696,8 +714,10 @@ model = "gpt-4.1"
         RootConfig::load_with_model_request_env(&path, |_| None)
             .expect("replaced config should parse")
             .agent
-            .provider,
-        "openai_responses"
+            .connection
+            .as_ref()
+            .map(crate::ConnectionId::as_str),
+        Some("openai_responses")
     );
 
     std::fs::write(&target, "keep me").expect("symlink target should write");
@@ -844,142 +864,7 @@ fn private_windows_acl_excludes_broad_read_principals_for_files_and_directories(
 }
 
 #[test]
-fn root_config_load_dispatches_v1_v2_mixed_and_future_schema() {
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let path = temp.path().join("sigil.toml");
-
-    std::fs::write(
-        &path,
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-api_key = "legacy-secret"
-"#,
-    )
-    .expect("legacy config should write");
-    let legacy = RootConfig::load(&path).expect("legacy config should load");
-    assert_eq!(legacy.config_version, None);
-
-    std::fs::write(
-        &path,
-        r#"
-config_version = 2
-
-[agent]
-connection = "openai-personal"
-model = "gpt-4.1"
-
-[connections.openai-personal]
-label = "OpenAI"
-provider = "openai"
-protocol = "responses"
-base_url = "https://api.openai.com/v1"
-credential = { source = "environment", name = "SIGIL_OPENAI_RESPONSES_API_KEY" }
-"#,
-    )
-    .expect("V2 config should write");
-    let v2 = RootConfig::load(&path).expect("V2 config shell should load");
-    assert_eq!(v2.config_version, Some(2));
-    assert_eq!(
-        v2.agent
-            .connection
-            .as_ref()
-            .expect("V2 route should exist")
-            .as_str(),
-        "openai-personal"
-    );
-
-    std::fs::write(
-        &path,
-        r#"
-config_version = 2
-[agent]
-provider = "deepseek"
-connection = "deepseek-default"
-model = "deepseek-v4-flash"
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-"#,
-    )
-    .expect("mixed config should write");
-    assert!(
-        RootConfig::load(&path)
-            .expect_err("mixed config should fail closed")
-            .to_string()
-            .contains("cannot include legacy")
-    );
-
-    std::fs::write(
-        &path,
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-
-[connections]
-"#,
-    )
-    .expect("empty mixed table config should write");
-    assert!(
-        RootConfig::load(&path)
-            .expect_err("an explicitly empty connections table must still select V2 schema")
-            .to_string()
-            .contains("config_version = 2 is required")
-    );
-
-    std::fs::write(
-        &path,
-        r#"
-config_version = 2
-
-[agent]
-connection = "openai-personal"
-model = "gpt-4.1"
-
-[providers]
-
-[connections.openai-personal]
-label = "OpenAI"
-provider = "openai"
-protocol = "responses"
-base_url = "https://api.openai.com/v1"
-credential = { source = "environment", name = "SIGIL_OPENAI_RESPONSES_API_KEY" }
-"#,
-    )
-    .expect("empty legacy table in V2 config should write");
-    assert!(
-        RootConfig::load(&path)
-            .expect_err("an explicitly empty providers table must still be rejected in V2")
-            .to_string()
-            .contains("cannot include legacy")
-    );
-
-    std::fs::write(
-        &path,
-        r#"
-config_version = 3
-[agent]
-connection = "openai-personal"
-model = "gpt-4.1"
-"#,
-    )
-    .expect("future config should write");
-    assert!(
-        RootConfig::load(&path)
-            .expect_err("future config should fail closed")
-            .to_string()
-            .contains("unsupported config_version 3")
-    );
-}
-
-#[test]
-fn root_config_v2_requires_compound_task_role_routes_and_rejects_legacy_provider() {
+fn root_config_requires_compound_task_role_routes() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("sigil.toml");
     let v2_prefix = r#"
@@ -998,14 +883,6 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#;
 
     for (role, expected) in [
-        (
-            r#"
-[task.planner]
-provider = "deepseek"
-model = "planner-model"
-"#,
-            "cannot include legacy [task.planner].provider",
-        ),
         (
             r#"
 [task.planner]
@@ -1053,44 +930,6 @@ reasoning_effort = "high"
         Some("primary")
     );
     assert_eq!(config.task.planner.model.as_deref(), Some("planner-model"));
-
-    std::fs::write(
-        &path,
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[task.planner]
-connection = "primary"
-model = "planner-model"
-"#,
-    )
-    .expect("legacy role config should write");
-    assert!(
-        RootConfig::load(&path)
-            .expect_err("role connection requires V2")
-            .to_string()
-            .contains("task role connection")
-    );
-}
-
-#[test]
-fn root_config_debug_redacts_legacy_provider_values() {
-    let config: RootConfig = toml::from_str(
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-[providers.deepseek]
-api_key = "debug-must-not-leak"
-"#,
-    )
-    .expect("legacy config should parse");
-
-    let rendered = format!("{config:?}");
-    assert!(!rendered.contains("debug-must-not-leak"));
-    assert!(rendered.contains("redacted"));
 }
 
 #[test]
@@ -1130,12 +969,12 @@ fn root_config_save_handles_paths_without_parent() {
     let path = Path::new(&file_name);
 
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig::default(),
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
@@ -1152,7 +991,6 @@ fn root_config_save_handles_paths_without_parent() {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
@@ -1169,37 +1007,15 @@ fn root_config_save_handles_paths_without_parent() {
 }
 
 #[test]
-fn root_config_save_rejects_legacy_inline_provider_secrets() {
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let path = temp.path().join("sigil.toml");
-    let config: RootConfig = toml::from_str(
-        r#"
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-api_key = "must-not-be-republished"
-"#,
-    )
-    .expect("legacy config should parse");
-
-    let error = config
-        .save(&path)
-        .expect_err("inline legacy secret must block ordinary publication");
-    assert!(format!("{error:#}").contains("legacy_secret_migration_required"));
-    assert!(!path.exists());
-}
-
-#[test]
 fn root_config_conditional_save_rejects_a_stale_snapshot() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("sigil.toml");
     let original: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 "#,
     )
@@ -1228,8 +1044,10 @@ model = "deepseek-v4-flash"
 fn root_config_loads_agent_and_session_defaults() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 "#,
     )
@@ -1252,7 +1070,6 @@ model = "deepseek-v4-flash"
     assert_eq!(config.storage, Default::default());
     assert_eq!(config.agent.tool_timeout_secs, 30);
     assert_eq!(config.memory, Default::default());
-    assert_eq!(config.compaction.tail_messages, 6);
     assert_eq!(config.terminal, Default::default());
     assert_eq!(config.appearance.theme, ThemeId::SigilDark);
     assert_eq!(config.appearance.syntax_theme, SyntaxThemeId::Auto);
@@ -1269,8 +1086,10 @@ model = "deepseek-v4-flash"
 fn session_retention_config_has_explicit_overrides_without_implicit_cleanup() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [session.retention]
@@ -1295,8 +1114,10 @@ expire_older_than_ms = 789
 fn root_config_loads_appearance_config() {
     let config: RootConfig = toml::from_str(
         r##"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [appearance]
@@ -1446,8 +1267,10 @@ fn preferred_config_path_known_paths_cover_explicit_and_default_edges() {
 fn root_config_rejects_unknown_theme() {
     let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [appearance]
@@ -1464,8 +1287,10 @@ theme = "dracula"
 fn root_config_rejects_unknown_syntax_theme() {
     let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [appearance]
@@ -1484,12 +1309,12 @@ fn root_config_serializes_appearance_theme_and_colors() {
     colors.insert("surface_base".to_owned(), "#07080a".to_owned());
     colors.insert("text_primary".to_owned(), "#ecf0f6".to_owned());
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig::default(),
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
@@ -1512,7 +1337,6 @@ fn root_config_serializes_appearance_theme_and_colors() {
             colors: crate::ThemeColorOverrides::new(colors),
         },
         task: Default::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
@@ -1533,8 +1357,10 @@ fn root_config_serializes_appearance_theme_and_colors() {
 #[test]
 fn task_config_loads_role_overrides() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [task]
@@ -1577,7 +1403,6 @@ prefixes = ["code_intel_"]
     );
     assert_eq!(config.task.planner.tools.names, vec!["read_file", "grep"]);
     assert_eq!(config.task.planner.tools.prefixes, vec!["code_intel_"]);
-    assert_eq!(config.task.executor.provider, None);
 }
 
 #[test]
@@ -1593,8 +1418,10 @@ fn task_config_rejects_legacy_budget_fields() {
     ] {
         let raw = format!(
             r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [task]
@@ -1651,47 +1478,48 @@ fn task_config_role_config_and_mode_labels_are_stable() {
 }
 
 #[test]
-fn task_routing_policy_preserves_manual_compatibility_when_missing() {
+fn task_routing_policy_uses_manual_default_when_missing() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [task]
 default_mode = "plan"
 "#;
 
-    let config: RootConfig = toml::from_str(raw).expect("legacy task config should parse");
+    let config: RootConfig = toml::from_str(raw).expect("task config should parse");
 
     assert_eq!(config.task.default_mode, TaskMode::Plan);
     assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
 }
 
 #[test]
-fn task_config_accepts_codex_multi_agent_mode_alias() {
+fn task_config_rejects_removed_multi_agent_mode_alias() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [task]
 multi_agent_mode = "explicitRequestOnly"
 "#;
 
-    let config: RootConfig = toml::from_str(raw).expect("task config should parse alias");
-
-    assert_eq!(
-        config.task.multi_agent_mode,
-        MultiAgentMode::ExplicitRequestOnly
-    );
+    toml::from_str::<RootConfig>(raw).expect_err("removed alias must be rejected");
 }
 
 #[test]
 fn root_config_loads_terminal_config() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal]
@@ -1730,8 +1558,10 @@ minimum_run_duration_ms = 25000
 fn root_config_defaults_terminal_controls_for_interactive_tui() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 "#,
     )
@@ -1759,8 +1589,10 @@ model = "deepseek-v4-flash"
 fn root_config_rejects_invalid_terminal_notification_method() {
     let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal.notifications]
@@ -1777,8 +1609,10 @@ fn root_config_rejects_out_of_range_terminal_notification_duration() {
     for duration in [999_u64, 3_600_001] {
         let raw = format!(
             r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal.notifications]
@@ -1820,8 +1654,10 @@ fn terminal_notification_method_cycles_through_supported_protocols() {
 fn root_config_rejects_bool_terminal_keyboard_enhancement() {
     let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal]
@@ -1833,8 +1669,10 @@ keyboard_enhancement = true
 
     let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal]
@@ -1848,8 +1686,10 @@ keyboard_enhancement = false
 #[test]
 fn mcp_server_config_loads_lifecycle_and_trust_policy() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [[mcp_servers]]
@@ -1929,8 +1769,10 @@ server_version = "1.2.3"
 fn mcp_server_config_rejects_invalid_inherit_env_name() {
     let error = toml::from_str::<RootConfig>(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [[mcp_servers]]
@@ -1948,8 +1790,10 @@ inherit_env = ["BAD-NAME"]
 #[test]
 fn root_mcp_flat_transport_variants_roundtrip_without_inference() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [[mcp_servers]]
@@ -2028,7 +1872,9 @@ fn root_mcp_flat_transport_rejects_missing_unknown_and_cross_variant_fields() {
         ),
     ] {
         let raw = format!(
-            "[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\n{body}\n"
+            "config_version = 2
+
+[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\n{body}\n"
         );
         let error = toml::from_str::<RootConfig>(&raw).expect_err(case);
         assert!(
@@ -2060,7 +1906,9 @@ fn root_remote_mcp_rejects_unsafe_headers_capabilities_and_legacy_pin() {
         ),
     ] {
         let raw = format!(
-            "[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\nname = \"remote\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.test/mcp\"\n{body}\n"
+            "config_version = 2
+
+[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\nname = \"remote\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.test/mcp\"\n{body}\n"
         );
         let error =
             toml::from_str::<RootConfig>(&raw).expect_err("unsafe remote MCP config should fail");
@@ -2071,8 +1919,10 @@ fn root_remote_mcp_rejects_unsafe_headers_capabilities_and_legacy_pin() {
     }
 
     let legacy_pin = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [[mcp_servers]]
@@ -2129,7 +1979,9 @@ fn root_remote_mcp_oauth_is_bounded_https_only_and_authorization_exclusive() {
         ),
     ] {
         let raw = format!(
-            "[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\nname = \"remote\"\ntransport = \"streamable_http\"\nurl = \"{url}\"\n{body}\n"
+            "config_version = 2
+
+[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\nname = \"remote\"\ntransport = \"streamable_http\"\nurl = \"{url}\"\n{body}\n"
         );
         let error = toml::from_str::<RootConfig>(&raw).expect_err("invalid OAuth config");
         assert!(
@@ -2142,8 +1994,10 @@ fn root_remote_mcp_oauth_is_bounded_https_only_and_authorization_exclusive() {
 #[test]
 fn root_config_loads_code_intelligence_config() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[code_intelligence]
@@ -2185,8 +2039,10 @@ check = { command = "check" }
 #[test]
 fn root_config_loads_code_intelligence_auto_discover_config() {
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[code_intelligence]
@@ -2213,7 +2069,9 @@ model = "deepseek-v4-flash"
 fn root_config_rejects_legacy_code_intelligence_keys() {
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2225,7 +2083,9 @@ fn root_config_rejects_legacy_code_intelligence_keys() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2238,7 +2098,9 @@ fn root_config_rejects_legacy_code_intelligence_keys() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2255,8 +2117,10 @@ fn root_config_rejects_legacy_code_intelligence_keys() {
 #[test]
 fn root_config_loads_verification_config_and_defaults_empty() {
     let default_raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 "#;
     let default_config: RootConfig =
@@ -2274,8 +2138,10 @@ model = "deepseek-v4-flash"
     assert!(default_config.verification.scope.generated_roots.is_empty());
 
     let raw = r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[verification]
@@ -2338,7 +2204,9 @@ effect = "read_only"
 fn root_config_rejects_legacy_verification_scope_keys() {
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2350,7 +2218,9 @@ fn root_config_rejects_legacy_verification_scope_keys() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2408,8 +2278,10 @@ fn compaction_threshold_status_handles_disabled_and_missing_window() {
 fn root_config_defaults_code_intelligence_and_memory() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 "#,
     )
@@ -2443,8 +2315,10 @@ model = "deepseek-v4-flash"
 fn root_config_loads_execution_config() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[execution]
@@ -2480,8 +2354,10 @@ model = "deepseek-v4-flash"
 fn root_config_loads_macos_seatbelt_execution_backend() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[execution]
@@ -2511,8 +2387,10 @@ model = "deepseek-v4-flash"
 fn root_config_loads_linux_bubblewrap_execution_backend() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[execution]
@@ -2543,8 +2421,10 @@ model = "deepseek-v4-flash"
 fn root_config_loads_docker_execution_backend() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 	[execution]
@@ -2574,7 +2454,9 @@ model = "deepseek-v4-flash"
 fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2587,7 +2469,9 @@ fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2599,7 +2483,9 @@ fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2614,7 +2500,9 @@ fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2630,7 +2518,9 @@ fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2646,7 +2536,9 @@ fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
 
     assert_root_config_rejects(
         r#"
-	[agent]
+	config_version = 2
+
+[agent]
 	provider = "deepseek"
 	model = "deepseek-v4-flash"
 
@@ -2874,14 +2766,14 @@ fn root_config_load_reports_missing_paths_with_context() {
 fn root_config_save_reports_parent_creation_and_write_errors() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
         storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(32),
@@ -2898,7 +2790,6 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
@@ -2927,8 +2818,10 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
 fn language_server_config_defaults_trust_and_timeout() {
     let config: RootConfig = toml::from_str(
         r#"
+config_version = 2
+
 [agent]
-provider = "deepseek"
+connection = "deepseek"
 model = "deepseek-v4-flash"
 
 [[code_intelligence.servers]]

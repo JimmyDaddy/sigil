@@ -28,9 +28,11 @@ pub(crate) fn supported_reasoning_efforts(
 pub(crate) fn configured_default_reasoning_effort(
     root_config: &RootConfig,
 ) -> Option<ReasoningEffort> {
-    let supported =
-        supported_reasoning_efforts(&root_config.agent.provider, &root_config.agent.model);
-    let configured = match normalize_provider_name(&root_config.agent.provider) {
+    let provider = crate::provider_connections::resolve_default_model_route(root_config)
+        .ok()
+        .map(|(provider, _)| provider)?;
+    let supported = supported_reasoning_efforts(&provider, &root_config.agent.model);
+    let configured = match normalize_provider_name(&provider) {
         DEEPSEEK_PROVIDER_KEY => Some(
             load_deepseek_config(root_config)
                 .ok()

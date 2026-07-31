@@ -12,11 +12,12 @@ use serde_json::json;
 use super::*;
 use crate::{
     CompactionConfig, CompletionRequest, MemoryConfig, MessageRole, NetworkEffect, NetworkPolicy,
-    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, Provider,
-    ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, Tool, ToolAccess, ToolApproval,
-    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolCategory, ToolContext,
-    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
+    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
+    PlanPermissionGrantedEntry, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningStreamSupport, TaskId, Tool, ToolAccess, ToolApproval, ToolApprovalSessionGrantEntry,
+    ToolApprovalSessionGrantExpiry, ToolCategory, ToolContext, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
 };
 
 fn spec(
@@ -64,25 +65,26 @@ fn policy_decision(
         )
 }
 
-fn approved_plan() -> PlanApprovedEntry {
-    PlanApprovedEntry {
-        plan_version: 1,
+fn plan_permission_grant() -> PlanPermissionGrantedEntry {
+    PlanPermissionGrantedEntry {
+        plan_id: PlanId::new("network-test-plan").expect("plan id"),
         plan_hash: "sha256:approved-plan".to_owned(),
-        approved_at_ms: 42,
+        task_id: TaskId::new("network-test-task").expect("task id"),
+        workspace_snapshot_id: None,
         permission: PlanApprovalPermission::WorkspaceEdits,
         scope: PlanApprovalScope {
             summary: "approved source edit".to_owned(),
             workspace_paths: vec!["src/lib.rs".to_owned()],
         },
         expires: PlanApprovalExpiry::Session,
-        clear_planning_context: true,
+        granted_at_ms: 42,
     }
 }
 
 #[test]
 fn plan_approval_does_not_override_network_ask_or_deny() -> Result<()> {
     let mut session = Session::new("test", "test");
-    session.append_control(ControlEntry::PlanApproved(approved_plan()))?;
+    session.append_control(ControlEntry::PlanPermissionGranted(plan_permission_grant()))?;
     let tool_spec = spec(
         "write_file",
         ToolCategory::File,

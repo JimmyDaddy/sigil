@@ -31,21 +31,28 @@ fn safe_provider_origin_rejects_credentials_and_non_http_schemes() {
 #[test]
 fn hosted_destination_uses_the_resolved_provider_base_url() -> Result<()> {
     let config: RootConfig = serde_json::from_value(json!({
+        "config_version": 2,
         "agent": {
-            "provider": "gemini",
+            "connection": "gemini-default",
             "model": "gemini-2.5-pro",
             "tool_timeout_secs": 30
         },
-        "providers": {
-            "gemini": {
-                "base_url": "http://127.0.0.1:4317/gemini/v1",
-                "api_key": "fixture"
+        "connections": {
+            "gemini-default": {
+                "label": "Gemini",
+                "provider": "gemini",
+                "protocol": "generate_content",
+                "base_url": "https://gemini.example.test/gemini/v1",
+                "credential": {
+                    "source": "environment",
+                    "name": "SIGIL_GEMINI_API_KEY"
+                }
             }
         }
     }))?;
     assert_eq!(
         provider_hosted_safe_destination(&config, "gemini")?,
-        "http://127.0.0.1:4317/"
+        "https://gemini.example.test/"
     );
     Ok(())
 }

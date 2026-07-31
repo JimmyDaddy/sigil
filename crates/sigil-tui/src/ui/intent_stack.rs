@@ -362,7 +362,7 @@ fn phase_label(phase: IntentStackModalPhase) -> &'static str {
         IntentStackModalPhase::Loading => "LOADING",
         IntentStackModalPhase::Ready => "READY",
         IntentStackModalPhase::ReadOnly => "READ ONLY",
-        IntentStackModalPhase::HistoryUnavailable => "HISTORY UNAVAILABLE",
+        IntentStackModalPhase::NotCreated => "NOT CREATED",
         IntentStackModalPhase::PreviewingDrop => "PREVIEWING",
         IntentStackModalPhase::ConfirmingDrop => "CONFIRM DROP",
         IntentStackModalPhase::ApplyingDrop => "APPLYING",
@@ -377,7 +377,7 @@ fn phase_color(phase: IntentStackModalPhase, palette: &ThemePalette) -> ratatui:
         IntentStackModalPhase::Unavailable => palette.accent_danger,
         IntentStackModalPhase::Loading
         | IntentStackModalPhase::ReadOnly
-        | IntentStackModalPhase::HistoryUnavailable
+        | IntentStackModalPhase::NotCreated
         | IntentStackModalPhase::PreviewingDrop
         | IntentStackModalPhase::ApplyingDrop => palette.accent_info,
     }

@@ -313,7 +313,7 @@ impl Session {
         }
     }
 
-    /// Loads a session from the durable store and recovers its persisted identity when possible.
+    /// Loads a session from the durable store and requires its current persisted identity.
     pub fn load_from_store(
         provider_name: impl Into<String>,
         model_name: impl Into<String>,
@@ -326,18 +326,18 @@ impl Session {
     pub fn load_from_store_with_route(
         provider_name: impl Into<String>,
         model_name: impl Into<String>,
-        fallback_route: Option<ResolvedModelRoute>,
+        initial_route: Option<ResolvedModelRoute>,
         store: JsonlSessionStore,
     ) -> Result<Self> {
-        let fallback_provider_name = provider_name.into();
-        let fallback_model_name = model_name.into();
+        let initial_provider_name = provider_name.into();
+        let initial_model_name = model_name.into();
         // Establish the V2 session envelope (including tail repair and identity) before the
         // continuation coordinator reads the stream. Otherwise coordinator recovery can expose
         // a repaired-but-not-yet-initialized file to concurrent readers during startup.
         let (entries, records, provider_name, model_name) = store.load_entries_writer_reconciled(
-            fallback_provider_name,
-            fallback_model_name,
-            fallback_route,
+            initial_provider_name,
+            initial_model_name,
+            initial_route,
         )?;
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover_from_records(&records)
@@ -377,11 +377,6 @@ impl Session {
     /// Appends a single entry to the in-memory log and durable store when present.
     pub fn append(&mut self, entry: SessionLogEntry) -> Result<()> {
         match &entry {
-            SessionLogEntry::ToolResult(_) => {
-                bail!(
-                    "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
-                );
-            }
             SessionLogEntry::ToolResultV2(result) => result.validate()?,
             SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) => {
                 receipt.validate()?;
@@ -456,47 +451,15 @@ impl Session {
         self.append(SessionLogEntry::Assistant(message))
     }
 
-    /// Crate-local migration helper for legacy tests. It always writes a V2 record and is not a
-    /// production persistence API.
+    /// Crate-local helper for tests that need a current durable tool-result record.
     #[cfg(test)]
-    pub(crate) fn append_tool_message(&mut self, message: ModelMessage) -> Result<()> {
-        if message.role != MessageRole::Tool
-            || !message.tool_calls.is_empty()
-            || message.tool_call_id.as_deref().is_none_or(str::is_empty)
-            || message.content.is_none()
-        {
-            bail!("legacy tool-message adapter requires one bounded tool-role message");
-        }
-        let call_id = message
-            .tool_call_id
-            .clone()
-            .expect("validated tool message has a call id");
-        let tool_name = self
-            .entries
-            .iter()
-            .rev()
-            .filter_map(|entry| match entry {
-                SessionLogEntry::Assistant(assistant) => Some(assistant),
-                _ => None,
-            })
-            .flat_map(|assistant| assistant.tool_calls.iter())
-            .find(|call| call.id == call_id)
-            .map_or_else(
-                || "legacy_inline_test_adapter".to_owned(),
-                |call| call.name.clone(),
-            );
-        let content = message
-            .content
-            .clone()
-            .expect("validated tool message has content");
-        let result = ToolResult::ok(call_id, tool_name, content, ToolResultMeta::default());
+    pub(crate) fn append_test_tool_result(&mut self, result: ToolResult) -> Result<()> {
         let artifact_store = self.tool_artifact_store();
-        let (mut recorded, _) = ToolResultRecordedV2::capture(
+        let (recorded, _) = ToolResultRecordedV2::capture(
             &result,
             artifact_store.as_ref(),
             ToolArtifactSensitivity::Ordinary,
         )?;
-        recorded.message_id = message.id;
         self.append(SessionLogEntry::ToolResultV2(recorded))
     }
 
@@ -878,9 +841,7 @@ impl Session {
             .entries
             .iter()
             .find_map(|entry| match entry {
-                SessionLogEntry::User(message)
-                | SessionLogEntry::Assistant(message)
-                | SessionLogEntry::ToolResult(message)
+                SessionLogEntry::User(message) | SessionLogEntry::Assistant(message)
                     if message.id == provenance.message_id =>
                 {
                     Some(message.clone())
@@ -1129,23 +1090,6 @@ impl Session {
         store.read_event_records_writer()
     }
 
-    /// Rebuilds a V2 fold preview from this session's durable stream without mutating it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when this session has no durable store or the V2 stream cannot safely be
-    /// planned.
-    pub fn v2_compaction_preview(
-        &self,
-        requested_tail_message_count: usize,
-    ) -> Result<Option<V2CompactionPreview>> {
-        let store = self
-            .store
-            .as_ref()
-            .context("v2 compaction preview requires a durable session store")?;
-        store.v2_compaction_preview(requested_tail_message_count, None)
-    }
-
     /// Rebuilds a V3 whole-turn/token-tail preview without mutating the durable session.
     ///
     /// # Errors
@@ -1251,11 +1195,6 @@ impl Session {
         })
     }
 
-    /// Returns durable plan approvals reconstructed from append-only control entries.
-    pub fn plan_approval_projection(&self) -> PlanApprovalProjection {
-        PlanApprovalProjection::from_entries(&self.entries)
-    }
-
     /// Returns durable plan artifact state reconstructed from append-only control entries.
     pub fn plan_artifact_projection(&self) -> PlanArtifactProjection {
         PlanArtifactProjection::from_entries(&self.entries)
@@ -1273,22 +1212,6 @@ impl Session {
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
             apply_plan_artifact_projection_record(&mut projection, &mut cursor, &record)?;
-        }
-        Ok(Some(projection))
-    }
-
-    /// Rebuilds plan approval state directly from the durable v2 event stream.
-    pub fn try_plan_approval_projection_from_durable(
-        &self,
-    ) -> Result<Option<PlanApprovalProjection>> {
-        let Some(store) = &self.store else {
-            return Ok(None);
-        };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
-        let mut projection = PlanApprovalProjection::default();
-        let mut cursor: Option<ProjectionCursor> = None;
-        for record in records {
-            apply_plan_approval_projection_record(&mut projection, &mut cursor, &record)?;
         }
         Ok(Some(projection))
     }
@@ -2269,9 +2192,7 @@ fn validated_recovered_entries(
         let accepted = match &entry {
             SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance)) => {
                 let message = safe_entries.iter().find_map(|candidate| match candidate {
-                    SessionLogEntry::User(message)
-                    | SessionLogEntry::Assistant(message)
-                    | SessionLogEntry::ToolResult(message)
+                    SessionLogEntry::User(message) | SessionLogEntry::Assistant(message)
                         if message.id == provenance.message_id =>
                     {
                         Some(message.clone())
@@ -2301,8 +2222,7 @@ fn validated_recovered_entries(
                                 crate::WebUrlProvenanceKind::WebSearchResult
                                 | crate::WebUrlProvenanceKind::PriorWebFetch
                                 | crate::WebUrlProvenanceKind::RedirectTarget,
-                                SessionLogEntry::Assistant(message)
-                                | SessionLogEntry::ToolResult(message),
+                                SessionLogEntry::Assistant(message),
                             ) => message.id == descriptor.durable_entry_id,
                             (
                                 crate::WebUrlProvenanceKind::WebSearchResult

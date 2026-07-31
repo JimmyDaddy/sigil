@@ -128,39 +128,6 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
-            "/settings/provider-connections/migrate-legacy": {
-                "post": {
-                    "summary": "Atomically migrate all valid legacy provider connections",
-                    "description": "Moves inline legacy credentials directly from the server-loaded config into the configured credential store, preserves environment references and routes, and does not contact a provider catalog.",
-                    "requestBody": {
-                        "required": true,
-                        "content": {
-                            "application/json": {
-                                "schema": { "$ref": "#/components/schemas/ProviderLegacyMigrationRequest" }
-                            }
-                        }
-                    },
-                    "responses": {
-                        "200": { "description": "Published V2 configuration and secret-free migration summary", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderLegacyMigrationResult" } } } },
-                        "400": { "$ref": "#/components/responses/BadRequest" },
-                        "401": { "$ref": "#/components/responses/Unauthorized" },
-                        "409": { "$ref": "#/components/responses/BadRequest" },
-                        "422": { "$ref": "#/components/responses/BadRequest" },
-                        "503": { "$ref": "#/components/responses/Unavailable" }
-                    }
-                }
-            },
-            "/settings/provider-connections/recheck-migration": {
-                "post": {
-                    "summary": "Explicitly recheck durable provider migration recovery",
-                    "description": "Clears a persisted migration recovery block only when the current config and credential-aware inventory are a complete healthy V2 state. Otherwise the returned inventory retains the recovery issue.",
-                    "responses": {
-                        "200": { "description": "Rechecked secret-free provider inventory", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderConnectionInventory" } } } },
-                        "401": { "$ref": "#/components/responses/Unauthorized" },
-                        "503": { "$ref": "#/components/responses/Unavailable" }
-                    }
-                }
-            },
             "/openapi.json": {
                 "get": {
                     "summary": "Read this authenticated local API description",
@@ -304,7 +271,7 @@ pub fn http_openapi_document() -> Value {
                             "required": false,
                             "schema": {
                                 "type": "string",
-                                "enum": ["ready", "oversized", "scan_budget_exceeded", "unsupported_legacy", "invalid"]
+                                "enum": ["ready", "oversized", "scan_budget_exceeded", "invalid"]
                             }
                         }
                     ],
@@ -1065,7 +1032,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup", "provider_migration"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -1085,13 +1052,12 @@ pub fn http_openapi_document() -> Value {
                         "agent_activity": { "type": "boolean" },
                         "support_diagnostics": { "type": "boolean" },
                         "provider_connections": { "type": "boolean" },
-                        "provider_setup": { "type": "boolean" },
-                        "provider_migration": { "type": "boolean" }
+                        "provider_setup": { "type": "boolean" }
                     }
                 },
                 "ProviderConfigMode": {
                     "type": "string",
-                    "enum": ["legacy_v1", "v2", "mixed", "unsupported_future"]
+                    "enum": ["v2", "invalid"]
                 },
                 "ProviderModelRef": {
                     "type": "object",
@@ -1104,7 +1070,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderCredentialSource": {
                     "type": "string",
-                    "enum": ["environment", "system_keyring", "stored", "none", "legacy_plaintext"]
+                    "enum": ["environment", "stored", "none"]
                 },
                 "ProviderConnectionReadiness": {
                     "type": "string",
@@ -1164,24 +1130,7 @@ pub fn http_openapi_document() -> Value {
                         "issues": {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/ProviderConnectionIssue" }
-                        },
-                        "legacy_migration": {
-                            "anyOf": [
-                                { "$ref": "#/components/schemas/ProviderLegacyMigrationPreview" },
-                                { "type": "null" }
-                            ]
                         }
-                    }
-                },
-                "ProviderLegacyMigrationPreview": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["revision", "connection_count", "inline_credential_count", "environment_reference_count"],
-                    "properties": {
-                        "revision": { "type": "string", "minLength": 1, "maxLength": 128 },
-                        "connection_count": { "type": "integer", "format": "uint64" },
-                        "inline_credential_count": { "type": "integer", "format": "uint64" },
-                        "environment_reference_count": { "type": "integer", "format": "uint64" }
                     }
                 },
                 "ProviderSetupTemplate": {
@@ -1268,39 +1217,6 @@ pub fn http_openapi_document() -> Value {
                         "default_model": { "$ref": "#/components/schemas/ProviderModelRef" },
                         "inventory": { "$ref": "#/components/schemas/ProviderConnectionInventory" },
                         "save_warning": { "type": "boolean" }
-                    }
-                },
-                "ProviderLegacyMigrationRequest": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["expected_revision"],
-                    "properties": {
-                        "expected_revision": { "type": "string", "minLength": 1, "maxLength": 128 }
-                    }
-                },
-                "ProviderLegacyMigrationOutcome": {
-                    "type": "string",
-                    "enum": ["published", "published_with_warning"]
-                },
-                "ProviderLegacyMigrationWarning": {
-                    "type": "string",
-                    "enum": ["filesystem_durability_uncertain", "publication_visibility_reconciled"]
-                },
-                "ProviderLegacyMigrationResult": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["default_model", "inventory", "migrated_connection_count", "moved_inline_credential_count", "preserved_environment_reference_count", "outcome", "warnings"],
-                    "properties": {
-                        "default_model": { "$ref": "#/components/schemas/ProviderModelRef" },
-                        "inventory": { "$ref": "#/components/schemas/ProviderConnectionInventory" },
-                        "migrated_connection_count": { "type": "integer", "format": "uint64" },
-                        "moved_inline_credential_count": { "type": "integer", "format": "uint64" },
-                        "preserved_environment_reference_count": { "type": "integer", "format": "uint64" },
-                        "outcome": { "$ref": "#/components/schemas/ProviderLegacyMigrationOutcome" },
-                        "warnings": {
-                            "type": "array",
-                            "items": { "$ref": "#/components/schemas/ProviderLegacyMigrationWarning" }
-                        }
                     }
                 },
                 "SupportStatus": {
@@ -1636,7 +1552,7 @@ pub fn http_openapi_document() -> Value {
                                 "truncated": { "type": "boolean" },
                                 "original_content_bytes": { "type": "integer", "format": "uint64" },
                                 "artifact_ref": { "type": ["string", "null"], "pattern": "^ta1_[0-9a-fA-F]{32}$" },
-                                "artifact_availability": { "type": ["string", "null"], "enum": ["available", "expired", "missing", "hash_mismatch", "policy_revoked", "legacy_unavailable", null] },
+                                "artifact_availability": { "type": ["string", "null"], "enum": ["available", "expired", "missing", "hash_mismatch", "policy_revoked", "unavailable", null] },
                                 "observed_bytes": { "type": ["integer", "null"], "format": "uint64" },
                                 "persisted_bytes": { "type": ["integer", "null"], "format": "uint64", "maximum": 16777216 },
                                 "has_more": { "type": "boolean" }
@@ -2153,11 +2069,11 @@ pub fn http_openapi_document() -> Value {
                 "CompactionAdmissionNoHistory": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["kind", "durable_message_count", "configured_tail_message_count"],
+                    "required": ["kind", "durable_message_count", "minimum_tail_turn_count"],
                     "properties": {
                         "kind": { "type": "string", "const": "no_foldable_history" },
                         "durable_message_count": { "type": "integer", "format": "uint64", "minimum": 0 },
-                        "configured_tail_message_count": { "type": "integer", "format": "uint64", "minimum": 1 }
+                        "minimum_tail_turn_count": { "type": "integer", "format": "uint64", "minimum": 1 }
                     }
                 },
                 "CompactionAdmissionUnavailable": {
@@ -2174,7 +2090,7 @@ pub fn http_openapi_document() -> Value {
                     "additionalProperties": false,
                     "required": ["strategy", "phase", "native_carrier_available"],
                     "properties": {
-                        "strategy": { "type": "string", "enum": ["cache_aware_v3", "legacy_v2"] },
+                        "strategy": { "type": "string", "const": "cache_aware_v3" },
                         "phase": { "type": "string", "enum": ["below_observe", "observe", "prepare", "admit", "emergency"] },
                         "forecast_confidence": { "oneOf": [
                             { "type": "string", "enum": ["low", "medium", "high"] },
@@ -2184,12 +2100,7 @@ pub fn http_openapi_document() -> Value {
                             { "type": "string", "enum": ["emergency_fit", "projected_fit_required", "qualified_cost_savings", "pricing_unavailable", "low_forecast_confidence", "expected_turns_before_break_even", "insufficient_savings"] },
                             { "type": "null" }
                         ] },
-                        "native_carrier_available": { "type": "boolean" },
-                        "legacy_migration_fields": {
-                            "type": "array",
-                            "items": { "type": "string", "maxLength": 128 },
-                            "maxItems": 8
-                        }
+                        "native_carrier_available": { "type": "boolean" }
                     }
                 },
                 "CompactionConstraint": {
@@ -2550,7 +2461,7 @@ pub fn http_openapi_document() -> Value {
                         "session_id": { "type": ["string", "null"] },
                         "source_state": {
                             "type": "string",
-                            "enum": ["ready", "oversized", "scan_budget_exceeded", "unsupported_legacy", "invalid"]
+                            "enum": ["ready", "oversized", "scan_budget_exceeded", "invalid"]
                         },
                         "source_bytes": { "type": "integer", "format": "uint64" },
                         "source_modified_at_unix_ms": { "type": "integer", "format": "uint64" },
@@ -3069,7 +2980,6 @@ pub fn http_openapi_document() -> Value {
                     "type": "string",
                     "enum": [
                         "unsupported_schema",
-                        "intent_history_unavailable",
                         "unknown_intent",
                         "unknown_operation",
                         "stale_intent_version",
@@ -3233,7 +3143,7 @@ pub fn http_openapi_document() -> Value {
                             "additionalProperties": false,
                             "required": ["status", "schema_version", "safe_message"],
                             "properties": {
-                                "status": { "type": "string", "const": "history_unavailable" },
+                                "status": { "type": "string", "const": "not_created" },
                                 "schema_version": { "type": "integer", "const": 1 },
                                 "safe_message": { "type": "string", "maxLength": 2048 }
                             }

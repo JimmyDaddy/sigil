@@ -978,17 +978,12 @@ fn catalog_fingerprint(
     } else {
         match loaded_ref {
             LoadedCredentialRef::Config(
-                CredentialRefConfig::SystemKeyring { .. }
-                | CredentialRefConfig::Stored { .. }
-                | CredentialRefConfig::None,
+                CredentialRefConfig::Stored { .. } | CredentialRefConfig::None,
             ) => unreachable!("persistent credential refs returned above"),
             LoadedCredentialRef::Config(CredentialRefConfig::Environment { name }) => format!(
                 "environment-process-memory:{name}:{}",
                 process_secret_scope()
             ),
-            LoadedCredentialRef::LegacyInline(_) => {
-                format!("legacy-process-memory:{}", process_secret_scope())
-            }
         }
     };
     let semantic_fingerprint = connection_semantic_fingerprint(connection);
@@ -1004,12 +999,11 @@ fn persistent_catalog_fingerprint(
     loaded_ref: &LoadedCredentialRef,
 ) -> Option<String> {
     let credential_scope = match loaded_ref {
-        LoadedCredentialRef::Config(
-            CredentialRefConfig::SystemKeyring { id } | CredentialRefConfig::Stored { id },
-        ) => format!("stored:{id}"),
+        LoadedCredentialRef::Config(CredentialRefConfig::Stored { id }) => {
+            format!("stored:{id}")
+        }
         LoadedCredentialRef::Config(CredentialRefConfig::None) => "unauthenticated".to_owned(),
-        LoadedCredentialRef::Config(CredentialRefConfig::Environment { .. })
-        | LoadedCredentialRef::LegacyInline(_) => return None,
+        LoadedCredentialRef::Config(CredentialRefConfig::Environment { .. }) => return None,
     };
     let semantic_fingerprint = connection_semantic_fingerprint(connection);
     Some(stable_digest(&[
@@ -1022,9 +1016,7 @@ fn persistent_catalog_fingerprint(
 fn credential_is_process_local(source: ResolvedCredentialSource) -> bool {
     matches!(
         source,
-        ResolvedCredentialSource::Environment
-            | ResolvedCredentialSource::LegacyInline
-            | ResolvedCredentialSource::ProcessStaged
+        ResolvedCredentialSource::Environment | ResolvedCredentialSource::ProcessStaged
     )
 }
 

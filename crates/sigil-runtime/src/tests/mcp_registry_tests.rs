@@ -77,9 +77,18 @@ startup = "eager"
         crate::merge_mcp_server_declarations(&[], &trusted.registrations.mcp_servers)
             .expect("declaration should merge");
     let root_config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
+        r#"config_version = 2
+
+[agent]
+connection = "local"
 model = "test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
 "#,
     )
     .expect("root config should parse");
@@ -165,9 +174,18 @@ startup = "eager"
         crate::merge_mcp_server_declarations(&[], &trusted.registrations.mcp_servers)
             .expect("declaration should merge");
     let root_config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
+        r#"config_version = 2
+
+[agent]
+connection = "local"
 model = "test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
 "#,
     )
     .expect("root config should parse");
@@ -218,9 +236,18 @@ fn declaration_launcher_rejects_replaced_workspace_execution_base_identity() {
     )
     .expect("root declaration should capture the canonical workspace base");
     let root_config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
+        r#"config_version = 2
+
+[agent]
+connection = "local"
 model = "test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
 "#,
     )
     .expect("root config should parse");

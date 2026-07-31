@@ -83,9 +83,7 @@ pub struct ExternalSourceRecord {
     pub content_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
-    #[serde(default)]
     pub freshness: SourceFreshness,
-    #[serde(default)]
     pub cache_status: SourceCacheStatus,
     pub url_restart_policy: ToolRestartPolicy,
 }

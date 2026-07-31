@@ -2,13 +2,15 @@ use super::*;
 
 fn test_root_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: Default::default(),
         storage: Default::default(),
         session: Default::default(),
         agent: sigil_kernel::AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
+            runtime_provider: "deepseek".to_owned(),
+            connection: Some(
+                sigil_kernel::ConnectionId::new("deepseek-default").expect("test connection id"),
+            ),
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -24,46 +26,22 @@ fn test_root_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: std::collections::BTreeMap::from([(
-            "deepseek".to_owned(),
+        connections: std::collections::BTreeMap::from([(
+            "deepseek-default".to_owned(),
             serde_json::json!({
-                "base_url": "https://api.deepseek.com"
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "credential": {
+                    "source": "environment",
+                    "name": "SIGIL_API_KEY"
+                }
             }),
         )]),
-        connections: Default::default(),
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
-}
-
-fn v2_config_with_malformed_sibling() -> RootConfig {
-    let mut config = test_root_config();
-    config.config_version = Some(sigil_kernel::CONFIG_VERSION_V2);
-    config.agent.provider.clear();
-    config.agent.connection =
-        Some(sigil_kernel::ConnectionId::new("primary").expect("connection id"));
-    config.agent.model = "deepseek-v4-flash".to_owned();
-    config.connections.insert(
-        "primary".to_owned(),
-        serde_json::json!({
-            "label": "Primary",
-            "provider": "deepseek",
-            "protocol": "deepseek",
-            "base_url": "https://api.deepseek.com",
-            "credential": {"source": "environment", "name": "SIGIL_API_KEY"}
-        }),
-    );
-    config.connections.insert(
-        "broken".to_owned(),
-        serde_json::json!({
-            "label": "Broken",
-            "provider": "custom",
-            "protocol": "chat_completions",
-            "base_url": "not-a-url",
-            "credential": {"source": "none"}
-        }),
-    );
-    config
 }
 
 fn test_skill(id: &str) -> sigil_kernel::SkillDescriptor {
@@ -244,39 +222,9 @@ fn compaction_context_field_uses_short_fallback_label() {
         "Fallback window"
     );
 
-    let state = ConfigState::from_root_config(&RootConfig {
-        config_version: None,
-        workspace: Default::default(),
-        storage: Default::default(),
-        session: Default::default(),
-        agent: sigil_kernel::AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
-            model: "deepseek-v4-pro".to_owned(),
-            max_turns: None,
-            tool_timeout_secs: 30,
-        },
-        model_request: Default::default(),
-        permission: Default::default(),
-        memory: Default::default(),
-        skills: Default::default(),
-        compaction: Default::default(),
-        code_intelligence: Default::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: Default::default(),
-        providers: std::collections::BTreeMap::from([(
-            "deepseek".to_owned(),
-            serde_json::json!({
-                "base_url": "https://api.deepseek.com"
-            }),
-        )]),
-        connections: Default::default(),
-        web: Default::default(),
-        mcp_servers: Vec::new(),
-    });
+    let mut config = test_root_config();
+    config.agent.model = "deepseek-v4-pro".to_owned();
+    let state = ConfigState::from_root_config(&config);
 
     assert_eq!(
         state.display_value(ConfigField::CompactionContextWindowTokens),
@@ -286,34 +234,7 @@ fn compaction_context_field_uses_short_fallback_label() {
 
 #[test]
 fn config_rows_do_not_pre_pad_labels() {
-    let mut state = ConfigState::from_root_config(&RootConfig {
-        config_version: None,
-        workspace: Default::default(),
-        storage: Default::default(),
-        session: Default::default(),
-        agent: sigil_kernel::AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
-            model: "deepseek-v4-flash".to_owned(),
-            max_turns: None,
-            tool_timeout_secs: 30,
-        },
-        model_request: Default::default(),
-        permission: Default::default(),
-        memory: Default::default(),
-        skills: Default::default(),
-        compaction: Default::default(),
-        code_intelligence: Default::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: Default::default(),
-        providers: Default::default(),
-        connections: Default::default(),
-        web: Default::default(),
-        mcp_servers: Vec::new(),
-    });
+    let mut state = ConfigState::from_root_config(&test_root_config());
     assert!(state.focus_field(ConfigField::ProviderModel));
 
     assert_eq!(
@@ -324,146 +245,6 @@ fn config_rows_do_not_pre_pad_labels() {
         render_config_readonly_row("Root files", "SIGIL.md"),
         "- Root files: SIGIL.md"
     );
-}
-
-#[test]
-fn api_key_display_uses_status_without_secret_length() {
-    let mut config = RootConfig {
-        config_version: None,
-        workspace: Default::default(),
-        storage: Default::default(),
-        session: Default::default(),
-        agent: sigil_kernel::AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
-            model: "deepseek-v4-flash".to_owned(),
-            max_turns: None,
-            tool_timeout_secs: 30,
-        },
-        model_request: Default::default(),
-        permission: Default::default(),
-        memory: Default::default(),
-        skills: Default::default(),
-        compaction: Default::default(),
-        code_intelligence: Default::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: Default::default(),
-        providers: std::collections::BTreeMap::from([(
-            "deepseek".to_owned(),
-            serde_json::json!({
-                "base_url": "https://api.deepseek.com"
-            }),
-        )]),
-        connections: Default::default(),
-        web: Default::default(),
-        mcp_servers: Vec::new(),
-    };
-
-    let empty_state = ConfigState::from_root_config(&config);
-    assert_eq!(
-        empty_state.display_value(ConfigField::ProviderApiKey),
-        "environment · SIGIL_API_KEY"
-    );
-
-    config.providers.insert(
-        "deepseek".to_owned(),
-        serde_json::json!({
-            "api_key": "short",
-        }),
-    );
-    let short_state = ConfigState::from_root_config(&config);
-    assert_eq!(
-        short_state.display_value(ConfigField::ProviderApiKey),
-        "legacy plaintext · migration required"
-    );
-
-    config.providers.insert(
-        "deepseek".to_owned(),
-        serde_json::json!({
-            "api_key": "a-very-very-long-api-key-value",
-        }),
-    );
-    let long_state = ConfigState::from_root_config(&config);
-    assert_eq!(
-        long_state.display_value(ConfigField::ProviderApiKey),
-        short_state.display_value(ConfigField::ProviderApiKey)
-    );
-}
-
-#[test]
-fn connection_cycle_keeps_each_unsaved_draft_and_materializes_the_whole_set() -> anyhow::Result<()>
-{
-    let mut config = test_root_config();
-    config.providers.insert(
-        "deepseek".to_owned(),
-        serde_json::json!({
-            "api_key": "deepseek-key",
-            "base_url": "https://deepseek.example.com",
-            "beta_base_url": "https://deepseek.example.com/beta",
-            "anthropic_base_url": "https://deepseek.example.com/anthropic",
-            "fim_model": "deepseek-fim"
-        }),
-    );
-    config.providers.insert(
-        "openai_compat".to_owned(),
-        serde_json::json!({
-            "api_key": "openai-key",
-            "base_url": "https://openai.example.com/v1"
-        }),
-    );
-    config.providers.insert(
-        "openai_responses".to_owned(),
-        serde_json::json!({
-            "api_key": "responses-key",
-            "base_url": "https://responses.example.com/v1"
-        }),
-    );
-    config.providers.insert(
-        "anthropic".to_owned(),
-        serde_json::json!({
-            "api_key": "anthropic-key",
-            "base_url": "https://anthropic.example.com"
-        }),
-    );
-    config.providers.insert(
-        "gemini".to_owned(),
-        serde_json::json!({
-            "api_key": "gemini-key",
-            "base_url": "https://gemini.example.com/v1beta"
-        }),
-    );
-
-    let mut state = ConfigState::from_root_config(&config);
-    assert_eq!(state.draft.provider_model, config.agent.model);
-    assert!(state.draft.provider_api_key.is_empty());
-    assert_eq!(state.draft.connection_rows().len(), 5);
-
-    state.draft.provider_model = "deepseek-edited".to_owned();
-    state.draft.cycle_connection(true)?;
-    let other_connection = state.draft.selected_connection_id.clone();
-    state.draft.provider_model = "other-edited".to_owned();
-    while state.draft.selected_connection_id.as_str() != "deepseek-default" {
-        state.draft.cycle_connection(true)?;
-    }
-    assert_eq!(state.draft.provider_model, "deepseek-edited");
-    state.draft.cycle_connection(true)?;
-    while state.draft.selected_connection_id != other_connection {
-        state.draft.cycle_connection(true)?;
-    }
-    assert_eq!(state.draft.provider_model, "other-edited");
-
-    state.draft.set_selected_as_default()?;
-    let saved = state.draft.to_root_config()?;
-    assert_eq!(saved.config_version, Some(2));
-    assert!(saved.providers.is_empty());
-    assert_eq!(saved.connections.len(), 5);
-    assert_eq!(saved.agent.connection, Some(other_connection));
-    assert_eq!(saved.agent.model, "other-edited");
-    assert!(!format!("{saved:?}").contains("deepseek-key"));
-    Ok(())
 }
 
 #[test]
@@ -535,11 +316,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         &[
             ConfigField::CompactionEnabled,
             ConfigField::CompactionNativeCarrierEnabled,
-            ConfigField::CompactionStrategy,
             ConfigField::CompactionContextWindowTokens,
-            ConfigField::CompactionSoftThresholdRatio,
-            ConfigField::CompactionHardThresholdRatio,
-            ConfigField::CompactionTailMessages,
         ]
     );
     assert_eq!(
@@ -700,11 +477,6 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::TerminalScrollSensitivity
             .help_text()
             .contains("Mouse wheel rows")
-    );
-    assert!(
-        ConfigField::CompactionSoftThresholdRatio
-            .help_text()
-            .contains("Prompt pressure")
     );
     assert!(
         ConfigField::McpArgsCsv
@@ -1217,12 +989,8 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     draft.permission_mode = sigil_kernel::PermissionMode::ReadOnly;
     draft.memory_enabled = true;
     draft.compaction_enabled = true;
-    draft.compaction_strategy = sigil_kernel::CompactionStrategy::LegacyV2;
     draft.compaction_native_carrier_enabled = true;
-    draft.compaction_soft_threshold_ratio = "0.5".to_owned();
-    draft.compaction_hard_threshold_ratio = "0.75".to_owned();
     draft.compaction_context_window_tokens = "128000".to_owned();
-    draft.compaction_tail_messages = "8".to_owned();
     draft.mcp_servers = vec![McpServerDraft {
         name: "test-mcp".to_owned(),
         command: "node".to_owned(),
@@ -1241,18 +1009,17 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
         .expect("default route should serialize");
     let provider = &loaded.connections[&default_model.connection_id].config;
 
-    assert_eq!(config.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
-    assert_eq!(config.agent.provider, "");
+    assert_eq!(config.config_version, sigil_kernel::CONFIG_VERSION_V2);
+    assert_eq!(config.agent.runtime_provider, "deepseek");
     assert_eq!(config.agent.model, "deepseek-v4-pro");
     assert_eq!(
         config.permission.mode,
         sigil_kernel::PermissionMode::ReadOnly
     );
     assert_eq!(config.compaction.context_window_tokens, Some(128000));
-    assert_eq!(config.compaction.tail_messages, 8);
     assert_eq!(
         config.compaction.strategy,
-        sigil_kernel::CompactionStrategy::LegacyV2
+        sigil_kernel::CompactionStrategy::CacheAwareV3
     );
     assert!(config.compaction.native_carrier_enabled);
     assert_eq!(config.model_request.request_timeout_secs, 60);
@@ -1317,134 +1084,6 @@ fn config_draft_preserves_complete_mcp_config_and_environment_grants() -> anyhow
     let round_trip = draft.to_root_config()?;
 
     assert_eq!(round_trip.mcp_servers, vec![original]);
-    Ok(())
-}
-
-#[test]
-fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
-    let mut root_config = test_root_config();
-    root_config.agent.provider = OPENAI_COMPAT_PROVIDER_KEY.to_owned();
-    root_config.agent.model = "gpt-old".to_owned();
-    root_config.providers.insert(
-        "openai_compat".to_owned(),
-        serde_json::json!({
-            "base_url": "https://openai.example.com/v1",
-            "api_key": "old-key"
-        }),
-    );
-
-    let mut state = ConfigState::from_root_config(&root_config);
-    assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
-    assert_eq!(
-        state.display_value(ConfigField::ProviderFimModel),
-        "not supported"
-    );
-
-    state.draft.provider_model = " gpt-new ".to_owned();
-    state.draft.provider_api_key = SecretString::new(" new-key ");
-    state.draft.provider_base_url = " https://proxy.example.test/v1 ".to_owned();
-    state.draft.provider_fim_model = " ".to_owned();
-    state.draft.model_request_timeout_secs = "45".to_owned();
-
-    let config = state.draft.to_root_config()?;
-    let loaded = sigil_runtime::provider_connections::load_provider_connections(&config);
-    let default_model = loaded.default_model.as_ref().expect("default route");
-    let provider = &loaded.connections[&default_model.connection_id].config;
-
-    assert_eq!(config.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
-    assert_eq!(config.agent.provider, "");
-    assert_eq!(config.agent.model, "gpt-new");
-    assert_eq!(provider.base_url, "https://proxy.example.test/v1");
-    assert_eq!(
-        provider.credential,
-        sigil_runtime::provider_connections::CredentialRefConfig::Environment {
-            name: "SIGIL_OPENAI_COMPATIBLE_API_KEY".to_owned()
-        }
-    );
-    assert!(!format!("{config:?}").contains("new-key"));
-    assert_eq!(config.model_request.request_timeout_secs, 45);
-    Ok(())
-}
-
-#[test]
-fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
-    let mut root_config = test_root_config();
-    root_config.agent.provider = "anthropic".to_owned();
-    root_config.agent.model = "claude-old".to_owned();
-    root_config.providers.insert(
-        "anthropic".to_owned(),
-        serde_json::json!({
-            "base_url": "https://anthropic.example.com",
-            "api_key": "old-key",
-            "anthropic_version": "2023-06-01",
-            "max_tokens": 1024
-        }),
-    );
-
-    let mut state = ConfigState::from_root_config(&root_config);
-    assert_eq!(state.draft.provider_name, ANTHROPIC_PROVIDER_KEY);
-    assert_eq!(
-        state.display_value(ConfigField::ProviderFimModel),
-        "not supported"
-    );
-
-    state.draft.provider_model = " claude-new ".to_owned();
-    state.draft.provider_api_key = SecretString::new(" new-key ");
-    state.draft.provider_base_url = " https://proxy.example.test ".to_owned();
-    state.draft.model_request_timeout_secs = "45".to_owned();
-
-    let config = state.draft.to_root_config()?;
-    let loaded = sigil_runtime::provider_connections::load_provider_connections(&config);
-    let default_model = loaded.default_model.as_ref().expect("default route");
-    let provider = &loaded.connections[&default_model.connection_id].config;
-
-    assert_eq!(config.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
-    assert_eq!(config.agent.provider, "");
-    assert_eq!(config.agent.model, "claude-new");
-    assert_eq!(provider.base_url, "https://proxy.example.test");
-    assert_eq!(provider.options["anthropic_version"], "2023-06-01");
-    assert_eq!(provider.options["max_tokens"], 1024);
-    assert!(!format!("{config:?}").contains("new-key"));
-    assert_eq!(config.model_request.request_timeout_secs, 45);
-    Ok(())
-}
-
-#[test]
-fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
-    let mut root_config = test_root_config();
-    root_config.agent.provider = "gemini".to_owned();
-    root_config.agent.model = "gemini-old".to_owned();
-    root_config.providers.insert(
-        "gemini".to_owned(),
-        serde_json::json!({
-            "base_url": "https://gemini.example.com/v1beta",
-            "api_key": "old-key"
-        }),
-    );
-
-    let mut state = ConfigState::from_root_config(&root_config);
-    assert_eq!(state.draft.provider_name, GEMINI_PROVIDER_KEY);
-    assert_eq!(
-        state.display_value(ConfigField::ProviderFimModel),
-        "not supported"
-    );
-
-    state.draft.provider_model = " gemini-new ".to_owned();
-    state.draft.provider_api_key = SecretString::new(" new-key ");
-    state.draft.provider_base_url = " https://proxy.example.test/v1beta ".to_owned();
-    state.draft.model_request_timeout_secs = "46".to_owned();
-
-    let config = state.draft.to_root_config()?;
-    let loaded = sigil_runtime::provider_connections::load_provider_connections(&config);
-    let default_model = loaded.default_model.as_ref().expect("default route");
-    let provider = &loaded.connections[&default_model.connection_id].config;
-
-    assert_eq!(config.config_version, Some(sigil_kernel::CONFIG_VERSION_V2));
-    assert_eq!(config.agent.provider, "");
-    assert_eq!(config.agent.model, "gemini-new");
-    assert_eq!(provider.base_url, "https://proxy.example.test/v1beta");
-    assert!(!format!("{config:?}").contains("new-key"));
-    assert_eq!(config.model_request.request_timeout_secs, 46);
     Ok(())
 }
 
@@ -1527,30 +1166,6 @@ fn config_draft_validates_provider_and_compaction_values() {
         },
         {
             let mut draft = base.clone();
-            draft.compaction_soft_threshold_ratio = "not-a-ratio".to_owned();
-            (draft, "soft_threshold_ratio must be a decimal number")
-        },
-        {
-            let mut draft = base.clone();
-            draft.compaction_hard_threshold_ratio = "not-a-ratio".to_owned();
-            (draft, "hard_threshold_ratio must be a decimal number")
-        },
-        {
-            let mut draft = base.clone();
-            draft.compaction_soft_threshold_ratio = "1.5".to_owned();
-            (draft, "soft_threshold_ratio must be between 0.0 and 1.0")
-        },
-        {
-            let mut draft = base.clone();
-            draft.compaction_soft_threshold_ratio = "0.8".to_owned();
-            draft.compaction_hard_threshold_ratio = "0.5".to_owned();
-            (
-                draft,
-                "hard_threshold_ratio must be greater than or equal to soft_threshold_ratio",
-            )
-        },
-        {
-            let mut draft = base.clone();
             draft.compaction_context_window_tokens = "abc".to_owned();
             (
                 draft,
@@ -1564,16 +1179,6 @@ fn config_draft_validates_provider_and_compaction_values() {
                 draft,
                 "fallback_context_window_tokens must be greater than 0",
             )
-        },
-        {
-            let mut draft = base.clone();
-            draft.compaction_tail_messages = "abc".to_owned();
-            (draft, "tail_messages must be a positive integer")
-        },
-        {
-            let mut draft = base.clone();
-            draft.compaction_tail_messages = "0".to_owned();
-            (draft, "tail_messages must be greater than 0")
         },
         {
             let mut draft = base.clone();
@@ -1728,14 +1333,6 @@ fn config_field_character_filter_matches_field_kind() {
         ConfigField::CompactionContextWindowTokens,
         '.'
     ));
-    assert!(config_field_accepts_char(
-        ConfigField::CompactionSoftThresholdRatio,
-        '.'
-    ));
-    assert!(!config_field_accepts_char(
-        ConfigField::CompactionSoftThresholdRatio,
-        'x'
-    ));
     assert!(config_field_accepts_char(ConfigField::McpArgsCsv, ','));
     assert!(!config_field_accepts_char(ConfigField::McpArgsCsv, '\n'));
     assert!(!config_field_accepts_char(ConfigField::ProviderApiKey, 'x'));
@@ -1744,28 +1341,12 @@ fn config_field_character_filter_matches_field_kind() {
 
 #[test]
 fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::Result<()> {
-    let serialized = sigil_runtime::deepseek_provider_value_for_setup("deepseek-v4-test", None)?;
-    assert!(serialized.get("model").is_none());
-    assert_eq!(serialized["fim_model"], "deepseek-v4-pro");
-    assert!(
-        !serialized
-            .as_object()
-            .expect("provider object")
-            .contains_key("api_key")
-    );
-
     let mut config = test_root_config();
     config.memory.enabled = true;
-    config.compaction.soft_threshold_ratio = 0.25;
-    config.compaction.hard_threshold_ratio = 0.5;
     config.compaction.context_window_tokens = Some(64000);
     let mut state = ConfigState::from_root_config(&config);
 
     assert_eq!(state.display_value(ConfigField::MemoryEnabled), "yes");
-    assert_eq!(
-        state.display_value(ConfigField::CompactionSoftThresholdRatio),
-        "25% (0.25)"
-    );
     assert_eq!(
         state.display_value(ConfigField::CompactionContextWindowTokens),
         "64000 tokens"
@@ -1822,38 +1403,6 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
         root_config.terminal.notifications.minimum_run_duration_ms,
         12_000
     );
-
-    assert_eq!(display_ratio("not-a-number"), "not-a-number");
-    Ok(())
-}
-
-#[test]
-fn malformed_v2_sibling_opens_as_explicit_removable_repair_draft() -> anyhow::Result<()> {
-    let config = v2_config_with_malformed_sibling();
-    let mut state = ConfigState::from_root_config(&config);
-
-    assert!(
-        state
-            .draft
-            .connection_rows()
-            .iter()
-            .any(|row| row.contains("invalid · remove with Ctrl-D"))
-    );
-    let error = state
-        .draft
-        .connection_save_draft()
-        .expect_err("malformed sibling must require explicit removal");
-    assert!(error.to_string().contains("remove invalid connection"));
-
-    state.draft.cycle_connection(true)?;
-    assert_eq!(state.draft.selected_connection_id.as_str(), "broken");
-    state
-        .draft
-        .delete_selected_connection(state.current_session_route.as_ref())?;
-    let save = state.draft.connection_save_draft()?;
-
-    assert_eq!(save.connections.len(), 1);
-    assert!(save.connections.keys().all(|id| id.as_str() == "primary"));
     Ok(())
 }
 

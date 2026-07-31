@@ -27,7 +27,7 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
     let workspace_root = std::fs::canonicalize(workspace_root)?;
     let session_log_path = temp.path().join(".sigil/sessions/verification.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
 
     let task_id = TaskId::new("task_1")?;
     let step_id = TaskStepId::new("step_1")?;
@@ -201,7 +201,7 @@ fn exact_integration_review_reads_and_digest_checks_the_bound_artifact() -> Resu
     let workspace_root = std::fs::canonicalize(workspace_root)?;
     let session_log_path = temp.path().join(".sigil/sessions/integration-review.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
     let aggregate_diff = b"diff --git a/src/lib.rs b/src/lib.rs\n-old\n+new\n";
     let recorder = session
         .mutation_event_recorder()

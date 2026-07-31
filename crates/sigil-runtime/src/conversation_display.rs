@@ -1275,59 +1275,6 @@ fn project_session_entry(
             }
             Ok(items)
         }
-        SessionLogEntry::ToolResult(message) => {
-            if message.role != MessageRole::Tool {
-                bail!("conversation display tool entry has a non-tool role");
-            }
-            let tool = message
-                .tool_call_id
-                .as_ref()
-                .and_then(|call_id| tools.get(call_id))
-                .cloned();
-            let call_id = message.tool_call_id.as_deref().map(bound_identity);
-            let output = project_optional_text(message.content.as_deref());
-            let run_id = active_run_id(active_run);
-            let mut item = new_item(
-                expected_scope,
-                record,
-                0,
-                ConversationDisplayItemKindV1::Tool,
-                ConversationDisplaySourceV1::DurableTranscript,
-                run_id.clone(),
-                ConversationDisplayStatusV1::Completed,
-                ConversationDisplayContentV1::Tool {
-                    call_id,
-                    tool_name: tool.as_ref().map(|tool| tool.name.clone()),
-                    output: output.as_ref().map(|output| output.text.clone()),
-                    truncated: output.as_ref().is_some_and(|output| output.truncated),
-                    original_content_bytes: output.map_or(0, |output| output.original_bytes),
-                    artifact_ref: None,
-                    artifact_availability: Some("legacy_unavailable".to_owned()),
-                    observed_bytes: None,
-                    persisted_bytes: None,
-                    has_more: false,
-                },
-            );
-            let mut reconciles = tool
-                .as_ref()
-                .map(|tool| vec![tool.requested_display_id.clone()])
-                .unwrap_or_default();
-            if let (Some(run_id), Some(call_id)) =
-                (run_id.as_deref(), message.tool_call_id.as_ref())
-            {
-                reconciles.push(conversation_live_provisional_id(
-                    expected_scope,
-                    run_id,
-                    &ConversationLiveProvisionalSlotV1::Tool {
-                        call_id: call_id.clone(),
-                    },
-                )?);
-            }
-            if !reconciles.is_empty() {
-                item.reconciles = Some(reconciles);
-            }
-            Ok(vec![item])
-        }
         SessionLogEntry::ToolResultV2(result) => {
             let tool = tools.get(&result.call_id).cloned();
             let display = result.display_view();
@@ -1411,7 +1358,7 @@ fn tool_artifact_availability_label(
         sigil_kernel::ToolArtifactAvailability::Missing => "missing",
         sigil_kernel::ToolArtifactAvailability::HashMismatch => "hash_mismatch",
         sigil_kernel::ToolArtifactAvailability::PolicyRevoked => "policy_revoked",
-        sigil_kernel::ToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
+        sigil_kernel::ToolArtifactAvailability::Unavailable => "unavailable",
     }
 }
 

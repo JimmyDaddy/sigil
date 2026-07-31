@@ -148,7 +148,7 @@ impl IntegrationEffect {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IntegrationBaseRepresentation {
-    /// Legacy or incomplete proposal that cannot be admitted to an automatic lane.
+    /// Incomplete proposal that cannot be admitted to an automatic lane.
     #[default]
     Unknown,
     /// Clean Git commit with no inherited overlay.

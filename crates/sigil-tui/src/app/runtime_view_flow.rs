@@ -77,30 +77,12 @@ impl AppState {
         mut saved_config: RootConfig,
     ) -> anyhow::Result<Option<RootConfig>> {
         let Some(route) = self.runtime.model_route.as_ref() else {
-            if saved_config.config_version == Some(sigil_kernel::CONFIG_VERSION_V2) {
-                // Legacy sessions do not carry a compound route. After an explicit V1 -> V2
-                // repair save there is therefore no established route to preserve. Keep the
-                // already-running legacy worker instead of silently rebinding the session to
-                // the newly saved default.
-                return Ok(None);
-            }
-            saved_config.agent.provider = self.runtime.provider_name.clone();
-            saved_config.agent.connection = None;
-            saved_config.agent.model = self.runtime.model_name.clone();
-            return Ok(Some(saved_config));
+            return Ok(None);
         };
-        let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
-            &saved_config,
-            route,
-        )
-        .map_err(anyhow::Error::new)?;
-        if saved_config.config_version == Some(sigil_kernel::CONFIG_VERSION_V2) {
-            saved_config.agent.provider.clear();
-            saved_config.agent.connection = Some(route.model_ref.connection_id.clone());
-        } else {
-            saved_config.agent.provider = provider_name;
-            saved_config.agent.connection = None;
-        }
+        sigil_runtime::provider_connections::validate_persisted_model_route(&saved_config, route)
+            .map_err(anyhow::Error::new)?;
+        saved_config.agent.runtime_provider.clear();
+        saved_config.agent.connection = Some(route.model_ref.connection_id.clone());
         saved_config.agent.model = route.model_ref.model_id.clone();
         Ok(Some(saved_config))
     }

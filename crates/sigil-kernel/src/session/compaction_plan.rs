@@ -22,7 +22,6 @@ pub const DEFAULT_TAIL_RECENT_TURN_P95_MULTIPLIER_PPM: u32 = 2_000_000;
 pub const DEFAULT_TAIL_MAX_USABLE_CONTEXT_RATIO_PPM: u32 = 250_000;
 /// Number of recent complete turns sampled for the deterministic p95.
 pub const DEFAULT_TAIL_RECENT_TURN_SAMPLE_LIMIT: usize = 20;
-const LEGACY_MESSAGES_PER_COMPLETE_TURN: usize = 3;
 const TURN_MESSAGE_TOKEN_OVERHEAD: u64 = 16;
 
 /// Stable reference to one raw durable event without copying its payload into a plan.
@@ -46,10 +45,6 @@ pub struct AdaptiveTailPolicyV3 {
     pub tail_recent_turn_p95_multiplier_ppm: u32,
     pub tail_max_usable_context_ratio_ppm: u32,
     pub recent_turn_sample_limit: usize,
-    /// Compatibility input only. It is translated once into `tail_min_complete_turns`; it never
-    /// selects individual messages in the V3 planner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translated_legacy_tail_messages: Option<usize>,
 }
 
 impl Default for AdaptiveTailPolicyV3 {
@@ -61,28 +56,11 @@ impl Default for AdaptiveTailPolicyV3 {
             tail_recent_turn_p95_multiplier_ppm: DEFAULT_TAIL_RECENT_TURN_P95_MULTIPLIER_PPM,
             tail_max_usable_context_ratio_ppm: DEFAULT_TAIL_MAX_USABLE_CONTEXT_RATIO_PPM,
             recent_turn_sample_limit: DEFAULT_TAIL_RECENT_TURN_SAMPLE_LIMIT,
-            translated_legacy_tail_messages: None,
         }
     }
 }
 
 impl AdaptiveTailPolicyV3 {
-    /// Deterministically translates the legacy message-count knob into a whole-turn minimum.
-    ///
-    /// The legacy default of six messages maps to two complete turns. The token target remains
-    /// the primary V3 size control, so tool-heavy turns are never approximated as three messages.
-    #[must_use]
-    pub fn from_legacy_tail_messages(tail_messages: usize) -> Self {
-        let tail_messages = tail_messages.max(1);
-        Self {
-            tail_min_complete_turns: tail_messages
-                .div_ceil(LEGACY_MESSAGES_PER_COMPLETE_TURN)
-                .max(DEFAULT_TAIL_MIN_COMPLETE_TURNS),
-            translated_legacy_tail_messages: Some(tail_messages),
-            ..Self::default()
-        }
-    }
-
     pub(crate) fn validate(&self) -> Result<()> {
         if self.tail_min_complete_turns < DEFAULT_TAIL_MIN_COMPLETE_TURNS
             || self.tail_target_min_tokens == 0
@@ -91,9 +69,6 @@ impl AdaptiveTailPolicyV3 {
             || self.tail_max_usable_context_ratio_ppm == 0
             || self.tail_max_usable_context_ratio_ppm > 1_000_000
             || self.recent_turn_sample_limit == 0
-            || self
-                .translated_legacy_tail_messages
-                .is_some_and(|count| count == 0)
         {
             bail!("adaptive tail policy is invalid");
         }
@@ -193,8 +168,6 @@ pub struct CompactionFoldPlan {
     pub session_id: crate::SessionId,
     /// Exact durable tail observed when the plan was built.
     pub base_stream_cursor: ProjectionCursor,
-    /// Requested raw-tail message count, normalized to at least one.
-    pub requested_tail_message_count: usize,
     /// The latest previously activated fold boundary, when this is a repeated compaction plan.
     ///
     /// All messages at or before this durable cursor are already represented by the previous
@@ -208,10 +181,8 @@ pub struct CompactionFoldPlan {
     pub retained_event_ids: Vec<EventId>,
     /// Controls, non-message events, and unsafe message pairs that are never candidates here.
     pub protected_events: Vec<ProtectedCompactionEventRef>,
-    /// Present only for V3 whole-turn planning. Legacy V2 plans omit it and retain their exact
-    /// message-count replay behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_tail: Option<AdaptiveTailSelectionV3>,
+    /// Exact whole-turn tail-selection proof.
+    pub adaptive_tail: AdaptiveTailSelectionV3,
 }
 
 /// Read-only V2 compaction planning result for a durable session stream.
@@ -227,182 +198,6 @@ pub struct V2CompactionPreview {
 }
 
 impl CompactionFoldPlan {
-    /// Builds a safe fold plan from the complete, validated V2 durable session stream.
-    ///
-    /// Every non-message/control event is protected. A tool-call assistant message and all of its
-    /// uniquely matching tool results move as one unit; incomplete or ambiguous pairs are
-    /// protected. The most recent requested raw messages are retained, then expanded to include
-    /// any complete tool pair they intersect.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an empty, malformed, cross-session, non-contiguous, or checksum
-    /// invalid stream. A caller must rebuild rather than applying a plan to a changed stream.
-    pub fn from_records(
-        records: &[SessionStreamRecord],
-        requested_tail_message_count: usize,
-    ) -> Result<Self> {
-        Self::from_records_after(records, requested_tail_message_count, None)
-    }
-
-    /// Builds a safe fold plan for history after an already activated V2 boundary.
-    ///
-    /// The previous boundary must name an exact event in the same complete stream. Earlier
-    /// messages stay durable but are explicitly protected so repeated compaction never treats an
-    /// already checkpointed prefix as new semantic input.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the supplied boundary does not identify an exact record in the
-    /// stream, in addition to the validation errors from [`Self::from_records`].
-    pub fn from_records_after(
-        records: &[SessionStreamRecord],
-        requested_tail_message_count: usize,
-        prior_folded_through: Option<&CompactionCursor>,
-    ) -> Result<Self> {
-        let requested_tail_message_count = requested_tail_message_count.max(1);
-        let session_id = validate_complete_stream(records)?;
-        validate_prior_folded_through(records, &session_id, prior_folded_through)?;
-
-        let visible_promotions = super::conversation_promotion_projection::
-            provider_visible_conversation_promotion_event_ids(records)?;
-        let promoted_message_ids = records
-            .iter()
-            .filter(|record| visible_promotions.contains(record.event_id()))
-            .filter_map(|record| session_entry_from_stored_event(record.stored_event()).transpose())
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .filter_map(|entry| match entry {
-                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
-                    Some(promotion.durable_user_message.id)
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut messages = Vec::new();
-        let mut protected = BTreeMap::new();
-        for record in records {
-            let event = record.stored_event();
-            // Decode first so manually supplied malformed known events cannot be silently
-            // classified as harmless non-message records.
-            decode_stored_event(event.clone())?;
-            let reference = event_ref(event);
-            match session_entry_from_stored_event(event)? {
-                Some(SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(
-                    promotion,
-                ))) if visible_promotions.contains(&event.event_id) => {
-                    messages.push(FoldMessage {
-                        event: reference,
-                        message: promotion.durable_user_message,
-                    });
-                }
-                Some(SessionLogEntry::User(message))
-                    if promoted_message_ids.contains(&message.id) =>
-                {
-                    protected.insert(reference, CompactionFoldProtectionReason::ControlState);
-                }
-                Some(SessionLogEntry::User(message))
-                | Some(SessionLogEntry::Assistant(message))
-                | Some(SessionLogEntry::ToolResult(message)) => {
-                    messages.push(FoldMessage {
-                        event: reference,
-                        message,
-                    });
-                }
-                Some(SessionLogEntry::ToolResultV2(result)) => {
-                    messages.push(FoldMessage {
-                        event: reference,
-                        message: result.model_message()?,
-                    });
-                }
-                Some(SessionLogEntry::Control(_)) => {
-                    protected.insert(reference, CompactionFoldProtectionReason::ControlState);
-                }
-                None => {
-                    protected.insert(
-                        reference,
-                        CompactionFoldProtectionReason::NonMessageDurableEvent,
-                    );
-                }
-            }
-        }
-
-        let groups = classify_tool_pair_groups(&messages, &mut protected);
-        if let Some(prior) = prior_folded_through {
-            for candidate in &messages {
-                if candidate.event.stream_sequence <= prior.through_stream_sequence {
-                    protected.insert(
-                        candidate.event.clone(),
-                        CompactionFoldProtectionReason::ExistingCompactionBoundary,
-                    );
-                }
-            }
-        }
-        let mut retained_indexes = messages
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, candidate)| {
-                prior_folded_through.is_none() || !protected.contains_key(&candidate.event)
-            })
-            .take(requested_tail_message_count)
-            .map(|(index, _)| index)
-            .collect::<BTreeSet<_>>();
-
-        // Retaining any member of a complete pair retains every member. Repeat because a pair
-        // can pull an older assistant into the tail, and ordering must remain explicit.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for group in &groups {
-                if group.iter().any(|index| retained_indexes.contains(index)) {
-                    for index in group {
-                        changed |= retained_indexes.insert(*index);
-                    }
-                }
-            }
-        }
-
-        let mut folded_event_ids = Vec::new();
-        let mut retained_event_ids = Vec::new();
-        let mut folded_through = None;
-        for (index, candidate) in messages.iter().enumerate() {
-            if protected.contains_key(&candidate.event) {
-                continue;
-            }
-            if retained_indexes.contains(&index) {
-                retained_event_ids.push(candidate.event.event_id.clone());
-            } else {
-                folded_through = Some(CompactionCursor {
-                    session_id: session_id.clone(),
-                    through_stream_sequence: candidate.event.stream_sequence,
-                    through_event_id: candidate.event.event_id.clone(),
-                });
-                folded_event_ids.push(candidate.event.event_id.clone());
-            }
-        }
-
-        let base_stream_cursor = records
-            .last()
-            .expect("validated complete stream is non-empty")
-            .projection_cursor(COMPACTION_FOLD_PLAN_SCHEMA_VERSION);
-        Ok(Self {
-            schema_version: COMPACTION_FOLD_PLAN_SCHEMA_VERSION,
-            session_id,
-            base_stream_cursor,
-            requested_tail_message_count,
-            prior_folded_through: prior_folded_through.cloned(),
-            folded_through,
-            folded_event_ids,
-            retained_event_ids,
-            protected_events: protected
-                .into_iter()
-                .map(|(event, reason)| ProtectedCompactionEventRef { event, reason })
-                .collect(),
-            adaptive_tail: None,
-        })
-    }
-
     /// Builds a V3 safe-fold plan whose raw tail consists only of complete turn groups.
     ///
     /// `exact_fit_limit_tokens` is a caller-computed tail budget after static request segments,
@@ -425,16 +220,8 @@ impl CompactionFoldPlan {
             bail!("adaptive tail exact-fit limit must be non-zero");
         }
 
-        // Reuse the production V2 parser, checksum validation, promotion resolution and tool-pair
-        // classifier. The legacy retain decision is discarded below.
-        let mut plan = Self::from_records_after(records, 1, prior_folded_through)?;
-        let mut protected = plan
-            .protected_events
-            .iter()
-            .cloned()
-            .map(|entry| (entry.event, entry.reason))
-            .collect::<BTreeMap<_, _>>();
-        let messages = fold_messages_from_records(records)?;
+        let (session_id, base_stream_cursor, messages, mut protected) =
+            prepare_fold_candidates(records, prior_folded_through)?;
         let tool_groups = classify_tool_pair_groups(&messages, &mut protected);
         let pending_calls = pending_tool_or_approval_call_ids(records)?;
         let turns = classify_turn_groups(
@@ -463,7 +250,7 @@ impl CompactionFoldPlan {
                 retained_event_ids.push(candidate.event.event_id.clone());
             } else {
                 folded_through = Some(CompactionCursor {
-                    session_id: plan.session_id.clone(),
+                    session_id: session_id.clone(),
                     through_stream_sequence: candidate.event.stream_sequence,
                     through_event_id: candidate.event.event_id.clone(),
                 });
@@ -471,19 +258,20 @@ impl CompactionFoldPlan {
             }
         }
 
-        plan.requested_tail_message_count = adaptive_tail
-            .policy
-            .translated_legacy_tail_messages
-            .unwrap_or(1);
-        plan.folded_through = folded_through;
-        plan.folded_event_ids = folded_event_ids;
-        plan.retained_event_ids = retained_event_ids;
-        plan.protected_events = protected
-            .into_iter()
-            .map(|(event, reason)| ProtectedCompactionEventRef { event, reason })
-            .collect();
-        plan.adaptive_tail = Some(adaptive_tail);
-        Ok(plan)
+        Ok(Self {
+            schema_version: COMPACTION_FOLD_PLAN_SCHEMA_VERSION,
+            session_id,
+            base_stream_cursor,
+            prior_folded_through: prior_folded_through.cloned(),
+            folded_through,
+            folded_event_ids,
+            retained_event_ids,
+            protected_events: protected
+                .into_iter()
+                .map(|(event, reason)| ProtectedCompactionEventRef { event, reason })
+                .collect(),
+            adaptive_tail,
+        })
     }
 
     /// Rebuilds and compares the plan against the current complete durable stream.
@@ -496,20 +284,12 @@ impl CompactionFoldPlan {
         if self.schema_version != COMPACTION_FOLD_PLAN_SCHEMA_VERSION {
             bail!("unsupported compaction fold-plan schema version");
         }
-        let current = if let Some(adaptive_tail) = &self.adaptive_tail {
-            Self::from_records_after_adaptive_tail(
-                records,
-                adaptive_tail.policy.clone(),
-                adaptive_tail.exact_fit_limit_tokens,
-                self.prior_folded_through.as_ref(),
-            )?
-        } else {
-            Self::from_records_after(
-                records,
-                self.requested_tail_message_count,
-                self.prior_folded_through.as_ref(),
-            )?
-        };
+        let current = Self::from_records_after_adaptive_tail(
+            records,
+            self.adaptive_tail.policy.clone(),
+            self.adaptive_tail.exact_fit_limit_tokens,
+            self.prior_folded_through.as_ref(),
+        )?;
         if &current != self {
             bail!("compaction fold plan is stale against the current durable stream");
         }
@@ -524,46 +304,6 @@ impl CompactionFoldPlan {
 }
 
 impl JsonlSessionStore {
-    /// Rebuilds a read-only V2 compaction preview from the current durable stream.
-    ///
-    /// The preview is unavailable when there is no newly foldable history. An unfinished V2
-    /// attempt is rejected rather than being implicitly recovered or overwritten. This query
-    /// never appends a lifecycle event or rewrites the JSONL transcript.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the V2 stream, lifecycle, or active sidecar is invalid, or when an
-    /// unfinished compaction attempt makes a new plan unsafe.
-    pub fn v2_compaction_preview(
-        &self,
-        requested_tail_message_count: usize,
-        branch_id: Option<&str>,
-    ) -> Result<Option<V2CompactionPreview>> {
-        let records = Self::read_event_records(self.path())?;
-        if records.is_empty() {
-            return Ok(None);
-        }
-        let lifecycle = CompactionLifecycleProjection::from_records(&records)?;
-        if !lifecycle.unfinished_attempts().is_empty() {
-            bail!("cannot preview V2 compaction while another attempt is unfinished");
-        }
-        let sidecars = CompactionSidecarProjection::from_records(&records)?;
-        let active = sidecars.latest_for_branch(branch_id);
-        let prior_folded_through = active.map(|sidecar| sidecar.folded_through.clone());
-        let plan = CompactionFoldPlan::from_records_after(
-            &records,
-            requested_tail_message_count,
-            prior_folded_through.as_ref(),
-        )?;
-        if !plan.has_foldable_history() {
-            return Ok(None);
-        }
-        Ok(Some(V2CompactionPreview {
-            plan,
-            active_compaction_id: active.map(|sidecar| sidecar.compaction_id.clone()),
-        }))
-    }
-
     /// Rebuilds a read-only V3 whole-turn compaction preview from the durable stream.
     ///
     /// This shares the V2 lifecycle and active sidecar resolver; only the raw-tail selection is
@@ -634,6 +374,13 @@ struct FoldMessage {
     message: crate::ModelMessage,
 }
 
+type PreparedFoldCandidates = (
+    crate::SessionId,
+    ProjectionCursor,
+    Vec<FoldMessage>,
+    BTreeMap<CompactionEventRef, CompactionFoldProtectionReason>,
+);
+
 #[derive(Debug, Clone)]
 struct TurnGroup {
     indexes: Vec<usize>,
@@ -642,7 +389,12 @@ struct TurnGroup {
     protected: bool,
 }
 
-fn fold_messages_from_records(records: &[SessionStreamRecord]) -> Result<Vec<FoldMessage>> {
+fn prepare_fold_candidates(
+    records: &[SessionStreamRecord],
+    prior_folded_through: Option<&CompactionCursor>,
+) -> Result<PreparedFoldCandidates> {
+    let session_id = validate_complete_stream(records)?;
+    validate_prior_folded_through(records, &session_id, prior_folded_through)?;
     let visible_promotions = super::conversation_promotion_projection::
         provider_visible_conversation_promotion_event_ids(records)?;
     let promoted_message_ids = records
@@ -659,36 +411,61 @@ fn fold_messages_from_records(records: &[SessionStreamRecord]) -> Result<Vec<Fol
         })
         .collect::<BTreeSet<_>>();
     let mut messages = Vec::new();
+    let mut protected = BTreeMap::new();
     for record in records {
         let event = record.stored_event();
+        decode_stored_event(event.clone())?;
+        let reference = event_ref(event);
         match session_entry_from_stored_event(event)? {
             Some(SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)))
                 if visible_promotions.contains(&event.event_id) =>
             {
                 messages.push(FoldMessage {
-                    event: event_ref(event),
+                    event: reference,
                     message: promotion.durable_user_message,
                 });
             }
-            Some(SessionLogEntry::User(message)) if promoted_message_ids.contains(&message.id) => {}
-            Some(SessionLogEntry::User(message))
-            | Some(SessionLogEntry::Assistant(message))
-            | Some(SessionLogEntry::ToolResult(message)) => {
+            Some(SessionLogEntry::User(message)) if promoted_message_ids.contains(&message.id) => {
+                protected.insert(reference, CompactionFoldProtectionReason::ControlState);
+            }
+            Some(SessionLogEntry::User(message)) | Some(SessionLogEntry::Assistant(message)) => {
                 messages.push(FoldMessage {
-                    event: event_ref(event),
+                    event: reference,
                     message,
                 });
             }
             Some(SessionLogEntry::ToolResultV2(result)) => {
                 messages.push(FoldMessage {
-                    event: event_ref(event),
+                    event: reference,
                     message: result.model_message()?,
                 });
             }
-            Some(SessionLogEntry::Control(_)) | None => {}
+            Some(SessionLogEntry::Control(_)) => {
+                protected.insert(reference, CompactionFoldProtectionReason::ControlState);
+            }
+            None => {
+                protected.insert(
+                    reference,
+                    CompactionFoldProtectionReason::NonMessageDurableEvent,
+                );
+            }
         }
     }
-    Ok(messages)
+    if let Some(prior) = prior_folded_through {
+        for candidate in &messages {
+            if candidate.event.stream_sequence <= prior.through_stream_sequence {
+                protected.insert(
+                    candidate.event.clone(),
+                    CompactionFoldProtectionReason::ExistingCompactionBoundary,
+                );
+            }
+        }
+    }
+    let base_stream_cursor = records
+        .last()
+        .expect("validated complete stream is non-empty")
+        .projection_cursor(COMPACTION_FOLD_PLAN_SCHEMA_VERSION);
+    Ok((session_id, base_stream_cursor, messages, protected))
 }
 
 fn pending_tool_or_approval_call_ids(records: &[SessionStreamRecord]) -> Result<BTreeSet<String>> {

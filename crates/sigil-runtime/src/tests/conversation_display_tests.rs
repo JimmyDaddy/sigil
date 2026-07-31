@@ -474,12 +474,12 @@ fn approval_resolution_reconciles_the_live_slot_and_durable_request() -> Result<
 }
 
 #[test]
-fn legacy_messages_remain_unbound_and_do_not_synthesize_terminal_items() -> Result<()> {
+fn unbound_messages_do_not_synthesize_terminal_items() -> Result<()> {
     let (_temp, store, mut session) = durable_session()?;
     let scope = session.session_scope_id().to_owned();
-    session.append_user_message(ModelMessage::user("legacy user"))?;
+    session.append_user_message(ModelMessage::user("unbound user"))?;
     session.append_assistant_message(ModelMessage::assistant_with_kind(
-        Some("legacy answer".to_owned()),
+        Some("unbound answer".to_owned()),
         Vec::new(),
         AssistantMessageKind::FinalAnswer,
     ))?;

@@ -203,7 +203,6 @@ export function ConversationLibrary({
             <option value="invalid">{t("invalid")}</option>
             <option value="oversized">{t("oversized")}</option>
             <option value="scan_budget_exceeded">{t("scanLimited")}</option>
-            <option value="unsupported_legacy">{t("unsupported")}</option>
           </Select>
           <Checkbox label={t("pinnedOnly")} checked={pinnedOnly} onChange={(event) => setPinnedOnly(event.currentTarget.checked)} />
           <Button type="submit" leadingIcon={<Icon name="search" />}>{t("search")}</Button>
@@ -373,7 +372,6 @@ function stateLabel(state: CatalogSourceState, t: ReturnType<typeof useLocale>["
     case "invalid": return t("invalid");
     case "oversized": return t("oversized");
     case "scan_budget_exceeded": return t("scanLimited");
-    case "unsupported_legacy": return t("unsupported");
   }
 }
 

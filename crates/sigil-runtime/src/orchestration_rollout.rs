@@ -214,8 +214,7 @@ pub fn load_orchestration_rollout_manifest(path: &Path) -> Result<OrchestrationR
 
 /// Applies qualified `auto + proactive` defaults to a newly constructed Quick Setup config.
 ///
-/// Existing configuration loading never calls this function, preserving explicit and legacy
-/// behavior.
+/// Existing configuration loading never calls this function, preserving its explicit behavior.
 #[must_use]
 pub fn apply_new_install_orchestration_rollout(
     root_config: &mut RootConfig,
@@ -302,10 +301,7 @@ fn rollout_route_candidate(
     task: &TaskConfig,
 ) -> Result<RolloutRouteCandidate> {
     let loaded = load_provider_connections(root_config);
-    if matches!(
-        loaded.mode,
-        ConfigMode::Mixed | ConfigMode::UnsupportedFuture
-    ) {
+    if loaded.mode != ConfigMode::V2 {
         bail!("provider connection configuration is not eligible for rollout");
     }
     let model_ref = loaded

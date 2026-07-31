@@ -33,7 +33,7 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
             .current_session_route
             .as_ref()
             .map(|route| format!("{}/{}", route.connection_id, route.model_id))
-            .unwrap_or_else(|| "legacy session identity".to_owned()),
+            .unwrap_or_else(|| "unavailable".to_owned()),
     ));
     lines.push(render_config_hint_row(
         "Press D to set selected route as saved default; current session is unchanged",

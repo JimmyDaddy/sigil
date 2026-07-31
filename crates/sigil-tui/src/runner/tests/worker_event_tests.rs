@@ -256,7 +256,7 @@ fn active_projection_observer_ignores_unrelated_append_and_wakes_once_for_queue_
 -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let store = sigil_kernel::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = sigil_kernel::Session::new("test", "model").with_store(store);
+    let mut session = sigil_kernel::Session::load_from_store("test", "model", store)?;
     session
         .active_projection_snapshot()?
         .expect("store-backed session should seed its active projection");

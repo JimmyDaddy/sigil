@@ -1,23 +1,16 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use std::{collections::BTreeMap, fmt};
 
 use sigil_kernel::{
-    CodeIntelStartup, CompactionStrategy, ConnectionId, ModelRef, PermissionMode,
-    PluginManifestSnapshot, RootConfig, SecretString, SkillDescriptor, SyntaxThemeId,
-    TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId, UsageCostCurrency,
-    VerificationAutoRunPolicy,
+    CodeIntelStartup, ConnectionId, ModelRef, PermissionMode, PluginManifestSnapshot, RootConfig,
+    SecretString, SkillDescriptor, SyntaxThemeId, TerminalKeyboardEnhancement,
+    TerminalNotificationMethod, ThemeId, UsageCostCurrency, VerificationAutoRunPolicy,
 };
 #[cfg(test)]
 pub(crate) use sigil_runtime::{
     ANTHROPIC_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
 };
 pub(crate) use sigil_runtime::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
-use sigil_runtime::{
-    ProviderStrictToolsMode, ResolvedAgentProfile,
-    provider_connections::LegacyMigrationRecoveryState,
-};
+use sigil_runtime::{ProviderStrictToolsMode, ResolvedAgentProfile};
 
 mod appearance;
 mod collection;
@@ -31,8 +24,6 @@ mod provider;
 mod section;
 use connections::ProviderConnectionDraft;
 pub(crate) use connections::{ConnectionPickerChoice, ConnectionPickerChoiceKind};
-#[cfg(test)]
-use display::display_ratio;
 pub(crate) use display::{
     config_field_accepts_char, render_config_readonly_row, render_config_value_row,
 };
@@ -73,7 +64,6 @@ pub(crate) struct ConfigDraft {
     connection_drafts: BTreeMap<ConnectionId, ProviderConnectionDraft>,
     pub(crate) selected_connection_id: ConnectionId,
     pub(crate) default_model: ModelRef,
-    pub(crate) confirmed_legacy_environment: BTreeSet<ConnectionId>,
     pub(crate) provider_beta_base_url: String,
     pub(crate) provider_anthropic_base_url: String,
     pub(crate) provider_user_id_strategy: String,
@@ -90,11 +80,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) memory_enabled: bool,
     pub(crate) compaction_enabled: bool,
     pub(crate) compaction_native_carrier_enabled: bool,
-    pub(crate) compaction_strategy: CompactionStrategy,
-    pub(crate) compaction_soft_threshold_ratio: String,
-    pub(crate) compaction_hard_threshold_ratio: String,
     pub(crate) compaction_context_window_tokens: String,
-    pub(crate) compaction_tail_messages: String,
     pub(crate) code_intelligence_enabled: bool,
     pub(crate) code_intelligence_server_startup: CodeIntelStartup,
     pub(crate) code_intelligence_auto_discover: bool,
@@ -159,7 +145,6 @@ pub(crate) struct ConfigState {
     pub(crate) draft: ConfigDraft,
     pub(crate) current_session_route: Option<ModelRef>,
     pub(crate) source_revision: Option<[u8; 32]>,
-    pub(crate) legacy_migration_recovery: Option<LegacyMigrationRecoveryState>,
     pub(crate) draft_revision: u64,
     pub(crate) dirty: bool,
     pub(crate) close_guard_armed: bool,
@@ -193,16 +178,11 @@ impl ConfigState {
             draft,
             current_session_route,
             source_revision: None,
-            legacy_migration_recovery: None,
             draft_revision: 0,
             dirty: false,
             close_guard_armed: false,
             pending_connection_delete: None,
         }
-    }
-
-    pub(crate) fn requires_legacy_migration_attention(&self) -> bool {
-        self.legacy_migration_recovery.is_some() || self.draft.requires_legacy_config_migration()
     }
 
     pub(crate) fn mark_dirty(&mut self) {

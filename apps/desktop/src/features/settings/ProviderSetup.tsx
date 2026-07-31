@@ -12,10 +12,6 @@ import type {
 } from "../../types";
 import { Button, Radio, Select, TextField } from "../../ui/primitives";
 import {
-  type ProviderMigrationRecoveryBlock,
-  isMigrationRecoveryBlock,
-} from "./LegacyProviderMigration";
-import {
   loadAndCacheProviderCatalog,
   readProviderCatalogCache,
 } from "./providerCatalogCache";
@@ -38,7 +34,6 @@ export function ProviderSetup({
   mode,
   onSaved,
   onCancel,
-  onRecoveryBlocked,
 }: {
   readonly bridge: DesktopBridge;
   readonly workspaceId: string;
@@ -46,7 +41,6 @@ export function ProviderSetup({
   readonly mode: "onboarding" | "settings";
   readonly onSaved: (inventory: ProviderConnectionInventory) => void;
   readonly onCancel?: () => void;
-  readonly onRecoveryBlocked?: (block: ProviderMigrationRecoveryBlock) => void;
 }) {
   const { t } = useLocale();
   const [step, setStep] = useState<SetupStep>("provider");
@@ -118,9 +112,8 @@ export function ProviderSetup({
                 setError(providerCatalogFailureMessage(next.state, t));
               }
             })
-            .catch((error) => {
+            .catch(() => {
               if (requestRevision !== catalogRequestRevision.current) return;
-              if (notifyRecoveryBlock(error)) return;
               setState("error");
               setError(t("providerCatalogRefreshFailed"));
             });
@@ -137,9 +130,8 @@ export function ProviderSetup({
       if (requestRevision !== catalogRequestRevision.current) return;
       if (!applyCatalog(next)) return;
       setState("idle");
-    } catch (error) {
+    } catch {
       if (requestRevision !== catalogRequestRevision.current) return;
-      if (notifyRecoveryBlock(error)) return;
       setState("error");
       setError(t("providerCatalogLoadFailed"));
     }
@@ -176,16 +168,6 @@ export function ProviderSetup({
     return true;
   };
 
-  const notifyRecoveryBlock = (caught: unknown): boolean => {
-    const code = errorCode(caught);
-    if (!isMigrationRecoveryBlock(code) || onRecoveryBlocked === undefined) return false;
-    setApiKey("");
-    setState("error");
-    setError(t("legacyMigrationAttention"));
-    onRecoveryBlocked(code);
-    return true;
-  };
-
   const save = async () => {
     if (!canSave || catalogInput === undefined) return;
     setState("saving");
@@ -198,8 +180,7 @@ export function ProviderSetup({
       setApiKey("");
       setState("idle");
       onSaved(result.inventory);
-    } catch (error) {
-      if (notifyRecoveryBlock(error)) return;
+    } catch {
       setState("error");
       setError(t("providerSetupSaveFailed"));
     }
@@ -427,15 +408,6 @@ export function ProviderSetup({
       )}
     </section>
   );
-}
-
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && typeof error.code === "string"
-    ? error.code
-    : undefined;
 }
 
 function providerName(

@@ -295,9 +295,6 @@ pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessag
             SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
                 Some(message.clone())
             }
-            // Clean cutover: even a manually assembled in-memory legacy entry is not eligible
-            // for provider context. Durable loading rejects this shape with LegacyUnavailable.
-            SessionLogEntry::ToolResult(_) => None,
             SessionLogEntry::ToolResultV2(result) => Some(
                 result
                     .model_message()
@@ -365,9 +362,7 @@ fn raw_model_messages_from_durable_records(
             SessionLogEntry::User(message) if promoted_message_ids.contains(&message.id) => {
                 continue;
             }
-            SessionLogEntry::User(message)
-            | SessionLogEntry::Assistant(message)
-            | SessionLogEntry::ToolResult(message) => replacements
+            SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => replacements
                 .get(event.event_id.as_str())
                 .cloned()
                 .unwrap_or(message),
@@ -452,7 +447,6 @@ fn portable_retained_raw_event_ids_for_plan(
             entry,
             SessionLogEntry::User(_)
                 | SessionLogEntry::Assistant(_)
-                | SessionLogEntry::ToolResult(_)
                 | SessionLogEntry::ToolResultV2(_)
         ) || (matches!(
             entry,
@@ -485,11 +479,14 @@ fn portable_retained_raw_event_ids(
     let source_records = records
         .get(..source_count)
         .context("portable checkpoint source plan cursor is missing")?;
-    let plan = CompactionFoldPlan::from_records_after(
+    let adaptive_tail = checkpoint
+        .adaptive_tail
+        .as_ref()
+        .context("portable checkpoint is missing its adaptive-tail proof")?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
         source_records,
-        checkpoint
-            .requested_tail_message_count
-            .context("portable checkpoint is missing its requested tail size")?,
+        adaptive_tail.policy.clone(),
+        adaptive_tail.exact_fit_limit_tokens,
         checkpoint.prior_folded_through.as_ref(),
     )?;
     if plan.base_stream_cursor != *source_cursor
@@ -509,7 +506,6 @@ fn portable_retained_raw_event_ids(
             Some(
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
-                    | SessionLogEntry::ToolResult(_)
                     | SessionLogEntry::ToolResultV2(_)
             )
         ) || (matches!(

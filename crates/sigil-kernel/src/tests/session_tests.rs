@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::PathBuf};
+use std::{fs, io::Write};
 
 use anyhow::Result;
 use fs2::FileExt;
@@ -11,40 +11,37 @@ use crate::{
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, CandidateCheck, ChangeSet,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompletionCriteria, ConnectionId, ContextBodyRef,
-    ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
-    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ChildVerificationReceiptLinked, CompletionCriteria, ContextBodyRef, ContextInclusionReason,
+    ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel, ConversationInputKind,
+    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputStatusEntry, ConversationInputTarget, DomainEvent, DomainPayload,
     DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
     MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig, MemoryLoadReport,
-    MemorySnapshot, ModelRef, MutationEventRecorder, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
+    MemorySnapshot, MutationEventRecorder, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanSourceRef, PluginCapability, PluginManifestSnapshot,
     PluginTrustDecision, PluginTrustEntry, ProjectionCursor, ProviderContinuationState,
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
-    ResolvedModelRoute, ResponseHandle, RunStatus, RuntimeContextCandidates,
-    SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
-    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
-    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection,
-    TaskStepEntry, TaskStepId, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
-    TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolArtifactSensitivity, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
-    ToolResultRecordedV2, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent,
-    UsageStats, VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationReceipt, VerificationReceiptLinkRecorded,
-    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
-    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, plan_draft_created_entry,
-    provider::ModelMessage, stable_event_hash,
+    ResponseHandle, RunStatus, RuntimeContextCandidates, SandboxProfileRequirement, SessionRef,
+    SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
+    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolArtifactSensitivity, ToolEffect,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile,
+    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolSubjectAudit,
+    ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus,
+    VerificationFailureLocatorRecorded, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationReceipt, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
+    VerificationScope, VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
+    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, plan_draft_created_entry, provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
     ControlEntry, JsonlSessionStore, PrefixSnapshot, PrefixSnapshotMaterialization, Session,
-    SessionIoBusyError, SessionIoBusyKind, SessionLogEntry, SessionStreamCompatibilityError,
-    session_stats_from_entries,
+    SessionIoBusyError, SessionIoBusyKind, SessionLogEntry, session_stats_from_entries,
 };
 
 fn test_tool_result_v2(call_id: &str, tool_name: &str, content: &str) -> Result<SessionLogEntry> {
@@ -60,7 +57,7 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     format!(
         r#"Plan:
 
-```sigil-plan-v1
+```sigil-plan-v2
 {{
   "summary": "{summary}",
   "steps": [
@@ -723,48 +720,6 @@ fn session_entry_projection_applies_and_ignores_idempotent_cursor() -> Result<()
 }
 
 #[test]
-fn append_session_entry_event_rejects_legacy_and_maps_v2_tool_result() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let store = JsonlSessionStore::new(&path)?;
-
-    let legacy_tool_entry = SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "ok"));
-    let tool_entry = test_tool_result_v2("call-1", "read_file", "ok")?;
-    let context_entry =
-        SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
-            materialization: test_prefix_materialization("prefix".len()),
-            sha256: "sha256:prefix".to_owned(),
-            provider_name: "deepseek".to_owned(),
-            model_name: "deepseek-v4-flash".to_owned(),
-            memory_fingerprint: "memory".to_owned(),
-            tool_schema_fingerprint: "tools".to_owned(),
-            skill_index_fingerprint: "skills".to_owned(),
-        }));
-    let legacy_error = store
-        .append_session_entry_event(&legacy_tool_entry)
-        .expect_err("legacy inline result must fail closed");
-    assert!(
-        legacy_error
-            .to_string()
-            .contains("legacy inline tool results")
-    );
-    let tool_event = store.append_session_entry_event(&tool_entry)?;
-    let context_event = store.append_session_entry_event(&context_entry)?;
-
-    assert_eq!(
-        tool_event.event_type,
-        DurableEventType::ToolResultRecordedV2.as_str()
-    );
-    assert_eq!(tool_event.event_class, EventClass::Critical);
-    assert_eq!(
-        context_event.event_type,
-        DurableEventType::ContextSourceCaptured.as_str()
-    );
-    assert_eq!(context_event.event_class, EventClass::NonCritical);
-    Ok(())
-}
-
-#[test]
 fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> Result<()> {
     let identity = SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
@@ -857,47 +812,6 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
 }
 
 #[test]
-fn session_entry_from_json_line_rejects_legacy_and_skips_unknown_noncritical() -> Result<()> {
-    assert!(JsonlSessionStore::session_entry_from_json_line("  \n  ")?.is_none());
-
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
-    let legacy_line = serde_json::to_string(&legacy_entry)?;
-    let error = JsonlSessionStore::session_entry_from_json_line(&legacy_line)
-        .expect_err("legacy line must be rejected");
-    let compatibility = error
-        .downcast_ref::<SessionStreamCompatibilityError>()
-        .expect("legacy line must return a structured compatibility error");
-    assert_eq!(compatibility.path, PathBuf::from("<session JSONL line>"));
-    assert_eq!(compatibility.physical_line, 1);
-
-    let v2_entry =
-        SessionLogEntry::Assistant(ModelMessage::assistant(Some("v2".to_owned()), Vec::new()));
-    let stored = StoredEvent::new(
-        DurableEventType::AssistantMessageRecorded,
-        EventClass::Critical,
-        "event-assistant".to_owned(),
-        "session-1".to_owned(),
-        1,
-        serde_json::json!({ "session_log_entry": v2_entry }),
-    )?;
-    let decoded = JsonlSessionStore::session_entry_from_json_line(&stored.to_json_line()?)?
-        .expect("stored event should decode to session entry");
-    assert!(matches!(decoded, SessionLogEntry::Assistant(_)));
-
-    let future = StoredEvent::new_raw(
-        "future_noncritical_event",
-        EventClass::NonCritical,
-        "event-future".to_owned(),
-        "session-1".to_owned(),
-        2,
-        serde_json::json!({ "session_log_entry": legacy_entry }),
-    )?;
-    assert!(JsonlSessionStore::session_entry_from_json_line(&future.to_json_line()?)?.is_none());
-
-    Ok(())
-}
-
-#[test]
 fn append_event_handles_blank_log_with_fast_path() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
@@ -977,47 +891,6 @@ fn load_from_store_keeps_existing_identity_without_duplicate_append() -> Result<
 
     let records = JsonlSessionStore::read_event_records(&path)?;
     assert_eq!(records.len(), 1);
-    Ok(())
-}
-
-#[test]
-fn new_session_persists_exact_route_while_legacy_identity_is_not_silently_rebound() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let route = ResolvedModelRoute::new(
-        ModelRef::new(ConnectionId::new("openai-personal")?, "gpt-5.4")?,
-        "openai",
-        "openai_responses",
-        "sha256:0123456789abcdef",
-    )?;
-    let new_path = temp.path().join("new.jsonl");
-    let new_store = JsonlSessionStore::new(&new_path)?;
-    let created = Session::load_from_store_with_route(
-        "openai_responses",
-        "gpt-5.4",
-        Some(route.clone()),
-        new_store.clone(),
-    )?;
-    assert_eq!(created.resolved_model_route(), Some(&route));
-    let reloaded = Session::load_from_store("ignored", "ignored", new_store)?;
-    assert_eq!(reloaded.resolved_model_route(), Some(&route));
-
-    let legacy_path = temp.path().join("legacy.jsonl");
-    let legacy_store = JsonlSessionStore::new(&legacy_path)?;
-    legacy_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "openai_responses".to_owned(),
-        model_name: "gpt-5.4".to_owned(),
-        resolved_model_route: None,
-    }))?;
-    let legacy = Session::load_from_store_with_route(
-        "openai_responses",
-        "gpt-5.4",
-        Some(route),
-        legacy_store,
-    )?;
-    assert!(
-        legacy.resolved_model_route().is_none(),
-        "an existing route-less session needs an explicit recovery action"
-    );
     Ok(())
 }
 
@@ -1510,109 +1383,6 @@ fn writer_mode_loader_fails_when_session_file_is_locked() -> Result<()> {
 }
 
 #[test]
-fn legacy_line_after_v2_is_rejected_as_an_unsupported_format() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let store = JsonlSessionStore::new(&path)?;
-    store.append_event(
-        DurableEventType::ToolExecutionStarted,
-        EventClass::Critical,
-        serde_json::json!({"call_id": "call-1"}),
-    )?;
-    let mut file = fs::OpenOptions::new().append(true).open(&path)?;
-    writeln!(
-        file,
-        "{}",
-        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("raw after v2")))?
-    )?;
-
-    let error = JsonlSessionStore::read_event_records(&path)
-        .expect_err("non-v2 entry after v2 should fail closed");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported legacy SessionLogEntry format")
-    );
-    Ok(())
-}
-
-#[test]
-fn legacy_line_before_v2_is_rejected_as_an_unsupported_format() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let legacy = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?;
-    let v2 = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("v2")), 2)?;
-    fs::write(&path, format!("{legacy}\n{v2}"))?;
-
-    let error = JsonlSessionStore::read_event_records(&path)
-        .expect_err("legacy entry before v2 should fail closed");
-    let compatibility = error
-        .downcast_ref::<SessionStreamCompatibilityError>()
-        .expect("legacy prefix must return a structured compatibility error");
-    assert_eq!(compatibility.path, path);
-    assert_eq!(compatibility.physical_line, 1);
-    Ok(())
-}
-
-#[test]
-fn legacy_compaction_record_inside_a_v2_envelope_is_rejected_without_recovery_or_append()
--> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let legacy_payload = serde_json::json!({
-        "control": {
-            "compaction_applied": {
-                "summary": "old compact summary",
-                "compacted_message_count": 2,
-                "retained_tail_message_count": 1,
-                "task_memory": null,
-                "external_trust": null,
-                "external_provenance_message_ids": [],
-                "external_source_ids": []
-            }
-        }
-    });
-    let legacy_event = StoredEvent::new(
-        DurableEventType::SessionEntryRecorded,
-        EventClass::NonCritical,
-        "event-1".to_owned(),
-        "session-test".to_owned(),
-        1,
-        serde_json::json!({ "session_log_entry": legacy_payload.clone() }),
-    )?;
-    let content = format!("{}{{unterminated-tail", legacy_event.to_json_line()?);
-    fs::write(&path, &content)?;
-
-    let read_error = JsonlSessionStore::read_event_records(&path)
-        .expect_err("legacy compaction record must not be read from a v2 envelope");
-    let compatibility = read_error
-        .downcast_ref::<SessionStreamCompatibilityError>()
-        .expect("legacy compaction record must return a structured compatibility error");
-    assert_eq!(compatibility.path, path);
-    assert_eq!(compatibility.physical_line, 1);
-    assert_eq!(compatibility.format_name, "legacy CompactionRecord payload");
-    assert_eq!(fs::read_to_string(&path)?, content);
-
-    let store = JsonlSessionStore::new(&path)?;
-    let append_error = store
-        .append_event(
-            DurableEventType::SessionEntryRecorded,
-            EventClass::NonCritical,
-            serde_json::json!({ "session_log_entry": legacy_payload }),
-        )
-        .expect_err("legacy compaction record must not be appended");
-    assert!(
-        append_error
-            .to_string()
-            .contains("legacy CompactionRecord payload is unsupported")
-    );
-    assert_eq!(fs::read_to_string(&path)?, content);
-    assert!(!super::tail_recovery_intent_path(&path).exists());
-    assert!(!temp.path().join(".sigil-recovery").exists());
-    Ok(())
-}
-
-#[test]
 fn append_event_assigns_local_sequence_without_global_ordering() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let first_store = JsonlSessionStore::new(temp.path().join("first.jsonl"))?;
@@ -1689,84 +1459,6 @@ fn append_event_reconciles_pending_tail_recovery_intent_before_append() -> Resul
         Some(3)
     );
     assert!(!super::tail_recovery_intent_path(&path).exists());
-    Ok(())
-}
-
-#[test]
-fn legacy_inline_tool_result_event_is_legacy_unavailable_and_left_untouched() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let legacy_event = StoredEvent::new(
-        DurableEventType::ToolResultRecorded,
-        EventClass::Critical,
-        "event-legacy-tool-result".to_owned(),
-        "session-test".to_owned(),
-        1,
-        serde_json::json!({
-            "session_log_entry": SessionLogEntry::ToolResult(ModelMessage::tool(
-                "call-1",
-                "legacy inline body",
-            )),
-        }),
-    )?;
-    let content = legacy_event.to_json_line()?;
-    fs::write(&path, &content)?;
-
-    let error = JsonlSessionStore::read_event_records(&path)
-        .expect_err("legacy inline tool result must fail closed");
-    let compatibility = error
-        .downcast_ref::<SessionStreamCompatibilityError>()
-        .expect("legacy tool result must return a structured compatibility error");
-    assert_eq!(compatibility.path, path);
-    assert_eq!(compatibility.physical_line, 1);
-    assert_eq!(
-        compatibility.format_name,
-        "legacy inline tool_result_recorded (LegacyUnavailable)"
-    );
-    assert_eq!(fs::read_to_string(&path)?, content);
-    Ok(())
-}
-
-#[test]
-fn pending_tail_recovery_intent_does_not_modify_an_unsupported_legacy_stream() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let content = format!(
-        "{}\n",
-        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
-    );
-    fs::write(&path, &content)?;
-    let quarantine_path = temp.path().join("quarantined-copy");
-    fs::write(&quarantine_path, &content)?;
-    super::write_tail_recovery_intent(
-        &path,
-        &super::TailRecoveryIntent {
-            original_size: content.len() as u64,
-            recovered_size: 0,
-            discarded_bytes: content.len() as u64,
-            quarantine_path,
-            original_hash: stable_event_hash(content.as_bytes()),
-            event_id: "tail-recovery-event".to_owned(),
-            session_id: "legacy-session".to_owned(),
-        },
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
-
-    let error = store
-        .append_event(
-            DurableEventType::ToolExecutionStarted,
-            EventClass::Critical,
-            serde_json::json!({"call_id": "must-not-append"}),
-        )
-        .expect_err("legacy stream must not enter tail recovery");
-    assert!(
-        error
-            .downcast_ref::<SessionStreamCompatibilityError>()
-            .is_some()
-    );
-    assert_eq!(fs::read_to_string(&path)?, content);
-    assert!(super::tail_recovery_intent_path(&path).exists());
-    assert!(!temp.path().join(".sigil-recovery").exists());
     Ok(())
 }
 
@@ -1870,8 +1562,16 @@ fn read_only_loader_does_not_recover_tail_corruption() -> Result<()> {
 fn load_from_store_recovers_tail_corruption_with_audit_event() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
-    fs::write(&path, format!("{valid}{{bad-tail"))?;
+    let identity = stored_session_entry_line(
+        &SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            resolved_model_route: None,
+        }),
+        1,
+    )?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 2)?;
+    fs::write(&path, format!("{identity}{valid}{{bad-tail"))?;
     let store = JsonlSessionStore::new(&path)?;
 
     let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
@@ -2506,7 +2206,7 @@ fn writer_mode_loader_rejects_tail_recovery_intent_past_log_length() -> Result<(
 }
 
 #[test]
-fn load_from_store_recovers_identity_from_prefix_snapshot() -> Result<()> {
+fn load_from_store_rejects_non_current_log_without_identity() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -2522,20 +2222,10 @@ fn load_from_store_recovers_identity_from_prefix_snapshot() -> Result<()> {
         }),
     ))?;
 
-    let session = Session::load_from_store("other-provider", "other-model", store)?;
+    let error = Session::load_from_store("other-provider", "other-model", store)
+        .expect_err("a non-empty current session must carry an explicit identity");
 
-    assert_eq!(session.provider_name(), "deepseek");
-    assert_eq!(session.model_name(), "deepseek-v4-flash");
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::SessionIdentity {
-                provider_name,
-                model_name,
-                ..
-            }) if provider_name == "deepseek" && model_name == "deepseek-v4-flash"
-        )
-    }));
+    assert!(format!("{error:#}").contains("missing its required session identity"));
     Ok(())
 }
 
@@ -2876,11 +2566,6 @@ fn session_exposes_optional_durable_task_state_projection() -> Result<()> {
 fn optional_durable_projections_return_none_for_in_memory_sessions() -> Result<()> {
     let session = Session::new("deepseek", "deepseek-v4-flash");
 
-    assert!(
-        session
-            .try_plan_approval_projection_from_durable()?
-            .is_none()
-    );
     assert!(session.try_task_state_projection_from_durable()?.is_none());
     assert!(
         session
@@ -3727,56 +3412,6 @@ fn changeset_projection_replays_durable_stream_records() -> Result<()> {
     ));
     Ok(())
 }
-
-#[test]
-fn plan_approval_projection_replays_durable_stream_records() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let store = JsonlSessionStore::new(&path)?;
-    let first = PlanApprovedEntry {
-        plan_version: 1,
-        plan_hash: "sha256:first".to_owned(),
-        approved_at_ms: 10,
-        permission: PlanApprovalPermission::Ask,
-        scope: PlanApprovalScope {
-            summary: "first plan".to_owned(),
-            workspace_paths: Vec::new(),
-        },
-        expires: PlanApprovalExpiry::NextUserPrompt,
-        clear_planning_context: false,
-    };
-    store
-        .append_session_entry_event(&SessionLogEntry::Control(ControlEntry::PlanApproved(first)))?;
-    let second = PlanApprovedEntry {
-        plan_version: 2,
-        plan_hash: "sha256:second".to_owned(),
-        approved_at_ms: 20,
-        permission: PlanApprovalPermission::WorkspaceEdits,
-        scope: PlanApprovalScope {
-            summary: "second plan".to_owned(),
-            workspace_paths: vec!["README.md".to_owned()],
-        },
-        expires: PlanApprovalExpiry::Session,
-        clear_planning_context: true,
-    };
-    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::PlanApproved(
-        second.clone(),
-    )))?;
-    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
-
-    let projection = session
-        .try_plan_approval_projection_from_durable()?
-        .expect("durable session should replay plan approvals");
-
-    assert_eq!(projection.approvals.len(), 2);
-    assert_eq!(projection.latest_approval, Some(second.clone()));
-    assert_eq!(
-        projection.latest_by_hash.get("sha256:second"),
-        Some(&second)
-    );
-    Ok(())
-}
-
 #[test]
 fn plan_artifact_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -4191,6 +3826,7 @@ fn build_request_persists_bounded_prefix_snapshot_for_materialization_over_event
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
     let message_body = "bounded-prefix-regression ".repeat(800);
     for index in 0..64 {
@@ -4234,23 +3870,6 @@ fn build_request_persists_bounded_prefix_snapshot_for_materialization_over_event
     assert_eq!(restored_snapshot.sha256, snapshot.sha256);
     assert_eq!(restored_snapshot.materialization, snapshot.materialization);
     Ok(())
-}
-
-#[test]
-fn legacy_prefix_snapshot_without_bounded_materialization_is_rejected() {
-    let legacy = serde_json::json!({
-        "materialized_text": "[{\"role\":\"user\",\"content\":\"hello\"}]\n[]",
-        "sha256": "legacy",
-        "provider_name": "deepseek",
-        "model_name": "deepseek-v4-flash",
-        "memory_fingerprint": "none",
-        "tool_schema_fingerprint": "tools",
-        "skill_index_fingerprint": "none"
-    });
-
-    let error = serde_json::from_value::<PrefixSnapshot>(legacy)
-        .expect_err("legacy full-material prefix snapshots are intentionally unsupported");
-    assert!(error.to_string().contains("materialization"));
 }
 
 #[test]
@@ -4652,6 +4271,7 @@ fn build_request_refreshes_session_memory_snapshot_after_disk_memory_changes() -
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     fs::write(temp.path().join("AGENTS.md"), "repo rules v1\n")?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
     let memory_config = MemoryConfig { enabled: true };
@@ -4733,6 +4353,7 @@ fn load_from_store_marks_started_tool_execution_as_interrupted() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
         Box::new(ToolExecutionEntry {
             call_id: "call-1".to_owned(),
@@ -4780,6 +4401,7 @@ fn unfinished_write_tool_execution_profile_reconciles_workspace_mutation() -> Re
     fs::write(workspace.join("note.txt"), "old")?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     let recorder = MutationEventRecorder::new(store.clone());
     let scope = VerificationScope::all_tracked("scope-main");
     let profile = recorder.execution_mutation_profile(
@@ -5165,11 +4787,6 @@ fn durable_projection_record_helpers_ignore_idempotent_replay() -> Result<()> {
     )?;
     let record = SessionStreamRecord::Stored(event);
 
-    let mut plan = crate::PlanApprovalProjection::default();
-    let mut plan_cursor = None;
-    super::apply_plan_approval_projection_record(&mut plan, &mut plan_cursor, &record)?;
-    super::apply_plan_approval_projection_record(&mut plan, &mut plan_cursor, &record)?;
-
     let mut task = TaskStateProjection::default();
     let mut task_cursor = None;
     super::apply_task_projection_record(&mut task, &mut task_cursor, &record)?;
@@ -5261,7 +4878,6 @@ fn durable_projection_record_helpers_ignore_idempotent_replay() -> Result<()> {
     super::apply_terminal_task_projection_record(&mut terminal, &mut terminal_cursor, &record)?;
 
     for cursor in [
-        plan_cursor,
         task_cursor,
         skill_cursor,
         plugin_cursor,
@@ -5394,6 +5010,7 @@ fn load_from_store_does_not_duplicate_closed_tool_execution() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
         Box::new(ToolExecutionEntry {
             call_id: "call-1".to_owned(),

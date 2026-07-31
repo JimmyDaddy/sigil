@@ -168,7 +168,7 @@ where
                 )
                 .with_orchestration_route_guard(
                     sigil_runtime::OrchestrationRouteGuard::new(
-                        &root_config.agent.provider,
+                        &root_config.agent.runtime_provider,
                         &root_config.agent.model,
                         sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
                     ),
@@ -740,37 +740,6 @@ where
                 ) {
                     Ok((entry, entries)) => {
                         let _ = message_tx.send(WorkerMessage::PlanRejected { entry, entries });
-                    }
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(error));
-                    }
-                }
-            }
-            RunPlanCommand::ApprovePlan {
-                plan_text,
-                permission,
-                scope_summary,
-                clear_planning_context,
-            } => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before approving a plan".to_owned(),
-                    ));
-                    continue;
-                }
-                match approve_plan(
-                    root_config,
-                    &state.session.log_path,
-                    &mut state.session.current,
-                    PlanApprovalRequest {
-                        plan_text,
-                        permission,
-                        scope_summary,
-                        clear_planning_context,
-                    },
-                ) {
-                    Ok((entry, entries)) => {
-                        let _ = message_tx.send(WorkerMessage::PlanApproved { entry, entries });
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::Notice(error));

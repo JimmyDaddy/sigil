@@ -380,7 +380,7 @@ where
                         local_layout_mutation: None,
                         provider_miss_without_local_mutation: false,
                     })
-                    .observe_local_layout(mutation, usage.cache_miss_tokens);
+                    .observe_local_layout(mutation);
                 if let Some(cache_usage) = &usage.cache_usage {
                     cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
                 }
@@ -572,7 +572,7 @@ where
                 local_layout_mutation: None,
                 provider_miss_without_local_mutation: false,
             })
-            .observe_local_layout(mutation, usage.cache_miss_tokens);
+            .observe_local_layout(mutation);
         if let Some(cache_usage) = &usage.cache_usage {
             cache_usage.validate_for_prompt_tokens(usage.prompt_tokens)?;
         }

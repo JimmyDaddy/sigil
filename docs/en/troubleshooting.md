@@ -49,18 +49,9 @@ Provider generation and remote model discovery both honor the standard
 `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables. The
 `[web].proxy_mode` setting governs Web tools; it does not configure provider traffic.
 
-If Doctor reports `mode=legacy_v1`, use the Desktop migration card or `/config` →
-**Legacy migration** → Enter. Review the connection/key/environment counts and exact default
-route first; migration requires no provider network or model loading. An ordinary pre-publish
-credential-store failure keeps the old configuration active; Sigil reloads the current inventory
-before offering a retry. If the UI instead says the file changed, reopen the view and review the
-new revision. If it says reconciliation or cleanup is required, do not retry blindly: open
-**Support**, inspect the current config with Doctor, and resolve that state first. That workspace
-remains blocked across navigation, workspace switches, Desktop/TUI restarts, and process restarts
-until **Recheck configuration** in Desktop or **Enter recheck** on TUI's **Migration recovery**
-row confirms a credential-aware healthy V2 configuration. Do not add duplicate connections or
-hand-edit credential IDs. Mixed V1/V2 and future schemas fail closed and must be repaired or
-opened with a compatible Sigil version.
+If Doctor reports an invalid or incompatible provider configuration, replace it with a current
+`config_version = 2` connection template. Sigil does not migrate or infer older provider blocks.
+Do not add duplicate connections or hand-edit credential IDs.
 
 ## Theme Colors Are Hard To Read
 

@@ -1127,11 +1127,6 @@
       "CompactionAdmissionNoHistory": {
         "additionalProperties": false,
         "properties": {
-          "configured_tail_message_count": {
-            "format": "uint64",
-            "minimum": 1,
-            "type": "integer"
-          },
           "durable_message_count": {
             "format": "uint64",
             "minimum": 0,
@@ -1140,12 +1135,17 @@
           "kind": {
             "const": "no_foldable_history",
             "type": "string"
+          },
+          "minimum_tail_turn_count": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
           "kind",
           "durable_message_count",
-          "configured_tail_message_count"
+          "minimum_tail_turn_count"
         ],
         "type": "object"
       },
@@ -1461,14 +1461,6 @@
               }
             ]
           },
-          "legacy_migration_fields": {
-            "items": {
-              "maxLength": 128,
-              "type": "string"
-            },
-            "maxItems": 8,
-            "type": "array"
-          },
           "native_carrier_available": {
             "type": "boolean"
           },
@@ -1483,10 +1475,7 @@
             "type": "string"
           },
           "strategy": {
-            "enum": [
-              "cache_aware_v3",
-              "legacy_v2"
-            ],
+            "const": "cache_aware_v3",
             "type": "string"
           }
         },
@@ -1819,7 +1808,7 @@
                   "missing",
                   "hash_mismatch",
                   "policy_revoked",
-                  "legacy_unavailable",
+                  "unavailable",
                   null
                 ],
                 "type": [
@@ -3802,7 +3791,6 @@
       "IntentOperationErrorCode": {
         "enum": [
           "unsupported_schema",
-          "intent_history_unavailable",
           "unknown_intent",
           "unknown_operation",
           "stale_intent_version",
@@ -4174,7 +4162,7 @@
                 "type": "integer"
               },
               "status": {
-                "const": "history_unavailable",
+                "const": "not_created",
                 "type": "string"
               }
             },
@@ -4331,10 +4319,8 @@
       },
       "ProviderConfigMode": {
         "enum": [
-          "legacy_v1",
           "v2",
-          "mixed",
-          "unsupported_future"
+          "invalid"
         ],
         "type": "string"
       },
@@ -4421,16 +4407,6 @@
               "$ref": "#/components/schemas/ProviderConnectionIssue"
             },
             "type": "array"
-          },
-          "legacy_migration": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProviderLegacyMigrationPreview"
-              },
-              {
-                "type": "null"
-              }
-            ]
           }
         },
         "required": [
@@ -4470,109 +4446,8 @@
       "ProviderCredentialSource": {
         "enum": [
           "environment",
-          "system_keyring",
           "stored",
-          "none",
-          "legacy_plaintext"
-        ],
-        "type": "string"
-      },
-      "ProviderLegacyMigrationOutcome": {
-        "enum": [
-          "published",
-          "published_with_warning"
-        ],
-        "type": "string"
-      },
-      "ProviderLegacyMigrationPreview": {
-        "additionalProperties": false,
-        "properties": {
-          "connection_count": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "environment_reference_count": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "inline_credential_count": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "revision": {
-            "maxLength": 128,
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "revision",
-          "connection_count",
-          "inline_credential_count",
-          "environment_reference_count"
-        ],
-        "type": "object"
-      },
-      "ProviderLegacyMigrationRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "expected_revision": {
-            "maxLength": 128,
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "expected_revision"
-        ],
-        "type": "object"
-      },
-      "ProviderLegacyMigrationResult": {
-        "additionalProperties": false,
-        "properties": {
-          "default_model": {
-            "$ref": "#/components/schemas/ProviderModelRef"
-          },
-          "inventory": {
-            "$ref": "#/components/schemas/ProviderConnectionInventory"
-          },
-          "migrated_connection_count": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "moved_inline_credential_count": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "outcome": {
-            "$ref": "#/components/schemas/ProviderLegacyMigrationOutcome"
-          },
-          "preserved_environment_reference_count": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "warnings": {
-            "items": {
-              "$ref": "#/components/schemas/ProviderLegacyMigrationWarning"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "default_model",
-          "inventory",
-          "migrated_connection_count",
-          "moved_inline_credential_count",
-          "preserved_environment_reference_count",
-          "outcome",
-          "warnings"
-        ],
-        "type": "object"
-      },
-      "ProviderLegacyMigrationWarning": {
-        "enum": [
-          "filesystem_durability_uncertain",
-          "publication_visibility_reconciled"
+          "none"
         ],
         "type": "string"
       },
@@ -5656,9 +5531,6 @@
           "provider_connections": {
             "type": "boolean"
           },
-          "provider_migration": {
-            "type": "boolean"
-          },
           "provider_setup": {
             "type": "boolean"
           },
@@ -5703,8 +5575,7 @@
           "agent_activity",
           "support_diagnostics",
           "provider_connections",
-          "provider_setup",
-          "provider_migration"
+          "provider_setup"
         ],
         "type": "object"
       },
@@ -6053,7 +5924,6 @@
               "ready",
               "oversized",
               "scan_budget_exceeded",
-              "unsupported_legacy",
               "invalid"
             ],
             "type": "string"
@@ -8343,7 +8213,6 @@
                 "ready",
                 "oversized",
                 "scan_budget_exceeded",
-                "unsupported_legacy",
                 "invalid"
               ],
               "type": "string"
@@ -9714,73 +9583,6 @@
           }
         },
         "summary": "Load an exact connection-scoped provider model catalog"
-      }
-    },
-    "/settings/provider-connections/migrate-legacy": {
-      "post": {
-        "description": "Moves inline legacy credentials directly from the server-loaded config into the configured credential store, preserves environment references and routes, and does not contact a provider catalog.",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProviderLegacyMigrationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProviderLegacyMigrationResult"
-                }
-              }
-            },
-            "description": "Published V2 configuration and secret-free migration summary"
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "409": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "422": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "503": {
-            "$ref": "#/components/responses/Unavailable"
-          }
-        },
-        "summary": "Atomically migrate all valid legacy provider connections"
-      }
-    },
-    "/settings/provider-connections/recheck-migration": {
-      "post": {
-        "description": "Clears a persisted migration recovery block only when the current config and credential-aware inventory are a complete healthy V2 state. Otherwise the returned inventory retains the recovery issue.",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProviderConnectionInventory"
-                }
-              }
-            },
-            "description": "Rechecked secret-free provider inventory"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "503": {
-            "$ref": "#/components/responses/Unavailable"
-          }
-        },
-        "summary": "Explicitly recheck durable provider migration recovery"
       }
     },
     "/support/bundle": {

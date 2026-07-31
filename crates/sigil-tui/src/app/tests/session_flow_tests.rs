@@ -17,7 +17,7 @@ fn plain_transcript(app: &AppState, max_lines: usize) -> String {
 fn latest_session_can_be_restored_on_launch() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -642,8 +642,6 @@ fn restored_session_view_shows_v2_compaction_invitation_and_restored_prompt_pres
 {
     let mut config = test_config();
     config.compaction.context_window_tokens = Some(100);
-    config.compaction.soft_threshold_ratio = 0.5;
-    config.compaction.hard_threshold_ratio = 0.8;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     let session_log_path = app.session_log_path.clone();
     let entries = vec![
@@ -768,7 +766,7 @@ fn session_audit_view_shows_tool_egress_summary() -> Result<()> {
 fn sessions_filter_narrows_sidebar_results() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -792,7 +790,7 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
 fn session_rows_mark_selected_and_current_entry() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -828,7 +826,7 @@ fn session_rows_mark_selected_and_current_entry() -> Result<()> {
 fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -874,7 +872,7 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
 fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -906,7 +904,7 @@ fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
 fn resume_command_shows_session_selector_and_enter_switches_selected_session() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -942,7 +940,7 @@ fn resume_command_shows_session_selector_and_enter_switches_selected_session() -
 fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1012,7 +1010,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1413,7 +1411,12 @@ fn restored_reasoning_traces_between_tools_before_final_stay_visible() -> Result
             }],
             AssistantMessageKind::ToolPreamble,
         )),
-        SessionLogEntry::ToolResult(ModelMessage::tool("call-read", "file content")),
+        v2_tool_result_entry(
+            "call-read",
+            "read_file",
+            "file content",
+            ToolResultMeta::default(),
+        ),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_delta".to_owned(),
             data: json!({"delta": "second draft summary that should stay visible"}),
@@ -1508,7 +1511,12 @@ fn restored_tool_preamble_before_final_answer_does_not_render_as_second_reply() 
             }],
             AssistantMessageKind::ToolPreamble,
         )),
-        SessionLogEntry::ToolResult(ModelMessage::tool("call-read", "file content")),
+        v2_tool_result_entry(
+            "call-read",
+            "read_file",
+            "file content",
+            ToolResultMeta::default(),
+        ),
         SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
             Some("final answer".to_owned()),
             Vec::new(),
@@ -1540,7 +1548,7 @@ fn restored_tool_preamble_before_final_answer_does_not_render_as_second_reply() 
 fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1601,10 +1609,10 @@ fn restore_latest_session_returns_false_when_history_is_empty() {
 }
 
 #[test]
-fn restore_session_path_ignores_non_session_rows_without_raw_decode() -> Result<()> {
+fn restore_session_path_rejects_an_invalid_session_stream() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -1620,13 +1628,13 @@ fn restore_session_path_ignores_non_session_rows_without_raw_decode() -> Result<
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
-    assert!(app.restore_session_path_from_disk(
+    assert!(!app.restore_session_path_from_disk(
         invalid_path.clone(),
         "fallback-provider",
         "fallback-model",
         "restore failed"
     ));
-    assert_eq!(app.session_log_path, invalid_path);
+    assert_ne!(app.session_log_path, invalid_path);
     assert!(
         app.session_browser
             .current_entries
@@ -1636,7 +1644,10 @@ fn restore_session_path_ignores_non_session_rows_without_raw_decode() -> Result<
                 SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
             ))
     );
-    assert_eq!(app.last_notice(), Some("restore failed"));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("session restore unavailable:"))
+    );
     Ok(())
 }
 

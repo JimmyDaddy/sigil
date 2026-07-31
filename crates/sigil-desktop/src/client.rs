@@ -20,8 +20,7 @@ use crate::{
         DesktopConversationRecoveryView, DesktopErrorResponse, DesktopIntentDropCommandReceipt,
         DesktopIntentDropPreviewRequest, DesktopIntentDropRequest, DesktopIntentOperationKind,
         DesktopIntentOperationPreview, DesktopIntentSource, DesktopIntentStackState,
-        DesktopIntentVersionRef, DesktopProviderConnectionInventory,
-        DesktopProviderLegacyMigrationResult, DesktopProviderSetupCatalog,
+        DesktopIntentVersionRef, DesktopProviderConnectionInventory, DesktopProviderSetupCatalog,
         DesktopProviderSetupCatalogRequest, DesktopProviderSetupSaveRequest,
         DesktopProviderSetupSaveResult, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
         DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
@@ -132,31 +131,6 @@ impl DesktopHttpClient {
         .await
     }
 
-    /// Atomically migrates one valid legacy provider configuration without exposing its keys.
-    pub async fn migrate_legacy_provider_connections(
-        &self,
-        expected_revision: String,
-    ) -> Result<DesktopProviderLegacyMigrationResult, DesktopClientError> {
-        self.post_json(
-            self.route(["settings", "provider-connections", "migrate-legacy"])?,
-            &DesktopProviderLegacyMigrationRequest { expected_revision },
-            StatusCode::OK,
-        )
-        .await
-    }
-
-    /// Explicitly rechecks and, only when healthy, clears durable migration recovery.
-    pub async fn recheck_legacy_provider_migration(
-        &self,
-    ) -> Result<DesktopProviderConnectionInventory, DesktopClientError> {
-        self.post_json(
-            self.route(["settings", "provider-connections", "recheck-migration"])?,
-            &(),
-            StatusCode::OK,
-        )
-        .await
-    }
-
     /// Loads one exact connection-scoped model catalog without publishing configuration.
     pub async fn provider_setup_catalog(
         &self,
@@ -232,9 +206,6 @@ impl DesktopHttpClient {
                         crate::DesktopSessionCatalogState::Oversized => "oversized",
                         crate::DesktopSessionCatalogState::ScanBudgetExceeded => {
                             "scan_budget_exceeded"
-                        }
-                        crate::DesktopSessionCatalogState::UnsupportedLegacy => {
-                            "unsupported_legacy"
                         }
                         crate::DesktopSessionCatalogState::Invalid => "invalid",
                     },
@@ -1022,12 +993,6 @@ impl DesktopHttpClient {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-struct DesktopProviderLegacyMigrationRequest {
-    expected_revision: String,
-}
-
 /// Bounded incremental decoder for one authenticated run SSE response.
 pub struct DesktopRunEventStream {
     response: Response,
@@ -1182,7 +1147,7 @@ fn validate_owner_revision(value: &str) -> Result<(), DesktopClientError> {
 
 fn validate_intent_stack_state(state: &DesktopIntentStackState) -> Result<(), DesktopClientError> {
     match state {
-        DesktopIntentStackState::HistoryUnavailable {
+        DesktopIntentStackState::NotCreated {
             schema_version,
             safe_message,
         } => {
@@ -1485,7 +1450,7 @@ fn validate_conversation_display_page(
                     && artifact_availability.is_some()
                     && !matches!(
                         artifact_availability,
-                        Some(DesktopToolArtifactAvailability::LegacyUnavailable)
+                        Some(DesktopToolArtifactAvailability::Unavailable)
                     )
             {
                 return Err(DesktopClientError::InvalidResponse);

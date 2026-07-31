@@ -185,11 +185,13 @@ fn route_contract_is_derived_from_the_frozen_production_surface() {
     let config_path = temp.path().join("source.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-eval"
 model = "deepseek-v4-flash"
 
 [permission]
@@ -199,8 +201,14 @@ mode = "auto-edit"
 enabled = true
 multi_agent_mode = "proactive"
 
-[providers.deepseek]
+[connections.deepseek-eval]
+label = "DeepSeek eval"
+provider = "deepseek"
+protocol = "deepseek"
 base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[connections.deepseek-eval.options]
 beta_base_url = "https://api.deepseek.com/beta"
 anthropic_base_url = "https://api.deepseek.com/anthropic"
 "#,
@@ -942,7 +950,8 @@ fn model_eval_verification_records_pass_then_durable_stale_mutation() {
         let isolated = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
             .expect("write isolated config");
         let store = JsonlSessionStore::new(&isolated.session_path).expect("session store");
-        let mut session = Session::new(&isolated.provider, &isolated.model).with_store(store);
+        let mut session = Session::load_from_store(&isolated.provider, &isolated.model, store)
+            .expect("initialize current session");
         session
             .append_control(ControlEntry::Note {
                 kind: "model_eval_test".to_owned(),

@@ -23,6 +23,29 @@ use crate::runner::worker_loop::queue_driver::{
 
 use super::*;
 
+fn cache_layout_proof(provider_name: &str, model_name: &str) -> sigil_kernel::CacheLayoutProofV1 {
+    sigil_kernel::CacheLayoutProofV1::from_request(
+        &sigil_kernel::CompletionRequest {
+            provider_name: provider_name.to_owned(),
+            model_name: model_name.to_owned(),
+            messages: vec![ModelMessage::user("current request")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+        None,
+    )
+    .expect("current cache layout proof")
+}
+
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
 
 fn idle_auto_session(prompt_tokens: u64) -> Session {
@@ -120,39 +143,9 @@ fn idle_auto_preflight_keeps_a_requested_run_blocked_at_the_scheduler_boundary()
 }
 
 #[test]
-fn idle_auto_preflight_falls_back_to_legacy_before_admitting_soft_pressure() {
-    let state = requested_idle_auto_state();
-    let session = idle_auto_session(600_000);
-
-    let result = idle_auto_compaction_preflight(
-        &state,
-        Some(&session),
-        &cache_aware_compaction_config(),
-        &sigil_kernel::ProviderContextCapabilities::unknown(),
-        IdleAutoCompactionSchedulerEligibility::idle(),
-    );
-
-    assert_eq!(
-        result.decision,
-        IdleAutoCompactionPreflightDecision::NotEligible(
-            IdleAutoCompactionNotEligibleReason::BelowPreparationThreshold,
-        )
-    );
-    assert_eq!(
-        result.evidence.threshold_status,
-        Some(sigil_kernel::CompactionThresholdStatus::Soft)
-    );
-    assert_eq!(
-        result.evidence.effective_strategy,
-        Some(sigil_kernel::CompactionStrategy::LegacyV2)
-    );
-    assert_eq!(result.evidence.cache_aware_v3_supported, Some(false));
-}
-
-#[test]
 fn idle_auto_preflight_admits_soft_pressure_only_to_detailed_preparation() {
     let state = requested_idle_auto_state();
-    let session = idle_auto_session(600_000);
+    let session = idle_auto_session(800_000);
 
     let result = idle_auto_compaction_preflight(
         &state,
@@ -177,7 +170,7 @@ fn stable_idle_compaction_snapshot_ignores_durable_lifecycle_but_rejects_new_ses
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
     let stable = capture_stable_idle_compaction_snapshot(&session)?
         .expect("empty store-backed session has a stable entry frontier");
     let prepared = stable
@@ -212,7 +205,7 @@ fn eligible_idle_durable_admission_uses_ready_projection_while_data_file_is_lock
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
-    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
     let circuit_scope = CompactionCircuitScopeV1 {
         source_cursor_event_id: "source-cursor".to_owned(),
         layout_hash: "layout-hash".to_owned(),
@@ -334,7 +327,7 @@ fn append_context_window_rejection(
         request_material_fingerprint: fingerprint.clone(),
         provider_name: "openai_responses".to_owned(),
         model_name: "gpt-4.1-2025-04-14".to_owned(),
-        cache_layout_proof: None,
+        cache_layout_proof: Some(cache_layout_proof("openai_responses", "gpt-4.1-2025-04-14")),
         started_at_unix_ms: 1,
     };
     let started_record = DurableAuditRecord::new(
@@ -372,7 +365,7 @@ fn append_context_window_rejection(
 
 fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -387,7 +380,7 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
@@ -405,7 +398,6 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
         appearance: Default::default(),
         task: Default::default(),
         web: Default::default(),
-        providers: Default::default(),
         connections: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -415,7 +407,8 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
 fn overflow_recovery_accepts_only_one_exact_durable_context_rejection() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let session = Session::new("openai_responses", "gpt-4.1-2025-04-14").with_store(store.clone());
+    let session =
+        Session::load_from_store("openai_responses", "gpt-4.1-2025-04-14", store.clone())?;
     append_context_window_rejection(
         &store,
         "attempt-exact",
@@ -448,7 +441,8 @@ fn overflow_recovery_accepts_only_one_exact_durable_context_rejection() -> Resul
 fn overflow_recovery_rejects_non_context_terminal_evidence() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let session = Session::new("openai_responses", "gpt-4.1-2025-04-14").with_store(store.clone());
+    let session =
+        Session::load_from_store("openai_responses", "gpt-4.1-2025-04-14", store.clone())?;
     append_context_window_rejection(
         &store,
         "attempt-other",
@@ -468,7 +462,8 @@ fn overflow_recovery_rejects_non_context_terminal_evidence() -> Result<()> {
 fn overflow_recovery_rejects_non_conversation_attempt_evidence() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let session = Session::new("openai_responses", "gpt-4.1-2025-04-14").with_store(store.clone());
+    let session =
+        Session::load_from_store("openai_responses", "gpt-4.1-2025-04-14", store.clone())?;
     append_context_window_rejection(
         &store,
         "attempt-measurement",
@@ -490,7 +485,11 @@ fn queued_pre_turn_admission_blocks_without_local_proof_and_never_mutates_sessio
     let cache_root = temp.path().join("cache");
     let root_config = root_config(temp.path(), &cache_root);
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -545,7 +544,11 @@ fn queued_portable_preflight_with_no_prior_history_is_read_only_and_not_ready() 
     let temp = tempfile::tempdir()?;
     let root_config = root_config(temp.path(), &temp.path().join("cache"));
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
     let mut exact_prompts = ExactConversationPromptStore::new();
     queue_conversation_input(
         store.path(),
@@ -594,10 +597,13 @@ fn queued_portable_preflight_with_no_prior_history_is_read_only_and_not_ready() 
 fn queued_portable_preflight_with_foldable_history_never_starts_without_verified_target_proof()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut root_config = root_config(temp.path(), &temp.path().join("cache"));
-    root_config.compaction.tail_messages = 1;
+    let root_config = root_config(temp.path(), &temp.path().join("cache"));
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let mut session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
     {
         let stream = session
             .as_mut()
@@ -675,9 +681,9 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
 fn v2_session_portable_transport_uses_its_durable_model_route() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut root_config = root_config(temp.path(), &temp.path().join("cache"));
-    root_config.config_version = Some(sigil_kernel::CONFIG_VERSION_V2);
+    root_config.config_version = sigil_kernel::CONFIG_VERSION_V2;
     let connection_id = sigil_kernel::ConnectionId::new("test-default")?;
-    root_config.agent.provider.clear();
+    root_config.agent.runtime_provider.clear();
     root_config.agent.connection = Some(connection_id.clone());
     root_config.connections.insert(
         connection_id.as_str().to_owned(),

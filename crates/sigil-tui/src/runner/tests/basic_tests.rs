@@ -61,12 +61,12 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     format!(
         r#"Plan:
 
-```sigil-plan-v1
+```sigil-plan-v2
 {{
   "summary": "{summary}",
   "steps": [
     {{
-      "id": "step-1",
+      "step_id": "step-1",
       "title": "{title}",
       "target_paths": ["{path}"]
     }}
@@ -875,10 +875,17 @@ fn spawn_agent_worker_reports_eager_mcp_failure_without_stopping_worker() -> Res
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
     let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
-    root_config.providers.insert(
-        "deepseek".to_owned(),
+    root_config.agent.runtime_provider = "custom".to_owned();
+    root_config.agent.connection =
+        Some(sigil_kernel::ConnectionId::new("local-test").expect("connection id"));
+    root_config.connections.insert(
+        "local-test".to_owned(),
         serde_json::json!({
-            "api_key": "test-key"
+            "label": "Local test",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:43123/v1",
+            "credential": {"source": "none"}
         }),
     );
     root_config.mcp_servers.push(mcp_server_config! {

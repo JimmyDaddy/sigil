@@ -35,11 +35,7 @@ pub(super) fn builtin_profile(
         .connection
         .clone()
         .or_else(|| root_config.agent.connection.clone());
-    let provider = resolved_profile_provider(
-        root_config,
-        role_config.provider.as_deref(),
-        connection.as_ref(),
-    );
+    let provider = resolved_profile_provider(root_config, connection.as_ref());
     let model = role_config
         .model
         .clone()
@@ -97,12 +93,8 @@ pub(super) fn builtin_profile(
 
 fn resolved_profile_provider(
     root_config: &RootConfig,
-    legacy_provider: Option<&str>,
     connection: Option<&ConnectionId>,
 ) -> String {
-    if let Some(provider) = legacy_provider {
-        return provider.to_owned();
-    }
     let loaded = load_provider_connections(root_config);
     connection
         .and_then(|id| loaded.connections.get(id))
@@ -120,7 +112,7 @@ fn resolved_profile_provider(
             }
             .to_owned()
         })
-        .unwrap_or_else(|| root_config.agent.provider.clone())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 pub(super) fn capture_profile_snapshot(

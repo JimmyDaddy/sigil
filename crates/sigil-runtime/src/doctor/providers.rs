@@ -5,15 +5,12 @@ pub(super) fn check_provider(
     root_config: &RootConfig,
     cache_root: &std::path::Path,
 ) {
-    if root_config.config_version.is_some()
-        || !root_config.connections.is_empty()
-        || root_config.agent.connection.is_some()
-    {
-        check_connection_inventory(report, root_config);
+    check_connection_inventory(report, root_config);
+    let Ok((provider, _)) = crate::provider_connections::resolve_default_model_route(root_config)
+    else {
         return;
-    }
-    check_legacy_connection_state(report, root_config);
-    match provider_config_key(&root_config.agent.provider) {
+    };
+    match provider_config_key(&provider) {
         "deepseek" => check_deepseek_provider(report, root_config, cache_root),
         "openai_compat" => check_openai_compat_provider(report, root_config),
         "openai_responses" => check_openai_responses_provider(report, root_config),
@@ -23,36 +20,8 @@ pub(super) fn check_provider(
             DoctorStatus::Error,
             "provider",
             format!("unsupported provider {other}"),
-            Some("set [agent].provider to \"deepseek\", \"openai_compat\", \"openai_responses\", \"anthropic\", or \"gemini\""),
+            Some("select a supported provider connection"),
         ),
-    }
-}
-
-fn check_legacy_connection_state(report: &mut DoctorReport, root_config: &RootConfig) {
-    let loaded = crate::provider_connections::load_provider_connections(root_config);
-    report.push(
-        DoctorStatus::Warn,
-        "provider:connections",
-        format!(
-            "mode=legacy_v1 connections={} default={} migration_required={}",
-            loaded.connections.len(),
-            loaded
-                .default_model
-                .as_ref()
-                .map(|model| format!("{}/{}", model.connection_id, model.model_id))
-                .unwrap_or_else(|| "not_configured".to_owned()),
-            loaded.migration_required()
-        ),
-    );
-    if loaded.migration_required() {
-        report.push_with_remediation(
-            DoctorStatus::Warn,
-            "provider:migration",
-            "legacy plaintext credential requires explicit migration",
-            Some(
-                "open Provider settings and save the connection to the protected store or environment",
-            ),
-        );
     }
 }
 
@@ -63,10 +32,8 @@ fn check_connection_inventory(report: &mut DoctorReport, root_config: &RootConfi
 
     let inventory = connection_inventory_native(root_config);
     let mode = match inventory.mode {
-        ConfigMode::LegacyV1 => "legacy_v1",
         ConfigMode::V2 => "v2",
-        ConfigMode::Mixed => "mixed_invalid",
-        ConfigMode::UnsupportedFuture => "unsupported_future",
+        ConfigMode::Invalid => "invalid",
     };
     report.push(
         if matches!(inventory.mode, ConfigMode::V2) {
@@ -108,10 +75,8 @@ fn check_connection_inventory(report: &mut DoctorReport, root_config: &RootConfi
         };
         let source = match entry.credential_source {
             CredentialSourceView::Environment => "environment",
-            CredentialSourceView::SystemKeyring => "system_keyring",
             CredentialSourceView::Stored => "stored",
             CredentialSourceView::None => "none",
-            CredentialSourceView::LegacyPlaintext => "legacy_plaintext",
         };
         let status = match entry.readiness {
             ConnectionReadiness::Ready => DoctorStatus::Ok,
@@ -414,17 +379,9 @@ pub(super) fn push_provider_auth_check(
     report: &mut DoctorReport,
     secret: Option<SecretResolution>,
     preferred_env: &'static str,
-    config_key: &'static str,
+    _config_key: &'static str,
 ) {
     match secret {
-        Some(secret) if secret.source == SecretSource::ConfigPlaintext => report.push_with_remediation(
-            DoctorStatus::Warn,
-            "provider:auth",
-            "resolved from config plaintext",
-            Some(format!(
-                "prefer {preferred_env} for temporary use; if api_key stays in sigil.toml, keep the file private and never commit it",
-            )),
-        ),
         Some(secret) => report.push(
             DoctorStatus::Ok,
             "provider:auth",
@@ -433,12 +390,8 @@ pub(super) fn push_provider_auth_check(
         None => report.push_with_remediation(
             DoctorStatus::Error,
             "provider:auth",
-            format!(
-                "missing api key; set {preferred_env} or {config_key}",
-            ),
-            Some(format!(
-                "for temporary use, export {preferred_env}; if you save api_key in sigil.toml, it is plaintext",
-            )),
+            format!("missing api key; set {preferred_env} or save a credential reference"),
+            Some("open Provider settings to store a credential or configure the environment"),
         ),
     }
 }
@@ -446,7 +399,6 @@ pub(super) fn push_provider_auth_check(
 pub(super) fn secret_source_label(source: SecretSource) -> &'static str {
     match source {
         SecretSource::Environment(name) => name,
-        SecretSource::ConfigPlaintext => "config plaintext",
         SecretSource::Session => "session",
     }
 }

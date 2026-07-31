@@ -449,9 +449,7 @@ impl ContinuationSourceCatalog {
                 SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
                     promotion.durable_user_message
                 }
-                SessionLogEntry::User(message)
-                | SessionLogEntry::Assistant(message)
-                | SessionLogEntry::ToolResult(message) => message,
+                SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => message,
                 SessionLogEntry::ToolResultV2(result) => result.model_message()?,
                 SessionLogEntry::Control(_) => {
                     bail!("folded checkpoint source cannot be a control entry");
@@ -561,7 +559,6 @@ pub struct ContinuationCheckpointV1 {
     pub task_memory_id: Option<TaskMemoryId>,
     pub valid_for_snapshot: Option<crate::WorkspaceSnapshotId>,
     pub source_plan_cursor: Option<ProjectionCursor>,
-    pub requested_tail_message_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_tail: Option<AdaptiveTailSelectionV3>,
     pub prior_folded_through: Option<CompactionCursor>,
@@ -587,7 +584,6 @@ impl ContinuationCheckpointV1 {
             task_memory_id: None,
             valid_for_snapshot: None,
             source_plan_cursor: None,
-            requested_tail_message_count: None,
             adaptive_tail: None,
             prior_folded_through: None,
             target_request_fit: None,
@@ -667,7 +663,7 @@ impl ContinuationCheckpointV1 {
             previous_checkpoint_id,
             narrative_items,
         )?;
-        let pinned_user_constraints = if session_anchor.uses_legacy_authority() {
+        let pinned_user_constraints = if session_anchor.uses_user_turn_authority() {
             catalog.pinned_user_items()?
         } else {
             Vec::new()
@@ -679,8 +675,7 @@ impl ContinuationCheckpointV1 {
             task_memory_id: Some(task_memory.memory_id.clone()),
             valid_for_snapshot: Some(valid_for_snapshot.clone()),
             source_plan_cursor: Some(plan.base_stream_cursor.clone()),
-            requested_tail_message_count: Some(plan.requested_tail_message_count),
-            adaptive_tail: plan.adaptive_tail.clone(),
+            adaptive_tail: Some(plan.adaptive_tail.clone()),
             prior_folded_through: plan.prior_folded_through.clone(),
             target_request_fit: None,
             session_anchor: Some(session_anchor),
@@ -819,7 +814,6 @@ impl ContinuationCheckpointV1 {
             ContinuationCheckpointKind::None => {
                 if self.task_memory_id.is_some()
                     || self.source_plan_cursor.is_some()
-                    || self.requested_tail_message_count.is_some()
                     || self.adaptive_tail.is_some()
                     || self.prior_folded_through.is_some()
                     || self.target_request_fit.is_some()
@@ -831,7 +825,6 @@ impl ContinuationCheckpointV1 {
             ContinuationCheckpointKind::ProviderNative => {
                 if self.task_memory_id.is_none()
                     || self.source_plan_cursor.is_some()
-                    || self.requested_tail_message_count.is_some()
                     || self.adaptive_tail.is_some()
                     || self.prior_folded_through.is_some()
                     || self.target_request_fit.is_some()
@@ -846,9 +839,7 @@ impl ContinuationCheckpointV1 {
                     .as_ref()
                     .context("portable continuation checkpoint has no source plan cursor")?;
                 if self.task_memory_id.is_none()
-                    || self
-                        .requested_tail_message_count
-                        .is_none_or(|count| count == 0)
+                    || self.adaptive_tail.is_none()
                     || cursor.projection_schema_version != COMPACTION_FOLD_PLAN_SCHEMA_VERSION
                     || cursor.session_id.trim().is_empty()
                     || cursor.last_applied_stream_sequence == 0
@@ -857,11 +848,13 @@ impl ContinuationCheckpointV1 {
                 {
                     bail!("portable continuation checkpoint bindings are invalid");
                 }
-                if let Some(adaptive_tail) = &self.adaptive_tail {
-                    adaptive_tail.policy.validate()?;
-                    if adaptive_tail.exact_fit_limit_tokens == 0 {
-                        bail!("portable continuation checkpoint adaptive tail is invalid");
-                    }
+                let adaptive_tail = self
+                    .adaptive_tail
+                    .as_ref()
+                    .expect("portable checkpoint adaptive tail was checked");
+                adaptive_tail.policy.validate()?;
+                if adaptive_tail.exact_fit_limit_tokens == 0 {
+                    bail!("portable continuation checkpoint adaptive tail is invalid");
                 }
             }
         }
@@ -913,7 +906,7 @@ impl ContinuationCheckpointV1 {
         let expected_pinned = if self
             .session_anchor
             .as_ref()
-            .is_some_and(|anchor| !anchor.uses_legacy_authority())
+            .is_some_and(|anchor| !anchor.uses_user_turn_authority())
         {
             Vec::new()
         } else {
@@ -1161,7 +1154,7 @@ fn render_portable_checkpoint(
 ) -> Result<String> {
     if let (Some(anchor), Some(continuity)) =
         (&checkpoint.session_anchor, &checkpoint.continuity_v2)
-        && !anchor.uses_legacy_authority()
+        && !anchor.uses_user_turn_authority()
     {
         return render_portable_checkpoint_v2(anchor, continuity);
     }
@@ -2052,26 +2045,20 @@ fn validate_portable_checkpoint_activation(
         anchor.validate_against_records(source_records)?;
         continuity.validate_against_records(source_records, anchor)?;
     }
-    let plan = if let Some(adaptive_tail) = &entry.checkpoint.adaptive_tail {
-        CompactionFoldPlan::from_records_after_adaptive_tail(
-            source_records,
-            adaptive_tail.policy.clone(),
-            adaptive_tail.exact_fit_limit_tokens,
-            entry.checkpoint.prior_folded_through.as_ref(),
-        )?
-    } else {
-        CompactionFoldPlan::from_records_after(
-            source_records,
-            entry
-                .checkpoint
-                .requested_tail_message_count
-                .expect("portable checkpoint shape was validated before activation"),
-            entry.checkpoint.prior_folded_through.as_ref(),
-        )?
-    };
+    let adaptive_tail = entry
+        .checkpoint
+        .adaptive_tail
+        .as_ref()
+        .context("portable checkpoint is missing its adaptive-tail proof")?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        source_records,
+        adaptive_tail.policy.clone(),
+        adaptive_tail.exact_fit_limit_tokens,
+        entry.checkpoint.prior_folded_through.as_ref(),
+    )?;
     if plan.base_stream_cursor != *source_cursor
         || plan.folded_through.as_ref() != Some(&entry.folded_through)
-        || plan.adaptive_tail != entry.checkpoint.adaptive_tail
+        || plan.adaptive_tail != *adaptive_tail
     {
         bail!("portable checkpoint does not match its deterministic fold plan");
     }

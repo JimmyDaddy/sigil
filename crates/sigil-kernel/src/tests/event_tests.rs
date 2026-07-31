@@ -21,8 +21,7 @@ use crate::{
     DurableDomainEvent, DurableEventPayloadStorage, DurableEventType, EventClass, EventSyncClass,
     EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, McpElicitationDecision,
     McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
-    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
-    PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
+    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
     PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
     ProviderContinuationState, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReasoningEffort, ReceiptStatus, RedactionState,
@@ -1593,21 +1592,6 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 updated_at_ms: 120,
             }),
             "terminal_task",
-        ),
-        (
-            ControlEntry::PlanApproved(PlanApprovedEntry {
-                plan_version: 1,
-                plan_hash: "sha256:plan".to_owned(),
-                approved_at_ms: 42,
-                permission: PlanApprovalPermission::WorkspaceEdits,
-                scope: PlanApprovalScope {
-                    summary: "workspace edits".to_owned(),
-                    workspace_paths: vec!["crates/sigil-kernel".into()],
-                },
-                expires: PlanApprovalExpiry::NextUserPrompt,
-                clear_planning_context: true,
-            }),
-            "plan_approved",
         ),
         (ControlEntry::TaskRun(task_run_entry()), "task_run"),
         (

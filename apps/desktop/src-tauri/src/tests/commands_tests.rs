@@ -634,49 +634,6 @@ fn conversation_display_errors_are_distinct_from_catalog_pagination() {
 }
 
 #[test]
-fn provider_migration_errors_preserve_recovery_semantics() {
-    let stale = project_provider_migration_client_error(DesktopClientError::Rejected {
-        status: 409,
-        code: Some("provider_migration_stale".to_owned()),
-    });
-    assert_eq!(stale.code, "provider_migration_stale");
-    assert_eq!(
-        stale.recovery_actions,
-        vec![DesktopRecoveryAction::RetryCurrent]
-    );
-
-    let unavailable = project_provider_migration_client_error(DesktopClientError::Rejected {
-        status: 503,
-        code: Some("provider_migration_config_unavailable".to_owned()),
-    });
-    assert_eq!(unavailable.code, "provider_migration_config_unavailable");
-    assert_eq!(
-        unavailable.recovery_actions,
-        vec![
-            DesktopRecoveryAction::RetryCurrent,
-            DesktopRecoveryAction::OpenDiagnostics
-        ]
-    );
-
-    for code in [
-        "provider_migration_reconcile_required",
-        "provider_migration_rollback_incomplete",
-        "provider_migration_recovery_unavailable",
-    ] {
-        let uncertain = project_provider_migration_client_error(DesktopClientError::Rejected {
-            status: 503,
-            code: Some(code.to_owned()),
-        });
-        assert_eq!(uncertain.code, code);
-        assert_eq!(
-            uncertain.recovery_actions,
-            vec![DesktopRecoveryAction::OpenDiagnostics]
-        );
-        assert!(!uncertain.message.contains("unchanged"));
-    }
-}
-
-#[test]
 fn conversation_queue_projection_is_bounded_camel_case_and_secret_free() {
     let projected = crate::ipc::DesktopConversationQueueView::from(NativeConversationQueueView {
         schema_version: 1,
@@ -1087,7 +1044,7 @@ fn direct_compaction_handles_noop_and_unavailable_states_without_applying() {
         "admission": {
             "kind": "no_foldable_history",
             "durable_message_count": 2,
-            "configured_tail_message_count": 2
+            "minimum_tail_turn_count": 2
         }
     }))
     .expect("no-op review should decode");

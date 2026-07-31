@@ -485,44 +485,6 @@ export function createCatalogWorkbenchBridge(
       }],
       issues: [],
     }),
-    migrateLegacyProviderConnections: async () => ({
-      defaultModel: runContext.modelRef,
-      inventory: {
-        configMode: "v2",
-        defaultModel: runContext.modelRef,
-        connections: [{
-          id: runContext.modelRef.connectionId,
-          label: "DeepSeek",
-          providerLabel: "DeepSeek",
-          protocolLabel: "DeepSeek",
-          endpointDisplay: "api.deepseek.com",
-          credentialSource: "stored",
-          readiness: "ready",
-          defaultModel: runContext.modelRef,
-        }],
-        issues: [],
-      },
-      migratedConnectionCount: 1,
-      movedInlineCredentialCount: 1,
-      preservedEnvironmentReferenceCount: 0,
-      outcome: "published",
-      warnings: [],
-    }),
-    recheckLegacyProviderMigration: async () => ({
-      configMode: "v2",
-      defaultModel: runContext.modelRef,
-      connections: [{
-        id: runContext.modelRef.connectionId,
-        label: "DeepSeek",
-        providerLabel: "DeepSeek",
-        protocolLabel: "DeepSeek",
-        endpointDisplay: "api.deepseek.com",
-        credentialSource: "stored",
-        readiness: "ready",
-        defaultModel: runContext.modelRef,
-      }],
-      issues: [],
-    }),
     providerSetupCatalog: async () => ({
       connectionId: runContext.modelRef.connectionId,
       providerLabel: "DeepSeek",
@@ -662,7 +624,7 @@ export function createCatalogWorkbenchBridge(
     conversationCompactionPreview: async () => ({
       foldedEventCount: 0,
       retainedEventCount: 0,
-      admission: { kind: "no_foldable_history", durableMessageCount: 0, configuredTailMessageCount: 12 },
+      admission: { kind: "no_foldable_history", durableMessageCount: 0, minimumTailTurnCount: 12 },
     }),
     compactConversation: async () => ({
       outcome: "nothing_to_compact",
@@ -743,9 +705,9 @@ export function createCatalogWorkbenchBridge(
       throw new Error("no integration review");
     },
     intentStack: async () => ({
-      status: "history_unavailable",
+      status: "not_created",
       schemaVersion: 1,
-      safeMessage: "No durable intents were recorded.",
+      safeMessage: "No Intent Stack has been created in this session.",
     }),
     previewIntentDrop: async () => {
       throw new Error("no Intent Drop preview");

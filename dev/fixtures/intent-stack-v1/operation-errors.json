@@ -1,6 +1,5 @@
 [
   "unsupported_schema",
-  "intent_history_unavailable",
   "unknown_intent",
   "unknown_operation",
   "stale_intent_version",

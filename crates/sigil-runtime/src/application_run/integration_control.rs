@@ -240,7 +240,7 @@ pub async fn accept_application_task_integration_review(
         let store = JsonlSessionStore::new(&session_path)?;
         let session_lease = session_leases.acquire(store.path())?;
         let session = Session::load_from_store(
-            root_config.agent.provider.clone(),
+            root_config.agent.runtime_provider.clone(),
             root_config.agent.model.clone(),
             store,
         )?;

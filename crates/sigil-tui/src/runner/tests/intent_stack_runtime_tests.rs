@@ -56,7 +56,7 @@ fn intent_stack_history_and_permission_boundaries_survive_worker_restart() -> Re
         ))?,
         WorkerMessage::IntentStackLoaded {
             request_id: 1,
-            stack_state: PublicIntentStackStateV1::HistoryUnavailable { .. },
+            stack_state: PublicIntentStackStateV1::NotCreated { .. },
         }
     ));
     worker.shutdown()?;
@@ -75,7 +75,7 @@ fn intent_stack_history_and_permission_boundaries_survive_worker_restart() -> Re
         ))?,
         WorkerMessage::IntentStackLoaded {
             request_id: 2,
-            stack_state: PublicIntentStackStateV1::HistoryUnavailable { .. },
+            stack_state: PublicIntentStackStateV1::NotCreated { .. },
         }
     ));
 
@@ -296,7 +296,7 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
   ],
   "steps": [
     {
-      "id": "implement-retry",
+      "step_id": "implement-retry",
       "title": "Implement retry policy",
       "role": "subagent_write",
       "depends_on": [],
@@ -306,7 +306,7 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
       "target_paths": ["retry.txt"]
     },
     {
-      "id": "add-telemetry",
+      "step_id": "add-telemetry",
       "title": "Add retry telemetry",
       "role": "subagent_write",
       "depends_on": [],
@@ -316,7 +316,7 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
       "target_paths": ["telemetry.txt"]
     },
     {
-      "id": "document-operations",
+      "step_id": "document-operations",
       "title": "Document operator guidance",
       "role": "subagent_write",
       "depends_on": [],

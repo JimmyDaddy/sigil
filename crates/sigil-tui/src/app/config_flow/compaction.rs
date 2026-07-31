@@ -10,10 +10,6 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         config_state,
         ConfigField::CompactionNativeCarrierEnabled,
     ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::CompactionStrategy,
-    ));
     lines.push(render_config_readonly_row(
         "Effective window",
         &render_effective_context_window(config_state),
@@ -21,20 +17,6 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     lines.push(render_config_value_row(
         config_state,
         ConfigField::CompactionContextWindowTokens,
-    ));
-    lines.push(String::new());
-    lines.push("[legacy migration controls]".to_owned());
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::CompactionSoftThresholdRatio,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::CompactionHardThresholdRatio,
-    ));
-    lines.push(render_config_value_row(
-        config_state,
-        ConfigField::CompactionTailMessages,
     ));
     lines.push(format!("status: {}", app.runtime.compaction_status));
     lines.extend(render_config_selection_details(config_state));

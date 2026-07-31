@@ -1612,9 +1612,6 @@ impl LinearSessionWriter {
         if pending.is_empty() {
             bail!("session writer append batch must not be empty");
         }
-        for event in &pending {
-            validate_pending_session_entry_payload(event)?;
-        }
         self.ensure_writer_lease()?;
         let mut file = self.open_locked_data_file()?;
         let validates_event_links = pending
@@ -2129,23 +2126,6 @@ fn harden_private_open_file(file: &File, path: &Path) -> Result<()> {
     #[cfg(windows)]
     if !crate::private_path_permissions_are_restricted(path)? {
         crate::secure_private_path_permissions(path)?;
-    }
-    Ok(())
-}
-
-fn validate_pending_session_entry_payload(event: &PendingStoredEvent) -> Result<()> {
-    if event.event_type.payload_metadata().storage != DurableEventPayloadStorage::SessionLogEntry {
-        return Ok(());
-    }
-    let Some(entry) = event.payload.get("session_log_entry").cloned() else {
-        return Ok(());
-    };
-    if entry
-        .get("control")
-        .and_then(|control| control.get("compaction_applied"))
-        .is_some()
-    {
-        bail!("legacy CompactionRecord payload is unsupported in this pre-release build");
     }
     Ok(())
 }

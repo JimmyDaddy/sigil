@@ -220,9 +220,9 @@ pub fn execute_application_intent_stack_command(
                     )));
                 }
                 PublicIntentStackStateV1::Available { .. } => {}
-                PublicIntentStackStateV1::HistoryUnavailable { .. } => {
+                PublicIntentStackStateV1::NotCreated { .. } => {
                     return Err(ApplicationIntentStackError::conflict(anyhow!(
-                        "durable Intent history is unavailable"
+                        "no Intent Stack exists in this session"
                     )));
                 }
             }

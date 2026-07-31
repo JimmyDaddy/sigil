@@ -111,11 +111,11 @@ export const catalogFixtures: readonly CatalogFixture[] = [
     ...environment,
     sessions: [
       {
-        sessionRef: "legacy.jsonl",
-        sourceState: "unsupported_legacy",
+        sessionRef: "invalid.jsonl",
+        sourceState: "invalid",
         sourceBytes: 256,
         sourceModifiedAtUnixMs: 1_784_419_100_000,
-        title: "Unavailable legacy source",
+        title: "Invalid source",
         userMessageCount: 0,
         assistantMessageCount: 0,
         toolResultCount: 0,

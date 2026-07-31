@@ -383,7 +383,7 @@
         "minimal-path",
         "workspace",
         "storage-and-session-paths",
-        "task-rollout-and-migration",
+        "task-rollout-and-defaults",
         "use-doctor-when-setup-looks-wrong"
       ],
       "cta_key": "open-configuration-reference",
@@ -394,7 +394,7 @@
           "Minimal Path",
           "Workspace",
           "Storage And Session Paths",
-          "Task Rollout And Migration",
+          "Task Rollout And Defaults",
           "Use Doctor When Setup Looks Wrong"
         ],
         "zh-CN": [
@@ -403,7 +403,7 @@
           "最小配置路径",
           "工作区",
           "存储与会话路径",
-          "Task Rollout 与迁移",
+          "Task Rollout 与默认值",
           "设置异常时使用 Doctor"
         ]
       },
@@ -580,7 +580,6 @@
       "role": "provider-selection-authority",
       "heading_keys": [
         "choose-a-provider",
-        "migrate-a-legacy-configuration",
         "authentication-priority",
         "copyable-starting-points",
         "troubleshooting-path"
@@ -589,14 +588,12 @@
       "heading_labels": {
         "en": [
           "Choose A Provider",
-          "Migrate A Legacy Configuration",
           "Authentication Priority",
           "Copyable Starting Points",
           "Troubleshooting Path"
         ],
         "zh-CN": [
           "选择模型服务",
-          "迁移旧版配置",
           "认证优先级",
           "可复制起点",
           "排障路径"

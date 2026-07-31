@@ -20,17 +20,40 @@ fn store_backed_session() -> Result<(tempfile::TempDir, Session)> {
     ))
 }
 
-fn large_tool_message(call_id: &str) -> ModelMessage {
+fn large_tool_result(call_id: &str) -> ToolResult {
     let content = format!("head:{}:tail", "middle-".repeat(1_000));
-    ModelMessage::tool(
+    ToolResult::ok(
         call_id,
+        "shell",
         serde_json::json!({"status": "ok", "content": content, "meta": {"exit_code": 0}})
             .to_string(),
+        ToolResultMeta::default(),
     )
 }
 
+fn compact_test_policy() -> AdaptiveTailPolicyV3 {
+    AdaptiveTailPolicyV3 {
+        tail_target_min_tokens: 1,
+        tail_target_max_tokens: 1,
+        ..AdaptiveTailPolicyV3::default()
+    }
+}
+
+fn append_followup_tail(session: &mut Session) -> Result<()> {
+    for index in 0..2 {
+        session.append_user_message(ModelMessage::user(format!("follow-up {index}")))?;
+        session.append_assistant_message(ModelMessage::assistant(
+            Some(format!("response {index}")),
+            Vec::new(),
+        ))?;
+    }
+    session.append_user_message(ModelMessage::user("active request"))?;
+    Ok(())
+}
+
 #[test]
-fn old_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata() -> Result<()> {
+fn historical_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata() -> Result<()>
+{
     let (_temp, mut session) = store_backed_session()?;
     session.append_user_message(ModelMessage::user("old request"))?;
     session.append_assistant_message(ModelMessage::assistant(
@@ -41,12 +64,21 @@ fn old_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata()
             args_json: r#"{\"command\":\"rg TODO\"}"#.to_owned(),
         }],
     ))?;
-    session.append_tool_message(large_tool_message("call-1"))?;
-    session.append_user_message(ModelMessage::user("latest request"))?;
+    session.append_test_tool_result(large_tool_result("call-1"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session)?;
     let before = std::fs::read(session.durable_store().expect("fixture has store").path())?;
 
     let stream = records(&session)?;
-    let plan = CompactionFoldPlan::from_records(&stream, 1)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &stream,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
     let projection = ToolOutputProjection::from_fold_plan(
         &stream,
         &plan,
@@ -131,40 +163,6 @@ fn old_completed_tool_output_shrinks_only_in_projection_with_truthful_metadata()
     );
     Ok(())
 }
-
-#[test]
-fn tail_tool_pair_and_unpaired_tool_output_never_shrink() -> Result<()> {
-    let (_temp, mut session) = store_backed_session()?;
-    session.append_user_message(ModelMessage::user("old request"))?;
-    session.append_tool_message(large_tool_message("missing-call"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        None,
-        vec![ToolCall {
-            id: "call-2".to_owned(),
-            name: "shell".to_owned(),
-            args_json: "{}".to_owned(),
-        }],
-    ))?;
-    session.append_tool_message(large_tool_message("call-2"))?;
-
-    let stream = records(&session)?;
-    let plan = CompactionFoldPlan::from_records(&stream, 1)?;
-    let projection = ToolOutputProjection::from_fold_plan(
-        &stream,
-        &plan,
-        &ToolOutputProjectionPolicy {
-            max_projected_content_bytes: 512,
-            retained_head_bytes: 200,
-            retained_tail_bytes: 200,
-        },
-    )?;
-
-    assert!(projection.outputs.is_empty());
-    assert_eq!(plan.protected_events.len(), 1);
-    assert_eq!(plan.retained_event_ids.len(), 2);
-    Ok(())
-}
-
 #[test]
 fn stale_fold_plan_cannot_produce_a_tool_output_projection() -> Result<()> {
     let (_temp, mut session) = store_backed_session()?;
@@ -177,9 +175,18 @@ fn stale_fold_plan_cannot_produce_a_tool_output_projection() -> Result<()> {
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_tool_message(large_tool_message("call-1"))?;
-    session.append_user_message(ModelMessage::user("latest request"))?;
-    let plan = CompactionFoldPlan::from_records(&records(&session)?, 1)?;
+    session.append_test_tool_result(large_tool_result("call-1"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("tool turn complete".to_owned()),
+        Vec::new(),
+    ))?;
+    append_followup_tail(&mut session)?;
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        &records(&session)?,
+        compact_test_policy(),
+        u64::MAX / 4,
+        None,
+    )?;
 
     session.append_user_message(ModelMessage::user("new request"))?;
     assert!(

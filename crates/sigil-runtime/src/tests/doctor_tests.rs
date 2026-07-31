@@ -126,17 +126,22 @@ fn doctor_warns_when_the_default_sigil_directory_is_too_permissive() -> Result<(
     let config_path = config_dir.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"
+        r#"config_version = 2
+
 [storage]
 credential_store = "file"
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-api_key = ""
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
     let credential_path = config_dir.join("credentials.json");
@@ -223,60 +228,28 @@ fn doctor_reports_invalid_config_parse_error() -> Result<()> {
 }
 
 #[test]
-fn doctor_reports_legacy_task_provider_as_invalid_in_v2() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"
-config_version = 2
-
-[agent]
-connection = "primary"
-model = "primary-model"
-
-[connections.primary]
-label = "Primary"
-provider = "deepseek"
-protocol = "deepseek"
-base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-
-[task.planner]
-provider = "deepseek"
-model = "planner-model"
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(report.checks.iter().any(|check| {
-        check.name == "config:load"
-            && check.status == DoctorStatus::Error
-            && check
-                .message
-                .contains("cannot include legacy [task.planner].provider")
-    }));
-    Ok(())
-}
-
-#[test]
 fn doctor_report_options_injects_appearance_checks() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
 
@@ -311,15 +284,22 @@ fn doctor_default_report_keeps_empty_appearance_extension() -> Result<()> {
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
 
@@ -345,15 +325,22 @@ fn doctor_explains_how_to_install_the_missing_deepseek_v4_tokenizer() -> Result<
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
 
@@ -371,132 +358,28 @@ api_key = "test-secret-key"
 }
 
 #[test]
-fn doctor_reports_valid_config_without_leaking_plaintext_secret() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let _env_lock = crate::test_env::lock();
-    let _env_scope = EnvScope::remove_many(&[SIGIL_API_KEY_ENV]);
-    let mcp_command = write_doctor_executable(&workspace, "mcp-server")?;
-    let rust_analyzer_command = write_doctor_executable(&workspace, "rust-analyzer")?;
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        format!(
-            r#"[workspace]
-root = "."
-
-[session]
-log_dir = ".sigil/sessions"
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-tool_timeout_secs = 5
-
-[code_intelligence]
-enabled = true
-
-[[code_intelligence.servers]]
-name = "rust-analyzer"
-languages = ["rust"]
-command = {rust_analyzer_command:?}
-file_extensions = ["rs"]
-root_markers = ["Cargo.toml"]
-
-[providers.deepseek]
-base_url = "https://example.com"
-beta_base_url = "https://example.com/beta"
-anthropic_base_url = "https://example.com/anthropic"
-fim_model = "deepseek-v4-pro"
-api_key = "test-secret-key"
-
-[[mcp_servers]]
-name = "local"
-transport = "stdio"
-command = {mcp_command:?}
-startup = "lazy"
-required = false
-
-[mcp_servers.trust]
-trust_class = "self_hosted"
-approval_default = "ask"
-allow_secrets = false
-"#
-        ),
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-    let rendered = report
-        .checks
-        .iter()
-        .map(|check| check.message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(!report.has_errors(), "{report:#?}");
-    assert_eq!(report.overall_status(), DoctorStatus::Warn);
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "execution:sandbox"
-                && check.status == DoctorStatus::Ok
-                && check.message.contains("backend=local")
-                && check.message.contains("capabilities=none"))
-    );
-    assert!(!rendered.contains("test-secret-key"));
-    assert!(rendered.contains("resolved from config plaintext"));
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:auth"
-            && check.status == DoctorStatus::Warn
-            && check
-                .remediation
-                .as_deref()
-                .is_some_and(|remediation| remediation.contains("SIGIL_API_KEY"))
-    }));
-    assert_eq!(
-        secret_source_label(SecretSource::ConfigPlaintext),
-        "config plaintext"
-    );
-    assert!(report.checks.iter().any(|check| {
-        check.name == "mcp:local"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("command=available")
-            && check.message.contains(
-                "facets=(local=execute declared_network=unknown effective_network=runtime_preflight source_trust=self_hosted source_approval=ask)"
-            )
-            && check.message.contains("network_admission=run_scoped")
-            && check
-                .message
-                .contains("boundary=local stdio outside local sandbox")
-    }));
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "lsp:rust-analyzer"
-                && check.status == DoctorStatus::Ok
-                && check.message.contains("command=available"))
-    );
-    Ok(())
-}
-
-#[test]
 fn doctor_reports_remote_mcp_oauth_configuration_without_probing_credentials() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 
 [[mcp_servers]]
 name = "remote-oauth"
@@ -562,15 +445,22 @@ declared_effect = "workspace_write"
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
     let pending = crate::discover_workspace_plugins(&workspace, &[])?;
@@ -616,11 +506,13 @@ fn doctor_reports_invalid_execution_sandbox_config() -> Result<()> {
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
 	[execution]
@@ -630,8 +522,13 @@ model = "deepseek-v4-flash"
 	backend = "docker"
 	profile = "build_offline"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
 
@@ -660,15 +557,22 @@ fn doctor_warns_when_sandbox_falls_back_to_unconfined_local() -> Result<()> {
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
     let mut root_config = RootConfig::load(&config_path)?;
@@ -700,15 +604,22 @@ fn doctor_reports_workspace_file_and_missing_workspace_errors() -> Result<()> {
     let file_config_path = workspace.join("file-workspace.toml");
     fs::write(
         &file_config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "workspace-file"
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
 
@@ -726,15 +637,22 @@ api_key = "test-secret-key"
     let missing_config_path = workspace.join("missing-workspace.toml");
     fs::write(
         &missing_config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "missing-workspace"
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
 
@@ -758,18 +676,25 @@ fn doctor_reports_empty_mcp_command_as_config_error() -> Result<()> {
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [session]
 log_dir = "missing-parent/sessions"
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 
 [[mcp_servers]]
 name = "empty-command"
@@ -969,12 +894,12 @@ fn doctor_session_stream_check_reports_checksum_failure() -> Result<()> {
 }
 
 #[test]
-fn doctor_session_stream_check_reports_legacy_format_without_rewriting_it() -> Result<()> {
+fn doctor_session_stream_check_rejects_an_invalid_format_without_rewriting_it() -> Result<()> {
     let temp = tempdir()?;
     let session_dir = temp.path().join("sessions");
     fs::create_dir(&session_dir)?;
-    let session_path = session_dir.join("legacy.jsonl");
-    let content = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?;
+    let session_path = session_dir.join("invalid.jsonl");
+    let content = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("invalid")))?;
     fs::write(&session_path, &content)?;
     let mut report = DoctorReport::default();
 
@@ -982,12 +907,12 @@ fn doctor_session_stream_check_reports_legacy_format_without_rewriting_it() -> R
 
     assert!(report.checks.iter().any(|check| {
         check.name == "session:stream"
-            && check.status == DoctorStatus::Warn
-            && check.message.contains("unsupported legacy session format")
+            && check.status == DoctorStatus::Error
+            && check.message.contains("failed RFC-0001 stream validation")
             && check
                 .remediation
                 .as_deref()
-                .is_some_and(|remediation| remediation.contains("archive the old log"))
+                .is_some_and(|remediation| remediation.contains("checksum/sequence"))
     }));
     assert_eq!(
         report
@@ -1033,15 +958,22 @@ fn doctor_marks_required_eager_mcp_missing_as_error_and_lazy_missing_as_warning(
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 
 [[mcp_servers]]
 name = "required"
@@ -1088,15 +1020,22 @@ fn doctor_reports_mcp_environment_grant_names_and_missing_without_values() -> Re
     fs::write(
         &config_path,
         format!(
-            r#"[workspace]
+            r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 
 [[mcp_servers]]
 name = "ready-env"
@@ -1146,185 +1085,6 @@ inherit_env = ["SIGIL_E21_DOCTOR_MISSING_4D21"]
 }
 
 #[test]
-fn doctor_reports_provider_config_errors() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-base_url = 123
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "provider:deepseek"
-                && check.status == DoctorStatus::Error
-                && check.message.contains("invalid deepseek provider config"))
-    );
-    Ok(())
-}
-
-#[test]
-fn doctor_reports_anthropic_and_gemini_provider_config_errors() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let anthropic_config_path = workspace.join("anthropic.toml");
-    fs::write(
-        &anthropic_config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "anthropic"
-model = "claude-test"
-"#,
-    )?;
-    let anthropic_report = build_doctor_report(&anthropic_config_path, &workspace);
-    assert!(
-        anthropic_report.checks.iter().any(|check| {
-            check.name == "provider:anthropic"
-                && check.status == DoctorStatus::Error
-                && check.message.contains("missing [providers.anthropic]")
-                && check
-                    .remediation
-                    .as_deref()
-                    .is_some_and(|value| value.contains("[providers.anthropic]"))
-        }),
-        "{anthropic_report:#?}"
-    );
-
-    let gemini_config_path = workspace.join("gemini.toml");
-    fs::write(
-        &gemini_config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "gemini"
-model = "gemini-test"
-"#,
-    )?;
-    let gemini_report = build_doctor_report(&gemini_config_path, &workspace);
-    assert!(
-        gemini_report.checks.iter().any(|check| {
-            check.name == "provider:gemini"
-                && check.status == DoctorStatus::Error
-                && check.message.contains("missing [providers.gemini]")
-                && check
-                    .remediation
-                    .as_deref()
-                    .is_some_and(|value| value.contains("[providers.gemini]"))
-        }),
-        "{gemini_report:#?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn doctor_reports_openai_responses_provider_config_errors() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("openai-responses.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "openai_responses"
-model = "gpt-test"
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-    assert!(
-        report.checks.iter().any(|check| {
-            check.name == "provider:openai_responses"
-                && check.status == DoctorStatus::Error
-                && check
-                    .message
-                    .contains("missing [providers.openai_responses]")
-                && check
-                    .remediation
-                    .as_deref()
-                    .is_some_and(|value| value.contains("[providers.openai_responses]"))
-        }),
-        "{report:#?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn doctor_reports_openai_compat_provider_config_and_plaintext_auth() -> Result<()> {
-    let _env_lock = crate::test_env::lock();
-    let _env_scope = EnvScope::remove_many(&[
-        "SIGIL_OPENAI_COMPATIBLE_API_KEY",
-        "SIGIL_OPENAI_COMPATIBLE_BASE_URL",
-    ]);
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "openai_compat"
-model = "gpt-test"
-
-[providers.openai_compat]
-base_url = "https://openai.example.com/v1"
-api_key = "test-secret-key"
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "provider:openai_compat"
-                && check.status == DoctorStatus::Ok
-                && check.message.contains("model=gpt-test"))
-    );
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "provider:auth"
-                && check.status == DoctorStatus::Warn
-                && check.message.contains("config plaintext"))
-    );
-    assert!(
-        !report
-            .checks
-            .iter()
-            .any(|check| check.message.contains("test-secret-key"))
-    );
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:openai_compat:capabilities"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("supported")
-    }));
-    Ok(())
-}
-
-#[test]
 fn doctor_reports_all_v2_connections_without_private_endpoint_or_credential_identity() -> Result<()>
 {
     let _env_lock = crate::test_env::lock();
@@ -1350,7 +1110,7 @@ label = "OpenAI personal"
 provider = "openai"
 protocol = "responses"
 base_url = "https://private-gateway.example.internal/v1"
-credential = {{ source = "keyring", id = "{credential_id}" }}
+credential = {{ source = "stored", id = "{credential_id}" }}
 
 [connections.local]
 label = "Local"
@@ -1377,7 +1137,7 @@ credential = {{ source = "none" }}
     }));
     assert!(report.checks.iter().any(|check| {
         check.name == "provider:connection:openai-personal"
-            && check.message.contains("credential_source=system_keyring")
+            && check.message.contains("credential_source=stored")
             && (check.message.contains("readiness=needs_credential")
                 || check.message.contains("readiness=credential_unavailable"))
     }));
@@ -1399,199 +1159,28 @@ credential = {{ source = "none" }}
 }
 
 #[test]
-fn doctor_reports_anthropic_provider_config_and_capabilities() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "anthropic"
-model = "claude-test"
-
-[providers.anthropic]
-base_url = "https://anthropic.example.com"
-api_key = "test-secret-key"
-max_tokens = 2048
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:anthropic"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("model=claude-test")
-            && check.message.contains("max_tokens=2048")
-    }));
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:anthropic:capabilities"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("supported")
-    }));
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:anthropic:capability:tool_calls"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("Tool calls")
-            && check.message.contains("supported")
-    }));
-    assert!(
-        !report
-            .checks
-            .iter()
-            .any(|check| check.message.contains("test-secret-key"))
-    );
-    Ok(())
-}
-
-#[test]
-fn doctor_rejects_provider_aliases() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "claude"
-model = "claude-test"
-
-[providers.anthropic]
-base_url = "https://anthropic.example.com"
-	api_key = "test-secret-key"
-	"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider"
-            && check.status == DoctorStatus::Error
-            && check.message.contains("unsupported provider claude")
-    }));
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider"
-            && check
-                .remediation
-                .as_deref()
-                .is_some_and(|value| value.contains("\"anthropic\""))
-    }));
-    Ok(())
-}
-
-#[test]
-fn doctor_reports_gemini_provider_config_and_capabilities() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "gemini"
-model = "gemini-test"
-
-[providers.gemini]
-base_url = "https://gemini.example.com/v1beta"
-api_key = "test-secret-key"
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:gemini"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("model=gemini-test")
-    }));
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:gemini:capabilities"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("supported")
-    }));
-    assert!(
-        !report
-            .checks
-            .iter()
-            .any(|check| check.message.contains("test-secret-key"))
-    );
-    Ok(())
-}
-
-#[test]
-fn doctor_reports_openai_compat_provider_config_errors() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "openai_compat"
-model = "gpt-test"
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "provider:openai_compat"
-                && check.status == DoctorStatus::Error
-                && check.message.contains("missing [providers.openai_compat]"))
-    );
-    Ok(())
-}
-
-#[test]
-fn provider_auth_check_reports_missing_api_key_remediation() {
-    let mut report = DoctorReport::default();
-
-    push_provider_auth_check(
-        &mut report,
-        None,
-        "TEST_API_KEY",
-        "[providers.test].api_key",
-    );
-
-    assert!(report.checks.iter().any(|check| {
-        check.name == "provider:auth"
-            && check.status == DoctorStatus::Error
-            && check.message.contains("missing api key")
-            && check
-                .remediation
-                .as_deref()
-                .is_some_and(|remediation| remediation.contains("plaintext"))
-    }));
-}
-
-#[test]
 fn doctor_reports_code_intelligence_empty_plan_remediation() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 
 	[code_intelligence]
 	enabled = true
@@ -1621,11 +1210,13 @@ fn code_intelligence_checks_are_scoped_to_code_intelligence() -> Result<()> {
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
 [code_intelligence]
@@ -1637,6 +1228,13 @@ languages = ["rust"]
 command = "./missing-lsp"
 file_extensions = ["rs"]
 root_markers = ["Cargo.toml"]
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 "#,
     )?;
     let root_config = RootConfig::load(&config_path)?;
@@ -1672,45 +1270,28 @@ fn secret_source_labels_cover_environment_and_session_sources() {
 }
 
 #[test]
-fn doctor_reports_unsupported_provider() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let config_path = workspace.join("sigil.toml");
-    fs::write(
-        &config_path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "other"
-model = "other-model"
-"#,
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(report.checks.iter().any(|check| check.name == "provider"
-        && check.status == DoctorStatus::Error
-        && check.message.contains("unsupported provider other")));
-    Ok(())
-}
-
-#[test]
 fn doctor_reports_lsp_warnings_for_missing_and_empty_commands() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential.source = "environment"
+credential.name = "SIGIL_API_KEY"
 
 [code_intelligence]
 enabled = true

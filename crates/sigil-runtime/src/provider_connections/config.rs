@@ -147,16 +147,8 @@ impl<'de> Deserialize<'de> for CredentialId {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CredentialRefConfig {
-    Environment {
-        name: String,
-    },
-    #[serde(rename = "keyring")]
-    SystemKeyring {
-        id: CredentialId,
-    },
-    Stored {
-        id: CredentialId,
-    },
+    Environment { name: String },
+    Stored { id: CredentialId },
     None,
 }
 
@@ -167,7 +159,6 @@ impl fmt::Debug for CredentialRefConfig {
                 .debug_struct("Environment")
                 .field("name", name)
                 .finish(),
-            Self::SystemKeyring { .. } => formatter.write_str("SystemKeyring([redacted])"),
             Self::Stored { .. } => formatter.write_str("Stored([redacted])"),
             Self::None => formatter.write_str("None"),
         }
@@ -271,7 +262,6 @@ impl ProviderConnectionConfig {
 fn credential_debug_label(credential: &CredentialRefConfig) -> &'static str {
     match credential {
         CredentialRefConfig::Environment { .. } => "environment",
-        CredentialRefConfig::SystemKeyring { .. } => "system_keyring",
         CredentialRefConfig::Stored { .. } => "stored",
         CredentialRefConfig::None => "none",
     }
@@ -471,7 +461,7 @@ fn validate_credential_ref(
                 "credential environment name is not allowed for this provider connection"
             );
         }
-        CredentialRefConfig::SystemKeyring { .. } | CredentialRefConfig::Stored { .. } => {}
+        CredentialRefConfig::Stored { .. } => {}
         CredentialRefConfig::None => {
             anyhow::ensure!(
                 family == ProviderFamily::Custom,

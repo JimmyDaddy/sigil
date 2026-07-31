@@ -1144,7 +1144,7 @@ impl Provider for ResultReplayProvider {
 
 fn root_config() -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -1154,7 +1154,7 @@ fn root_config() -> RootConfig {
             retention: Default::default(),
         },
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: Some(12),
@@ -1171,12 +1171,6 @@ fn root_config() -> RootConfig {
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": "https://example.com",
-            }),
-        )]),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::new(),
@@ -4949,7 +4943,12 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
         "sha256:agent-run-context",
     )?;
     let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
-    let mut session = Session::new_with_route("deepseek", route).with_store(store.clone());
+    let mut session = Session::load_from_store_with_route(
+        "deepseek",
+        route.model_ref.model_id.clone(),
+        Some(route),
+        store.clone(),
+    )?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 

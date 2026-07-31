@@ -14,9 +14,7 @@ use sigil_kernel::{
 };
 use sigil_runtime::{
     AgentProfileRegistry, ResolvedAgentProfile,
-    provider_connections::{
-        ConfigMode, ConnectionReadiness, bundled_model_entries, load_provider_connections,
-    },
+    provider_connections::{ConnectionReadiness, bundled_model_entries, load_provider_connections},
 };
 use std::{collections::HashSet, path::Path};
 
@@ -179,11 +177,7 @@ impl AppState {
         let ready_connections = inventory
             .entries
             .iter()
-            .filter(|entry| {
-                entry.readiness == ConnectionReadiness::Ready
-                    || (inventory.mode == ConfigMode::LegacyV1
-                        && entry.readiness == ConnectionReadiness::Unverified)
-            })
+            .filter(|entry| entry.readiness == ConnectionReadiness::Ready)
             .map(|entry| entry.id.clone())
             .collect::<HashSet<_>>();
         let current = self
@@ -735,22 +729,10 @@ impl AppState {
             return Ok(None);
         };
         let expected_root_config = root_config.clone();
-        let loaded = load_provider_connections(&root_config);
-        if loaded.mode == sigil_runtime::provider_connections::ConfigMode::LegacyV1 {
-            let current = loaded
-                .default_model
-                .ok_or_else(|| anyhow!("model_route_not_configured"))?;
-            anyhow::ensure!(
-                current.connection_id == model_ref.connection_id,
-                "legacy config cannot set another connection as default before migration"
-            );
-            sigil_runtime::set_active_provider_model(&mut root_config, &model_ref.model_id)?;
-        } else {
-            sigil_runtime::provider_connections::resolve_model_route(&root_config, &model_ref)
-                .map_err(anyhow::Error::new)?;
-            root_config.agent.connection = Some(model_ref.connection_id.clone());
-            root_config.agent.model = model_ref.model_id.clone();
-        }
+        sigil_runtime::provider_connections::resolve_model_route(&root_config, &model_ref)
+            .map_err(anyhow::Error::new)?;
+        root_config.agent.connection = Some(model_ref.connection_id.clone());
+        root_config.agent.model = model_ref.model_id.clone();
         self.pending_mouse_slash_confirmation = None;
         self.last_notice = Some(format!(
             "saving default {}/{}; current session remains unchanged",

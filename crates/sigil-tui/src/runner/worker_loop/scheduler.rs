@@ -76,7 +76,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         sigil_runtime::ControlledImageAttachmentCache::new(attachment_paths.attachments_root),
     );
     let mut initial_session = match load_session_with_runtime_attachments(
-        &root_config.agent.provider,
+        &root_config.agent.runtime_provider,
         &root_config.agent.model,
         &session_log_path,
         None,

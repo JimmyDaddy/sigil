@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use crate::{
-    ControlEntry, PlanApprovalExpiry, PlanApprovedEntry, PlanPermissionGrantedEntry, Session,
-    SessionLogEntry, ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry,
-    ToolSubjectAudit,
+    ControlEntry, PlanApprovalExpiry, PlanPermissionGrantedEntry, Session, SessionLogEntry,
+    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolSubjectAudit,
     permission::{
         ApprovalMode, InteractionMode, PermissionDecision, PermissionRisk,
         ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope,
@@ -14,11 +13,7 @@ use crate::{
 
 use super::AgentRunOptions;
 
-#[derive(Debug, Clone)]
-pub(super) enum PlanApprovalAuthority {
-    PermissionGrant(PlanPermissionGrantedEntry),
-    ApprovedPlan(crate::PlanApprovedEntry),
-}
+pub(super) type PlanApprovalAuthority = PlanPermissionGrantedEntry;
 
 pub(super) fn plan_approval_decision_override(
     session: &Session,
@@ -59,16 +54,9 @@ pub(super) fn active_plan_approval_authority(
         && grant.permission.covers_tool(spec)
         && plan_approval_covers_subjects(&grant.scope.workspace_paths, &decision.subjects)
     {
-        return Some(PlanApprovalAuthority::PermissionGrant(grant));
+        return Some(grant);
     }
-    let approval = active_plan_approval(session)?;
-    if approval.permission.covers_tool(spec)
-        && plan_approval_covers_subjects(&approval.scope.workspace_paths, &decision.subjects)
-    {
-        Some(PlanApprovalAuthority::ApprovedPlan(approval))
-    } else {
-        None
-    }
+    None
 }
 
 pub(super) fn interactive_external_directory_approval_override(
@@ -268,35 +256,6 @@ fn task_has_terminal_status_after(
                     if &run.task_id == task_id && run.status.is_terminal()
             )
         })
-}
-
-pub(super) fn active_plan_approval(session: &Session) -> Option<PlanApprovedEntry> {
-    let entries = session.entries();
-    let (approval_index, approval) =
-        entries
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, entry)| match entry {
-                SessionLogEntry::Control(ControlEntry::PlanApproved(approval)) => {
-                    Some((index, approval.clone()))
-                }
-                _ => None,
-            })?;
-    match approval.expires {
-        PlanApprovalExpiry::NextUserPrompt => {
-            let user_messages_after_approval = entries
-                .iter()
-                .skip(approval_index.saturating_add(1))
-                .filter(|entry| matches!(entry, SessionLogEntry::User(_)))
-                .count();
-            (user_messages_after_approval == 1).then_some(approval)
-        }
-        PlanApprovalExpiry::Session => Some(approval),
-        PlanApprovalExpiry::AtUnixMs(expires_at_ms) => {
-            (super::unix_time_ms() <= expires_at_ms).then_some(approval)
-        }
-    }
 }
 
 fn plan_approval_covers_subjects(workspace_paths: &[String], subjects: &[ToolSubject]) -> bool {

@@ -83,7 +83,7 @@ impl std::fmt::Debug for McpProcessLaunchRequest {
 }
 
 impl McpProcessLaunchRequest {
-    /// Resolves one legacy stdio config into a launch request.
+    /// Resolves one user-configured stdio server into a launch request.
     ///
     /// Declaration-aware launchers may call this only after validating their origin/attestation
     /// and execution base, then replace the command with the already resolved executable.
@@ -378,7 +378,7 @@ impl McpProcessLaunch {
 pub trait McpProcessLauncher: Send + Sync {
     /// Resolves declaration-aware launch material before process-subject and pin validation.
     ///
-    /// The default preserves the legacy config-only launcher behavior.
+    /// The default supports a config-only launcher without declaration metadata.
     fn resolve_launch_request(
         &self,
         config: &McpServerConfig,

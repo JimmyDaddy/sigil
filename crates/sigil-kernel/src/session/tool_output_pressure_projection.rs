@@ -184,10 +184,8 @@ pub struct ToolOutputPressureSnapshotV1 {
     pub ageable_count: u32,
     pub high_signal_count: u32,
     /// Aggregate tokens for already-aged results retired from the bounded working set.
-    #[serde(default)]
     pub archived_aged_tool_tokens: u64,
     /// Number of already-aged results retired from the bounded working set.
-    #[serde(default)]
     pub archived_aged_count: u64,
     /// Compact retrieval/GC bindings for retired aged results, keyed by opaque artifact id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -402,7 +400,6 @@ impl ToolOutputPressureProjectionV1 {
                     SessionLogEntry::Control(control) => {
                         self.apply_control_signal(record.event_id(), control)?;
                     }
-                    _ => {}
                 }
             }
             if record.stored_event().event_kind() == Some(DurableEventType::MutationPrepared) {
@@ -433,9 +430,7 @@ impl ToolOutputPressureProjectionV1 {
                     serde_json::from_value(record.stored_event().payload.clone())
                         .context("failed to decode tool-output context epoch transition")?;
                 sidecar.validate_shape()?;
-                if let Some(transition) = sidecar.epoch_transition {
-                    self.active_epoch_id = transition.target_epoch_id;
-                }
+                self.active_epoch_id = sidecar.epoch_transition.target_epoch_id;
             } else if record.stored_event().event_kind()
                 == Some(DurableEventType::CompactionAppliedV2)
             {

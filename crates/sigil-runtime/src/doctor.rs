@@ -7,8 +7,8 @@ use std::{
 use sigil_kernel::{
     AppearanceConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
     PluginCapability, PluginHookKind, PluginTrustDecision, PluginTrustEntry, RootConfig,
-    SessionStreamCompatibilityError, SessionStreamRecord, ToolEffect, config::TerminalConfig,
-    default_user_config_path, private_path_permissions_are_restricted, resolve_workspace_root,
+    SessionStreamRecord, ToolEffect, config::TerminalConfig, default_user_config_path,
+    private_path_permissions_are_restricted, resolve_workspace_root,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -50,7 +50,7 @@ pub use web::{
 };
 
 #[cfg(test)]
-use providers::{push_provider_auth_check, secret_source_label};
+use providers::secret_source_label;
 #[cfg(test)]
 use session::check_session_log_dir;
 #[cfg(test)]
@@ -289,11 +289,14 @@ pub fn build_doctor_report_with_options(
     check_storage_paths(&mut report, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
     check_orchestration_rollout(&mut report, &root_config);
+    let runtime_provider = crate::provider_connections::resolve_default_model_route(&root_config)
+        .map(|(provider, _)| provider)
+        .unwrap_or_else(|_| "unknown".to_owned());
     check_orchestration_route_disablement(
         &mut report,
         &sigil_paths.session_log_dir,
         &crate::OrchestrationRouteGuard::new(
-            &root_config.agent.provider,
+            &runtime_provider,
             &root_config.agent.model,
             crate::ORCHESTRATION_RUNTIME_BUILD_ID,
         ),

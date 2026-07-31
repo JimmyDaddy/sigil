@@ -1,48 +1,58 @@
 use std::env;
 
 use serde_json::json;
-use sigil_kernel::{AgentConfig, ModelRequestConfig, RootConfig};
+use sigil_kernel::{ConnectionId, ModelRef, ModelRequestConfig, RootConfig};
 
 use super::{
-    ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DeepSeekProviderConfigFields,
-    GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
-    ProviderConfigFields, ProviderStrictToolsMode, bundled_provider_models,
-    deepseek_provider_config_fields, default_provider_config_fields, default_provider_model,
-    next_provider_name, normalize_provider_model_alias, normalize_provider_name,
-    provider_api_key_env_name, provider_balance_status_config, provider_config_fields,
-    provider_model_status_config, provider_model_status_config_from_fields,
-    provider_status_config_from_fields, set_provider_config_fields,
+    ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
+    OPENAI_RESPONSES_PROVIDER_KEY, ProviderConfigFields, bundled_provider_models,
+    default_provider_config_fields, default_provider_model, next_provider_name,
+    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
+    provider_balance_status_config, provider_model_status_config,
+    provider_model_status_config_from_fields, provider_status_config_from_fields,
 };
 
 fn test_root_config() -> RootConfig {
-    RootConfig {
-        config_version: None,
-        workspace: Default::default(),
-        storage: Default::default(),
-        session: Default::default(),
-        agent: AgentConfig {
-            provider: DEEPSEEK_PROVIDER_KEY.to_owned(),
-            connection: None,
-            model: "deepseek-v4-flash".to_owned(),
-            max_turns: None,
-            tool_timeout_secs: 30,
-        },
-        permission: Default::default(),
-        model_request: Default::default(),
-        memory: Default::default(),
-        skills: Default::default(),
-        compaction: Default::default(),
-        code_intelligence: Default::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: Default::default(),
-        providers: Default::default(),
-        connections: Default::default(),
-        web: Default::default(),
-        mcp_servers: Vec::new(),
-    }
+    test_root_config_for(
+        crate::provider_connections::ProviderFamily::DeepSeek,
+        crate::provider_connections::ProviderProtocol::DeepSeek,
+        "deepseek-default",
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+    )
+}
+
+fn test_root_config_for(
+    family: crate::provider_connections::ProviderFamily,
+    protocol: crate::provider_connections::ProviderProtocol,
+    connection_id: &str,
+    model: &str,
+    base_url: &str,
+) -> RootConfig {
+    let connection_id = ConnectionId::new(connection_id).expect("connection id");
+    let mut connection = crate::provider_connections::provider_connection_template(
+        family,
+        protocol,
+        connection_id.clone(),
+        "Test connection",
+    )
+    .expect("connection template")
+    .0;
+    connection.base_url = base_url.to_owned();
+    let runtime_provider =
+        crate::provider_connections::runtime_provider_name(&connection).to_owned();
+    let base: RootConfig = toml::from_str(
+        "config_version = 2\n[agent]\nconnection = \"bootstrap\"\nmodel = \"bootstrap\"\n",
+    )
+    .expect("base root config");
+    let mut root = crate::provider_connections::materialize_root_config(
+        &base,
+        &std::collections::BTreeMap::from([(connection_id.clone(), connection)]),
+        &ModelRef::new(connection_id, model).expect("model ref"),
+    )
+    .expect("current root config");
+    root.agent.runtime_provider = runtime_provider;
+    root
 }
 
 #[test]
@@ -152,129 +162,6 @@ fn provider_defaults_are_available_to_provider_neutral_setup_flows() {
 }
 
 #[test]
-fn provider_config_fields_read_defaults_and_update_provider_blocks() -> anyhow::Result<()> {
-    let mut config = test_root_config();
-    config.agent.provider = "anthropic".to_owned();
-    config.agent.model = "claude-old".to_owned();
-    config.providers.insert(
-        ANTHROPIC_PROVIDER_KEY.to_owned(),
-        json!({
-            "base_url": "https://anthropic.example.com",
-            "api_key": "old-key",
-            "anthropic_version": "2023-06-01",
-            "max_tokens": 2048
-        }),
-    );
-
-    let draft = provider_config_fields(&config, "anthropic", "fallback");
-    assert_eq!(draft.model, "claude-old");
-    assert_eq!(draft.api_key, "old-key");
-
-    let fields = ProviderConfigFields {
-        model: " claude-new ".to_owned(),
-        api_key: " new-key ".to_owned(),
-        base_url: " https://anthropic-proxy.example.com ".to_owned(),
-    };
-    set_provider_config_fields(&mut config, "anthropic", &fields, None)?;
-
-    let provider = config.providers[ANTHROPIC_PROVIDER_KEY]
-        .as_object()
-        .expect("provider should serialize as object");
-    assert_eq!(config.agent.provider, ANTHROPIC_PROVIDER_KEY);
-    assert_eq!(config.agent.model, "claude-new");
-    assert!(provider.get("model").is_none());
-    assert_eq!(provider["api_key"], "new-key");
-    assert_eq!(provider["base_url"], "https://anthropic-proxy.example.com");
-    assert_eq!(provider["anthropic_version"], "2023-06-01");
-    assert_eq!(provider["max_tokens"], 2048);
-    assert!(provider.get("request_timeout_secs").is_none());
-    Ok(())
-}
-
-#[test]
-fn set_provider_config_fields_rejects_unknown_provider_names() {
-    let mut config = test_root_config();
-    let fields = ProviderConfigFields {
-        model: "test-model".to_owned(),
-        api_key: String::new(),
-        base_url: "https://provider.example.com".to_owned(),
-    };
-
-    let error = set_provider_config_fields(&mut config, "claude", &fields, None)
-        .expect_err("provider aliases should not be accepted");
-
-    assert!(error.to_string().contains(
-        "unsupported provider claude; expected one of deepseek, openai_compat, openai_responses, anthropic, or gemini"
-    ));
-}
-
-#[test]
-fn responses_provider_config_fields_round_trip_through_runtime_setup() -> anyhow::Result<()> {
-    let mut config = test_root_config();
-    let fields = ProviderConfigFields {
-        model: "gpt-5-test".to_owned(),
-        api_key: "responses-key".to_owned(),
-        base_url: "https://responses.example.test/v1".to_owned(),
-    };
-
-    set_provider_config_fields(&mut config, OPENAI_RESPONSES_PROVIDER_KEY, &fields, None)?;
-
-    assert_eq!(config.agent.provider, OPENAI_RESPONSES_PROVIDER_KEY);
-    assert_eq!(config.agent.model, "gpt-5-test");
-    assert_eq!(
-        config.providers[OPENAI_RESPONSES_PROVIDER_KEY]["base_url"],
-        "https://responses.example.test/v1"
-    );
-    assert_eq!(
-        provider_config_fields(&config, OPENAI_RESPONSES_PROVIDER_KEY, "fallback").api_key,
-        "responses-key"
-    );
-    Ok(())
-}
-
-#[test]
-fn deepseek_config_fields_update_provider_specific_surface() -> anyhow::Result<()> {
-    let mut config = test_root_config();
-    let fields = ProviderConfigFields {
-        model: "deepseek-v4-pro".to_owned(),
-        api_key: String::new(),
-        base_url: "https://deepseek-proxy.example.com".to_owned(),
-    };
-    let deepseek_fields = DeepSeekProviderConfigFields {
-        beta_base_url: "https://deepseek-proxy.example.com/beta".to_owned(),
-        anthropic_base_url: "https://deepseek-proxy.example.com/anthropic".to_owned(),
-        user_id_strategy: " ".to_owned(),
-        strict_tools_mode: ProviderStrictToolsMode::Always,
-        fim_model: "deepseek-v4-pro".to_owned(),
-    };
-
-    set_provider_config_fields(
-        &mut config,
-        DEEPSEEK_PROVIDER_KEY,
-        &fields,
-        Some(&deepseek_fields),
-    )?;
-
-    let provider = config.providers[DEEPSEEK_PROVIDER_KEY]
-        .as_object()
-        .expect("provider should serialize as object");
-    assert_eq!(config.agent.model, "deepseek-v4-pro");
-    assert!(provider.get("model").is_none());
-    assert!(provider.get("api_key").is_none());
-    assert!(provider.get("user_id_strategy").is_none());
-    assert_eq!(provider["strict_tools_mode"], "always");
-    assert_eq!(provider["fim_model"], "deepseek-v4-pro");
-
-    let round_tripped = deepseek_provider_config_fields(&config, "fallback");
-    assert_eq!(
-        round_tripped.strict_tools_mode,
-        ProviderStrictToolsMode::Always
-    );
-    assert_eq!(round_tripped.user_id_strategy, "stable_per_end_user");
-    Ok(())
-}
-
-#[test]
 fn provider_status_config_from_fields_validates_common_status_surface() {
     let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, "deepseek-v4-flash");
     let model_request = ModelRequestConfig {
@@ -312,20 +199,18 @@ fn provider_status_config_from_fields_validates_common_status_surface() {
 fn provider_status_helpers_expose_supported_status_surfaces() {
     let _env_lock = crate::test_env::lock();
     let _base_url = EnvironmentGuard::set("SIGIL_BASE_URL", "https://api.deepseek.com");
-    let mut config = test_root_config();
+    let config = test_root_config();
     let balance = provider_balance_status_config(&config)
         .expect("balance status should resolve")
         .expect("deepseek exposes balance status");
     assert_eq!(balance.base_url, "https://api.deepseek.com");
 
-    config.agent.provider = OPENAI_COMPAT_PROVIDER_KEY.to_owned();
-    config.agent.model = "gpt-test".to_owned();
-    config.providers.insert(
-        OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
-        json!({
-            "base_url": "https://openai.example.com/v1",
-            "api_key": "openai-key"
-        }),
+    let config = test_root_config_for(
+        crate::provider_connections::ProviderFamily::Custom,
+        crate::provider_connections::ProviderProtocol::OpenAiChatCompletions,
+        "custom-default",
+        "gpt-test",
+        "https://openai.example.com/v1",
     );
     assert!(
         provider_balance_status_config(&config)
@@ -429,13 +314,36 @@ fn root_model_status_discovery_fails_closed_on_malformed_provider_config() {
     ] {
         let _api_key = EnvironmentGuard::set(api_key_env, "must-not-be-routed");
         let _base_url = EnvironmentGuard::set(base_url_env, "https://environment.example/v1");
-        let mut root_config = test_root_config();
-        root_config.agent.provider = provider_name.to_owned();
-        root_config.agent.model = model.to_owned();
-        root_config.providers.insert(
-            provider_name.to_owned(),
+        let (family, protocol) = match provider_name {
+            DEEPSEEK_PROVIDER_KEY => (
+                crate::provider_connections::ProviderFamily::DeepSeek,
+                crate::provider_connections::ProviderProtocol::DeepSeek,
+            ),
+            OPENAI_COMPAT_PROVIDER_KEY => (
+                crate::provider_connections::ProviderFamily::Custom,
+                crate::provider_connections::ProviderProtocol::OpenAiChatCompletions,
+            ),
+            OPENAI_RESPONSES_PROVIDER_KEY => (
+                crate::provider_connections::ProviderFamily::OpenAi,
+                crate::provider_connections::ProviderProtocol::OpenAiResponses,
+            ),
+            _ => unreachable!("fixture covers known providers"),
+        };
+        let mut root_config = test_root_config_for(
+            family,
+            protocol,
+            &format!("{provider_name}-default"),
+            model,
+            "https://custom-gateway.example/v1",
+        );
+        root_config.connections.insert(
+            format!("{provider_name}-default"),
             json!({
+                "label": "Malformed",
+                "provider": provider_name,
+                "protocol": "invalid",
                 "base_url": "https://custom-gateway.example/v1",
+                "credential": {"source": "none"},
                 "unknown_field": true
             }),
         );

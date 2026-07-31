@@ -1,4 +1,4 @@
-<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,task-rollout-and-migration,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
+<!-- public-doc-role: configuration; authority: configuration-router; sections: choose-the-right-page,resolution-order,minimal-path,workspace,storage-and-session-paths,task-rollout-and-defaults,use-doctor-when-setup-looks-wrong; cta: open-configuration-reference -->
 
 # Sigil 配置指南
 
@@ -31,10 +31,14 @@
 进入仓库并运行 `sigil`。快速设置会处理工作区、模型服务、具体模型与认证，保存时也会显式信任启动目录。Provider 是快速设置的第一个决定；在 `/config` 中，对 **Connection** 按 Enter 会打开明确的已保存连接/Provider 模板选择器，`A` 会开始新增 Provider。最小的手写配置如下：
 
 ```toml
+config_version = 2
+
 [workspace]
 root = "."
 
 [agent]
+connection = "my-connection"
+model = "my-model"
 tool_timeout_secs = 30
 
 [appearance]
@@ -42,12 +46,9 @@ info_rail = true
 theme = "sigil_dark"
 ```
 
-然后从所选模型服务的页面加入对应配置区块。可以直接复制的起点位于 [`docs/examples/config`](../examples/config)。
-
-如果已有合法的旧版 `[providers]` 文件，不要手工重写。TUI 中打开 `/config`，检查
-**Legacy migration** 行后按 Enter；Desktop 中在打开项目或设置页的迁移卡片选择**安全迁移**。
-Sigil 不加载模型目录，并保留已保存的 provider/model route。内联 key 会移入
-`[storage].credential_store`，环境变量引用仍保持引用，当前会话 route 不会改变。
+然后从所选模型服务的页面加入匹配的 `[connections.my-connection]` 区块。可以直接复制的起点
+位于 [`docs/examples/config`](../examples/config)。Sigil 只接受当前 schema；旧配置需要直接
+替换为当前模板。
 
 ## 工作区
 
@@ -61,17 +62,17 @@ Shell 选择和终端行为见[终端兼容性](terminal-compatibility.md)；可
 
 保留期限只会在 `/config` → **Storage** 中经过预览和确认后应用。普通启动、恢复、运行和 `sigil serve` 不会自动删除会话。见[管理已保存的会话](user-guide.md#管理已保存的会话)。
 
-## Task Rollout 与迁移
+## Task Rollout 与默认值
 
-除非用户显式修改，否则 Rust schema 与所有已有配置继续使用兼容值
+除非用户显式修改，否则当前 schema 默认使用
 `routing_policy = "manual"` 和 `multi_agent_mode = "explicit_request_only"`。
 只有在缺少配置、安装的 binary 同时携带 qualified rollout manifest，并且所选 provider、
 model、官方 endpoint family、task config 与 build 全部精确匹配时，Quick Setup 才可能选择
 `auto + proactive`。
 
-升级不会重写已有配置，也不会改写 legacy `default_mode = "chat"`。manifest 缺失、损坏、
-过期或 route 不匹配时同样保持保守值。使用 `sigil doctor` 检查当前 release qualification。
-把两个字段恢复为兼容值就是 coarse rollback；它不会删除 durable Task 或 agent history。
+Sigil 不会重写不兼容的配置。manifest 缺失、损坏、过期或 route 不匹配时同样保持保守值。
+使用 `sigil doctor` 检查当前 release qualification。把两个字段恢复为默认值就是 rollout 的
+coarse rollback；它不会删除 durable Task 或 agent history。
 
 ## 设置异常时使用 Doctor
 

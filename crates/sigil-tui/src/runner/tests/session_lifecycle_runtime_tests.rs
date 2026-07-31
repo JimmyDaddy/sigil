@@ -20,7 +20,7 @@ use super::{
 
 fn write_finalized_session(path: &Path, prompt: &str) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
     session.append_control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -62,8 +62,8 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     write_finalized_session(&retention_path, "retention")?;
 
     let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
-    root_config.config_version = Some(CONFIG_VERSION_V2);
-    root_config.agent.provider.clear();
+    root_config.config_version = CONFIG_VERSION_V2;
+    root_config.agent.runtime_provider.clear();
     root_config.agent.connection = Some(ConnectionId::new("saved-default")?);
     root_config.agent.model = "saved-default-model".to_owned();
     for connection_id in ["saved-default", "current-route"] {

@@ -134,7 +134,6 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
 
     let mut summary = SessionStreamDoctorSummary::default();
     let mut oversized_skipped = 0usize;
-    let mut unsupported_legacy = Vec::new();
     for path in &session_paths {
         if session_stream_too_large_for_doctor(path) {
             oversized_skipped += 1;
@@ -143,13 +142,6 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
         match JsonlSessionStore::read_event_records(path) {
             Ok(records) => summary.add_records(records),
             Err(error) => {
-                if error
-                    .downcast_ref::<SessionStreamCompatibilityError>()
-                    .is_some()
-                {
-                    unsupported_legacy.push(path);
-                    continue;
-                }
                 report.push_with_remediation(
                     DoctorStatus::Error,
                     "session:stream",
@@ -164,10 +156,7 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
     }
 
     let skipped = total_streams.saturating_sub(session_paths.len());
-    let checked_streams = session_paths
-        .len()
-        .saturating_sub(oversized_skipped)
-        .saturating_sub(unsupported_legacy.len());
+    let checked_streams = session_paths.len().saturating_sub(oversized_skipped);
     let mut message = format!(
         "{checked_streams} V2 streams checked, {} records, last_sequence={}",
         summary.records, summary.last_sequence
@@ -186,34 +175,14 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
             ", skipped {oversized_skipped} oversized streams over {MAX_SESSION_STREAM_DOCTOR_BYTES} bytes"
         ));
     }
-    if !unsupported_legacy.is_empty() {
-        let first_path = unsupported_legacy
-            .first()
-            .expect("non-empty legacy stream list has a first path");
-        message.push_str(&format!(
-            ", {} unsupported legacy session format(s), first={}",
-            unsupported_legacy.len(),
-            first_path.display()
-        ));
-    }
-    if oversized_skipped > 0 || !unsupported_legacy.is_empty() {
-        let remediation = match (oversized_skipped > 0, unsupported_legacy.is_empty()) {
-            (true, false) => {
-                "archive unsupported legacy logs and start a new session; open a focused session audit for oversized streams instead of loading them during startup diagnostics"
-            }
-            (true, true) => {
-                "open a focused session audit for oversized streams instead of loading them during startup diagnostics"
-            }
-            (false, false) => {
-                "this pre-release build will not modify the file; archive the old log and start a new session"
-            }
-            (false, true) => unreachable!("warning state requires unsupported or oversized stream"),
-        };
+    if oversized_skipped > 0 {
         report.push_with_remediation(
             DoctorStatus::Warn,
             "session:stream",
             message,
-            Some(remediation),
+            Some(
+                "open a focused session audit for oversized streams instead of loading them during startup diagnostics",
+            ),
         );
     } else {
         report.push(DoctorStatus::Ok, "session:stream", message);

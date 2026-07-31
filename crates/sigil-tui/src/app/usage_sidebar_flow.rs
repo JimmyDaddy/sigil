@@ -1,4 +1,7 @@
-use sigil_kernel::{CompactionConfig, CompactionThresholdStatus};
+use sigil_kernel::{
+    COMPACTION_EMERGENCY_RATIO, COMPACTION_PREPARATION_RATIO, CompactionConfig,
+    CompactionThresholdStatus,
+};
 use sigil_runtime::{
     ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
 };
@@ -33,21 +36,15 @@ impl AppState {
                 "policy: {} {} · soft {}% ({}) · hard {}% ({})",
                 context_window_source_label(resolved.source),
                 format_token_count(cap as u64),
-                ratio_to_percent(self.compaction_config.soft_threshold_ratio),
-                format_token_compact(threshold_token_count(
-                    cap,
-                    self.compaction_config.soft_threshold_ratio
-                )),
-                ratio_to_percent(self.compaction_config.hard_threshold_ratio),
-                format_token_compact(threshold_token_count(
-                    cap,
-                    self.compaction_config.hard_threshold_ratio
-                ))
+                ratio_to_percent(COMPACTION_PREPARATION_RATIO),
+                format_token_compact(threshold_token_count(cap, COMPACTION_PREPARATION_RATIO)),
+                ratio_to_percent(COMPACTION_EMERGENCY_RATIO),
+                format_token_compact(threshold_token_count(cap, COMPACTION_EMERGENCY_RATIO))
             ),
             _ => format!(
                 "policy: soft {}% · hard {}%",
-                ratio_to_percent(self.compaction_config.soft_threshold_ratio),
-                ratio_to_percent(self.compaction_config.hard_threshold_ratio)
+                ratio_to_percent(COMPACTION_PREPARATION_RATIO),
+                ratio_to_percent(COMPACTION_EMERGENCY_RATIO)
             ),
         }
     }
@@ -208,10 +205,7 @@ impl AppState {
             CompactionThresholdStatus::NotAvailable => "threshold n/a".to_owned(),
             CompactionThresholdStatus::Ready => format!(
                 "soft at {}",
-                format_token_compact(threshold_token_count(
-                    cap,
-                    self.compaction_config.soft_threshold_ratio
-                ))
+                format_token_compact(threshold_token_count(cap, COMPACTION_PREPARATION_RATIO))
             ),
             CompactionThresholdStatus::Soft => "soft; /compact".to_owned(),
             CompactionThresholdStatus::Hard => "hard; auto-compact".to_owned(),

@@ -119,10 +119,10 @@ fn local_session_catalog_projects_only_bounded_v2_direct_children() -> Result<()
     let ready = sessions.join("session-ready.jsonl");
     finalized_session(&ready, "Explain the repository")?;
     fs::write(
-        sessions.join("session-legacy.jsonl"),
+        sessions.join("session-invalid.jsonl"),
         format!(
             "{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("invalid")))?
         ),
     )?;
     let oversized = sessions.join("session-oversized.jsonl");
@@ -155,8 +155,8 @@ fn local_session_catalog_projects_only_bounded_v2_direct_children() -> Result<()
     assert_eq!(ready.finalized_turn_count, 1);
     assert!(ready.session_id.is_some());
     assert!(catalog.entries.iter().any(|entry| {
-        entry.path.ends_with("session-legacy.jsonl")
-            && entry.state == LocalSessionCatalogState::UnsupportedLegacy
+        entry.path.ends_with("session-invalid.jsonl")
+            && entry.state == LocalSessionCatalogState::Invalid
     }));
     assert!(catalog.entries.iter().any(|entry| {
         entry.path.ends_with("session-oversized.jsonl")
@@ -239,10 +239,10 @@ fn session_reopen_rejects_missing_non_ready_and_changed_identity() -> Result<()>
     let ready = sessions.join("session-ready.jsonl");
     finalized_session(&ready, "ready")?;
     fs::write(
-        sessions.join("session-legacy.jsonl"),
+        sessions.join("session-invalid.jsonl"),
         format!(
             "{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("invalid")))?
         ),
     )?;
     let service =
@@ -257,11 +257,11 @@ fn session_reopen_rejects_missing_non_ready_and_changed_identity() -> Result<()>
     ));
     assert!(matches!(
         service.resolve_session_for_reopen(
-            &sigil_kernel::SessionRef::new_relative("session-legacy.jsonl")?,
-            "legacy"
+            &sigil_kernel::SessionRef::new_relative("session-invalid.jsonl")?,
+            "invalid"
         ),
         Err(LocalSessionReopenError::NotReady {
-            state: LocalSessionCatalogState::UnsupportedLegacy
+            state: LocalSessionCatalogState::Invalid
         })
     ));
     assert!(matches!(

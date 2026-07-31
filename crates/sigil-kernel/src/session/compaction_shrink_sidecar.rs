@@ -92,18 +92,14 @@ pub struct ToolOutputProjectionShrinkRecorded {
     pub attempt_id: CompactionAttemptId,
     /// Exact V2 stream tail observed before the compaction Started barrier was appended.
     pub source_plan_cursor: ProjectionCursor,
-    pub requested_tail_message_count: usize,
-    /// Exact V3 whole-turn selection proof, when the source plan used adaptive tail planning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_tail: Option<AdaptiveTailSelectionV3>,
+    /// Exact whole-turn selection proof.
+    pub adaptive_tail: AdaptiveTailSelectionV3,
     /// Previous activated boundary used while planning a repeated compaction, if any.
     pub prior_folded_through: Option<super::compaction_v2::CompactionCursor>,
     pub policy: ToolOutputProjectionPolicy,
     pub shrinks: Vec<ToolOutputProjectionShrink>,
-    /// Every sidecar binds shrink activation to a distinct epoch. Missing transitions are an
-    /// unsupported pre-cutover shape and fail closed during validation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub epoch_transition: Option<ToolOutputContextEpochTransitionV1>,
+    /// Every sidecar binds shrink activation to a distinct epoch.
+    pub epoch_transition: ToolOutputContextEpochTransitionV1,
 }
 
 impl ToolOutputProjectionShrinkRecorded {
@@ -125,7 +121,6 @@ impl ToolOutputProjectionShrinkRecorded {
             compaction_id: compaction_id.clone(),
             attempt_id: attempt_id.into(),
             source_plan_cursor: plan.base_stream_cursor.clone(),
-            requested_tail_message_count: plan.requested_tail_message_count,
             adaptive_tail: plan.adaptive_tail.clone(),
             prior_folded_through: plan.prior_folded_through.clone(),
             policy,
@@ -134,10 +129,7 @@ impl ToolOutputProjectionShrinkRecorded {
                 .iter()
                 .map(|output| output.shrink.clone())
                 .collect(),
-            epoch_transition: Some(ToolOutputContextEpochTransitionV1::semantic(
-                plan,
-                &compaction_id,
-            )),
+            epoch_transition: ToolOutputContextEpochTransitionV1::semantic(plan, &compaction_id),
         };
         entry.validate_shape()?;
         Ok(entry)
@@ -164,7 +156,6 @@ impl ToolOutputProjectionShrinkRecorded {
             compaction_id: target_epoch_id.clone(),
             attempt_id: format!("standalone-shrink-attempt:{target_epoch_id}"),
             source_plan_cursor: plan.base_stream_cursor.clone(),
-            requested_tail_message_count: plan.requested_tail_message_count,
             adaptive_tail: plan.adaptive_tail.clone(),
             prior_folded_through: plan.prior_folded_through.clone(),
             policy,
@@ -173,10 +164,10 @@ impl ToolOutputProjectionShrinkRecorded {
                 .iter()
                 .map(|output| output.shrink.clone())
                 .collect(),
-            epoch_transition: Some(ToolOutputContextEpochTransitionV1::standalone(
+            epoch_transition: ToolOutputContextEpochTransitionV1::standalone(
                 source_epoch_id,
                 target_epoch_id,
-            )?),
+            )?,
         };
         entry.validate_shape()?;
         Ok(entry)
@@ -205,17 +196,12 @@ impl ToolOutputProjectionShrinkRecorded {
         {
             bail!("tool-output projection sidecar source plan cursor is invalid");
         }
-        if self.requested_tail_message_count == 0 {
-            bail!("tool-output projection sidecar must retain a raw tail");
+        if self.adaptive_tail.schema_version != ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION {
+            bail!("tool-output projection sidecar adaptive tail schema is unsupported");
         }
-        if let Some(adaptive_tail) = &self.adaptive_tail {
-            if adaptive_tail.schema_version != ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION {
-                bail!("tool-output projection sidecar adaptive tail schema is unsupported");
-            }
-            adaptive_tail.policy.validate()?;
-            if adaptive_tail.exact_fit_limit_tokens == 0 {
-                bail!("tool-output projection sidecar adaptive exact-fit limit is invalid");
-            }
+        self.adaptive_tail.policy.validate()?;
+        if self.adaptive_tail.exact_fit_limit_tokens == 0 {
+            bail!("tool-output projection sidecar adaptive exact-fit limit is invalid");
         }
         self.policy.validate()?;
         if self.shrinks.is_empty() || self.shrinks.len() > MAX_TOOL_OUTPUT_PROJECTION_SHRINKS {
@@ -228,10 +214,7 @@ impl ToolOutputProjectionShrinkRecorded {
                 bail!("tool-output projection sidecar duplicates a source event");
             }
         }
-        let transition = self
-            .epoch_transition
-            .as_ref()
-            .context("tool-output projection sidecar is missing its context epoch transition")?;
+        let transition = &self.epoch_transition;
         transition.validate()?;
         if transition.reason == ToolOutputContextEpochTransitionReasonV1::SemanticCompaction
             && transition.target_epoch_id != format!("context-epoch:{}", self.compaction_id)
@@ -340,17 +323,15 @@ impl ToolOutputProjectionSidecarProjection {
                     entry.compaction_id
                 );
             }
-            if entry.epoch_transition.as_ref().is_some_and(|transition| {
-                transition.reason == ToolOutputContextEpochTransitionReasonV1::StandaloneShrink
-            }) {
+            if entry.epoch_transition.reason
+                == ToolOutputContextEpochTransitionReasonV1::StandaloneShrink
+            {
                 for output in &outputs {
                     self.standalone_outputs
                         .insert(output.shrink.source_event.event_id.clone(), output.clone());
                 }
             }
-            if let Some(transition) = &entry.epoch_transition {
-                self.latest_context_epoch_id = Some(transition.target_epoch_id.clone());
-            }
+            self.latest_context_epoch_id = Some(entry.epoch_transition.target_epoch_id.clone());
             self.by_compaction_id.insert(
                 entry.compaction_id,
                 RecordedToolOutputProjection { outputs },
@@ -375,9 +356,8 @@ fn validate_recorded_sidecar(
     }
     let source_count = usize::try_from(entry.source_plan_cursor.last_applied_stream_sequence)
         .context("tool-output projection sidecar source plan cursor overflows usize")?;
-    let standalone = entry.epoch_transition.as_ref().is_some_and(|transition| {
-        transition.reason == ToolOutputContextEpochTransitionReasonV1::StandaloneShrink
-    });
+    let standalone =
+        entry.epoch_transition.reason == ToolOutputContextEpochTransitionReasonV1::StandaloneShrink;
     if (standalone && source_count != index) || (!standalone && source_count >= index) {
         bail!("tool-output projection sidecar source plan is not at its required frontier");
     }
@@ -390,20 +370,12 @@ fn validate_recorded_sidecar(
         bail!("tool-output projection sidecar source plan cursor does not match raw history");
     }
     let source_records = &records[..source_count];
-    let plan = if let Some(adaptive_tail) = &entry.adaptive_tail {
-        CompactionFoldPlan::from_records_after_adaptive_tail(
-            source_records,
-            adaptive_tail.policy.clone(),
-            adaptive_tail.exact_fit_limit_tokens,
-            entry.prior_folded_through.as_ref(),
-        )?
-    } else {
-        CompactionFoldPlan::from_records_after(
-            source_records,
-            entry.requested_tail_message_count,
-            entry.prior_folded_through.as_ref(),
-        )?
-    };
+    let plan = CompactionFoldPlan::from_records_after_adaptive_tail(
+        source_records,
+        entry.adaptive_tail.policy.clone(),
+        entry.adaptive_tail.exact_fit_limit_tokens,
+        entry.prior_folded_through.as_ref(),
+    )?;
     if plan.base_stream_cursor != entry.source_plan_cursor {
         bail!("tool-output projection sidecar source plan rebuilt to a different cursor");
     }
@@ -474,18 +446,7 @@ fn projection_shrinks_match(
     expected: &[ToolOutputProjectionShrink],
     recorded: &[ToolOutputProjectionShrink],
 ) -> bool {
-    expected.len() == recorded.len()
-        && expected.iter().zip(recorded).all(|(expected, recorded)| {
-            if expected == recorded {
-                return true;
-            }
-            recorded.schema_version == 1
-                && expected.source_event == recorded.source_event
-                && expected.tool_call_id == recorded.tool_call_id
-                && expected.source_message_sha256 == recorded.source_message_sha256
-                && expected.original_content_bytes == recorded.original_content_bytes
-                && expected.source_ref == recorded.source_ref
-        })
+    expected == recorded
 }
 
 impl JsonlSessionStore {

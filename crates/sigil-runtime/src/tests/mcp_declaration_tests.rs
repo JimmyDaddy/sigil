@@ -212,7 +212,7 @@ fn plugin_declaration_with_expected_facts(
 }
 
 #[test]
-fn mcp_declaration_promotes_legacy_root_without_losing_declared_name() {
+fn mcp_declaration_resolves_user_root_without_losing_declared_name() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     let declarations = resolve_user_root_mcp_declarations(
         &[mcp_server_config! {
@@ -834,9 +834,18 @@ done
             .expect("plugin declaration should merge");
     let expected_projection = declarations[0].safe_projection();
     let root_config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
+        r#"config_version = 2
+
+[agent]
+connection = "local"
 model = "test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
 "#,
     )
     .expect("root config should parse");
@@ -1033,9 +1042,18 @@ async fn mcp_declaration_pre_spawn_rejection_keeps_safe_lifecycle_identity() {
             .expect("trust decision should append");
     }
     let root_config: RootConfig = toml::from_str(
-        r#"[agent]
-provider = "deepseek"
+        r#"config_version = 2
+
+[agent]
+connection = "local"
 model = "test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
 "#,
     )
     .expect("root config should parse");

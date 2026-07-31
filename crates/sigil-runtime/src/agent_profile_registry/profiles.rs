@@ -26,6 +26,12 @@ pub(super) enum NativeAgentProfileFormat {
     Markdown,
 }
 
+fn default_runtime_provider(root_config: &RootConfig) -> String {
+    crate::provider_connections::resolve_default_model_route(root_config)
+        .map(|(provider, _)| provider)
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
 pub(super) fn native_agent_entrypoint(dir: &Path) -> Option<(PathBuf, NativeAgentProfileFormat)> {
     let toml = dir.join("agent.toml");
     if toml.is_file() {
@@ -151,7 +157,7 @@ pub(super) fn workspace_agent_profile_from_raw(
         model: wire.model.or_else(|| Some(root_config.agent.model.clone())),
         provider: wire
             .provider
-            .or_else(|| Some(root_config.agent.provider.clone())),
+            .or_else(|| Some(default_runtime_provider(root_config))),
         connection: wire
             .connection
             .or_else(|| root_config.agent.connection.clone()),
@@ -214,7 +220,7 @@ pub(super) fn codex_agent_profile_from_raw(
         description: wire.description.trim().to_owned(),
         instructions: wire.developer_instructions.trim().to_owned(),
         model: Some(root_config.agent.model.clone()),
-        provider: Some(root_config.agent.provider.clone()),
+        provider: Some(default_runtime_provider(root_config)),
         connection: root_config.agent.connection.clone(),
         reasoning_effort: None,
         tool_scope: read_only_role_tool_scope(),
@@ -307,7 +313,7 @@ pub(super) fn plugin_agent_profile_from_raw(
         model: wire.model.or_else(|| Some(root_config.agent.model.clone())),
         provider: wire
             .provider
-            .or_else(|| Some(root_config.agent.provider.clone())),
+            .or_else(|| Some(default_runtime_provider(root_config))),
         connection: wire
             .connection
             .or_else(|| root_config.agent.connection.clone()),
@@ -374,7 +380,7 @@ pub(super) fn child_session_skill_profile(
         description: descriptor.description.clone(),
         instructions,
         model: Some(root_config.agent.model.clone()),
-        provider: Some(root_config.agent.provider.clone()),
+        provider: Some(default_runtime_provider(root_config)),
         connection: root_config.agent.connection.clone(),
         reasoning_effort: None,
         tool_scope,

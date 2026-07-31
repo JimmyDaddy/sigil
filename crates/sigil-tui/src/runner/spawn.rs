@@ -202,8 +202,8 @@ fn initialize_worker_session_route(
     )?;
     let route = session.resolved_model_route().cloned().ok_or_else(|| {
         anyhow::anyhow!(
-            "session_route_missing: legacy durable session has no frozen connection route; \
-             start a new session or fork with the current route"
+            "session_route_missing: durable session has no frozen connection route; \
+             start a new session"
         )
     })?;
     let provider_name =

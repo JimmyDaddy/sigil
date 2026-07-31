@@ -48,7 +48,8 @@ fn task_parallel_concurrency_uses_config_and_clamps_zero() {
 fn tui_task_cancellation_adapter_uses_durable_shared_binding() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl")).expect("session store");
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)
+        .expect("initialize current worker session");
     let task_id = TaskId::new("task-1").expect("task id");
 
     let (_owner, _recorder, handle, task_guard) =
@@ -469,8 +470,11 @@ fn clean_mutation_artifacts_applies_retention_policy_and_records_lifecycle() -> 
         .storage
         .mutation_artifact_retention
         .expire_older_than_ms = None;
-    let current_session =
-        Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let current_session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
 
     let report = clean_mutation_artifacts(
         &root_config,
@@ -557,8 +561,11 @@ fn delete_mutation_artifact_records_user_requested_lifecycle() -> anyhow::Result
         .next()
         .expect("artifact should exist")
         .artifact_id;
-    let current_session =
-        Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    let current_session = Some(Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        store.clone(),
+    )?);
 
     let payload = delete_mutation_artifact(&session_path, &current_session, &artifact_id)
         .expect("artifact deletion should record lifecycle");
@@ -575,14 +582,14 @@ fn root_config_with_checks(
     checks: Vec<VerificationCheckConfig>,
 ) -> RootConfig {
     RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
         storage: StorageConfig::default(),
         session: SessionConfig::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            runtime_provider: "deepseek".to_owned(),
             connection: None,
             model: "deepseek-v4-flash".to_owned(),
             max_turns: None,
@@ -603,7 +610,6 @@ fn root_config_with_checks(
         },
         appearance: Default::default(),
         task: TaskConfig::default(),
-        providers: BTreeMap::new(),
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),

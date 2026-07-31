@@ -1,7 +1,7 @@
 use std::{io::Cursor, path::PathBuf};
 
 use super::*;
-use crate::app::tests::common::test_config;
+use crate::app::tests::common::{test_config, v2_tool_result_entry};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
@@ -11,7 +11,7 @@ use sigil_kernel::{
     ExecutionBackendKind, ExecutionCoverageLabel, ExecutionNetworkReceipt, ExecutionSandboxProfile,
     ExternalEvidenceLevel, ExternalProvenanceEntry, ExternalSourceRecord, ExternalTrust,
     JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
-    PlanApprovalExpiry, PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
+    PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
     PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
     PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SessionStreamRecord,
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
@@ -368,40 +368,6 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
 }
 
 #[test]
-fn participant_result_audit_line_distinguishes_terminal_and_legacy_results() -> Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_audit_result")?;
-    let attempt_id = sigil_kernel::task_participant_attempt_id(
-        &task_id,
-        sigil_kernel::TaskParticipantPurpose::Planner,
-        None,
-        None,
-        1,
-    )?;
-    let mut result = sigil_kernel::TaskParticipantResultEntry {
-        attempt_id,
-        task_id,
-        summary: "bounded result".to_owned(),
-        summary_truncated: false,
-        summary_hash: format!("sha256:{}", "1".repeat(64)),
-        output_hash: format!("sha256:{}", "2".repeat(64)),
-        terminal_status: Some(sigil_kernel::TaskParticipantAttemptStatus::Completed),
-        final_answer_ref: None,
-        artifact_refs: Vec::new(),
-        changed_paths: vec!["src/lib.rs".to_owned()],
-        verification_refs: Vec::new(),
-    };
-
-    let terminal = render_control_entry_line(&ControlEntry::TaskParticipantResult(result.clone()));
-    assert!(terminal.contains("terminal=completed"));
-    assert!(terminal.contains("changed=1"));
-
-    result.terminal_status = None;
-    let legacy = render_control_entry_line(&ControlEntry::TaskParticipantResult(result));
-    assert!(legacy.contains("terminal=legacy"));
-    Ok(())
-}
-
-#[test]
 fn participant_retry_audit_line_shows_bounded_schedule() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_audit_retry")?;
     let step_id = sigil_kernel::TaskStepId::new("inspect")?;
@@ -449,18 +415,17 @@ fn participant_retry_audit_line_shows_bounded_schedule() -> Result<()> {
 }
 
 #[test]
-fn session_history_marks_legacy_raw_logs_as_unsupported() -> Result<()> {
+fn session_history_does_not_read_a_removed_raw_log_format() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session-legacy.jsonl");
+    let path = temp.path().join("session-removed-format.jsonl");
     fs::write(
         &path,
-        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?,
+        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(
+            "removed session format",
+        )))?,
     )?;
 
-    assert_eq!(
-        session_history_title_from_log(&path).as_deref(),
-        Some("legacy session format unsupported")
-    );
+    assert_eq!(session_history_title_from_log(&path), None);
     Ok(())
 }
 
@@ -1276,20 +1241,6 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     );
 
     let rendered = [
-        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::PlanApproved(
-            sigil_kernel::PlanApprovedEntry {
-                plan_version: 1,
-                plan_hash: sigil_kernel::plan_text_hash("inspect then edit"),
-                approved_at_ms: 42,
-                permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
-                scope: sigil_kernel::PlanApprovalScope {
-                    summary: "edit workspace files described by the plan".to_owned(),
-                    workspace_paths: vec!["crates/sigil-tui".to_owned()],
-                },
-                expires: sigil_kernel::PlanApprovalExpiry::NextUserPrompt,
-                clear_planning_context: true,
-            },
-        ))),
         render_session_log_entry(&SessionLogEntry::Control(ControlEntry::TaskRun(
             sigil_kernel::TaskRunEntry {
                 task_id: task_id.clone(),
@@ -1384,7 +1335,6 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     ]
     .join("\n");
 
-    assert!(rendered.contains("[ctl] plan grant v1 permission=workspace_edits expires=next_user"));
     assert!(rendered.contains("[ctl] task task_1 status=running"));
     assert!(rendered.contains("[ctl] plan task_1 v1 status=accepted steps=1"));
     assert!(rendered.contains("[ctl] step task_1 v1:step_1 status=running"));
@@ -1396,7 +1346,7 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
 }
 
 #[test]
-fn render_agent_profile_control_entries_and_plan_approval_labels() -> Result<()> {
+fn render_agent_profile_control_entries_and_permission_labels() -> Result<()> {
     let profile_id = AgentProfileId::new("review")?;
     let snapshot = AgentProfileSnapshot {
         snapshot_id: AgentProfileSnapshotId::new("snapshot_1")?,
@@ -1452,18 +1402,6 @@ fn render_agent_profile_control_entries_and_plan_approval_labels() -> Result<()>
     assert_eq!(
         plan_approval_permission_label(PlanApprovalPermission::WorkspaceEdits),
         "workspace_edits"
-    );
-    assert_eq!(
-        plan_approval_expiry_label(&PlanApprovalExpiry::NextUserPrompt),
-        "next_user_prompt"
-    );
-    assert_eq!(
-        plan_approval_expiry_label(&PlanApprovalExpiry::Session),
-        "session"
-    );
-    assert_eq!(
-        plan_approval_expiry_label(&PlanApprovalExpiry::AtUnixMs(123)),
-        "at_unix_ms"
     );
     assert_eq!(
         agent_trust_state_label(AgentTrustState::Disabled),
@@ -1842,7 +1780,7 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution.clone()))),
         SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(preview.clone())),
-        SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "tool output")),
+        v2_tool_result_entry("call-1", "bash", "tool output", ToolResultMeta::default()),
     ];
 
     assert_eq!(
@@ -1907,7 +1845,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
                 args_json: "{}".to_owned(),
             }],
         )),
-        SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "tool output")),
+        v2_tool_result_entry("call-1", "bash", "tool output", ToolResultMeta::default()),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_delta".to_owned(),
             data: json!({ "delta": "think 1\n" }),
@@ -2053,7 +1991,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
 fn session_restore_and_projection_helpers_cover_empty_and_invalid_paths() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config = RootConfig {
-        config_version: None,
+        config_version: 2,
         workspace: WorkspaceConfig {
             root: temp.path().display().to_string(),
         },
@@ -2597,41 +2535,6 @@ fn render_session_control_entries_cover_remaining_labels() {
         },
         &std::collections::HashSet::new()
     ));
-}
-
-#[test]
-fn restore_session_view_skips_empty_assistant_and_marks_legacy_tool_result_unavailable() {
-    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
-    let mut empty_tool = ModelMessage::new(
-        sigil_kernel::MessageRole::Tool,
-        Some("legacy-inline-secret-sentinel".to_owned()),
-    );
-    empty_tool.tool_call_id = Some("call-empty".to_owned());
-
-    app.restore_session_view(
-        PathBuf::from("session-empty-content.jsonl"),
-        "deepseek".to_owned(),
-        "deepseek-v4-flash".to_owned(),
-        vec![
-            SessionLogEntry::Assistant(ModelMessage::assistant(None, Vec::new())),
-            SessionLogEntry::Assistant(ModelMessage::assistant(Some(String::new()), Vec::new())),
-            SessionLogEntry::ToolResult(empty_tool),
-        ],
-        "restored empty",
-    );
-
-    assert!(
-        !app.timeline
-            .iter()
-            .any(|entry| entry.role == TimelineRole::Assistant)
-    );
-    let legacy = app
-        .timeline
-        .iter()
-        .find(|entry| entry.role == TimelineRole::Tool)
-        .expect("legacy tool result should remain visibly unavailable");
-    assert!(legacy.text.contains("legacy_unavailable"));
-    assert!(!legacy.text.contains("legacy-inline-secret-sentinel"));
 }
 
 #[test]

@@ -335,7 +335,7 @@ pub fn mcp_launch_static_fingerprint_at(
 /// This binds a secret-safe declaration projection to executable content. Canonical paths,
 /// command text and arguments are deliberately excluded because this fingerprint may be persisted
 /// and a plain digest of low-entropy path/argument material would support offline guessing. Exact
-/// path/process identity belongs in the runtime-keyed authorization HMAC. Legacy user-root config
+/// path/process identity belongs in the runtime-keyed authorization HMAC. User-root config
 /// keeps the existing fingerprint compatibility path.
 ///
 /// # Errors

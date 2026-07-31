@@ -57,9 +57,6 @@ pub(super) fn recover_tail_if_needed_locked(
                 validate_pending_tail_recovery_prefix(file, path, &intent, &records)?;
             }
             Err(read_error) => {
-                if is_unsupported_legacy_session_error(&read_error) {
-                    return Err(read_error);
-                }
                 recover_from_pending_tail_intent(file, path, &intent)
                     .with_context(|| read_error.to_string())?;
                 let records = read_stream_records_from_file(file, path)?;
@@ -133,12 +130,6 @@ fn recover_append_bundle_if_needed_locked(file: &mut File, path: &Path) -> Resul
     {
         bail!("append bundle intent payload does not match its durable range");
     }
-    let bundle_records = read_stream_records_from_str(path, &intent.bundle_jsonl)
-        .context("append bundle intent does not contain valid session records")?;
-    if bundle_records.len() != intent.event_count as usize {
-        bail!("append bundle intent event count does not match its payload");
-    }
-
     file.seek(SeekFrom::Start(0))
         .with_context(|| format!("failed to seek {}", path.display()))?;
     let mut content = Vec::new();
@@ -152,6 +143,26 @@ fn recover_append_bundle_if_needed_locked(file: &mut File, path: &Path) -> Resul
             intent.end_offset,
             current_size
         );
+    }
+    let start_index = usize::try_from(intent.start_offset)
+        .context("append bundle intent start offset exceeds platform limits")?;
+    let prefix = std::str::from_utf8(&content[..start_index])
+        .context("append bundle intent prefix is not valid UTF-8")?;
+    let prefix_records = read_stream_records_from_str(path, prefix)
+        .context("append bundle intent prefix is not a valid current session stream")?;
+    let mut completed_stream = Vec::with_capacity(start_index.saturating_add(bundle_bytes.len()));
+    completed_stream.extend_from_slice(prefix.as_bytes());
+    completed_stream.extend_from_slice(bundle_bytes);
+    let completed_stream = std::str::from_utf8(&completed_stream)
+        .context("append bundle intent completed stream is not valid UTF-8")?;
+    let completed_records = read_stream_records_from_str(path, completed_stream)
+        .context("append bundle intent does not complete a valid current session stream")?;
+    if completed_records.len()
+        != prefix_records
+            .len()
+            .saturating_add(intent.event_count as usize)
+    {
+        bail!("append bundle intent event count does not match its payload");
     }
 
     if current_size == intent.end_offset {

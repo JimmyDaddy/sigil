@@ -1,7 +1,5 @@
 use anyhow::Result;
-use sigil_kernel::{
-    CompactionConfig, CompactionStrategy, JsonlSessionStore, ModelMessage, Session,
-};
+use sigil_kernel::{CompactionConfig, JsonlSessionStore, ModelMessage, Session};
 
 use super::{
     ContextWindowSource, compaction_preview_for_strategy, effective_compaction_config,
@@ -25,23 +23,19 @@ fn configured_window_is_used_when_provider_window_is_unknown() {
 }
 
 #[test]
-fn effective_compaction_config_preserves_thresholds_and_tail() {
+fn effective_compaction_config_preserves_current_strategy_settings() {
     let config = CompactionConfig {
         strategy: Default::default(),
         enabled: true,
         native_carrier_enabled: false,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
         context_window_tokens: Some(128_000),
-        tail_messages: 6,
     };
 
     let effective = effective_compaction_config("deepseek", "deepseek-v4-pro", &config);
 
     assert_eq!(effective.context_window_tokens, Some(1_000_000));
-    assert_eq!(effective.soft_threshold_ratio, 0.5);
-    assert_eq!(effective.hard_threshold_ratio, 0.8);
-    assert_eq!(effective.tail_messages, 6);
+    assert!(effective.enabled);
+    assert!(!effective.native_carrier_enabled);
 }
 
 #[test]
@@ -66,14 +60,7 @@ fn cache_aware_strategy_uses_adaptive_whole_turn_preview_in_production_helper() 
     );
     let preview = compaction_preview_for_strategy(&session, &effective)?
         .expect("older whole turns are foldable");
-    assert!(preview.plan.adaptive_tail.is_some());
-
-    let legacy = CompactionConfig {
-        strategy: CompactionStrategy::LegacyV2,
-        ..effective
-    };
-    let legacy_preview =
-        compaction_preview_for_strategy(&session, &legacy)?.expect("legacy history is foldable");
-    assert!(legacy_preview.plan.adaptive_tail.is_none());
+    assert!(preview.plan.adaptive_tail.folded_complete_turns > 0);
+    assert!(preview.plan.adaptive_tail.retained_complete_turns >= 2);
     Ok(())
 }

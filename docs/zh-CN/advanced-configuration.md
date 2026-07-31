@@ -25,10 +25,10 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-以上数值是 schema 与迁移安全的兼容默认值。缺少配置时，只有 installed release 携带
+以上数值是当前 schema 默认值。缺少配置时，只有 installed release 携带
 qualified sidecar，且 provider、model、官方 endpoint family、task-config digest 与 binary
-build 全部精确匹配，Quick Setup 才可能保存 `auto + proactive`。已有配置永远不会被重写；
-sidecar 缺失、无效、过期或不匹配时，会 fail closed 到上面的兼容值。`sigil doctor` 会报告
+build 全部精确匹配，Quick Setup 才可能保存 `auto + proactive`。不兼容的配置会被拒绝；
+sidecar 缺失、无效、过期或不匹配时，会 fail closed 到上面的默认值。`sigil doctor` 会报告
 rollout 状态。
 
 coarse rollback 是设置 `routing_policy = "manual"` 与
@@ -69,14 +69,11 @@ Sigil 原生的可复用工作区技能、命令、子智能体和插件分别�
 enabled = true
 strategy = "cache_aware_v3"
 native_carrier_enabled = false
-soft_threshold_ratio = 0.5
-hard_threshold_ratio = 0.8
-tail_messages = 6
 ```
 
-默认策略是 `cache_aware_v3`：在模型服务支持时保持可复用的历史输入稳定，延续当前意图并按完整回合保留最近内容；只有上下文即将放不下，或可信成本证据证明值得时，才开始新的缓存周期。执行 `/compact` 本身就是生成、校验并原子激活一个可恢复语义 checkpoint 的明确请求，不再打开确认弹窗。route 准入后，它会在当前模型服务和模型上额外调用一次 LLM：保留上一份请求作为可缓存前缀，只在末尾追加严格 JSON 摘要指令。这不是子智能体，也不会执行工具。模型摘要只补充不可信语义脉络；目标、约束、授权、完成状态和验证仍以保存的会话历史为准。Sigil 会先展示进度，随后给出已激活回执或可操作的拒绝原因。摘要生成、精确 token proof、经济性准入任一失败，或摘要期间会话发生变化而无法安全激活时，当前上下文保持不变。自动 V3 只在受支持且可信的模型服务路径上启用；未知或兼容路径自动回退 `legacy_v2`。手动摘要失败不会静默降级，只有上下文必须缩小或即将溢出的紧急路径才可带明确审计使用确定性 fallback。大型工具输出 aging 继续作为独立的确定性维护路径，不再隐藏在 `/compact` review 中。ratio 与 `tail_messages` 继续可读，供迁移和回滚使用；V3 会把 tail 值视为完整回合下限，不再按裸消息数切断工具回合。无法确定模型上下文窗口大小时，可以设置 `fallback_context_window_tokens`。
+`cache_aware_v3` 是唯一策略：在模型服务支持时保持可复用的历史输入稳定，延续当前意图并按完整回合保留最近内容；只有上下文即将放不下，或可信成本证据证明值得时，才开始新的缓存周期。执行 `/compact` 本身就是生成、校验并原子激活一个可恢复语义 checkpoint 的明确请求，不再打开确认弹窗。route 准入后，它会在当前模型服务和模型上额外调用一次 LLM：保留上一份请求作为可缓存前缀，只在末尾追加严格 JSON 摘要指令。这不是子智能体，也不会执行工具。模型摘要只补充不可信语义脉络；目标、约束、授权、完成状态和验证仍以保存的会话历史为准。Sigil 会先展示进度，随后给出已激活回执或可操作的拒绝原因。摘要生成、精确 token proof、经济性准入任一失败，或摘要期间会话发生变化而无法安全激活时，当前上下文保持不变。不支持的 route 会直接不可用，不再选择旧算法。手动摘要失败不会静默降级，只有上下文必须缩小或即将溢出的紧急路径才可带明确审计使用确定性 fallback。大型工具输出 aging 继续作为独立的确定性维护路径，不再隐藏在 `/compact` 中。无法确定模型上下文窗口大小时，可以设置 `fallback_context_window_tokens`。
 
-`native_carrier_enabled` 是默认关闭的迁移预留开关。当前将它设为 `true` 不会产生效果，因为 Sigil 尚不会在相同模型服务路径的下一次请求中复用模型服务专属的精简状态。portable continuity 仍是唯一启用的精简路径。
+`native_carrier_enabled` 是默认关闭的 provider-native 加速开关。当前将它设为 `true` 不会产生效果，因为 Sigil 尚不会在相同模型服务路径的下一次请求中复用模型服务专属的精简状态。portable continuity 仍是唯一启用的精简路径。
 
 <!-- public-doc-topic: code-intelligence -->
 

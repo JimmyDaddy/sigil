@@ -332,7 +332,7 @@ fn render_projected_markdown_timeline_lines_with_palette(
                 ));
                 continue;
             }
-            if label == "sigil-plan-v1"
+            if label == "sigil-plan-v2"
                 && let Some(plan_lines) =
                     render_sigil_plan_block_with_palette(accent, &block_lines, palette)
             {
@@ -450,7 +450,7 @@ fn render_sigil_plan_block_with_palette(
         "plan",
         palette.accent_info,
         vec![Span::styled(
-            "sigil-plan-v1",
+            "sigil-plan-v2",
             Style::default().fg(palette.text_muted),
         )],
         palette,

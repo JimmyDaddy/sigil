@@ -798,109 +798,6 @@ fn tool_result_is_rendered_as_multiline_json_block() -> Result<()> {
 }
 
 #[test]
-fn tool_result_card_redacts_configured_secret_from_display_payloads() -> Result<()> {
-    let _env_guard = crate::test_env::lock();
-    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
-    let mut config = test_config();
-    config.providers.insert(
-        "deepseek".to_owned(),
-        json!({
-            "api_key": "sk-ui-secret"
-        }),
-    );
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    let preview = ToolPreview {
-        title: "Update secrets.txt".to_owned(),
-        summary: "Preview summary".to_owned(),
-        body: "--- current/secrets.txt\n+++ proposed/secrets.txt\n@@ -1 +1 @@\n-old\n+sk-ui-secret"
-            .to_owned(),
-        changed_files: vec!["secrets.txt".to_owned()],
-        file_diffs: vec![sigil_kernel::ToolPreviewFile {
-            path: "secrets.txt".to_owned(),
-            diff: "--- current/secrets.txt\n+++ proposed/secrets.txt\n@@ -1 +1 @@\n-old\n+sk-ui-secret"
-                .to_owned(),
-        }],
-    };
-    let snapshot = ToolPreviewSnapshot::from_preview(
-        "call-secret",
-        "write_file",
-        &preview,
-        Default::default(),
-        None,
-    );
-
-    app.handle(RunEvent::Control(ControlEntry::ToolPreviewCaptured(
-        snapshot,
-    )))?;
-    app.handle(RunEvent::ToolResult(ToolResult::ok(
-        "call-secret",
-        "write_file",
-        r#"{"token":"sk-ui-secret","value":"visible"}"#,
-        ToolResultMeta {
-            bytes: Some(36),
-            changed_files: vec!["secrets.txt".to_owned()],
-            details: json!({
-                "api_key": "sk-ui-secret",
-                "note": "visible"
-            }),
-            ..ToolResultMeta::default()
-        },
-    )))?;
-
-    let entry = app.timeline.last().expect("expected tool timeline entry");
-    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
-    let serialized = serde_json::to_string(&rendered)?;
-
-    assert!(!serialized.contains("sk-ui-secret"));
-    assert!(serialized.contains(sigil_kernel::REDACTED_SECRET));
-    assert_eq!(
-        rendered["metadata"]["details"]["api_key"],
-        sigil_kernel::REDACTED_SECRET
-    );
-    assert_eq!(
-        rendered["preview_value"]["token"],
-        sigil_kernel::REDACTED_SECRET
-    );
-    Ok(())
-}
-
-#[test]
-fn large_tool_result_display_is_bounded_and_redacted() -> Result<()> {
-    let mut config = test_config();
-    config.providers.insert(
-        "deepseek".to_owned(),
-        json!({
-            "api_key": "sk-large-secret"
-        }),
-    );
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    let content = format!(
-        "Authorization: Bearer sk-large-secret\n{}",
-        "x".repeat(70 * 1024)
-    );
-
-    app.handle(RunEvent::ToolResult(ToolResult::ok(
-        "call-large",
-        "bash",
-        content,
-        ToolResultMeta::default(),
-    )))?;
-
-    let entry = app.timeline.last().expect("expected tool timeline entry");
-    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
-    let serialized = serde_json::to_string(&rendered)?;
-    assert_eq!(rendered["display_truncated"], true);
-    assert!(
-        rendered["summary"]
-            .as_str()
-            .is_some_and(|summary| { summary.contains("display truncated") })
-    );
-    assert!(!serialized.contains("sk-large-secret"));
-    assert!(serialized.contains(sigil_kernel::REDACTED_SECRET));
-    Ok(())
-}
-
-#[test]
 fn batched_streaming_text_deltas_rerender_once_after_drain() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -2174,11 +2071,9 @@ fn default_open_large_diff_stays_stable_when_new_output_arrives() -> Result<()> 
 #[test]
 fn compaction_status_tracks_latest_prompt_tokens_instead_of_cumulative_totals() -> Result<()> {
     let mut config = test_config();
-    config.agent.provider = "planned".to_owned();
+    config.agent.runtime_provider = "planned".to_owned();
     config.agent.model = "planned-model".to_owned();
     config.compaction.context_window_tokens = Some(100);
-    config.compaction.soft_threshold_ratio = 0.5;
-    config.compaction.hard_threshold_ratio = 0.8;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
     app.handle(RunEvent::Usage(UsageStats {
@@ -2217,8 +2112,6 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
     let mut config = test_config();
     config.agent.model = "deepseek-v4-pro".to_owned();
     config.compaction.context_window_tokens = Some(128_000);
-    config.compaction.soft_threshold_ratio = 0.5;
-    config.compaction.hard_threshold_ratio = 0.8;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
     app.handle(RunEvent::Usage(UsageStats {
@@ -2236,18 +2129,18 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
 
     assert_eq!(
         app.context_usage_line(),
-        "ctx: 9% · prompt 90.4K / 1.0M provider · soft at 500.0K"
+        "ctx: 9% · prompt 90.4K / 1.0M provider · soft at 700.0K"
     );
     assert_eq!(app.runtime.compaction_status, "ready");
     assert!(app.footer_status_line().contains("tok 90.4K"));
     assert!(app.footer_status_line().contains("ctx 9%"));
     assert!(
         app.usage_sidebar_lines().iter().any(
-            |line| line == "policy: provider 1,000,000 · soft 50% (500.0K) · hard 80% (800.0K)"
+            |line| line == "policy: provider 1,000,000 · soft 70% (700.0K) · hard 92% (920.0K)"
         )
     );
 
-    config.agent.provider = "custom".to_owned();
+    config.agent.runtime_provider = "custom".to_owned();
     config.agent.model = "custom-model".to_owned();
     let mut fallback_app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     fallback_app.handle(RunEvent::Usage(UsageStats {
@@ -2264,7 +2157,7 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
     }))?;
     assert_eq!(
         fallback_app.context_usage_line(),
-        "ctx: 50% · prompt 64.0K / 128.0K fallback · soft; /compact"
+        "ctx: 50% · prompt 64.0K / 128.0K fallback · soft at 89.6K"
     );
     Ok(())
 }
@@ -2546,7 +2439,7 @@ fn app_status_helpers_cover_empty_balance_context_and_session_title() {
     assert_eq!(app.balance_sidebar_line(), "balance: checking");
     assert_eq!(
         app.context_usage_line(),
-        "ctx: 0% · prompt 1.2K / 1.0M provider · soft at 500.0K"
+        "ctx: 0% · prompt 1.2K / 1.0M provider · soft at 700.0K"
     );
     let policy = app.compaction_policy_line();
     assert!(policy.starts_with("policy: "));

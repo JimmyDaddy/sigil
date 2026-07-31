@@ -225,8 +225,8 @@ impl ToolOutputProjection {
     /// Builds bounded model-visible replacements for old, completed tool results in `plan`.
     ///
     /// The complete durable stream is revalidated through [`CompactionFoldPlan`]. Only an
-    /// artifact-backed `ToolResultV2` event already in the folded set can shrink. Legacy inline
-    /// results fail session loading before this projection and are never treated as recoverable.
+    /// artifact-backed `ToolResultV2` event already in the folded set can shrink. Invalid inline
+    /// records fail session loading before this projection and are never treated as recoverable.
     ///
     /// # Errors
     ///

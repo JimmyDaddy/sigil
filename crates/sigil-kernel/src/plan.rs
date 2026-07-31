@@ -107,7 +107,6 @@ pub struct PlanDraftStep {
 #[serde(rename_all = "snake_case")]
 pub struct PlanDraftCreatedEntry {
     pub plan_id: PlanId,
-    #[serde(default = "legacy_plan_schema_version")]
     pub schema_version: u32,
     pub source: PlanSourceRef,
     pub plan_hash: String,
@@ -221,25 +220,6 @@ pub struct TaskCreatedFromPlanEntry {
     pub created_at_ms: u64,
 }
 
-/// Append-only permission grant for one plan-mode result.
-///
-/// This record predates durable plan artifacts. It records a scoped permission decision for a
-/// read-only planning result; it is not a plan acceptance decision and does not create or
-/// continue a task. New plan-to-task handoff flows use [`PlanDecisionRecordedEntry`] plus
-/// [`TaskCreatedFromPlanEntry`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct PlanApprovedEntry {
-    pub plan_version: u32,
-    pub plan_hash: String,
-    pub approved_at_ms: u64,
-    pub permission: PlanApprovalPermission,
-    pub scope: PlanApprovalScope,
-    pub expires: PlanApprovalExpiry,
-    #[serde(default)]
-    pub clear_planning_context: bool,
-}
-
 /// Permission chosen from the plan approval surface.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -280,40 +260,6 @@ pub enum PlanApprovalExpiry {
     NextUserPrompt,
     Session,
     AtUnixMs(u64),
-}
-
-/// Materialized plan approval state reconstructed from append-only entries.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PlanApprovalProjection {
-    pub approvals: Vec<PlanApprovedEntry>,
-    pub latest_approval: Option<PlanApprovedEntry>,
-    pub latest_by_hash: BTreeMap<String, PlanApprovedEntry>,
-}
-
-impl PlanApprovalProjection {
-    /// Replays session entries into the latest plan approval state.
-    pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
-        let mut projection = Self::default();
-        for entry in entries {
-            if let SessionLogEntry::Control(control) = entry {
-                projection.apply_control_entry(control);
-            }
-        }
-        projection
-    }
-
-    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
-        if let ControlEntry::PlanApproved(entry) = control {
-            self.apply_approval(entry);
-        }
-    }
-
-    fn apply_approval(&mut self, entry: &PlanApprovedEntry) {
-        self.approvals.push(entry.clone());
-        self.latest_by_hash
-            .insert(entry.plan_hash.clone(), entry.clone());
-        self.latest_approval = Some(entry.clone());
-    }
 }
 
 /// Materialized plan artifact state reconstructed from append-only entries.
@@ -496,9 +442,9 @@ pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
 
 /// Promotes a fully executable plan draft directly into an accepted task plan.
 ///
-/// Legacy drafts that do not carry the shared task fields return `None` so callers can retain the
-/// isolated planner fallback. A draft that claims the executable schema but contains an invalid
-/// graph fails closed.
+/// Current drafts that do not yet carry every executable task field return `None` so callers can
+/// retain the isolated planner fallback. A draft with an unsupported schema or invalid graph fails
+/// closed.
 ///
 /// # Errors
 ///
@@ -509,8 +455,10 @@ pub fn task_plan_from_plan_draft(
     task_id: TaskId,
     plan_version: u32,
 ) -> Result<Option<PlanTaskPromotion>> {
-    if entry.schema_version != 2
-        || entry.steps.is_empty()
+    if entry.schema_version != 2 {
+        bail!("unsupported executable plan draft schema version");
+    }
+    if entry.steps.is_empty()
         || entry
             .steps
             .iter()
@@ -862,7 +810,7 @@ struct RawStructuredPlanDraft {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct RawPlanDraftStep {
-    #[serde(default, alias = "id")]
+    #[serde(default)]
     step_id: Option<String>,
     title: String,
     #[serde(default)]
@@ -991,15 +939,9 @@ fn parse_fence_start(line: &str) -> Option<(&'static str, &str)> {
 }
 
 fn structured_plan_schema_version(info: &str) -> Option<u32> {
-    let mut versions = info.split_whitespace().filter_map(|part| match part {
-        "sigil-plan-v1" => Some(1),
-        "sigil-plan-v2" => Some(2),
-        _ => None,
-    });
-    let version = versions.next()?;
-    versions
-        .all(|candidate| candidate == version)
-        .then_some(version)
+    info.split_whitespace()
+        .any(|part| part == "sigil-plan-v2")
+        .then_some(2)
 }
 
 fn materialize_structured_plan(
@@ -1055,10 +997,6 @@ fn materialize_structured_plan(
         risk: raw.risk.and_then(nonempty_trimmed),
         notes: raw.notes.into_iter().filter_map(nonempty_trimmed).collect(),
     }
-}
-
-const fn legacy_plan_schema_version() -> u32 {
-    1
 }
 
 fn materialize_plan_step(

@@ -151,24 +151,6 @@ credential = { source = "none" }
     Ok(())
 }
 
-fn write_legacy_application_test_config(path: &Path) -> Result<()> {
-    std::fs::write(
-        path,
-        r#"[workspace]
-root = "."
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-api_key = "test-key"
-base_url = "https://api.deepseek.com"
-"#,
-    )?;
-    Ok(())
-}
-
 #[test]
 fn durable_frontier_projection_is_scope_checked_and_read_only() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -387,15 +369,21 @@ fn preparation_recovers_an_orphan_run_after_exclusive_lease_before_next_admissio
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let session_path = temp.path().join("state/sessions/orphan.jsonl");
@@ -628,15 +616,21 @@ fn adapter_session_binding_creates_and_reopens_the_same_durable_v2_scope() -> Re
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let requested_path = temp.path().join("state/sessions/http.jsonl");
@@ -745,54 +739,7 @@ fn session_reopen_binding_requires_an_existing_durable_file() -> Result<()> {
 }
 
 #[test]
-fn session_reopen_binding_migrates_an_exact_legacy_v1_route_once() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    write_legacy_application_test_config(&config_path)?;
-    let session_path = temp.path().join("state/sessions/legacy-route.jsonl");
-    let store = JsonlSessionStore::new(&session_path)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
-    session.append_control(ControlEntry::SessionIdentity {
-        provider_name: "deepseek".to_owned(),
-        model_name: "deepseek-v4-flash".to_owned(),
-        resolved_model_route: None,
-    })?;
-    session.append_user_message(ModelMessage::user("hello"))?;
-    let expected_scope = session.session_scope_id().to_owned();
-    drop(session);
-
-    let reopened = bind_existing_application_session(&config_path, &session_path)?;
-    assert_eq!(reopened.session_scope_id, expected_scope);
-    let migrated_entries = JsonlSessionStore::read_entries(&session_path)?;
-    let migrated_routes = migrated_entries
-        .iter()
-        .filter_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::SessionIdentity {
-                resolved_model_route: Some(route),
-                ..
-            }) => Some(route),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(migrated_routes.len(), 1);
-    assert_eq!(
-        migrated_routes[0].model_ref.connection_id.as_str(),
-        "deepseek-default"
-    );
-    assert_eq!(migrated_routes[0].model_ref.model_id, "deepseek-v4-flash");
-    let after_first_open = std::fs::read(&session_path)?;
-
-    let reopened_again = bind_existing_application_session(&config_path, &session_path)?;
-    assert_eq!(reopened_again, reopened);
-    assert_eq!(std::fs::read(&session_path)?, after_first_open);
-    let context =
-        application_run_context_view(&config_path, temp.path(), &session_path, &expected_scope)?;
-    assert_eq!(context.model_ref, migrated_routes[0].model_ref);
-    Ok(())
-}
-
-#[test]
-fn session_reopen_binding_does_not_rebind_a_route_less_v2_session() -> Result<()> {
+fn session_reopen_binding_rejects_a_route_less_current_session() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_application_test_config(&config_path)?;
@@ -994,7 +941,7 @@ fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabili
         &temp.path().join("cache"),
     )?;
     let mut selected_config = RootConfig::load(&config_path)?;
-    selected_config.agent.provider = "deepseek".to_owned();
+    selected_config.agent.runtime_provider = "deepseek".to_owned();
     selected_config.agent.model = "deepseek-v4-pro".to_owned();
     admit_application_reasoning_effort(&request, &selected_config)?;
 
@@ -1111,12 +1058,20 @@ fn exact_inline_skill_binding_loads_transient_context_and_audit_entry() -> Resul
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let skill_path = temp.path().join(".sigil/skills/review/SKILL.md");
@@ -1195,12 +1150,20 @@ fn exact_agent_binding_admits_current_snapshot_and_rejects_stale_snapshot() -> R
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let root_config = RootConfig::load(&config_path)?;
@@ -1242,22 +1205,31 @@ fn explicit_reasoning_effort_requires_exact_current_binding() -> Result<()> {
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let config = RootConfig::load(&config_path)?;
+    let (provider_name, route) = crate::provider_connections::resolve_default_model_route(&config)?;
     let supported = crate::reasoning_effort::supported_reasoning_efforts(
-        &config.agent.provider,
-        &config.agent.model,
+        &provider_name,
+        &route.model_ref.model_id,
     );
     let binding = crate::reasoning_effort::reasoning_effort_binding(
-        &config.agent.provider,
-        &config.agent.model,
+        &provider_name,
+        &route.model_ref.model_id,
         &supported,
     )
     .expect("default model supports reasoning effort");
@@ -1823,18 +1795,24 @@ async fn application_auto_routing_stays_manual_without_attached_task_executor() 
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
 [task]
 routing_policy = "auto"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let request = ApplicationRunRequest::non_interactive(
@@ -1867,18 +1845,24 @@ async fn application_preparation_enables_model_owned_auto_handoff_without_host_c
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
 [task]
 routing_policy = "auto"
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let request = ApplicationRunRequest::non_interactive(
@@ -1923,12 +1907,21 @@ async fn application_task_handoff_runs_shared_executor_and_returns_synthesis() -
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "application-task-test"
+connection = "application-task-test"
 model = "application-task-model"
+
+[connections.application-task-test]
+label = "Application task test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
 "#,
     )?;
     let mut root_config = RootConfig::load(&config_path)?;
@@ -2153,18 +2146,24 @@ async fn application_task_continuation_rejects_stale_scope_without_mutation() ->
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(
         &config_path,
-        r#"[workspace]
+        r#"config_version = 2
+
+[workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
+connection = "deepseek-default"
 model = "deepseek-v4-flash"
 
 [task]
 enabled = true
 
-[providers.deepseek]
-api_key = "test-secret-key"
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
     let session_path = temp.path().join("session.jsonl");

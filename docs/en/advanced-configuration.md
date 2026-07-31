@@ -25,11 +25,11 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-The values above are the schema and migration-safe compatibility defaults.
+The values above are the current schema defaults.
 Quick Setup for a missing configuration may instead save `auto + proactive`
 only when the installed release carries a qualified sidecar whose exact
 provider, model, official endpoint family, task-config digest, and binary build
-all match. Existing configurations are never rewritten. Missing, invalid, stale,
+all match. Incompatible configurations are rejected. Missing, invalid, stale,
 or non-matching sidecars fail closed to the values shown above. `sigil doctor`
 reports the rollout state.
 
@@ -72,14 +72,11 @@ Sigil-native reusable workspace skills, commands, agents, and plugins live under
 enabled = true
 strategy = "cache_aware_v3"
 native_carrier_enabled = false
-soft_threshold_ratio = 0.5
-hard_threshold_ratio = 0.8
-tail_messages = 6
 ```
 
-`cache_aware_v3` is the default. It keeps reusable prior input stable where supported, preserves current intent and complete recent turns, and starts a new cache period only when the conversation must fit or trusted cost evidence shows a benefit. Running `/compact` is the explicit request to generate, validate, and atomically activate one recoverable semantic checkpoint; it does not open a confirmation modal. On an admitted route this makes one additional LLM request on the current provider/model route, keeping the previous request as the cacheable prefix and appending a strict JSON summary instruction. This is not a child agent and cannot execute tools. The model contributes only untrusted narrative; objectives, constraints, authorization, completion, and verification remain grounded in saved session history. Sigil shows progress followed by an applied receipt or an actionable refusal. If generation, exact token proof, economics admission, or a concurrent conversation change prevents safe activation, the active context remains unchanged. Automatic V3 is enabled only on supported, trusted provider routes; unknown or compatible routes fall back to `legacy_v2`. A failed manual summary is not silently downgraded; only fit-required or overflow emergency paths may use an explicitly audited deterministic fallback. Large tool-output aging remains a separate deterministic maintenance path instead of being hidden behind a `/compact` review. The ratio and `tail_messages` fields remain readable for rollback and migration; V3 treats the tail value as a whole-turn minimum instead of cutting a raw message count. If a model window is unknown, set `fallback_context_window_tokens`.
+`cache_aware_v3` is the only strategy. It keeps reusable prior input stable where supported, preserves current intent and complete recent turns, and starts a new cache period only when the conversation must fit or trusted cost evidence shows a benefit. Running `/compact` is the explicit request to generate, validate, and atomically activate one recoverable semantic checkpoint; it does not open a confirmation modal. On an admitted route this makes one additional LLM request on the current provider/model route, keeping the previous request as the cacheable prefix and appending a strict JSON summary instruction. This is not a child agent and cannot execute tools. The model contributes only untrusted narrative; objectives, constraints, authorization, completion, and verification remain grounded in saved session history. Sigil shows progress followed by an applied receipt or an actionable refusal. If generation, exact token proof, economics admission, or a concurrent conversation change prevents safe activation, the active context remains unchanged. Unsupported routes remain unavailable rather than selecting an older algorithm. A failed manual summary is not silently downgraded; only fit-required or overflow emergency paths may use an explicitly audited deterministic fallback. Large tool-output aging remains a separate deterministic maintenance path instead of being hidden behind `/compact`. If a model window is unknown, set `fallback_context_window_tokens`.
 
-`native_carrier_enabled` is a reserved, default-off migration flag. Setting it to `true` currently has no effect because Sigil does not yet reuse provider-specific compacted state in the next request on the same route. Portable continuity remains the only active compaction path.
+`native_carrier_enabled` is a default-off provider-native acceleration flag. Setting it to `true` currently has no effect because Sigil does not yet reuse provider-specific compacted state in the next request on the same route. Portable continuity remains the only active compaction path.
 
 <!-- public-doc-topic: code-intelligence -->
 

@@ -376,10 +376,8 @@ struct AgentProfileWire {
     invocation_policy: Option<AgentInvocationPolicy>,
     #[serde(default)]
     result_policy: AgentResultPolicy,
-    #[serde(default)]
-    user_invocable: Option<bool>,
-    #[serde(default)]
-    model_invocable: Option<bool>,
+    user_invocable: bool,
+    model_invocable: bool,
     #[serde(default)]
     skills: Vec<String>,
     #[serde(default)]
@@ -401,12 +399,6 @@ impl<'de> Deserialize<'de> for AgentProfile {
         let invocation_policy = wire
             .invocation_policy
             .ok_or_else(|| serde::de::Error::missing_field("invocation_policy"))?;
-        let user_invocable = wire
-            .user_invocable
-            .unwrap_or_else(|| invocation_policy.default_user_invocable());
-        let model_invocable = wire
-            .model_invocable
-            .unwrap_or_else(|| invocation_policy.default_model_invocable());
         Ok(Self {
             id: wire.id,
             kind: wire.kind,
@@ -420,8 +412,8 @@ impl<'de> Deserialize<'de> for AgentProfile {
             permission_policy: wire.permission_policy,
             invocation_policy,
             result_policy: wire.result_policy,
-            user_invocable,
-            model_invocable,
+            user_invocable: wire.user_invocable,
+            model_invocable: wire.model_invocable,
             skills: wire.skills,
             mcp_servers: wire.mcp_servers,
             nickname_candidates: wire.nickname_candidates,
@@ -437,21 +429,13 @@ impl<'de> Deserialize<'de> for AgentProfile {
 pub struct AgentProfileSnapshot {
     pub snapshot_id: AgentProfileSnapshotId,
     pub profile_id: AgentProfileId,
-    #[serde(default)]
     pub source: AgentProfileSource,
-    #[serde(default)]
     pub source_hash: String,
-    #[serde(default)]
     pub profile_hash: String,
-    #[serde(default)]
     pub resolved_tool_scope_hash: String,
-    #[serde(default)]
     pub resolved_permission_policy_hash: String,
-    #[serde(default)]
     pub resolved_mcp_scope_hash: String,
-    #[serde(default)]
     pub resolved_skill_hashes: Vec<String>,
-    #[serde(default)]
     pub trust_state: AgentTrustState,
 }
 
@@ -460,11 +444,8 @@ pub struct AgentProfileSnapshot {
 #[serde(rename_all = "snake_case")]
 pub struct AgentProfileTrustEntry {
     pub profile_id: AgentProfileId,
-    #[serde(default)]
     pub source: AgentProfileSource,
-    #[serde(default)]
     pub source_hash: String,
-    #[serde(default)]
     pub profile_hash: String,
     pub decision: AgentTrustState,
     pub reviewed_at_ms: u64,
@@ -532,11 +513,8 @@ impl AgentProfileTrustProjection {
 #[serde(rename_all = "snake_case")]
 pub struct AgentProfilePolicyEntry {
     pub profile_id: AgentProfileId,
-    #[serde(default)]
     pub source: AgentProfileSource,
-    #[serde(default)]
     pub source_hash: String,
-    #[serde(default)]
     pub profile_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -616,17 +594,12 @@ pub struct AgentRunContextSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     pub workspace_root: WorkspaceRootSnapshot,
-    #[serde(default)]
     pub effective_tool_scope_hash: String,
-    #[serde(default)]
     pub effective_permission_policy_hash: String,
-    #[serde(default)]
     pub effective_mcp_scope_hash: String,
-    #[serde(default)]
     pub provider_capability_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_visible_agent_index_hash: Option<String>,
-    #[serde(default)]
     pub budget_policy_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_background_handle_ref: Option<String>,
@@ -1196,11 +1169,8 @@ impl AgentMailboxStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct AgentUsageSummary {
-    #[serde(default)]
     pub input_tokens: u64,
-    #[serde(default)]
     pub output_tokens: u64,
-    #[serde(default)]
     pub total_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
@@ -1223,7 +1193,6 @@ pub struct AgentFinalAnswerRef {
     pub session_ref: SessionRef,
     pub message_id: String,
     pub content_hash: String,
-    #[serde(default)]
     pub char_count: usize,
 }
 
@@ -1235,17 +1204,12 @@ pub struct AgentThreadResult {
     pub session_ref: SessionRef,
     pub status: AgentThreadTerminalStatus,
     pub summary: String,
-    #[serde(default)]
     pub summary_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_summary_chars: Option<usize>,
-    #[serde(default)]
     pub artifacts: Vec<AgentArtifactRef>,
-    #[serde(default)]
     pub changed_paths: Vec<String>,
-    #[serde(default)]
     pub risks: Vec<String>,
-    #[serde(default)]
     pub followups: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsageSummary>,
@@ -1278,7 +1242,6 @@ pub struct AgentThreadStartedEntry {
     pub profile_snapshot_id: AgentProfileSnapshotId,
     pub run_context: AgentRunContextSnapshot,
     pub objective: String,
-    #[serde(default)]
     pub prompt_hash: String,
     pub invocation_mode: AgentInvocationMode,
     pub invocation_source: AgentInvocationSource,
@@ -1344,13 +1307,9 @@ pub struct AgentThreadResultDeliveredEntry {
     pub thread_id: AgentThreadId,
     pub call_id: String,
     pub output_hash: String,
-    #[serde(default)]
     pub offset_chars: usize,
-    #[serde(default)]
     pub returned_chars: usize,
-    #[serde(default)]
     pub total_chars: usize,
-    #[serde(default)]
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at_ms: Option<u64>,
@@ -1481,7 +1440,6 @@ pub struct AgentRunAttemptStartedEntry {
     pub attempt_id: AgentRunAttemptId,
     pub provider: String,
     pub model: String,
-    #[serde(default)]
     pub background: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_background_handle_ref: Option<String>,
@@ -1539,9 +1497,7 @@ pub struct AgentThreadStateProjection {
     pub threads: BTreeMap<AgentThreadId, AgentThreadProjection>,
     pub latest_thread_id: Option<AgentThreadId>,
     pub thread_replay_order: Vec<AgentThreadId>,
-    #[serde(default)]
     pub batches: BTreeMap<AgentBatchId, AgentBatchProjection>,
-    #[serde(default)]
     pub batch_replay_order: Vec<AgentBatchId>,
     pub approval_routes: BTreeMap<AgentRouteId, AgentApprovalRouteEntry>,
     pub elicitation_routes: BTreeMap<AgentRouteId, AgentElicitationRouteEntry>,
@@ -1992,13 +1948,9 @@ pub struct AgentThreadProjection {
     pub status: AgentThreadStatus,
     pub reason: Option<String>,
     pub result: Option<AgentThreadResult>,
-    #[serde(default)]
     pub result_delivered: bool,
-    #[serde(default)]
     pub result_fully_delivered: bool,
-    #[serde(default)]
     pub result_delivered_chars: usize,
-    #[serde(default)]
     pub result_delivery_call_ids: Vec<String>,
     pub attempts: BTreeMap<AgentRunAttemptId, AgentRunAttemptProjection>,
     pub merge_safe_points: Vec<AgentMergeSafePointEntry>,
@@ -2007,7 +1959,6 @@ pub struct AgentThreadProjection {
     pub unresolved: bool,
     pub profile_snapshot_missing: bool,
     pub profile_snapshot_mismatch: bool,
-    #[serde(default)]
     pub batch_identity_incomplete: bool,
 }
 
@@ -2089,9 +2040,7 @@ pub struct AgentBatchProjection {
     pub parent_thread_id: Option<AgentThreadId>,
     pub member_thread_ids: Vec<AgentThreadId>,
     pub member_keys: BTreeMap<AgentRouteId, AgentThreadId>,
-    #[serde(default)]
     pub parent_mismatch: bool,
-    #[serde(default)]
     pub duplicate_member_keys: usize,
 }
 
@@ -2166,11 +2115,8 @@ pub struct AgentGraphSummary {
     pub active_threads: u64,
     pub terminal_threads: u64,
     pub unresolved_threads: u64,
-    #[serde(default)]
     pub total_batches: u64,
-    #[serde(default)]
     pub active_batches: u64,
-    #[serde(default)]
     pub degraded_batches: u64,
     pub foreground_threads: u64,
     pub background_threads: u64,

@@ -6,20 +6,6 @@ use super::*;
 use crate::EventId;
 use thiserror::Error;
 
-/// A session stream uses a durable format this pre-release build intentionally no longer reads.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-#[error(
-    "session log uses unsupported {format_name} format on line {physical_line} in {path}; the file was not modified"
-)]
-pub struct SessionStreamCompatibilityError {
-    /// Source session log that was left untouched.
-    pub path: PathBuf,
-    /// One-based physical line containing the unsupported record.
-    pub physical_line: usize,
-    /// Stable name of the unsupported pre-release payload shape.
-    pub format_name: &'static str,
-}
-
 /// Operation class whose bounded session-file lock acquisition was exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionIoBusyKind {
@@ -80,48 +66,6 @@ pub fn session_io_lock_metrics() -> SessionIoLockMetricsSnapshot {
     }
 }
 
-pub(super) fn unsupported_legacy_session_log_entry(
-    path: &Path,
-    physical_line: usize,
-) -> anyhow::Error {
-    SessionStreamCompatibilityError {
-        path: path.to_path_buf(),
-        physical_line,
-        format_name: "legacy SessionLogEntry",
-    }
-    .into()
-}
-
-pub(super) fn unsupported_legacy_compaction_record(
-    path: &Path,
-    physical_line: usize,
-) -> anyhow::Error {
-    SessionStreamCompatibilityError {
-        path: path.to_path_buf(),
-        physical_line,
-        format_name: "legacy CompactionRecord payload",
-    }
-    .into()
-}
-
-pub(super) fn unsupported_legacy_tool_result_record(
-    path: &Path,
-    physical_line: usize,
-) -> anyhow::Error {
-    SessionStreamCompatibilityError {
-        path: path.to_path_buf(),
-        physical_line,
-        format_name: "legacy inline tool_result_recorded (LegacyUnavailable)",
-    }
-    .into()
-}
-
-pub(super) fn is_unsupported_legacy_session_error(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<SessionStreamCompatibilityError>()
-        .is_some()
-}
-
 pub(super) fn stored_event_from_stream_line(
     line: &str,
     path: &Path,
@@ -144,67 +88,22 @@ pub(super) fn classify_session_stream_line(
     path: &Path,
     physical_line: usize,
 ) -> Result<Option<StoredEvent>> {
-    if serde_json::from_str::<SessionLogEntry>(line).is_ok() {
-        return Err(unsupported_legacy_session_log_entry(path, physical_line));
-    }
-
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return Ok(None);
     };
-    // The removed pre-release compaction payload was written as a raw JSON object rather than a
-    // `SessionLogEntry` enum or V2 event envelope. Treat it as an explicitly unsupported format
-    // before tail recovery gets a chance to interpret its final line as malformed bytes.
-    if value
-        .get("control")
-        .and_then(|control| control.get("compaction_applied"))
-        .is_some()
-    {
-        return Err(unsupported_legacy_compaction_record(path, physical_line));
-    }
     let looks_like_stored_event = ["schema_version", "event_type"]
         .into_iter()
         .all(|field| value.get(field).is_some());
     if !looks_like_stored_event {
-        return Ok(None);
+        bail!(
+            "session stream line {physical_line} in {} is not a stored event",
+            path.display()
+        );
     }
 
-    let event = StoredEvent::from_json_str(line)
-        .with_context(|| stream_line_context("stored event", physical_line, path))?;
-    reject_legacy_compaction_record_payload(&event, path, physical_line)?;
-    Ok(Some(event))
-}
-
-fn reject_legacy_compaction_record_payload(
-    event: &StoredEvent,
-    path: &Path,
-    physical_line: usize,
-) -> Result<()> {
-    if event.event_type == DurableEventType::ToolResultRecorded.as_str()
-        || event
-            .payload
-            .get("session_log_entry")
-            .and_then(|entry| entry.get("tool_result"))
-            .is_some()
-    {
-        return Err(unsupported_legacy_tool_result_record(path, physical_line));
-    }
-    let Some(event_type) = event.event_kind() else {
-        return Ok(());
-    };
-    if event_type.payload_metadata().storage != DurableEventPayloadStorage::SessionLogEntry {
-        return Ok(());
-    }
-    let Some(entry) = event.payload.get("session_log_entry").cloned() else {
-        return Ok(());
-    };
-    if entry
-        .get("control")
-        .and_then(|control| control.get("compaction_applied"))
-        .is_some()
-    {
-        return Err(unsupported_legacy_compaction_record(path, physical_line));
-    }
-    Ok(())
+    StoredEvent::from_json_str(line)
+        .map(Some)
+        .with_context(|| stream_line_context("stored event", physical_line, path))
 }
 
 /// Append-only JSONL store for session and control-plane history.
@@ -260,11 +159,6 @@ impl JsonlSessionStore {
         event_class: EventClass,
         payload: serde_json::Value,
     ) -> Result<StoredEvent> {
-        if event_type == DurableEventType::ToolResultRecorded {
-            bail!(
-                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
-            );
-        }
         let mut events = self.writer.append_events(
             vec![PendingStoredEvent {
                 event_type,
@@ -288,22 +182,6 @@ impl JsonlSessionStore {
     ) -> Result<Vec<StoredEvent>> {
         if durable_events.is_empty() && entries.is_empty() {
             bail!("durable event append batch must not be empty");
-        }
-        if durable_events
-            .iter()
-            .any(|(event_type, _, _)| *event_type == DurableEventType::ToolResultRecorded)
-        {
-            bail!(
-                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
-            );
-        }
-        if entries
-            .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
-        {
-            bail!(
-                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
-            );
         }
         if entries.iter().any(|entry| {
             matches!(
@@ -354,22 +232,6 @@ impl JsonlSessionStore {
     {
         if durable_events.is_empty() && entries.is_empty() {
             bail!("conditional mixed event append batch must not be empty");
-        }
-        if durable_events
-            .iter()
-            .any(|(event_type, _, _)| *event_type == DurableEventType::ToolResultRecorded)
-        {
-            bail!(
-                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
-            );
-        }
-        if entries
-            .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
-        {
-            bail!(
-                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
-            );
         }
         if entries.iter().any(|entry| {
             matches!(
@@ -597,25 +459,12 @@ impl JsonlSessionStore {
         if pending.is_empty() {
             bail!("conditional durable append batch must not be empty");
         }
-        if pending
-            .iter()
-            .any(|event| event.event_type == DurableEventType::ToolResultRecorded)
-        {
-            bail!(
-                "legacy tool_result_recorded is append-disabled; use ToolResultRecordedV2 with an explicit artifact availability"
-            );
-        }
         self.writer
             .append_events_if_records(pending, true, should_append)
     }
 
     /// Appends a provider-visible or control session entry as a v2 stored event.
     pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
-        if matches!(entry, SessionLogEntry::ToolResult(_)) {
-            bail!(
-                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
-            );
-        }
         if matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
@@ -636,14 +485,6 @@ impl JsonlSessionStore {
     ) -> Result<Vec<StoredEvent>> {
         if entries.is_empty() {
             bail!("session entry append batch must not be empty");
-        }
-        if entries
-            .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::ToolResult(_)))
-        {
-            bail!(
-                "legacy inline tool results are unsupported; append ToolResultRecordedV2 with an explicit artifact availability"
-            );
         }
         if entries.iter().any(|entry| {
             matches!(
@@ -705,9 +546,9 @@ impl JsonlSessionStore {
 
     pub(super) fn load_entries_writer_reconciled(
         &self,
-        fallback_provider_name: String,
-        fallback_model_name: String,
-        fallback_route: Option<crate::ResolvedModelRoute>,
+        initial_provider_name: String,
+        initial_model_name: String,
+        initial_route: Option<crate::ResolvedModelRoute>,
     ) -> Result<(
         Vec<SessionLogEntry>,
         Vec<SessionStreamRecord>,
@@ -721,8 +562,6 @@ impl JsonlSessionStore {
         let mut records = writer.read_records_writer()?;
         ConversationQueueDurableProjection::from_records(&records)?;
         let mut entries = session_entries_from_records(&records)?;
-        let (provider_name, model_name) = session_identity_from_entries(&entries)
-            .unwrap_or((fallback_provider_name, fallback_model_name));
 
         let mut reconciled_entries = Vec::new();
         let recovered_at_ms = std::time::SystemTime::now()
@@ -731,14 +570,23 @@ impl JsonlSessionStore {
             .as_millis() as u64;
 
         if !has_session_identity(&entries) {
+            anyhow::ensure!(
+                entries.iter().all(|entry| matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(_))
+                )),
+                "current session stream is missing its required session identity"
+            );
             let entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
-                provider_name: provider_name.clone(),
-                model_name: model_name.clone(),
-                resolved_model_route: fallback_route,
+                provider_name: initial_provider_name,
+                model_name: initial_model_name,
+                resolved_model_route: initial_route,
             });
             entries.push(entry);
             reconciled_entries.push(entries.last().expect("identity entry was pushed").clone());
         }
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .ok_or_else(|| anyhow::anyhow!("current session identity could not be decoded"))?;
 
         for execution in interrupted_tool_executions(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution)));
@@ -831,13 +679,13 @@ impl JsonlSessionStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the line is a legacy entry, not a valid stored event, or when a
+    /// Returns an error when the line is not a valid stored event or when a
     /// stored event's embedded session entry payload is malformed.
     pub fn session_entry_from_json_line(line: &str) -> Result<Option<SessionLogEntry>> {
         Self::session_entry_from_json_line_at_path(line, Path::new("<session JSONL line>"), 1)
     }
 
-    /// Decodes one session entry with its source location for an actionable compatibility error.
+    /// Decodes one session entry with its source location for an actionable format error.
     pub fn session_entry_from_json_line_at_path(
         line: &str,
         path: &Path,
@@ -1151,7 +999,6 @@ pub(super) fn session_entry_event_type(entry: &SessionLogEntry) -> DurableEventT
     match entry {
         SessionLogEntry::User(_) => DurableEventType::UserMessageRecorded,
         SessionLogEntry::Assistant(_) => DurableEventType::AssistantMessageRecorded,
-        SessionLogEntry::ToolResult(_) => DurableEventType::ToolResultRecorded,
         SessionLogEntry::ToolResultV2(_) => DurableEventType::ToolResultRecordedV2,
         SessionLogEntry::Control(control) => control_entry_event_type(control),
     }
@@ -1276,11 +1123,6 @@ pub(super) fn tool_execution_event_type(status: ToolExecutionStatus) -> DurableE
 pub(super) fn session_entry_from_stored_event(
     event: &StoredEvent,
 ) -> Result<Option<SessionLogEntry>> {
-    if event.event_type == DurableEventType::ToolResultRecorded.as_str() {
-        bail!(
-            "unsupported legacy inline tool_result_recorded: raw body is LegacyUnavailable and cannot be recovered as an artifact"
-        );
-    }
     if event.event_kind().is_none() {
         return Ok(None);
     }
@@ -1298,11 +1140,6 @@ pub(super) fn session_entry_from_stored_event(
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from stored event payload")?;
-    if matches!(entry, SessionLogEntry::ToolResult(_)) {
-        bail!(
-            "unsupported legacy inline tool result: raw body is LegacyUnavailable and cannot be recovered as an artifact"
-        );
-    }
     if let SessionLogEntry::ToolResultV2(result) = &entry {
         if event.event_kind() != Some(DurableEventType::ToolResultRecordedV2) {
             bail!("tool result V2 payload used the wrong durable event type");
@@ -1321,11 +1158,6 @@ pub(super) fn session_entry_from_stored_event(
 pub(crate) fn session_entry_from_domain_event(
     event: &DomainEvent,
 ) -> Result<Option<SessionLogEntry>> {
-    if event.event_type() == DurableEventType::ToolResultRecorded {
-        bail!(
-            "unsupported legacy inline tool_result_recorded: raw body is LegacyUnavailable and cannot be recovered as an artifact"
-        );
-    }
     if let DomainEvent::ConversationInputPromoted(payload) = event {
         let entry: ConversationInputPromotedEntry = serde_json::from_value(payload.payload.clone())
             .context("failed to decode conversation input promoted domain payload")?;
@@ -1342,11 +1174,6 @@ pub(crate) fn session_entry_from_domain_event(
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from domain event payload")?;
-    if matches!(entry, SessionLogEntry::ToolResult(_)) {
-        bail!(
-            "unsupported legacy inline tool result: raw body is LegacyUnavailable and cannot be recovered as an artifact"
-        );
-    }
     if let SessionLogEntry::ToolResultV2(result) = &entry {
         if event.event_type() != DurableEventType::ToolResultRecordedV2 {
             bail!("tool result V2 payload used the wrong durable event type");

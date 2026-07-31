@@ -58,7 +58,7 @@ fn appearance_store_persists_only_the_bounded_versioned_enum() {
 }
 
 #[test]
-fn appearance_store_migrates_legacy_light_and_dark_preferences() {
+fn appearance_store_rejects_removed_light_and_dark_preferences() {
     let temp = tempfile::tempdir().expect("temporary directory should create");
     let light = temp.path().join("light.json");
     let dark = temp.path().join("dark.json");
@@ -69,11 +69,11 @@ fn appearance_store_migrates_legacy_light_and_dark_preferences() {
 
     assert_eq!(
         AppearanceStore::load(light).preference(),
-        ThemePreference::SigilLight
+        ThemePreference::System
     );
     assert_eq!(
         AppearanceStore::load(dark).preference(),
-        ThemePreference::SigilDark
+        ThemePreference::System
     );
 }
 

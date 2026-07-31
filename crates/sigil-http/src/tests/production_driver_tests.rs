@@ -500,7 +500,7 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
         .expect("orphan artifact should publish");
     store
         .bind_source_event(&orphan.artifact_ref, "forged-source-event")
-        .expect("legacy sidecar should be forgeable for the regression fixture");
+        .expect("orphan sidecar should be forgeable for the regression fixture");
     assert_eq!(
         driver.tool_artifact_page(
             &session,

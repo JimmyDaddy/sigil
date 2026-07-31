@@ -384,12 +384,6 @@ pub enum AppAction {
         paused: bool,
     },
     SubmitPlanPrompt(String),
-    ApprovePlan {
-        plan_text: String,
-        permission: PlanApprovalPermission,
-        scope_summary: String,
-        clear_planning_context: bool,
-    },
     CreateTaskFromPlan {
         plan_id: String,
         expected_plan_hash: String,
@@ -602,7 +596,7 @@ fn configured_runtime_route(
         })
         .unwrap_or_else(|_| {
             (
-                root_config.agent.provider.clone(),
+                root_config.agent.runtime_provider.clone(),
                 root_config.agent.model.clone(),
                 None,
             )

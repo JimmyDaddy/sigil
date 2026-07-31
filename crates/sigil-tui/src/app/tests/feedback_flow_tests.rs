@@ -1,11 +1,11 @@
 use std::fs;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_kernel::{ModelMessage, SessionLogEntry};
+use sigil_kernel::{ModelMessage, SessionLogEntry, ToolResultMeta};
 use sigil_runtime::support::{SUPPORT_BUNDLES_DIRECTORY_NAME, SupportBuildInfo, SupportBundleV1};
 use tempfile::tempdir;
 
-use super::super::tests::common::test_config;
+use super::super::tests::common::{test_config, v2_tool_result_entry};
 use super::*;
 
 fn feedback_app() -> anyhow::Result<AppState> {
@@ -81,10 +81,12 @@ fn feedback_modal_owns_input_and_exports_only_redacted_coarse_facts() -> anyhow:
         )));
     app.session_browser
         .current_entries
-        .push(SessionLogEntry::ToolResult(ModelMessage::tool(
+        .push(v2_tool_result_entry(
             "private-call",
+            "test_tool",
             canaries[2],
-        )));
+            ToolResultMeta::default(),
+        ));
     let durable_entry_count = app.session_browser.current_entries.len();
     let timeline_count = app.timeline.len();
     let event_count = app.events.len();

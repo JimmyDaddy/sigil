@@ -278,9 +278,18 @@ fn mcp_get_requires_an_exact_configured_name() -> Result<()> {
 fn write_config(path: &Path) -> Result<()> {
     fs::write(
         path,
-        r#"[agent]
-provider = "deepseek"
-model = "deepseek-chat"
+        r#"config_version = 2
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = { source = "none" }
 "#,
     )?;
     Ok(())

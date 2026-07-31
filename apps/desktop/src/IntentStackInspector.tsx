@@ -74,10 +74,10 @@ export function IntentStackInspector({
       </section>
     );
   }
-  if (state?.status === "history_unavailable") {
+  if (state?.status === "not_created") {
     return (
       <section className="intent-stack-empty">
-        <strong>{t("intentHistoryUnavailable")}</strong>
+        <strong>{t("noIntentsRecorded")}</strong>
         <p>{state.safeMessage}</p>
         <Button type="button" variant="quiet" disabled={busy} onClick={onRefresh}>
           {t("refreshIntentStack")}

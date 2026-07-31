@@ -1,6 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
-use serde_json::Value;
+use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{ModelRequestConfig, RootConfig};
 use sigil_provider_anthropic::{AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV, StrictToolsMode};
@@ -291,110 +289,6 @@ pub fn deepseek_provider_config_fields(
     }
 }
 
-pub fn set_provider_config_fields(
-    root_config: &mut RootConfig,
-    provider_name: &str,
-    fields: &ProviderConfigFields,
-    deepseek_fields: Option<&DeepSeekProviderConfigFields>,
-) -> Result<()> {
-    let provider_name = supported_provider_name(provider_name)?;
-    let model = fields.model.trim();
-    if model.is_empty() {
-        bail!("model cannot be empty");
-    }
-    let base_url = fields.base_url.trim();
-    if base_url.is_empty() {
-        bail!("base_url cannot be empty");
-    }
-    let api_key = optional_trimmed_string(&fields.api_key);
-
-    root_config.agent.provider = provider_name.to_owned();
-    root_config.agent.model = model.to_owned();
-
-    match provider_name {
-        OPENAI_COMPAT_PROVIDER_KEY => {
-            let mut config = load_openai_compat_config(root_config)
-                .unwrap_or_else(|_| OpenAiCompatibleProviderConfig::default_for_model(model));
-            config.model = model.to_owned();
-            config.api_key = api_key;
-            config.base_url = base_url.to_owned();
-            root_config.providers.insert(
-                OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
-                serialize_provider_config("openai_compat", &config)?,
-            );
-        }
-        OPENAI_RESPONSES_PROVIDER_KEY => {
-            let mut config = load_openai_responses_config(root_config)
-                .unwrap_or_else(|_| OpenAiResponsesProviderConfig::default_for_model(model));
-            config.model = model.to_owned();
-            config.api_key = api_key;
-            config.base_url = base_url.to_owned();
-            root_config.providers.insert(
-                OPENAI_RESPONSES_PROVIDER_KEY.to_owned(),
-                serialize_provider_config("openai_responses", &config)?,
-            );
-        }
-        ANTHROPIC_PROVIDER_KEY => {
-            let mut config = load_anthropic_config(root_config)
-                .unwrap_or_else(|_| AnthropicProviderConfig::default_for_model(model));
-            config.model = model.to_owned();
-            config.api_key = api_key;
-            config.base_url = base_url.to_owned();
-            root_config.providers.insert(
-                ANTHROPIC_PROVIDER_KEY.to_owned(),
-                serialize_provider_config("anthropic", &config)?,
-            );
-        }
-        GEMINI_PROVIDER_KEY => {
-            let mut config = load_gemini_config(root_config)
-                .unwrap_or_else(|_| GeminiProviderConfig::default_for_model(model));
-            config.model = model.to_owned();
-            config.api_key = api_key;
-            config.base_url = base_url.to_owned();
-            root_config.providers.insert(
-                GEMINI_PROVIDER_KEY.to_owned(),
-                serialize_provider_config("gemini", &config)?,
-            );
-        }
-        DEEPSEEK_PROVIDER_KEY => {
-            let extras = deepseek_fields
-                .cloned()
-                .unwrap_or_else(|| deepseek_provider_config_fields(root_config, model));
-            let beta_base_url = extras.beta_base_url.trim();
-            if beta_base_url.is_empty() {
-                bail!("beta_base_url cannot be empty");
-            }
-            let anthropic_base_url = extras.anthropic_base_url.trim();
-            if anthropic_base_url.is_empty() {
-                bail!("anthropic_base_url cannot be empty");
-            }
-            let fim_model = extras.fim_model.trim();
-            if fim_model.is_empty() {
-                bail!("fim_model cannot be empty");
-            }
-
-            let mut config = load_deepseek_config(root_config)
-                .unwrap_or_else(|_| DeepSeekProviderConfig::default_for_model(model));
-            config.model = model.to_owned();
-            config.api_key = api_key;
-            config.base_url = base_url.to_owned();
-            config.beta_base_url = beta_base_url.to_owned();
-            config.anthropic_base_url = anthropic_base_url.to_owned();
-            config.user_id_strategy = optional_trimmed_string(&extras.user_id_strategy);
-            config.strict_tools_mode = extras.strict_tools_mode.into();
-            config.fim_model = fim_model.to_owned();
-            root_config.providers.insert(
-                DEEPSEEK_PROVIDER_KEY.to_owned(),
-                serialize_provider_config("deepseek", &config)?,
-            );
-        }
-        _ => unreachable!("supported_provider_name returned an unsupported provider"),
-    }
-
-    Ok(())
-}
-
-#[must_use]
 pub fn model_request_config_fields(root_config: &RootConfig) -> ModelRequestConfigFields {
     ModelRequestConfigFields {
         request_timeout_secs: root_config.model_request.request_timeout_secs.to_string(),
@@ -427,17 +321,12 @@ pub fn set_model_request_config_fields(
 }
 
 pub fn set_active_provider_model(root_config: &mut RootConfig, model: &str) -> Result<()> {
-    let provider_name = normalize_provider_name(&root_config.agent.provider).to_owned();
-    let mut fields = provider_config_fields(root_config, &provider_name, model);
-    fields.model = model.to_owned();
-    let deepseek_fields = deepseek_provider_config_fields(root_config, model);
-    set_provider_config_fields(root_config, &provider_name, &fields, Some(&deepseek_fields))
-}
-
-pub fn deepseek_provider_value_for_setup(model: &str, api_key: Option<&str>) -> Result<Value> {
-    let mut config = DeepSeekProviderConfig::default_for_model(model);
-    config.api_key = api_key.map(str::to_owned);
-    serialize_provider_config("deepseek", &config)
+    let model = model.trim();
+    if model.is_empty() {
+        bail!("model cannot be empty");
+    }
+    root_config.agent.model = model.to_owned();
+    Ok(())
 }
 
 pub fn provider_status_config_from_fields(
@@ -470,7 +359,7 @@ pub fn deepseek_provider_status_config(root_config: &RootConfig) -> Result<Provi
 pub fn provider_balance_status_config(
     root_config: &RootConfig,
 ) -> Result<Option<ProviderStatusConfig>> {
-    match normalize_provider_name(&root_config.agent.provider) {
+    match normalize_provider_name(&root_config.agent.runtime_provider) {
         DEEPSEEK_PROVIDER_KEY => deepseek_provider_status_config(root_config).map(Some),
         _ => Ok(None),
     }
@@ -479,7 +368,7 @@ pub fn provider_balance_status_config(
 pub fn provider_model_status_config(
     root_config: &RootConfig,
 ) -> Result<Option<ProviderStatusConfig>> {
-    match normalize_provider_name(&root_config.agent.provider) {
+    match normalize_provider_name(&root_config.agent.runtime_provider) {
         DEEPSEEK_PROVIDER_KEY => crate::resolve_deepseek_config(root_config)
             .map(provider_config_fields_from_deepseek)
             .and_then(|fields| {
@@ -608,18 +497,6 @@ fn parse_model_request_timeout_secs(label: &str, raw: &str) -> Result<u64> {
 fn optional_trimmed_string(raw: &str) -> Option<String> {
     let value = raw.trim();
     (!value.is_empty()).then(|| value.to_owned())
-}
-
-fn serialize_provider_config<T>(label: &str, provider_config: &T) -> Result<Value>
-where
-    T: Serialize,
-{
-    let mut value = serde_json::to_value(provider_config)
-        .with_context(|| format!("failed to serialize {label} provider config"))?;
-    if let Some(object) = value.as_object_mut() {
-        object.retain(|_, entry| !entry.is_null());
-    }
-    Ok(value)
 }
 
 #[cfg(test)]

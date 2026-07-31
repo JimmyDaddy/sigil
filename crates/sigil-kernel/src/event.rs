@@ -164,7 +164,6 @@ macro_rules! durable_event_types {
 durable_event_types! {
     UserMessageRecorded => ("user_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
     AssistantMessageRecorded => ("assistant_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
-    ToolResultRecorded => ("tool_result_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
     RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
@@ -1041,7 +1040,6 @@ fn maybe_decode_control_entry(event: &StoredEvent) -> Result<Option<ControlEntry
         SessionLogEntry::Control(control) => Ok(Some(control)),
         SessionLogEntry::User(_)
         | SessionLogEntry::Assistant(_)
-        | SessionLogEntry::ToolResult(_)
         | SessionLogEntry::ToolResultV2(_) => Ok(None),
     }
 }
@@ -1566,7 +1564,6 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ChangeSetProposed(_) => "change_set_proposed",
         ControlEntry::ChangeSetApplied(_) => "change_set_applied",
         ControlEntry::TerminalTask(_) => "terminal_task",
-        ControlEntry::PlanApproved(_) => "plan_approved",
         ControlEntry::PlanDraftCreated(_) => "plan_draft_created",
         ControlEntry::PlanDecisionRecorded(_) => "plan_decision_recorded",
         ControlEntry::PlanPermissionGranted(_) => "plan_permission_granted",

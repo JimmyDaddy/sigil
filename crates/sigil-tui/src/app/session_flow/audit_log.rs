@@ -56,35 +56,11 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
         SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
             render_model_message_line(message)
         }
-        SessionLogEntry::ToolResult(message) => format!(
-            "[tool] {}",
-            render_legacy_tool_result_unavailable_content(message)
-        ),
         SessionLogEntry::ToolResultV2(result) => {
             format!("[tool] {}", render_tool_result_v2_content(result))
         }
         SessionLogEntry::Control(control) => render_control_entry_line(control),
     }
-}
-
-pub(super) fn render_legacy_tool_result_unavailable_content(message: &ModelMessage) -> String {
-    let observed_bytes = message
-        .content
-        .as_deref()
-        .map_or(0, |content| content.len() as u64);
-    serde_json::json!({
-        "status": "error",
-        "content": "Legacy inline tool output is unavailable after the V2 artifact cutover.",
-        "artifact": {
-            "artifact_ref": null,
-            "availability": "legacy_unavailable",
-            "observed_bytes": observed_bytes,
-            "persisted_bytes": 0,
-            "has_more": false,
-            "next_selector": null
-        }
-    })
-    .to_string()
 }
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
@@ -329,13 +305,6 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             task.status.as_str(),
             truncate_session_view_text(&task.handle.log_path.display().to_string(), 48)
         ),
-        ControlEntry::PlanApproved(entry) => format!(
-            "[ctl] plan grant v{} permission={} expires={} hash={}",
-            entry.plan_version,
-            plan_approval_permission_label(entry.permission),
-            plan_approval_expiry_label(&entry.expires),
-            truncate_session_view_text(&entry.plan_hash, 16)
-        ),
         ControlEntry::PlanDraftCreated(entry) => format!(
             "[ctl] plan draft {} paths={} suggested_checks={} hash={}",
             entry.plan_id.as_str(),
@@ -433,7 +402,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             result
                 .terminal_status
                 .map(task_participant_attempt_status_label)
-                .unwrap_or("legacy"),
+                .unwrap_or("unavailable"),
             truncate_session_view_text(&result.summary, 64),
             result.changed_paths.len()
         ),
@@ -981,7 +950,6 @@ pub(super) fn restored_tool_result_call_ids(entries: &[SessionLogEntry]) -> Hash
     entries
         .iter()
         .filter_map(|entry| match entry {
-            SessionLogEntry::ToolResult(message) => message.tool_call_id.clone(),
             SessionLogEntry::ToolResultV2(result) => Some(result.call_id.clone()),
             _ => None,
         })
@@ -1044,7 +1012,7 @@ fn tool_artifact_availability_label(availability: ToolArtifactAvailability) -> &
         ToolArtifactAvailability::Missing => "missing",
         ToolArtifactAvailability::HashMismatch => "hash_mismatch",
         ToolArtifactAvailability::PolicyRevoked => "policy_revoked",
-        ToolArtifactAvailability::LegacyUnavailable => "legacy_unavailable",
+        ToolArtifactAvailability::Unavailable => "unavailable",
     }
 }
 
@@ -1145,16 +1113,6 @@ pub(super) fn plan_approval_permission_label(
     match permission {
         sigil_kernel::PlanApprovalPermission::Ask => "ask",
         sigil_kernel::PlanApprovalPermission::WorkspaceEdits => "workspace_edits",
-    }
-}
-
-pub(super) fn plan_approval_expiry_label(
-    expiry: &sigil_kernel::PlanApprovalExpiry,
-) -> &'static str {
-    match expiry {
-        sigil_kernel::PlanApprovalExpiry::NextUserPrompt => "next_user_prompt",
-        sigil_kernel::PlanApprovalExpiry::Session => "session",
-        sigil_kernel::PlanApprovalExpiry::AtUnixMs(_) => "at_unix_ms",
     }
 }
 

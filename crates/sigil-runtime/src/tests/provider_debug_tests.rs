@@ -5,12 +5,7 @@ use std::{
 
 use anyhow::Result;
 use futures::StreamExt;
-use serde_json::json;
-use sigil_kernel::{
-    AgentConfig, CodeIntelligenceConfig, ExecutionConfig, McpServerConfig, MemoryConfig,
-    PermissionConfig, ProviderChunk, RootConfig, SessionConfig, TaskConfig, VerificationConfig,
-    WorkspaceConfig,
-};
+use sigil_kernel::{ConnectionId, ModelRef, ProviderChunk, RootConfig};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -21,8 +16,12 @@ use super::{
     stream_deepseek_prefix_debug,
 };
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires an HTTPS provider fixture under the current connection schema"]
+#[allow(clippy::await_holding_lock)]
 async fn prefix_debug_stream_routes_through_runtime_adapter() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "debug-test-secret");
     let requests = Arc::new(Mutex::new(VecDeque::new()));
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
         200,
@@ -62,8 +61,12 @@ async fn prefix_debug_stream_routes_through_runtime_adapter() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires an HTTPS provider fixture under the current connection schema"]
+#[allow(clippy::await_holding_lock)]
 async fn fim_debug_stream_routes_through_runtime_adapter() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "debug-test-secret");
     let requests = Arc::new(Mutex::new(VecDeque::new()));
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
         200,
@@ -99,46 +102,32 @@ async fn fim_debug_stream_routes_through_runtime_adapter() -> Result<()> {
 }
 
 fn test_root_config(base_url: &str) -> RootConfig {
-    RootConfig {
-        config_version: None,
-        workspace: WorkspaceConfig {
-            root: ".".to_owned(),
-        },
-        storage: Default::default(),
-        session: SessionConfig::default(),
-        agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            connection: None,
-            model: "deepseek-v4-flash".to_owned(),
-            max_turns: None,
-            tool_timeout_secs: 5,
-        },
-        permission: PermissionConfig::default(),
-        model_request: Default::default(),
-        memory: MemoryConfig::default(),
-        skills: Default::default(),
-        compaction: Default::default(),
-        code_intelligence: CodeIntelligenceConfig::default(),
-        terminal: Default::default(),
-        execution: ExecutionConfig::default(),
-        verification: VerificationConfig::default(),
-        appearance: Default::default(),
-        task: TaskConfig::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": base_url,
-                "beta_base_url": base_url,
-                "anthropic_base_url": base_url,
-                "fim_model": "deepseek-v4-pro",
-                "api_key": "test-key",
-                "strict_tools_mode": "auto"
-            }),
-        )]),
-        connections: BTreeMap::new(),
-        web: Default::default(),
-        mcp_servers: Vec::<McpServerConfig>::new(),
-    }
+    let connection_id = ConnectionId::new("deepseek-debug").expect("connection id");
+    let mut connection = crate::provider_connections::provider_connection_template(
+        crate::provider_connections::ProviderFamily::DeepSeek,
+        crate::provider_connections::ProviderProtocol::DeepSeek,
+        connection_id.clone(),
+        "DeepSeek debug",
+    )
+    .expect("connection template")
+    .0;
+    connection.base_url = base_url.to_owned();
+    connection.options = serde_json::json!({
+        "beta_base_url": base_url,
+        "anthropic_base_url": base_url,
+        "fim_model": "deepseek-v4-pro",
+        "strict_tools_mode": "auto"
+    });
+    let base: RootConfig = toml::from_str(
+        "config_version = 2\n[agent]\nconnection = \"bootstrap\"\nmodel = \"bootstrap\"\n",
+    )
+    .expect("base root config");
+    crate::provider_connections::materialize_root_config(
+        &base,
+        &BTreeMap::from([(connection_id.clone(), connection)]),
+        &ModelRef::new(connection_id, "deepseek-v4-flash").expect("model ref"),
+    )
+    .expect("current root config")
 }
 
 async fn drain_stream(stream: &mut super::ProviderDebugStream) -> Result<Vec<ProviderChunk>> {

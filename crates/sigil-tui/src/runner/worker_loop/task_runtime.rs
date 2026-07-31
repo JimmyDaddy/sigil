@@ -1051,63 +1051,6 @@ pub(in crate::runner) fn send_task_result(
     });
 }
 
-pub(in crate::runner) struct PlanApprovalRequest {
-    pub(in crate::runner) plan_text: String,
-    pub(in crate::runner) permission: PlanApprovalPermission,
-    pub(in crate::runner) scope_summary: String,
-    pub(in crate::runner) clear_planning_context: bool,
-}
-
-pub(in crate::runner) fn approve_plan(
-    root_config: &RootConfig,
-    current_session_log_path: &Path,
-    current_session: &mut Option<Session>,
-    request: PlanApprovalRequest,
-) -> std::result::Result<(PlanApprovedEntry, Vec<SessionLogEntry>), String> {
-    let safe_plan_text = sigil_kernel::safe_persistence_text(&request.plan_text);
-    let plan_text = safe_plan_text.trim();
-    if plan_text.is_empty() {
-        return Err("plan approval failed: plan text is empty".to_owned());
-    }
-    let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.provider,
-        &root_config.agent.model,
-        current_session_log_path,
-        current_session.as_ref(),
-    )
-    .map_err(|error| format!("failed to load session before plan approval: {error:#}"))?;
-    let next_version = session
-        .plan_approval_projection()
-        .latest_approval
-        .as_ref()
-        .map(|entry| entry.plan_version.saturating_add(1))
-        .unwrap_or(1);
-    let scope_summary = if request.scope_summary.trim().is_empty() {
-        "approved plan scope".to_owned()
-    } else {
-        sigil_kernel::safe_persistence_text(request.scope_summary.trim())
-    };
-    let workspace_paths = plan_workspace_paths(plan_text);
-    let entry = PlanApprovedEntry {
-        plan_version: next_version,
-        plan_hash: plan_text_hash(plan_text),
-        approved_at_ms: current_unix_time_ms(),
-        permission: request.permission,
-        scope: PlanApprovalScope {
-            summary: scope_summary,
-            workspace_paths,
-        },
-        expires: PlanApprovalExpiry::NextUserPrompt,
-        clear_planning_context: request.clear_planning_context,
-    };
-    session
-        .append_control(ControlEntry::PlanApproved(entry.clone()))
-        .map_err(|error| format!("failed to append plan approval state: {error:#}"))?;
-    let entries = session.entries().to_vec();
-    *current_session = Some(session);
-    Ok((entry, entries))
-}
-
 pub(in crate::runner) fn append_plan_draft(
     root_config: &RootConfig,
     workspace_root: &Path,
@@ -1217,7 +1160,7 @@ pub(in crate::runner) fn create_task_from_plan(
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for task creation: {error:#}"))?;
     let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.provider,
+        &root_config.agent.runtime_provider,
         &root_config.agent.model,
         current_session_log_path,
         current_session.as_ref(),
@@ -1596,7 +1539,7 @@ pub(in crate::runner) fn reject_plan(
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for rejection: {error:#}"))?;
     let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.provider,
+        &root_config.agent.runtime_provider,
         &root_config.agent.model,
         current_session_log_path,
         current_session.as_ref(),

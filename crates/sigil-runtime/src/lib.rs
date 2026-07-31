@@ -8,9 +8,9 @@ pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
     AgentRole, AgentRunOptions, ApprovalMode, ExecutionBackend, InteractionMode, McpServerConfig,
     McpServerStartup, MutationEventRecorder, NetworkEffect, NetworkPolicy,
-    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig,
-    RootConfig, ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess,
-    ToolAllowlistConfig, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
+    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
+    ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
     ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
     ToolSubject, ToolSubjectKind, ToolSubjectScope, WorkspaceTrust, default_user_config_dir,
 };
@@ -247,12 +247,11 @@ pub use provider_config::{
     ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
     PROVIDER_KEYS, ProviderConfigFields, ProviderStatusConfig, ProviderStrictToolsMode,
     bundled_provider_models, deepseek_provider_config_fields, deepseek_provider_status_config,
-    deepseek_provider_value_for_setup, default_provider_config_fields, default_provider_model,
-    default_setup_provider_model, model_request_config_fields, next_provider_name,
-    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
-    provider_balance_status_config, provider_config_fields, provider_model_status_config,
-    provider_model_status_config_from_fields, provider_status_config_from_fields,
-    set_active_provider_model, set_model_request_config_fields, set_provider_config_fields,
+    default_provider_config_fields, default_provider_model, default_setup_provider_model,
+    model_request_config_fields, next_provider_name, normalize_provider_model_alias,
+    normalize_provider_name, provider_api_key_env_name, provider_balance_status_config,
+    provider_config_fields, provider_model_status_config, provider_model_status_config_from_fields,
+    provider_status_config_from_fields, set_active_provider_model, set_model_request_config_fields,
     supported_provider_name,
 };
 pub use provider_debug::{
