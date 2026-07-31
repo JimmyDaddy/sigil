@@ -3634,6 +3634,107 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText("Run finished. Review the final response and verification status.")).toBeTruthy();
   });
 
+  it("does not re-subscribe when a terminal event is replayed during the initial continuity probe", async () => {
+    const user = userEvent.setup();
+    const continuity = vi.fn(async (): Promise<ConversationContinuity> => ({
+      durableFrontier: { throughStreamSequence: 2 },
+      recoveryActions: [],
+    }));
+    let eventSubscriptionCount = 0;
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "terminal-replay.jsonl",
+          sessionId: "durable-terminal-replay",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Terminal replay",
+          userMessageCount: 1,
+          assistantMessageCount: 1,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-terminal-replay", label: "Terminal replay", runCount: 1 }),
+      display: async () => ({
+        schemaVersion: 1,
+        requestScope: "terminal-replay-scope",
+        throughSessionStreamSequence: "2",
+        totalItems: "2",
+        items: [{
+          schemaVersion: 1,
+          displayId: "terminal-replay-answer",
+          displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "terminal-replay-answer-event",
+          kind: "assistant_message",
+          source: "durable_transcript",
+          runId: "run-terminal-replay",
+          status: "succeeded",
+          content: {
+            type: "message",
+            role: "assistant",
+            text: "This run already finished.",
+            assistantPhase: "final_answer",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 26,
+          },
+        }, {
+          schemaVersion: 1,
+          displayId: "terminal-replay-finished",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          sourceEventId: "terminal-replay-finished-event",
+          kind: "terminal",
+          source: "durable_run_event",
+          runId: "run-terminal-replay",
+          status: "succeeded",
+          content: {
+            type: "terminal",
+            finalMessageId: "terminal-replay-answer",
+            summaryTruncated: false,
+          },
+        }],
+        terminalFrontier: {
+          runId: "run-terminal-replay",
+          sessionStreamSequence: "2",
+          status: "succeeded",
+        },
+        hasMore: false,
+        gapFacts: [],
+      }),
+      continuity,
+      subscribeRunEvents: async (listener) => {
+        eventSubscriptionCount += 1;
+        listener({
+          workspaceId: workspace.id,
+          sessionId: "http-terminal-replay",
+          runId: "run-terminal-replay",
+          sequence: 2,
+          runSequence: "2",
+          replayable: true,
+          kind: "run_finished",
+        });
+        return () => undefined;
+      },
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Terminal replay/ }));
+    expect(await screen.findByText("This run already finished.")).toBeTruthy();
+    await waitFor(() => expect(continuity).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    });
+
+    expect(eventSubscriptionCount).toBe(1);
+    expect(continuity).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("status", { name: "Checking conversation continuity" })).toBeNull();
+    await user.type(screen.getByRole("combobox", { name: "Message Sigil" }), "Continue normally");
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("reloads the durable projection when a newly started run finishes before its owner is observed", async () => {
     const user = userEvent.setup();
     let completed = false;

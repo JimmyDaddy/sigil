@@ -17,6 +17,7 @@ use sigil_kernel::{
     ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
     WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
 };
+use sigil_runtime::SessionCatalogProjectionError;
 use sigil_runtime::application_run::{application_run_input, default_application_session_path};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use sigil_runtime::machine_protocol::MachineExitCode;
@@ -34,6 +35,7 @@ use super::{
     render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
     render_serve_startup_json, render_serve_startup_plan, render_update_apply, render_update_check,
     render_version, run_machine_command_with_cancellation, run_machine_command_with_writer,
+    session_catalog_projection_error_code,
 };
 
 fn boxed_chunk_stream(
@@ -78,6 +80,19 @@ fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Resul
         Some(paths.projections_root.as_path())
     );
     Ok(())
+}
+
+#[test]
+fn session_catalog_warmup_errors_use_stable_path_free_codes() {
+    let private_path = "/Users/private/workspace/session-catalog.sqlite3";
+    let error = SessionCatalogProjectionError::UnsafePath {
+        message: private_path.to_owned(),
+    };
+
+    let code = session_catalog_projection_error_code(&error);
+
+    assert_eq!(code, "unsafe_path");
+    assert!(!code.contains(private_path));
 }
 
 #[test]

@@ -470,6 +470,40 @@ fn projection_rejects_unknown_persisted_source_state() -> Result<()> {
 }
 
 #[test]
+fn projection_revision_change_rebuilds_without_decoding_retired_row_values() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    finalized_session(
+        &lifecycle.session_dir.join("session.jsonl"),
+        "Current durable session",
+        "deepseek",
+        "chat",
+    )?;
+    projection.rebuild()?;
+    let connection = Connection::open(projection.database_path())?;
+    connection.execute(
+        "UPDATE session_catalog_workspace_v1 SET projection_revision = 1",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE session_catalog_entry_v1 SET source_state = 'unsupported_legacy'",
+        [],
+    )?;
+    drop(connection);
+
+    let report = projection.reconcile()?;
+    let rows = projection.list_workspace_entries()?;
+
+    assert!(report.generation_changed);
+    assert_eq!(report.removed_source_count, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source_state, LocalSessionCatalogState::Ready);
+    assert_eq!(rows[0].title.as_deref(), Some("Current durable session"));
+    Ok(())
+}
+
+#[test]
 fn incremental_reconcile_reuses_unchanged_rows_and_tracks_pin_append_delete() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");

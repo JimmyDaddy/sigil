@@ -191,6 +191,62 @@ Then("the initial run and queued follow-up both complete", async () => {
   await browser.saveScreenshot(resolve(artifactRoot, "desktop-real-run.png"));
 });
 
+Then("terminal completion releases continuity and history controls", async () => {
+  const composer = await $("#desktop-prompt");
+  await composer.waitForEnabled({
+    timeout: 20_000,
+    timeoutMsg: "terminal completion left the Desktop composer blocked by continuity recovery",
+  });
+  try {
+    await browser.waitUntil(
+      async () =>
+        !(await $(".conversation-continuity-loading").isExisting())
+        && !(await $(".session-rail .error-card").isExisting()),
+      {
+        timeout: 20_000,
+        timeoutMsg: "terminal completion left continuity or conversation history in recovery",
+      },
+    );
+  } catch {
+    const state = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const tauri = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__;
+      let serverContinuity: unknown;
+      try {
+        serverContinuity = await tauri?.core?.invoke?.("desktop_continuity", {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+        });
+      } catch (error) {
+        serverContinuity = { error: String(error) };
+      }
+      return {
+        continuity: document.querySelector(".conversation-continuity-loading")?.textContent ?? null,
+        historyError: document.querySelector(".session-rail .error-card")?.textContent ?? null,
+        composerDisabled: (document.querySelector("#desktop-prompt") as HTMLTextAreaElement | null)?.disabled ?? null,
+        continuityLifecycle: panel?.dataset.continuityLifecycle ?? null,
+        continuityRefreshState: panel?.dataset.continuityRefreshState ?? null,
+        continuityOwnerRunId: panel?.dataset.continuityOwnerRunId ?? null,
+        continuityPendingTerminalRunId: panel?.dataset.continuityPendingTerminalRunId ?? null,
+        serverContinuity,
+      };
+    });
+    const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
+    if (artifactRoot !== undefined) {
+      await browser.saveScreenshot(resolve(artifactRoot, "desktop-terminal-recovery-failure.png"));
+    }
+    throw new Error(`terminal completion did not settle: ${JSON.stringify(state)}`);
+  }
+});
+
 Then("the generated semantic title is synchronized into the conversation page", async () => {
   const title = await $("#conversation-title");
   await title.waitUntil(

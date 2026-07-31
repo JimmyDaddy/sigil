@@ -14,6 +14,7 @@ Feature: Desktop workbench remains usable
     Then the follow-up is recorded in the durable queue
     When I approve the pending command
     Then the initial run and queued follow-up both complete
+    And terminal completion releases continuity and history controls
     And the generated semantic title is synchronized into the conversation page
 
   Scenario: Load and execute workspace extensions

@@ -53,7 +53,10 @@ use sigil_runtime::{
         project_doctor_support_report_v1,
     },
 };
-use sigil_runtime::{LocalSessionLifecycleService, SessionCatalogProjectionService, SigilPaths};
+use sigil_runtime::{
+    LocalSessionLifecycleService, SessionCatalogProjectionError, SessionCatalogProjectionService,
+    SigilPaths,
+};
 
 const HTTP_SERVER_STATE_DIR: &str = "http-server-v2";
 
@@ -1174,13 +1177,15 @@ async fn serve_command(
         &paths.session_catalog_db,
     ));
     let warm_catalog = std::sync::Arc::clone(&session_catalog);
-    let catalog_ready = tokio::task::spawn_blocking(move || warm_catalog.reconcile())
-        .await
-        .is_ok_and(|result| result.is_ok());
-    if !catalog_ready {
-        eprintln!(
-            "warning: historical session catalog is unavailable; catalog requests will return 503"
-        );
+    match tokio::task::spawn_blocking(move || warm_catalog.reconcile()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => eprintln!(
+            "warning: historical session catalog is unavailable; catalog requests will return 503: {}",
+            session_catalog_projection_error_code(&error)
+        ),
+        Err(_) => eprintln!(
+            "warning: historical session catalog is unavailable; catalog requests will return 503: warmup_task_failed"
+        ),
     }
     let server = HttpLocalServer::bind_production(
         config,
@@ -1229,6 +1234,23 @@ async fn serve_command(
         owner_channel.reap_if_finished()?;
     }
     Ok(())
+}
+
+fn session_catalog_projection_error_code(error: &SessionCatalogProjectionError) -> &'static str {
+    match error {
+        SessionCatalogProjectionError::UnsafePath { .. } => "unsafe_path",
+        SessionCatalogProjectionError::IncompatibleSchema { .. } => "incompatible_schema",
+        SessionCatalogProjectionError::Sqlite { .. } => "sqlite",
+        SessionCatalogProjectionError::Source { .. } => "source",
+        SessionCatalogProjectionError::IntegerRange { .. } => "integer_range",
+        SessionCatalogProjectionError::Encoding { .. } => "encoding",
+        SessionCatalogProjectionError::InvalidQuery { .. } => "invalid_query",
+        SessionCatalogProjectionError::InvalidCursor { .. } => "invalid_cursor",
+        SessionCatalogProjectionError::StaleCursor { .. } => "stale_cursor",
+        SessionCatalogProjectionError::ReconcileConflict => "reconcile_conflict",
+        SessionCatalogProjectionError::RecoveryBusy => "recovery_busy",
+        SessionCatalogProjectionError::Recovery { .. } => "recovery",
+    }
 }
 
 fn build_session_lifecycle_service(paths: &SigilPaths) -> LocalSessionLifecycleService {

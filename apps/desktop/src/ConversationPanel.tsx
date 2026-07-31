@@ -28,6 +28,7 @@ import type {
   AgentCatalogEntry,
   ApprovalAction,
   ContinuityRecoveryAction,
+  ConversationContinuity,
   ConversationQueueCommandAction,
   ConversationQueueView,
   CheckpointRestoreReview,
@@ -240,6 +241,7 @@ export function ConversationPanel({
   const conversationQueueEpoch = useRef(0);
   const queuedSuccessorExpected = useRef(false);
   const startedRunProjectionExpected = useRef<string | undefined>(undefined);
+  const pendingContinuityOwner = useRef<ConversationContinuity | undefined>(undefined);
   const onSessionCatalogChangeRef = useRef(onSessionCatalogChange);
   const initialRunContextSessionId = useRef<string | undefined>(undefined);
   const initialDisplaySessionId = useRef<string | undefined>(undefined);
@@ -431,6 +433,7 @@ export function ConversationPanel({
     conversationQueueEpoch.current += 1;
     queuedSuccessorExpected.current = false;
     startedRunProjectionExpected.current = undefined;
+    pendingContinuityOwner.current = undefined;
     activeRunIdRef.current = undefined;
     canonicalRefreshAttempts.current = 0;
     canonicalRefreshRunId.current = undefined;
@@ -674,6 +677,7 @@ export function ConversationPanel({
     let disposed = false;
     let liveConnectionFailed = false;
     let continuityReprobeScheduled = false;
+    let continuityProbeInFlight = true;
     let allowedRecoveryActions: ContinuityRecoveryAction[] = [];
     const unsubscribers: Array<() => void> = [];
     dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
@@ -701,13 +705,74 @@ export function ConversationPanel({
       setContinuityRecoveryActions(actions);
       settleInitialContinuity();
     };
+    const resolveIdleContinuity = (
+      projectionExpected: boolean,
+      startedProjectionRunId?: string,
+    ) => {
+      if (projectionExpected) {
+        // A newly started or promoted follow-up run can complete before
+        // the renderer observes its short-lived foreground owner. Refresh
+        // the canonical display once the bounded hand-off window settles
+        // so that fast runs are still projected into the open conversation.
+        queuedSuccessorExpected.current = false;
+        startedRunProjectionExpected.current = undefined;
+        if (startedProjectionRunId !== undefined) {
+          reportSessionCatalogChange(startedProjectionRunId);
+          pendingPromptRef.current = undefined;
+          setPendingPrompt(undefined);
+        }
+        setDisplayReload((value) => value + 1);
+      }
+      activeRunIdRef.current = undefined;
+      setRun(undefined);
+      setStreamStatus(undefined);
+      setAttachmentGap(false);
+      dispatchContinuity({
+        type: "owner_probe_resolved",
+        sessionId: session.id,
+      });
+      setContinuityMessage(undefined);
+      settleInitialContinuity();
+    };
+    const reprobeContinuity = async () => {
+      const successorExpected = queuedSuccessorExpected.current;
+      const startedProjectionRunId = startedRunProjectionExpected.current;
+      const projectionExpected = successorExpected || startedProjectionRunId !== undefined;
+      const maximumAttempts = projectionExpected
+        ? QUEUED_SUCCESSOR_PROBE_DELAYS_MS.length + 1
+        : 1;
+      for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+        const continuity = await bridge.continuity(workspaceId, session.id);
+        if (disposed) return;
+        allowedRecoveryActions = [...continuity.recoveryActions];
+        setContinuityRecoveryActions(allowedRecoveryActions);
+        if (continuity.foregroundOwner !== undefined) {
+          activeRunIdRef.current = continuity.foregroundOwner.runId;
+          pendingContinuityOwner.current = continuity;
+          setContinuityReload((value) => value + 1);
+          return;
+        }
+        const retryDelay = QUEUED_SUCCESSOR_PROBE_DELAYS_MS[attempt];
+        if (projectionExpected && retryDelay !== undefined) {
+          await waitForCanonicalProjection(retryDelay);
+          if (disposed) return;
+          continue;
+        }
+        resolveIdleContinuity(projectionExpected, startedProjectionRunId);
+        continuityReprobeScheduled = false;
+        return;
+      }
+    };
     const scheduleContinuityReprobe = (runId?: string) => {
-      if (disposed || continuityReprobeScheduled) return;
-      continuityReprobeScheduled = true;
+      if (disposed) return;
       activeRunIdRef.current = runId;
+      if (continuityProbeInFlight || continuityReprobeScheduled) return;
+      continuityReprobeScheduled = true;
       dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
       setContinuityMessage(undefined);
-      setContinuityReload((value) => value + 1);
+      void reprobeContinuity().catch((error: unknown) => {
+        enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error);
+      });
     };
     const ingestEvent = (event: TimelineEvent) => {
       if (
@@ -839,7 +904,9 @@ export function ConversationPanel({
         ? QUEUED_SUCCESSOR_PROBE_DELAYS_MS.length + 1
         : 3;
       for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
-        const continuity = await bridge.continuity(workspaceId, session.id);
+        const continuity = pendingContinuityOwner.current
+          ?? await bridge.continuity(workspaceId, session.id);
+        pendingContinuityOwner.current = undefined;
         if (disposed) return;
         allowedRecoveryActions = [...continuity.recoveryActions];
         setContinuityRecoveryActions(allowedRecoveryActions);
@@ -851,30 +918,7 @@ export function ConversationPanel({
             if (disposed) return;
             continue;
           }
-          if (projectionExpected) {
-            // A newly started or promoted follow-up run can complete before
-            // the renderer observes its short-lived foreground owner. Refresh
-            // the canonical display once the bounded hand-off window settles
-            // so that fast runs are still projected into the open conversation.
-            queuedSuccessorExpected.current = false;
-            startedRunProjectionExpected.current = undefined;
-            if (startedProjectionRunId !== undefined) {
-              reportSessionCatalogChange(startedProjectionRunId);
-              pendingPromptRef.current = undefined;
-              setPendingPrompt(undefined);
-            }
-            setDisplayReload((value) => value + 1);
-          }
-          activeRunIdRef.current = undefined;
-          setRun(undefined);
-          setStreamStatus(undefined);
-          setAttachmentGap(false);
-          dispatchContinuity({
-            type: "owner_probe_resolved",
-            sessionId: session.id,
-          });
-          setContinuityMessage(undefined);
-          settleInitialContinuity();
+          resolveIdleContinuity(projectionExpected, startedProjectionRunId);
           return;
         }
 
@@ -950,7 +994,11 @@ export function ConversationPanel({
       }
       throw new Error("continuity owner changed repeatedly");
     };
-    void setup().catch((error: unknown) => enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error));
+    void setup()
+      .catch((error: unknown) => enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error))
+      .finally(() => {
+        continuityProbeInFlight = false;
+      });
     return () => {
       disposed = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
@@ -1697,7 +1745,18 @@ export function ConversationPanel({
 
   return (
     <div className="conversation-layout">
-      <section className="conversation-panel" aria-labelledby="conversation-title">
+      <section
+        className="conversation-panel"
+        aria-labelledby="conversation-title"
+        data-workspace-id={workspaceId}
+        data-session-id={session.id}
+        data-continuity-lifecycle={continuityState.lifecycle}
+        data-continuity-refresh-state={continuityState.refreshState}
+        data-continuity-owner-run-id={continuityState.owner.foregroundRunId}
+        data-continuity-pending-terminal-run-id={
+          continuityState.observedTerminal?.runId ?? continuityState.pendingTerminalRunId
+        }
+      >
       <header className="conversation-header">
         <div>
           <span className="conversation-title-row">

@@ -33,7 +33,7 @@ pub use query::{
 
 pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 2;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
-const SESSION_CATALOG_PROJECTION_REVISION: u16 = 1;
+const SESSION_CATALOG_PROJECTION_REVISION: u16 = 2;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
 const SESSION_CATALOG_TITLE_MAX_BYTES: usize = 160;
@@ -742,16 +742,25 @@ impl SessionCatalogProjectionService {
             let base_generation = base_metadata
                 .as_ref()
                 .map_or(0, |metadata| metadata.generation);
-            let force_rebuild = force_rebuild
+            let rebuild_workspace = force_rebuild
                 || base_metadata.as_ref().is_some_and(|metadata| {
                     metadata.projection_revision != SESSION_CATALOG_PROJECTION_REVISION
                 });
-            let existing = list_workspace_entries(&connection, &self.lifecycle.workspace_id)?
-                .into_iter()
-                .map(|entry| (entry.session_ref.clone(), entry))
-                .collect::<BTreeMap<_, _>>();
+            let existing_source_count = if rebuild_workspace {
+                workspace_entry_count(&connection, &self.lifecycle.workspace_id)?
+            } else {
+                0
+            };
+            let existing = if rebuild_workspace {
+                BTreeMap::new()
+            } else {
+                list_workspace_entries(&connection, &self.lifecycle.workspace_id)?
+                    .into_iter()
+                    .map(|entry| (entry.session_ref.clone(), entry))
+                    .collect::<BTreeMap<_, _>>()
+            };
             let reconciled_at_unix_ms = current_unix_ms();
-            let scan = self.scan_entries(&existing, force_rebuild, reconciled_at_unix_ms)?;
+            let scan = self.scan_entries(&existing, rebuild_workspace, reconciled_at_unix_ms)?;
             let degraded_source_count = scan
                 .entries
                 .iter()
@@ -774,14 +783,18 @@ impl SessionCatalogProjectionService {
                 .map(String::as_str)
                 .collect::<Vec<_>>();
             let updated_source_count = updated_entries.len();
-            let removed_source_count = removed_session_refs.len();
+            let removed_source_count = if rebuild_workspace {
+                existing_source_count
+            } else {
+                removed_session_refs.len()
+            };
             let metadata_changed = base_metadata.as_ref().is_none_or(|metadata| {
                 metadata.projection_revision != SESSION_CATALOG_PROJECTION_REVISION
                     || metadata.degraded_source_count != degraded_source_count
                     || metadata.identity_conflict_count != identity_conflict_count
                     || metadata.truncated_source_count != scan.truncated_source_count
             });
-            let generation_changed = force_rebuild
+            let generation_changed = rebuild_workspace
                 || updated_source_count > 0
                 || removed_source_count > 0
                 || metadata_changed;
@@ -815,6 +828,7 @@ impl SessionCatalogProjectionService {
                     scan.truncated_source_count,
                     &updated_entries,
                     &removed_session_refs,
+                    rebuild_workspace,
                 )?;
             } else {
                 upsert_workspace_metadata(
@@ -1130,6 +1144,20 @@ fn list_workspace_entries(
     let rows = statement.query_map(params![workspace_id], decode_entry_row)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(SessionCatalogProjectionError::from)
+}
+
+fn workspace_entry_count(
+    connection: &Connection,
+    workspace_id: &str,
+) -> Result<usize, SessionCatalogProjectionError> {
+    let count = connection.query_row(
+        "SELECT COUNT(*) FROM session_catalog_entry_v1 WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    usize::try_from(count).map_err(|_| SessionCatalogProjectionError::IntegerRange {
+        field: "workspace_entry_count",
+    })
 }
 
 fn workspace_metadata(
@@ -1702,6 +1730,7 @@ fn apply_workspace_entry_changes(
     truncated_source_count: usize,
     updated_entries: &[&SessionCatalogProjectionEntry],
     removed_session_refs: &[&str],
+    replace_workspace_entries: bool,
 ) -> Result<(), SessionCatalogProjectionError> {
     upsert_workspace_metadata(
         transaction,
@@ -1712,13 +1741,19 @@ fn apply_workspace_entry_changes(
         identity_conflict_count,
         truncated_source_count,
     )?;
-    let mut delete_statement = transaction.prepare(
-        "DELETE FROM session_catalog_entry_v1 WHERE workspace_id = ?1 AND session_ref = ?2",
-    )?;
-    for session_ref in removed_session_refs {
-        delete_statement.execute(params![workspace_id, session_ref])?;
+    if replace_workspace_entries {
+        transaction.execute(
+            "DELETE FROM session_catalog_entry_v1 WHERE workspace_id = ?1",
+            params![workspace_id],
+        )?;
+    } else {
+        let mut delete_statement = transaction.prepare(
+            "DELETE FROM session_catalog_entry_v1 WHERE workspace_id = ?1 AND session_ref = ?2",
+        )?;
+        for session_ref in removed_session_refs {
+            delete_statement.execute(params![workspace_id, session_ref])?;
+        }
     }
-    drop(delete_statement);
     for entry in updated_entries {
         upsert_entry(transaction, entry)?;
     }
