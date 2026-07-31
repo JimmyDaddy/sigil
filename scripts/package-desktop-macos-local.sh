@@ -23,6 +23,7 @@ cd "$repo_root"
 target_mode="native"
 notary_profile="${SIGIL_NOTARY_PROFILE:-Sigil-Notary}"
 updater_key="${SIGIL_DESKTOP_UPDATER_KEY:-$HOME/Library/Application Support/sigil/release/desktop-updater.key}"
+updater_key_password="${SIGIL_DESKTOP_UPDATER_KEY_PASSWORD:-}"
 output_root=""
 skip_notarization=false
 
@@ -199,6 +200,7 @@ for target in "${targets[@]}"; do
 
   APPLE_SIGNING_IDENTITY="$identity" \
   TAURI_SIGNING_PRIVATE_KEY="$(<"$updater_key")" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_key_password" \
     pnpm --dir apps/desktop tauri build \
       --config src-tauri/tauri.bundle.conf.json \
       --config src-tauri/tauri.updater.conf.json \
@@ -264,6 +266,7 @@ for target in "${targets[@]}"; do
   fi
   "$repo_root/scripts/verify-desktop-macos-app.sh" "${roundtrip_verify_args[@]}"
   TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_key_password" \
     pnpm --dir apps/desktop tauri signer sign "$updater_archive"
   test -s "${updater_archive}.sig"
   "$repo_root/scripts/verify-desktop-update-signature.sh" \
