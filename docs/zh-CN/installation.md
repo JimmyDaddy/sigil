@@ -4,7 +4,7 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。Sigil beta 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
+本页集中说明 Sigil 的安装方式、更新与卸载命令，以及发布压缩包的使用方法。其他用户指南只链接到这里，不重复这些细节。如果你想按首次使用流程走一遍，先看[快速上手](quickstart.md)。Sigil 仍是早期预览版，配置、插件、高级沙箱行为和自动化接口都可能调整。
 
 官网文档基于 `main` 分支，因此[尚未发布](changelog.md#尚未发布-main)的功能在下一个 beta 版本发布前可能只能从源码体验。带精确版本的 Cargo 示例仍固定到最近一次源码 tag。
 
@@ -19,8 +19,8 @@
 
 | 渠道 | 当前覆盖 | 适合场景 |
 | --- | --- | --- |
-| Desktop beta | 面向 Apple 芯片与 Intel Mac、已签名并完成 Apple 公证的 DMG。 | 希望使用原生会话、审批与设置工作区。 |
-| npm beta | `@sigil-ai/sigil@beta` 会自动选择当前平台对应的软件包。 | 想用最短路径完成跨平台 TUI 安装。 |
+| Desktop beta 候选 | 完整 beta draft 通过发布门禁后，才会公开 Apple 芯片与 Intel 的签名、公证 DMG。 | 首个 Desktop beta 公开后，希望使用原生会话、审批与设置工作区。 |
+| npm alpha | `@sigil-ai/sigil@alpha` 会自动选择当前平台对应的软件包。 | 想安装当前已经公开的跨平台 TUI 预览版。 |
 | Homebrew tap | macOS 配方位于 `JimmyDaddy/homebrew-sigil`，安装名是 `sigil-ai`，最终命令仍是 `sigil`。 | 习惯用 Homebrew 管理终端工具。 |
 | Cargo git tag | 使用本机 Rust 工具链，从带版本标签的 Git 发布构建。 | 已有 Rust 工具链，或希望从源码构建。 |
 | GitHub 发布压缩包 | 提供各平台的压缩包与校验文件。 | 需要手动或离线安装。 |
@@ -39,7 +39,7 @@
 npm 包名是 `@sigil-ai/sigil`。安装时会先放置一个很小的 Node.js 启动器，再下载当前平台对应的 Sigil 可执行文件。最终命令仍然是 `sigil`。
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 ```
 
 确认安装：
@@ -73,7 +73,7 @@ sigil doctor
 首个发布版本通过 Git tag 安装，不从 crates.io 分发：
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil
 ```
 
 这会把 `sigil` 可执行文件安装到 Cargo 的二进制目录。macOS 和 Linux 默认为 `~/.cargo/bin`，Windows 默认为 `%USERPROFILE%\.cargo\bin`。
@@ -126,9 +126,9 @@ sigil run "总结一下当前仓库"
 使用原来的安装器更新：
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

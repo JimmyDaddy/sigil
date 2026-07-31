@@ -4,7 +4,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This page is the authoritative source for Sigil install channels, update and uninstall commands, and release-archive handling. Other user guides link here instead of copying those details. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). Sigil beta remains an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
+This page is the authoritative source for Sigil install channels, update and uninstall commands, and release-archive handling. Other user guides link here instead of copying those details. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). Sigil remains an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
 
 The GitHub Pages documentation tracks `main`, so features listed under [Unreleased](changelog.md#unreleased-main) may require a source install until the next beta is published. Exact versioned Cargo examples remain pinned to the most recent tagged source release.
 
@@ -19,8 +19,8 @@ The GitHub Pages documentation tracks `main`, so features listed under [Unreleas
 
 | Channel | Current coverage | Use when |
 | --- | --- | --- |
-| Desktop beta | Signed and Apple-notarized DMGs for Apple Silicon and Intel Macs. | You want a native conversation, approval, and settings workspace. |
-| npm beta | Platform-specific optional binary packages behind `@sigil-ai/sigil@beta`. | You want the shortest cross-platform TUI install path. |
+| Desktop beta candidate | Signed and Apple-notarized Apple Silicon and Intel DMGs appear only after the complete beta draft passes publication gates. | You want a native conversation, approval, and settings workspace after the first Desktop beta is public. |
+| npm alpha | Platform-specific optional binary packages behind `@sigil-ai/sigil@alpha`. | You want the current public cross-platform TUI preview. |
 | Homebrew tap | macOS formula in `JimmyDaddy/homebrew-sigil`, installed as `sigil-ai` while exposing the `sigil` command. | You manage terminal tools with Homebrew. |
 | Cargo git tag | Builds from the tagged Git release with your local Rust toolchain. | You already use Rust tooling or need a source-based install. |
 | GitHub release archive | Downloadable release archives with checksum files. | You need a manual or offline install. |
@@ -39,7 +39,7 @@ Each beta draft is published only after both DMGs, their SHA-256 files, and the 
 The npm package is scoped as `@sigil-ai/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 ```
 
 Confirm the install:
@@ -73,7 +73,7 @@ The release workflow generates `sigil-ai.rb` from the macOS release archives. Th
 For the first release, Cargo installs from the Git tag rather than crates.io:
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil
 ```
 
 This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
@@ -126,9 +126,9 @@ The archive contains the `sigil` binary plus the user-facing README, logo assets
 Use the installer you used originally:
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

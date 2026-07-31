@@ -42,7 +42,11 @@ on:
       - "scripts/extract-verified-desktop-updater-app.py"
       - "scripts/generate-desktop-update-manifest.mjs"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/upload-desktop-macos-release.sh"
+      - "scripts/release-candidate.mjs"
+      - "scripts/release-doctor.mjs"
       - "scripts/release-channel-version.mjs"
+      - "scripts/publish-npm-packages.sh"
       - "scripts/notarize-desktop-macos-app.sh"
       - "scripts/notarize-desktop-macos.sh"
       - "scripts/verify-desktop-macos-app.sh"
@@ -50,6 +54,8 @@ on:
       - "scripts/test-desktop-macos-signing.mjs"
       - "scripts/test-extract-verified-desktop-updater-app.py"
       - "scripts/test-published-distribution-smoke.sh"
+      - "scripts/test-publish-npm-packages.sh"
+      - "scripts/test-release-tooling.mjs"
       - "scripts/test-product-surface-positioning.mjs"
       - "scripts/test-update-distribution-markers.mjs"
       - "scripts/select-published-desktop-beta.mjs"
@@ -93,7 +99,11 @@ on:
       - "scripts/extract-verified-desktop-updater-app.py"
       - "scripts/generate-desktop-update-manifest.mjs"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/upload-desktop-macos-release.sh"
+      - "scripts/release-candidate.mjs"
+      - "scripts/release-doctor.mjs"
       - "scripts/release-channel-version.mjs"
+      - "scripts/publish-npm-packages.sh"
       - "scripts/notarize-desktop-macos-app.sh"
       - "scripts/notarize-desktop-macos.sh"
       - "scripts/verify-desktop-macos-app.sh"
@@ -101,6 +111,8 @@ on:
       - "scripts/test-desktop-macos-signing.mjs"
       - "scripts/test-extract-verified-desktop-updater-app.py"
       - "scripts/test-published-distribution-smoke.sh"
+      - "scripts/test-publish-npm-packages.sh"
+      - "scripts/test-release-tooling.mjs"
       - "scripts/test-product-surface-positioning.mjs"
       - "scripts/test-update-distribution-markers.mjs"
       - "scripts/select-published-desktop-beta.mjs"
@@ -139,6 +151,8 @@ jobs:
           python3 scripts/test-extract-verified-desktop-updater-app.py
           node scripts/test-product-surface-positioning.mjs
           node scripts/test-update-distribution-markers.mjs
+          node scripts/test-release-tooling.mjs
+          scripts/test-publish-npm-packages.sh
           scripts/test-published-distribution-smoke.sh
 
       - name: Enforce physical Rust test layout

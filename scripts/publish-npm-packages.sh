@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/publish-npm-packages.sh --version <version> --packages-dir <dir> [--tag <tag>] [--dry-run]
+Usage: scripts/publish-npm-packages.sh --version <version> (--packages-dir <dir> | --package-tarballs-dir <dir>) [--tag <tag>] [--dry-run]
 
 Publish generated @sigil-ai platform packages before the root launcher package.
 Already-published package versions are skipped so a failed release workflow can
@@ -13,6 +13,8 @@ version. Every registry read and channel monotonicity check fails closed.
 Options:
   --version VERSION      Exact package version to publish.
   --packages-dir DIR     Directory created by prepare-npm-packages.sh.
+  --package-tarballs-dir DIR
+                         Directory containing its npm pack .tgz outputs.
   --tag TAG              npm dist-tag. Defaults to alpha/beta for matching prereleases and latest otherwise.
   --dry-run              Validate package metadata and print the publish plan without registry access.
   -h, --help             Show this help.
@@ -22,6 +24,7 @@ USAGE
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 version=""
 packages_dir=""
+package_tarballs_dir=""
 dist_tag=""
 dry_run=false
 
@@ -33,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --packages-dir)
       packages_dir="${2-}"
+      shift 2
+      ;;
+    --package-tarballs-dir)
+      package_tarballs_dir="${2-}"
       shift 2
       ;;
     --tag)
@@ -55,7 +62,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${version}" || -z "${packages_dir}" ]]; then
+if [[ -z "${version}" ]] ||
+  [[ -z "${packages_dir}" && -z "${package_tarballs_dir}" ]] ||
+  [[ -n "${packages_dir}" && -n "${package_tarballs_dir}" ]]; then
   usage >&2
   exit 2
 fi
@@ -81,28 +90,64 @@ case "${dist_tag}" in
     ;;
 esac
 
-if [[ "${packages_dir}" != /* ]]; then
-  packages_dir="${repo_root}/${packages_dir}"
+declare -a platform_package_sources=()
+declare -a platform_package_metadata=()
+root_package_source=""
+root_package_metadata=""
+metadata_root=""
+
+if [[ -n "${packages_dir}" ]]; then
+  if [[ "${packages_dir}" != /* ]]; then
+    packages_dir="${repo_root}/${packages_dir}"
+  fi
+  root_package_source="${packages_dir}/sigil"
+  root_package_metadata="${root_package_source}/package.json"
+  if [[ ! -d "${root_package_source}" ]]; then
+    echo "missing root npm package directory: ${root_package_source}" >&2
+    exit 1
+  fi
+  shopt -s nullglob
+  platform_package_sources=("${packages_dir}"/sigil-*)
+  shopt -u nullglob
+  for package_source in "${platform_package_sources[@]}"; do
+    platform_package_metadata+=("${package_source}/package.json")
+  done
+else
+  if [[ "${package_tarballs_dir}" != /* ]]; then
+    package_tarballs_dir="${repo_root}/${package_tarballs_dir}"
+  fi
+  root_package_source="${package_tarballs_dir}/sigil-ai-sigil-${version}.tgz"
+  if [[ ! -f "${root_package_source}" || -L "${root_package_source}" ]]; then
+    echo "missing root npm package tarball: ${root_package_source}" >&2
+    exit 1
+  fi
+  shopt -s nullglob
+  platform_package_sources=("${package_tarballs_dir}"/sigil-ai-sigil-*-${version}.tgz)
+  shopt -u nullglob
+  metadata_root="$(mktemp -d "${TMPDIR:-/tmp}/sigil-npm-metadata.XXXXXX")"
+  trap 'rm -rf "${metadata_root}"' EXIT
+  for index in "${!platform_package_sources[@]}"; do
+    package_source="${platform_package_sources[$index]}"
+    if [[ ! -f "${package_source}" || -L "${package_source}" ]]; then
+      echo "npm package tarball must be a regular non-symlink file: ${package_source}" >&2
+      exit 1
+    fi
+    package_json="${metadata_root}/platform-${index}.json"
+    tar -xOf "${package_source}" package/package.json >"${package_json}"
+    platform_package_metadata+=("${package_json}")
+  done
+  root_package_metadata="${metadata_root}/root.json"
+  tar -xOf "${root_package_source}" package/package.json >"${root_package_metadata}"
 fi
 
-root_package_dir="${packages_dir}/sigil"
-if [[ ! -d "${root_package_dir}" ]]; then
-  echo "missing root npm package directory: ${root_package_dir}" >&2
-  exit 1
-fi
-
-shopt -s nullglob
-platform_package_dirs=("${packages_dir}"/sigil-*)
-shopt -u nullglob
-
-if [[ "${#platform_package_dirs[@]}" -eq 0 ]]; then
-  echo "no platform npm package directories found in ${packages_dir}" >&2
+if [[ "${#platform_package_sources[@]}" -eq 0 ]]; then
+  echo "no platform npm packages found" >&2
   exit 1
 fi
 
 publish_package() {
-  local package_dir="$1"
-  local package_json="${package_dir}/package.json"
+  local package_source="$1"
+  local package_json="$2"
   local package_name
   local package_version
   local published_version
@@ -183,7 +228,7 @@ publish_package() {
   rm -f "${npm_error}"
 
   echo "publishing ${package_name}@${version} with tag ${dist_tag}"
-  npm publish "${package_dir}" --access public --tag "${dist_tag}"
+  npm publish "${package_source}" --access public --tag "${dist_tag}"
   published_version="$(npm view "${package_name}@${dist_tag}" version)"
   if [[ "${published_version}" != "${version}" ]]; then
     echo "npm ${package_name}@${dist_tag} did not converge to ${version}" >&2
@@ -191,10 +236,11 @@ publish_package() {
   fi
 }
 
-for package_dir in "${platform_package_dirs[@]}"; do
-  if [[ -d "${package_dir}" ]]; then
-    publish_package "${package_dir}"
+for index in "${!platform_package_sources[@]}"; do
+  package_source="${platform_package_sources[$index]}"
+  if [[ -d "${package_source}" || -f "${package_source}" ]]; then
+    publish_package "${package_source}" "${platform_package_metadata[$index]}"
   fi
 done
 
-publish_package "${root_package_dir}"
+publish_package "${root_package_source}" "${root_package_metadata}"

@@ -13,7 +13,7 @@
 ## 1. 安装 Sigil
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 sigil --version
 ```
 

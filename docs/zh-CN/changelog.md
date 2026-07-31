@@ -8,6 +8,10 @@
 
 ## 尚未发布 - main
 
+- Release tag 现在只构建一次 TUI/npm 字节，并在 draft 中冻结绑定 commit 的 candidate
+  manifest；最终发布复用已准入 tarball，不再重新编译。Release doctor 与 Desktop 上传命令
+  会绑定版本、tag/main/CI、updater 公钥、签名、公证和 macOS 双架构；公开后自动触发带有
+  有界一致性等待的 npm/GitHub/Desktop/Pages/Homebrew 真实安装 smoke。
 - 修复无效或非当前格式配置导致所有 Desktop 工作区都无法打开、设置页也无法进入的死路。
   Desktop 现在会启动支持配置恢复的工作区服务，并在设置中提供明确的当前格式替换流程；
   TUI 快速设置也提供相同恢复路径。两端都不会复用或迁移原无效文件中的值，并会拒绝覆盖
@@ -15,9 +19,9 @@
 
 ## v0.0.1-beta.1 - 2026-07-31
 
-以下变更已包含在打包发布的 `v0.0.1-beta.1` 中。
+以下是 `v0.0.1-beta.1` 发布候选内容；签名 Desktop 双架构矩阵与最终发布门禁全部通过前，不视为已公开发布。
 
-- 增加公开 macOS Desktop beta 渠道：提供已签名并完成 Apple 公证的 Apple 芯片与 Intel DMG，以及分架构签名更新包。
+- 完成公开 macOS Desktop beta 渠道的发布候选准备：提供已签名并完成 Apple 公证的 Apple 芯片与 Intel DMG，以及分架构签名更新包；完整矩阵通过前不会公开。
 - 为 Desktop 设置页、TUI `/update` 与 CLI `sigil update` 增加明确的版本检查和更新；包管理器安装会收到对应更新命令，独立安装包继续校验 checksum/签名，并且不会静默重启。
 - Release tag 现在先建立可补齐资源的 draft。明确 publish 时才校验全部 Desktop 资源、公开完整 GitHub Release、按 `beta` 或 `alpha` 发布 npm，最后更新官网与 Homebrew；该顺序兼容 immutable GitHub Releases。
 - 更新官网、README、安装/状态文档与界面导览，把 Desktop 与 TUI 作为并列入口，同时提供分架构下载指引、真实 Desktop 截图导览和已有 TUI 真实运行 Demo。

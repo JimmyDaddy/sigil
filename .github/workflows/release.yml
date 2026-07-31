@@ -42,6 +42,12 @@ jobs:
     name: Validate release mode
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && inputs.tag || github.ref }}
+
       - name: Validate manual publish inputs
         shell: bash
         env:
@@ -59,6 +65,8 @@ jobs:
           fi
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
+          elif [[ "${PUBLISH}" != "true" ]]; then
+            RELEASE_TAG="v$(node -p "require('./apps/desktop/package.json').version")"
           fi
           version="${RELEASE_TAG#v}"
           case "${version}" in
@@ -83,10 +91,16 @@ jobs:
               exit 1
             fi
           fi
+          doctor_args=(--tag "${RELEASE_TAG}")
+          if [[ "${GITHUB_EVENT_NAME}" == "push" || "${PUBLISH}" == "true" ]]; then
+            doctor_args+=(--require-head-tag)
+          fi
+          node scripts/release-doctor.mjs "${doctor_args[@]}"
 
   build:
     name: Build ${{ matrix.os }}
     needs: validate-mode
+    if: ${{ github.event_name == 'push' || !inputs.publish }}
     runs-on: ${{ matrix.os }}
     permissions:
       attestations: write
@@ -155,7 +169,7 @@ jobs:
   stage-release:
     name: Stage draft release
     needs: build
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -168,17 +182,6 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
-
-      - name: Install Rust signature verifier
-        if: >-
-          ${{ github.event_name == 'workflow_dispatch' &&
-              inputs.publish &&
-              contains(inputs.tag, '-beta.') }}
-        shell: bash
-        run: |
-          rustup set profile minimal
-          rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
-          rustup default "${RUST_TOOLCHAIN_VERSION}"
 
       - name: Download release artifacts
         uses: actions/download-artifact@v8
@@ -195,6 +198,21 @@ jobs:
       - name: Install npm CLI
         shell: bash
         run: npm install --global npm@11.18.0
+
+      - name: Verify exact tagged source and green CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-doctor.mjs \
+            --tag "${RELEASE_TAG}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --require-head-tag \
+            --require-remote-tag \
+            --require-ci \
+            --require-workflow CI \
+            --require-workflow "Desktop Package" \
+            --require-public-channel \
+            --wait-ci-seconds 1800
 
       - name: Prepare release assets
         shell: bash
@@ -239,6 +257,12 @@ jobs:
             --out-dir release-npm-packages \
             --pack-destination dist
 
+          node scripts/release-candidate.mjs create \
+            --tag "${RELEASE_TAG}" \
+            --commit "$(git rev-parse "${RELEASE_TAG}^{commit}")" \
+            --asset-dir dist \
+            --output "dist/sigil-${RELEASE_TAG#v}-candidate.json"
+
           {
             echo
             echo "## Release assets"
@@ -247,20 +271,6 @@ jobs:
               echo "- \`$(basename "${asset}")\`"
             done
           } >> RELEASE_NOTES.md
-
-      - name: Archive npm publication inputs
-        shell: bash
-        run: >-
-          tar -czf release-publication-inputs.tar.gz
-          release-npm-packages RELEASE_NOTES.md
-
-      - name: Upload npm publication inputs
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-publication-inputs
-          path: release-publication-inputs.tar.gz
-          if-no-files-found: error
-          retention-days: 1
 
       - name: Stage draft GitHub release
         shell: bash
@@ -276,41 +286,119 @@ jobs:
           if release="$(
             gh release view "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --json isDraft,tagName 2>/dev/null
+              --json assets,isDraft,tagName 2>/dev/null
           )"; then
             test "$(jq -r '.tagName' <<<"${release}")" = "${RELEASE_TAG}"
             if [[ "$(jq -r '.isDraft' <<<"${release}")" != "true" ]]; then
               echo "release ${RELEASE_TAG} is already public; preserving its immutable assets"
               exit 0
             fi
-            gh release upload "${RELEASE_TAG}" dist/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-            gh release edit "${RELEASE_TAG}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "Sigil ${RELEASE_TAG}" \
-              --notes-file RELEASE_NOTES.md \
-              "${release_flags[@]}"
           else
-            gh release create "${RELEASE_TAG}" dist/* \
+            gh release create "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Sigil ${RELEASE_TAG}" \
               --notes-file RELEASE_NOTES.md \
               --verify-tag \
               "${release_flags[@]}"
+            release="$(
+              gh release view "${RELEASE_TAG}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --json assets,isDraft,tagName
+            )"
           fi
+          existing_dir="${RUNNER_TEMP}/sigil-existing-release-assets"
+          mkdir -p "${existing_dir}"
+          mapfile -t existing_names < <(jq -r '.assets[].name' <<<"${release}")
+          for asset_path in dist/*; do
+            asset_name="$(basename "${asset_path}")"
+            if printf '%s\n' "${existing_names[@]}" | grep -Fxq -- "${asset_name}"; then
+              asset_dir="${existing_dir}/${asset_name}"
+              mkdir -p "${asset_dir}"
+              gh release download "${RELEASE_TAG}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --pattern "${asset_name}" \
+                --dir "${asset_dir}"
+              if ! cmp -s "${asset_path}" "${asset_dir}/${asset_name}"; then
+                echo "draft asset ${asset_name} differs from the exact tagged candidate" >&2
+                exit 1
+              fi
+              echo "keeping identical draft asset: ${asset_name}"
+            else
+              gh release upload "${RELEASE_TAG}" "${asset_path}" \
+                --repo "${GITHUB_REPOSITORY}"
+            fi
+          done
+          gh release edit "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Sigil ${RELEASE_TAG}" \
+            --notes-file RELEASE_NOTES.md \
+            "${release_flags[@]}"
 
-      - name: Verify beta Desktop assets and stage update manifest
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+  prepare-publication:
+    name: Verify staged candidate
+    needs: validate-mode
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Draft releases require repository write visibility. This job mutates only
+      # latest.json after every Desktop byte has passed local checksum/signature checks.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout staged tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.22.0"
+          package-manager-cache: false
+
+      - name: Install Rust signature verifier
+        if: ${{ contains(inputs.tag, '-beta.') }}
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
+          rustup default "${RUST_TOOLCHAIN_VERSION}"
+
+      - name: Download and verify the exact staged candidate
         shell: bash
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
-          case "${version}" in
-            *-beta | *-beta.*) ;;
-            *) exit 0 ;;
-          esac
+          commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          candidate_dir="release-publication-inputs"
+          mkdir -p "${candidate_dir}"
+          node scripts/release-doctor.mjs \
+            --tag "${RELEASE_TAG}" \
+            --require-head-tag
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "sigil-${version}-candidate.json" \
+            --pattern 'sigil-ai-sigil-*.tgz' \
+            --dir "${candidate_dir}"
+          gh release view "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json assets,isDraft,isImmutable,tagName \
+            > "${candidate_dir}/release.json"
+          node scripts/release-candidate.mjs verify \
+            --manifest "${candidate_dir}/sigil-${version}-candidate.json" \
+            --tag "${RELEASE_TAG}" \
+            --commit "${commit}" \
+            --release-json "${candidate_dir}/release.json"
 
+      - name: Verify beta Desktop assets and stage update manifest
+        if: ${{ contains(inputs.tag, '-beta.') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
           release="$(
             gh release view "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
@@ -346,6 +434,9 @@ jobs:
               shasum -a 256 --check "Sigil_${version}_${target}.dmg.sha256"
               shasum -a 256 --check "Sigil_${version}_${target}.app.tar.gz.sha256"
             )
+            scripts/verify-desktop-update-signature.sh \
+              --archive "${desktop_dir}/Sigil_${version}_${target}.app.tar.gz" \
+              --signature "${desktop_dir}/Sigil_${version}_${target}.app.tar.gz.sig"
           done
 
           node scripts/generate-desktop-update-manifest.mjs \
@@ -355,21 +446,37 @@ jobs:
             --pub-date "$(git show -s --format=%cI "${RELEASE_TAG}")" \
             --notes "Sigil Desktop ${version} beta update. See the release notes for details." \
             --output "${desktop_dir}/latest.json"
-          if [[ "${is_draft}" == "true" ]]; then
-            gh release upload "${RELEASE_TAG}" "${desktop_dir}/latest.json" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-          else
+          if printf '%s\n' "${asset_names[@]}" | grep -Fxq latest.json; then
+            published_dir="${desktop_dir}/published"
+            mkdir -p "${published_dir}"
             gh release download "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --pattern latest.json \
-              --dir "${desktop_dir}/published"
-            cmp "${desktop_dir}/latest.json" "${desktop_dir}/published/latest.json"
+              --dir "${published_dir}"
+            cmp "${desktop_dir}/latest.json" "${published_dir}/latest.json"
+          elif [[ "${is_draft}" == "true" ]]; then
+            gh release upload "${RELEASE_TAG}" "${desktop_dir}/latest.json" \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            echo "published beta release is missing immutable latest.json" >&2
+            exit 1
           fi
+          cp "${desktop_dir}/latest.json" release-publication-inputs/latest.json
+
+      - name: Pass verified npm tarballs to publication
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-publication-inputs
+          path: |
+            release-publication-inputs/sigil-*-candidate.json
+            release-publication-inputs/sigil-ai-sigil-*.tgz
+            release-publication-inputs/latest.json
+          if-no-files-found: error
+          retention-days: 1
 
   verify-desktop-macos:
     name: Verify Desktop ${{ matrix.label }}
-    needs: stage-release
+    needs: prepare-publication
     if: >-
       ${{ github.event_name == 'workflow_dispatch' &&
           inputs.publish &&
@@ -501,6 +608,18 @@ jobs:
               shasum -a 256 "${desktop_dir}/Sigil_${version}_${TARGET}.app.tar.gz" |
                 awk '{print $1}'
             )"
+            printf 'dmg_checksum_sha256=%s\n' "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${TARGET}.dmg.sha256" |
+                awk '{print $1}'
+            )"
+            printf 'archive_checksum_sha256=%s\n' "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${TARGET}.app.tar.gz.sha256" |
+                awk '{print $1}'
+            )"
+            printf 'signature_sha256=%s\n' "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${TARGET}.app.tar.gz.sig" |
+                awk '{print $1}'
+            )"
           } > "${receipt_dir}/${TARGET}.txt"
 
       - name: Upload Desktop verification receipt
@@ -514,13 +633,13 @@ jobs:
   publish-release:
     name: Publish immutable release and npm
     needs:
-      - stage-release
+      - prepare-publication
       - verify-desktop-macos
     if: >-
       ${{ always() &&
           github.event_name == 'workflow_dispatch' &&
           inputs.publish &&
-          needs.stage-release.result == 'success' &&
+          needs.prepare-publication.result == 'success' &&
           (!contains(inputs.tag, '-beta.') ||
            needs.verify-desktop-macos.result == 'success') }}
     runs-on: ubuntu-latest
@@ -551,16 +670,51 @@ jobs:
         shell: bash
         run: npm install --global npm@11.18.0
 
-      - name: Download npm publication inputs
+      - name: Download verified publication inputs
         uses: actions/download-artifact@v8
         with:
           name: release-publication-inputs
           path: release-publication-inputs
 
-      - name: Extract npm publication inputs
+      - name: Recheck staged TUI and npm candidate bytes
         shell: bash
-        run: >-
-          tar -xzf release-publication-inputs/release-publication-inputs.tar.gz
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          remote_manifest_dir="${RUNNER_TEMP}/sigil-remote-candidate-manifest"
+          mkdir -p "${remote_manifest_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "sigil-${version}-candidate.json" \
+            --dir "${remote_manifest_dir}"
+          cmp \
+            "release-publication-inputs/sigil-${version}-candidate.json" \
+            "${remote_manifest_dir}/sigil-${version}-candidate.json"
+          gh release view "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json assets,isDraft,isImmutable,tagName \
+            > "${remote_manifest_dir}/release.json"
+          node scripts/release-candidate.mjs verify \
+            --manifest "release-publication-inputs/sigil-${version}-candidate.json" \
+            --tag "${RELEASE_TAG}" \
+            --commit "${commit}" \
+            --release-json "${remote_manifest_dir}/release.json"
+          for tarball in release-publication-inputs/sigil-ai-sigil-*.tgz; do
+            expected_sha256="$(
+              # shellcheck disable=SC2016
+              node -e '
+                const fs = require("node:fs");
+                const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                const asset = manifest.assets.find(({ name }) => name === process.argv[2]);
+                if (!asset) throw new Error(`missing candidate asset ${process.argv[2]}`);
+                process.stdout.write(asset.sha256);
+              ' \
+              "release-publication-inputs/sigil-${version}-candidate.json" \
+              "$(basename "${tarball}")"
+            )"
+            test "$(sha256sum "${tarball}" | awk '{print $1}')" = "${expected_sha256}"
+          done
 
       - name: Download Desktop verification receipts
         if: ${{ contains(inputs.tag, '-beta.') }}
@@ -586,7 +740,7 @@ jobs:
             test "$(awk -F= '$1 == "target" { print $2 }' "${receipt}")" = "${target}"
             test "$(awk -F= '$1 == "version" { print $2 }' "${receipt}")" = "${version}"
             test "$(awk -F= '$1 == "commit" { print $2 }' "${receipt}")" = "${expected_commit}"
-            for suffix in dmg app.tar.gz; do
+            for suffix in dmg dmg.sha256 app.tar.gz app.tar.gz.sha256 app.tar.gz.sig; do
               asset="Sigil_${version}_${target}.${suffix}"
               gh release download "${RELEASE_TAG}" \
                 --repo "${GITHUB_REPOSITORY}" \
@@ -602,7 +756,26 @@ jobs:
               shasum -a 256 "${desktop_dir}/Sigil_${version}_${target}.app.tar.gz" |
                 awk '{print $1}'
             )" = "$(awk -F= '$1 == "archive_sha256" { print $2 }' "${receipt}")"
+            test "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${target}.dmg.sha256" |
+                awk '{print $1}'
+            )" = "$(awk -F= '$1 == "dmg_checksum_sha256" { print $2 }' "${receipt}")"
+            test "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${target}.app.tar.gz.sha256" |
+                awk '{print $1}'
+            )" = "$(awk -F= '$1 == "archive_checksum_sha256" { print $2 }' "${receipt}")"
+            test "$(
+              shasum -a 256 "${desktop_dir}/Sigil_${version}_${target}.app.tar.gz.sig" |
+                awk '{print $1}'
+            )" = "$(awk -F= '$1 == "signature_sha256" { print $2 }' "${receipt}")"
           done
+          latest_dir="${desktop_dir}/latest"
+          mkdir -p "${latest_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern latest.json \
+            --dir "${latest_dir}"
+          cmp release-publication-inputs/latest.json "${latest_dir}/latest.json"
 
       - name: Verify channel monotonicity
         shell: bash
@@ -699,7 +872,6 @@ jobs:
             gh release edit "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Sigil ${RELEASE_TAG}" \
-              --notes-file RELEASE_NOTES.md \
               "${release_flags[@]}"
           else
             echo "release ${RELEASE_TAG} is already public; continuing idempotent publication"
@@ -738,8 +910,32 @@ jobs:
           esac
           scripts/publish-npm-packages.sh \
             --version "${version}" \
-            --packages-dir release-npm-packages \
+            --package-tarballs-dir release-publication-inputs \
             --tag "${npm_tag}"
+
+  dispatch-published-smoke:
+    name: Start published distribution smoke
+    needs: publish-release
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          inputs.publish &&
+          contains(inputs.tag, '-beta.') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Dispatch exact published beta
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=sigil_published_distribution \
+            -f "client_payload[tag]=${RELEASE_TAG}"
 
   publish-update-site:
     name: Publish Desktop update manifest

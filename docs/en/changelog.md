@@ -8,6 +8,11 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- Release tags now build TUI/npm bytes once and freeze a commit-bound candidate manifest in the
+  draft. Final publication reuses those admitted tarballs instead of rebuilding, while the release
+  doctor and Desktop upload command bind versions, tag/main/CI, updater keys, signatures,
+  notarization, and both macOS architectures. Publishing automatically starts a bounded public
+  npm/GitHub/Desktop/Pages/Homebrew installation smoke.
 - Fixed invalid or non-current configuration blocking every Desktop workspace before Settings was
   reachable. Desktop now starts a recovery-capable workspace service and offers an explicit
   current-format replacement in Settings; TUI Quick Setup offers the same replacement path.
@@ -16,9 +21,9 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## v0.0.1-beta.1 - 2026-07-31
 
-These changes are included in the packaged `v0.0.1-beta.1` release.
+This is the `v0.0.1-beta.1` release candidate. It is not a public release until the signed Desktop matrix and final publication gates pass.
 
-- Added the public macOS Desktop beta channel with signed, Apple-notarized Apple Silicon and Intel DMGs plus signed architecture-specific update bundles.
+- Prepared the public macOS Desktop beta channel with signed, Apple-notarized Apple Silicon and Intel DMGs plus signed architecture-specific update bundles; publication remains gated on the complete matrix.
 - Added explicit version checks and updates across Desktop Settings, TUI `/update`, and CLI `sigil update`; managed installations receive their package-manager command, while standalone updates remain checksum/signature verified and never restart silently.
 - Release tags now stage a mutable draft first. The explicit publish run verifies all Desktop assets, makes the completed GitHub Release public, publishes npm with the matching `beta` or `alpha` dist-tag, and only then updates the website and Homebrew; this remains compatible with immutable GitHub Releases.
 - Updated the website, README, installation/status docs, and visual tour so Desktop and TUI are coequal entry points with architecture-specific download guidance, a real Desktop capture tour, and the existing TUI real-run demo.

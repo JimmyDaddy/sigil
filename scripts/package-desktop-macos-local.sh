@@ -7,6 +7,7 @@ Usage: scripts/package-desktop-macos-local.sh \
   [--target native|all|aarch64-apple-darwin|x86_64-apple-darwin] \
   [--notary-profile PROFILE] \
   [--updater-key PATH] \
+  [--tag v<version>] \
   [--output-dir PATH] \
   [--skip-notarization]
 
@@ -25,6 +26,7 @@ notary_profile="${SIGIL_NOTARY_PROFILE:-Sigil-Notary}"
 updater_key="${SIGIL_DESKTOP_UPDATER_KEY:-$HOME/Library/Application Support/sigil/release/desktop-updater.key}"
 updater_key_password="${SIGIL_DESKTOP_UPDATER_KEY_PASSWORD:-}"
 output_root=""
+release_tag=""
 skip_notarization=false
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-dir)
       output_root="${2-}"
+      shift 2
+      ;;
+    --tag)
+      release_tag="${2-}"
       shift 2
       ;;
     --skip-notarization)
@@ -161,6 +167,17 @@ cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 if [[ -z "$version" || "$version" != "$cargo_version" ]]; then
   echo "desktop and Cargo workspace versions must match before packaging" >&2
   exit 1
+fi
+if [[ "${target_mode}" == "all" && -z "${release_tag}" ]]; then
+  echo "public two-architecture packaging requires --tag v${version}" >&2
+  exit 2
+fi
+if [[ -n "${release_tag}" ]]; then
+  node scripts/release-doctor.mjs \
+    --tag "${release_tag}" \
+    --require-clean \
+    --require-head-tag \
+    --updater-public-key "${updater_key}.pub"
 fi
 
 commit="$(git rev-parse HEAD)"

@@ -30,7 +30,7 @@
   </a>
 </p>
 
-<p align="center"><a href="https://github.com/JimmyDaddy/sigil/releases">Download signed macOS Desktop beta</a> · <a href="https://sigil.corerobin.com/#demo">Watch Desktop + TUI demos</a> · <a href="docs/en/changelog.md">Changelog</a></p>
+<p align="center"><a href="https://github.com/JimmyDaddy/sigil/releases">View macOS prereleases</a> · <a href="https://sigil.corerobin.com/#demo">Watch Desktop + TUI demos</a> · <a href="docs/en/changelog.md">Changelog</a></p>
 
 > [!WARNING]
 > Sigil is under active development and continuous iteration, so features may be unstable and change without notice. The website and user docs follow `main`; packaged releases can lag behind. Check [Installation](docs/en/installation.md) and the [Changelog](docs/en/changelog.md) before relying on a newly documented feature.
@@ -46,7 +46,7 @@
 ## Start in under a minute
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 cd /path/to/your/project
 sigil
 ```

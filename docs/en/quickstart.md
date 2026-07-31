@@ -13,7 +13,7 @@ You need a modern terminal, Node.js with npm, a model-provider credential, and a
 ## 1. Install Sigil
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 sigil --version
 ```
 

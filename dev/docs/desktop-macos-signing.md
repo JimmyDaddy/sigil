@@ -46,14 +46,18 @@ pnpm --dir apps/desktop package:macos:signed
 公开发布同时构建 Apple Silicon 和 Intel：
 
 ```bash
-pnpm --dir apps/desktop package:macos:signed -- --target all
+pnpm --dir apps/desktop package:macos:signed -- \
+  --target all \
+  --tag v0.0.1-beta.1
 ```
 
 若 Keychain profile 使用了其他名称：
 
 ```bash
 SIGIL_NOTARY_PROFILE="<profile>" \
-  pnpm --dir apps/desktop package:macos:signed -- --target all
+  pnpm --dir apps/desktop package:macos:signed -- \
+    --target all \
+    --tag v0.0.1-beta.1
 ```
 
 本地打包脚本会把当前 workspace version 与 `git rev-parse --short=12 HEAD`
@@ -68,8 +72,19 @@ SIGIL_NOTARY_PROFILE="<profile>" \
 
 ## 发布
 
-先推送版本 tag，让 `Release` workflow 建立只含 TUI/npm/Homebrew 资源的 draft
-Release。随后把本机输出目录中的双架构公开产物上传到同一个 draft，不能先公开
+先推送版本 tag，让 `Release` workflow 构建一次 TUI/npm/Homebrew 资源，并用
+commit-bound candidate manifest 建立 draft Release。随后用唯一上传入口把本机输出目录
+中的双架构公开产物上传到同一个 draft：
+
+```bash
+scripts/upload-desktop-macos-release.sh \
+  --tag v0.0.1-beta.1 \
+  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
+```
+
+该命令会先复验本地与远端 tag/main、精确 SHA 的 CI、`build.txt`、双架构、checksum、
+updater 签名、Developer ID、公证和内嵌公钥。远端已有相同字节时保持不动；不同字节
+默认停止，只有发布者明确检查后传入 `--replace` 才会删除并替换 draft asset。不能先公开
 Release 再补 Desktop 资源。最终手动以 `publish: true` 运行 `Release` workflow；
 它会先在 arm64/Intel macOS runner 重新验证两套 DMG 和 updater app 的 Developer
 ID、Team ID、Hardened Runtime、版本、commit、stapler 与 Gatekeeper，再在公开 job
@@ -81,7 +96,9 @@ artifact 把同一 manifest 部署到：
 https://sigil.corerobin.com/updates/beta/latest.json
 ```
 
-最后才同步 Homebrew。完整顺序、必需资源名与失败恢复方式见
+最终 publish 不再重编 TUI，而是按 candidate manifest 复用并核验 tag 阶段的 npm/TUI
+产物。最后才同步 Homebrew；主 workflow 使用 `repository_dispatch` 自动启动真实公开安装
+smoke，`release.published` 另行覆盖人工发布。完整顺序、必需资源名与失败恢复方式见
 [`release-process.md`](release-process.md)。
 
 ## 中断恢复

@@ -109,8 +109,8 @@
             给出目标、检查 AI 生成的计划、跟进并行工作，并从桌面端或终端决定下一步。
           </p>
           <div class="alpha-status" aria-label="发布状态">
-            <strong>Beta 预览</strong>
-            <span>Desktop 与 TUI 是并列的一等产品表面。已签名并完成 Apple 公证的 macOS Desktop 安装包通过 GitHub prerelease 分发；npm 使用对应的 <code>beta</code> tag。使用前请查看<a href="docs/status/">当前支持状态</a>和<a href="docs/changelog/">变更记录</a>。</span>
+            <strong>早期预览</strong>
+            <span>Desktop 与 TUI 是并列的一等产品表面。首个完成签名与 Apple 公证的 macOS Desktop beta 仍处于发布候选阶段；当前已公开的 TUI 预览使用 npm 的 <code>alpha</code> tag。使用前请查看<a href="docs/status/">当前支持状态</a>和<a href="docs/changelog/">变更记录</a>。</span>
           </div>
           <div class="hero-actions" aria-label="主要操作">
             <a class="button primary" href="#quickstart">安装</a>
@@ -209,7 +209,7 @@
         </div>
         <div class="install-options" aria-label="推荐安装方式">
           <article class="install-card install-card-primary">
-            <span class="resource-kicker">Desktop beta · macOS</span>
+            <span class="resource-kicker">Desktop beta 候选 · macOS</span>
             <h3>已签名并完成 Apple 公证的 DMG</h3>
             <div class="download-links">
               <a class="button primary" href="https://github.com/JimmyDaddy/sigil/releases" data-desktop-update-platform="darwin-aarch64" data-desktop-target="aarch64-apple-darwin" data-desktop-update-manifest="../updates/beta/latest.json">Apple 芯片</a>
@@ -218,9 +218,9 @@
             <small>Beta manifest 可用后，按钮会直接指向对应已签名、公证并装订票据的 DMG；否则打开 Releases。</small>
           </article>
           <article class="install-card">
-            <span class="resource-kicker">TUI beta</span>
+            <span class="resource-kicker">TUI alpha</span>
             <h3>npm</h3>
-            <pre><code>npm install -g @sigil-ai/sigil@beta</code></pre>
+            <pre><code>npm install -g @sigil-ai/sigil@alpha</code></pre>
           </article>
           <article class="install-card">
             <span class="resource-kicker">本次变化</span>
@@ -296,7 +296,7 @@ sigil</code></pre>
             </ul>
             <div class="feature-visual feature-diff" aria-hidden="true">
               <div class="feature-visual-bar"><span>审批 · README.md</span><b>请检查</b></div>
-              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@beta</span></code>
+              <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@alpha</span></code>
               <div class="feature-visual-actions"><span>拒绝</span><strong>仅允许这次</strong></div>
             </div>
           </article>

@@ -6,33 +6,69 @@ product surface.
 
 ## Release Trigger
 
-Create and push a version tag that matches the Cargo package version:
+Run the release doctor from a clean `main` checkout before creating a tag. It
+binds the candidate version across Cargo, Cargo.lock, Desktop, Tauri, and both
+changelogs, proves remote `main` is the same commit, and requires successful CI
+and Desktop Package runs for that exact SHA:
+
+```bash
+node scripts/release-doctor.mjs \
+  --tag v0.0.1-beta.1 \
+  --repository JimmyDaddy/sigil \
+  --require-clean \
+  --require-origin-main \
+  --require-ci \
+  --require-workflow CI \
+  --require-workflow "Desktop Package" \
+  --require-public-channel
+```
+
+`--require-public-channel` intentionally blocks a beta tag while the public
+README, Quickstart, installation docs, and site still advertise the previous
+alpha. Change those surfaces only in the final release-preparation commit, after
+the candidate is otherwise ready. Then create and push the version tag:
 
 ```bash
 git tag -a v0.0.1-beta.1 -m "Sigil 0.0.1-beta.1"
 git push origin v0.0.1-beta.1
 ```
 
-Before creating a tag, manually dispatch the `Release` workflow from the exact
-candidate ref with `publish` left at its safe default of `false`. This build-only
-mode runs all four platform archive, smoke, checksum, attestation, and artifact
-upload steps, but it does not publish npm packages, create or change a GitHub
-Release, or update the Homebrew tap.
+The optional manual `publish: false` mode remains a build-only preflight. It is
+not required for publication and never becomes the source of a later publish.
 
-Pushing the tag builds the exact source and creates or refreshes a **draft**
-GitHub Release containing the TUI archives, npm tarballs, checksum files, and
-Homebrew formula. It does not publish npm, make the release public, or update
-Homebrew. Upload the locally signed/notarized Desktop assets to that draft
-before the final publish dispatch.
+Pushing the tag builds the exact source once and creates a **draft** GitHub
+Release containing the TUI archives, npm tarballs, checksum files, Homebrew
+formula, and a commit-bound candidate manifest. A rerun keeps byte-identical
+assets and fails closed if an existing draft asset differs; it never uses
+`--clobber`. The tag run does not publish npm, make the release public, or update
+Homebrew.
+
+For a beta, build and upload the signed Desktop matrix from the tagged checkout:
+
+```bash
+pnpm --dir apps/desktop package:macos:signed -- \
+  --target all \
+  --tag v0.0.1-beta.1
+
+scripts/upload-desktop-macos-release.sh \
+  --tag v0.0.1-beta.1 \
+  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
+```
+
+The upload command reruns checksum, updater-signature, Apple trust, notarization,
+version, commit, and architecture checks; binds local and remote tag/main/CI;
+keeps identical remote bytes; and requires explicit `--replace` before deleting
+a different draft asset.
 
 Final publication requires a manual dispatch with `publish: true` and the
-existing `v`-prefixed tag. The workflow checks out that tag, rebuilds and
-revalidates the release assets, and for a beta requires both macOS Desktop
-architectures. Native arm64 and Intel macOS jobs then download the completed
-draft and re-check Developer ID authority, the exact Apple Team ID, Hardened
-Runtime, stapler, Gatekeeper, updater signature, tag version, and tagged Git
-commit for both the DMG app and updater archive app. Only those jobs can unblock
-the separate public-release job. Treat this as a public release action, not as
+existing `v`-prefixed tag. This path does **not** rebuild TUI or regenerate npm
+packages. It downloads the candidate manifest and npm tarballs already frozen
+in the draft, checks every candidate digest against GitHub's release-asset
+digest, and for a beta requires both macOS Desktop architectures. Native arm64
+and Intel jobs then download the completed draft and re-check Developer ID
+authority, the exact Apple Team ID, Hardened Runtime, stapler, Gatekeeper,
+updater signature, tag version, and tagged Git commit. Only those jobs can
+unblock the public-release job. Treat this as a public release action, not as
 package preflight.
 
 The workflow serializes every run for the same tag. Final publication is also
@@ -62,12 +98,14 @@ append Desktop assets after publication.
 5. Generate release notes from Conventional Commit subjects.
 6. Render a Homebrew tap formula from the macOS archive URL and checksum.
 7. Generate npm package tarballs from the release archives.
-8. On tag push, create or update a draft GitHub Release with archives, checksum
-   files, `checksums.txt`, `sigil-ai.rb`, npm package tarballs, and generated
-   notes. A tag push never publishes the draft.
+8. Generate `sigil-<version>-candidate.json` with the exact tag, full commit,
+   asset names, byte sizes, and SHA-256 digests. On tag push, create or update a
+   draft GitHub Release without replacing a different existing asset. A tag push
+   never publishes the draft.
 9. Upload the signed Desktop DMGs, checksums, updater archives, and updater
    signatures to the same draft.
-10. On explicit publish, require the beta Desktop asset matrix, verify the DMG
+10. On explicit publish, download and verify the staged candidate manifest and
+   npm tarballs without rebuilding TUI. Require the beta Desktop asset matrix, verify the DMG
    and updater archive checksums, cryptographically verify both updater
    signatures against the public key embedded in the tagged Tauri config, run a
    swapped-signature negative control, and generate `latest.json`.
@@ -79,7 +117,7 @@ append Desktop assets after publication.
    immutability is enabled, then make the completed draft public. Prerelease
    suffixes stay marked as GitHub prereleases; no release assets are appended
    afterward.
-13. Publish npm only after the release is accessible. `-alpha.*` uses the
+13. Publish the already-staged npm tarballs only after the release is accessible. `-alpha.*` uses the
    `alpha` dist-tag, `-beta.*` uses `beta`, and unknown prerelease suffixes fail.
    Registry reads and SemVer comparison fail closed. An exact package-version
    retry is skipped only when the requested dist-tag already points to that
@@ -96,6 +134,14 @@ append Desktop assets after publication.
    the generated `sigil-ai.rb` asset only after a SemVer monotonicity check and
    verify the tap points at the same release tag. Alpha remains an npm/GitHub
    channel and does not compete for the single Homebrew formula.
+16. After npm publication, the release workflow emits a
+   `sigil_published_distribution` repository dispatch because GitHub suppresses
+   ordinary workflow events caused by `GITHUB_TOKEN`. A `release.published`
+   trigger remains as coverage for maintainer-published releases. The smoke waits
+   for bounded npm, Pages, and Homebrew convergence, then exercises npm installs
+   on four runners, checks GitHub checksums and attestations, verifies both
+   Desktop updater signatures and the public update manifest, and installs both
+   Homebrew architectures.
 
 GitHub artifact attestations require `id-token: write`, `contents: read`, and
 `attestations: write` permissions on the build job. The publish job requires
@@ -121,6 +167,7 @@ Each release should contain:
 - `sigil-ai.rb` with arm64 and Intel macOS archive URLs when both macOS artifacts are available
 - `sigil-ai-sigil-<version>.tgz`
 - `sigil-ai-sigil-<platform>-<version>.tgz` for each supported npm platform package
+- `sigil-<version>-candidate.json`, binding the staged TUI/npm bytes to the tag commit
 - `Sigil_<version>_aarch64-apple-darwin.dmg`
 - `Sigil_<version>_aarch64-apple-darwin.dmg.sha256`
 - `Sigil_<version>_x86_64-apple-darwin.dmg`
@@ -201,9 +248,10 @@ Trusted Publisher connection:
 - environment: unset
 - allowed action: `npm publish`
 
-The workflow calls `scripts/publish-npm-packages.sh`, which derives `alpha` or
-`beta` from the prerelease suffix and publishes platform
-packages first and the root package last. It skips an exact package version that
+The workflow calls `scripts/publish-npm-packages.sh` against the `.tgz` files
+already admitted by the candidate manifest. It derives `alpha` or `beta` from
+the prerelease suffix and publishes platform packages first and the root package
+last. It skips an exact package version that
 already exists only after proving the selected dist-tag already equals that
 version, so a retry cannot silently preserve the wrong desired state or move a
 newer tag backward. To inspect the package order locally without registry access:
@@ -211,7 +259,7 @@ newer tag backward. To inspect the package order locally without registry access
 ```bash
 scripts/publish-npm-packages.sh \
   --version 0.0.1-beta.1 \
-  --packages-dir dist/npm-packages \
+  --package-tarballs-dir dist \
   --tag beta \
   --dry-run
 ```
@@ -263,6 +311,8 @@ cargo fmt --all --check
 cargo check
 cargo test
 cargo clippy --all-targets -- -D warnings
+node scripts/release-doctor.mjs --tag v0.0.1-beta.1
+node scripts/test-release-tooling.mjs
 scripts/build-release-archive.sh
 scripts/render-homebrew-formula.sh --version 0.0.1-beta.1 --url https://example.invalid/sigil.tar.gz --sha256 0000000000000000000000000000000000000000000000000000000000000000 --output /tmp/sigil-ai.rb
 scripts/generate-release-notes.sh HEAD >/tmp/sigil-release-notes.md
@@ -279,9 +329,12 @@ scripts/build-release-archive.sh \
 The command must fail if the report targets a different commit or build. Do not
 copy a report-derived sidecar into another archive manually.
 
-If staging fails, keep the draft and rerun the same tag after fixing or adding
-its assets. If npm, Pages, or Homebrew fails after the draft becomes public,
-rerun the explicit publish dispatch; exact npm package versions are skipped
-safely and the immutable `latest.json` is copied into a fresh full Pages
-artifact. Never publish a draft until the Desktop matrix is complete, because
-immutable GitHub Releases cannot accept missing assets afterward.
+If staging is interrupted, keep the draft and rerun the same tag: byte-identical
+assets are retained and missing assets resume. A different byte for an existing
+candidate asset is not repaired in place; fix the source and use a new version
+tag. If npm, Pages, Homebrew, or published-distribution smoke fails after the
+draft becomes public, rerun the explicit publish dispatch or the read-only smoke
+as appropriate. Exact npm package versions are skipped safely and the immutable
+`latest.json` is copied into a fresh full Pages artifact. Never publish a draft
+until the Desktop matrix is complete, because immutable GitHub Releases cannot
+accept missing assets afterward.

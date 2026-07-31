@@ -2,6 +2,10 @@ name: Published Distribution Smoke
 
 on:
   workflow_dispatch:
+  release:
+    types: [published]
+  repository_dispatch:
+    types: [sigil_published_distribution]
   schedule:
     - cron: "17 3 * * *"
 
@@ -10,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: published-distribution-smoke
+  group: published-distribution-smoke-${{ github.event.release.tag_name || github.event.client_payload.tag || 'current-beta' }}
   cancel-in-progress: false
 
 env:
@@ -24,8 +28,12 @@ env:
 jobs:
   resolve-release:
     name: Resolve current beta release
+    if: >-
+      ${{ (github.event_name != 'release' || contains(github.event.release.tag_name, '-beta.')) &&
+          (github.event_name != 'repository_dispatch' || contains(github.event.client_payload.tag, '-beta.')) }}
     runs-on: ubuntu-latest
     outputs:
+      available: ${{ steps.release.outputs.available }}
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
     steps:
@@ -33,11 +41,47 @@ jobs:
         id: release
         shell: bash
         env:
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_DISPATCH_TAG: ${{ github.event.client_payload.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "${RELEASE_CHANNEL}" = "beta"
-          version="$(npm view "@sigil-ai/sigil@${RELEASE_CHANNEL}" version --json | jq -er '.')"
+          if [[ "${GITHUB_EVENT_NAME}" == "release" || "${GITHUB_EVENT_NAME}" == "repository_dispatch" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+              tag="${EVENT_RELEASE_TAG}"
+            else
+              tag="${EVENT_DISPATCH_TAG}"
+            fi
+            version="${tag#v}"
+            if [[ "${tag}" != v* || "${version}" != *-beta.* ]]; then
+              echo "published distribution smoke only admits beta releases: ${tag}" >&2
+              exit 1
+            fi
+            npm_version=""
+            for attempt in $(seq 1 20); do
+              if npm_version="$(npm view "@sigil-ai/sigil@${RELEASE_CHANNEL}" version --json 2>/dev/null | jq -er '.' 2>/dev/null)" &&
+                [[ "${npm_version}" == "${version}" ]]; then
+                break
+              fi
+              if [[ "${attempt}" -eq 20 ]]; then
+                echo "npm ${RELEASE_CHANNEL} did not converge to ${version}; observed ${npm_version:-nothing}" >&2
+                exit 1
+              fi
+              sleep 30
+            done
+          else
+            if ! version="$(npm view "@sigil-ai/sigil@${RELEASE_CHANNEL}" version --json 2>/dev/null | jq -er '.' 2>/dev/null)"; then
+              if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+                echo "no published beta exists yet; scheduled smoke is not applicable"
+                printf 'available=false\n' >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              echo "npm has no resolvable ${RELEASE_CHANNEL} release" >&2
+              exit 1
+            fi
+            tag="v${version}"
+          fi
           case "${version}" in
             *-"${RELEASE_CHANNEL}" | *-"${RELEASE_CHANNEL}".*) ;;
             *)
@@ -45,7 +89,6 @@ jobs:
               exit 1
               ;;
           esac
-          tag="v${version}"
           release="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
@@ -60,12 +103,16 @@ jobs:
             exit 1
           fi
           test -n "${version}"
-          printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
-          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+          {
+            printf 'available=true\n'
+            printf 'tag=%s\n' "${tag}"
+            printf 'version=%s\n' "${version}"
+          } >> "${GITHUB_OUTPUT}"
 
   npm-install:
     name: npm ${{ matrix.label }}
     needs: resolve-release
+    if: ${{ needs.resolve-release.outputs.available == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -126,6 +173,7 @@ jobs:
   github-release:
     name: GitHub Release and Desktop assets
     needs: resolve-release
+    if: ${{ needs.resolve-release.outputs.available == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout published tag
@@ -155,6 +203,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --pattern 'checksums.txt' \
             --pattern 'sigil-*.tar.gz' \
+            --pattern 'sigil-*-candidate.json' \
             --dir "${asset_dir}"
 
       - name: Verify aggregate checksums and expected platforms
@@ -181,6 +230,25 @@ jobs:
           done < "${asset_dir}/checksums.txt"
           test "$(wc -l < "${normalized}" | tr -d ' ')" = "${#expected[@]}"
           (cd "${asset_dir}" && sha256sum --check "$(basename "${normalized}")")
+
+      - name: Verify immutable candidate manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset_dir="${RUNNER_TEMP}/sigil-release-smoke"
+          gh release view "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json assets,isDraft,isImmutable,tagName \
+            > "${asset_dir}/release.json"
+          node scripts/release-candidate.mjs verify \
+            --manifest "${asset_dir}/sigil-${VERSION}-candidate.json" \
+            --tag "${RELEASE_TAG}" \
+            --commit "$(git rev-parse "${RELEASE_TAG}^{commit}")" \
+            --release-json "${asset_dir}/release.json"
 
       - name: Verify GitHub artifact attestations
         shell: bash
@@ -243,6 +311,7 @@ jobs:
           fi
 
           curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 20 --retry-delay 30 --retry-all-errors \
             --output "${desktop_dir}/pages-latest.json" \
             "https://sigil.corerobin.com/updates/beta/latest.json"
           cmp "${desktop_dir}/latest.json" "${desktop_dir}/pages-latest.json"
@@ -290,6 +359,7 @@ jobs:
   homebrew-install:
     name: Homebrew ${{ matrix.label }}
     needs: resolve-release
+    if: ${{ needs.resolve-release.outputs.available == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -302,6 +372,28 @@ jobs:
             os: macos-15-intel
             architecture: x86_64
     steps:
+      - name: Wait for the public tap to converge
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          formula="${RUNNER_TEMP}/sigil-ai.rb"
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${formula}" \
+              "https://raw.githubusercontent.com/JimmyDaddy/homebrew-sigil/main/Formula/sigil-ai.rb" &&
+              grep -Fq "version \"${VERSION}\"" "${formula}"; then
+              break
+            fi
+            if [[ "${attempt}" -eq 20 ]]; then
+              echo "Homebrew tap did not converge to ${VERSION}" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
       - name: Install from the public tap
         shell: bash
         env:

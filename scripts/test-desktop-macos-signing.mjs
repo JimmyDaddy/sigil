@@ -21,6 +21,10 @@ const packageScript = readFileSync(
   resolve(root, "scripts/package-desktop-macos-local.sh"),
   "utf8",
 );
+const uploadScript = readFileSync(
+  resolve(root, "scripts/upload-desktop-macos-release.sh"),
+  "utf8",
+);
 const workspaceManifest = readFileSync(resolve(root, "Cargo.toml"), "utf8");
 const notarizeScript = readFileSync(
   resolve(root, "scripts/notarize-desktop-macos.sh"),
@@ -107,9 +111,31 @@ for (const token of [
   "swapped Desktop updater signature",
   "--expected-version",
   "--expected-commit",
+  "release-doctor.mjs",
+  "--tag",
 ]) {
   assert.match(packageScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
+
+for (const token of [
+  "--require-head-tag",
+  "--require-origin-main",
+  "--require-remote-tag",
+  "--require-workflow CI",
+  '--require-workflow "Desktop Package"',
+  "build.txt",
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "verify-desktop-macos.sh",
+  "verify-desktop-macos-app.sh",
+  "verify-desktop-update-signature.sh",
+  "extract-verified-desktop-updater-app.py",
+  "--replace",
+  "gh release download",
+]) {
+  assert.match(uploadScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+}
+assert.doesNotMatch(uploadScript, /gh release upload[^\n]*--clobber/);
 
 for (const token of [
   "notarytool submit",
@@ -237,9 +263,16 @@ for (const token of [
   "X-GitHub-Api-Version: 2026-03-10",
   "SIGIL_RELEASE_ADMIN_TOKEN",
   "generate-desktop-update-manifest.mjs",
+  "release-candidate.mjs create",
+  "release-candidate.mjs verify",
+  "prepare-publication:",
+  "--package-tarballs-dir release-publication-inputs",
+  "dispatch-published-smoke:",
+  "sigil_published_distribution",
 ]) {
   assert.match(releaseWorkflow, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
+assert.doesNotMatch(releaseWorkflow, /--clobber/);
 for (const token of [
   "Checkout published tag",
   "RELEASE_CHANNEL: beta",
@@ -247,6 +280,8 @@ for (const token of [
   "verify-desktop-update-signature.sh",
   "swapped Desktop updater signature",
   "entry.signature !== signature",
+  "types: [published]",
+  "Wait for the public tap to converge",
 ]) {
   assert.match(
     publishedSmokeWorkflow,

@@ -30,7 +30,7 @@
   </a>
 </p>
 
-<p align="center"><a href="https://github.com/JimmyDaddy/sigil/releases">下载已签名的 macOS Desktop beta</a> · <a href="https://sigil.corerobin.com/zh-CN/#demo">观看 Desktop + TUI Demo</a> · <a href="docs/zh-CN/changelog.md">变更记录</a></p>
+<p align="center"><a href="https://github.com/JimmyDaddy/sigil/releases">查看 macOS 预发布版本</a> · <a href="https://sigil.corerobin.com/zh-CN/#demo">观看 Desktop + TUI Demo</a> · <a href="docs/zh-CN/changelog.md">变更记录</a></p>
 
 > [!NOTE]
 > Sigil 仍处于早期预览阶段。网站与用户文档跟随 `main`，可能领先于已发布的软件包。依赖新功能前，请先查看[安装指南](docs/zh-CN/installation.md)与[变更记录](docs/zh-CN/changelog.md)。
@@ -45,7 +45,7 @@
 ## 一分钟内开始
 
 ```bash
-npm install -g @sigil-ai/sigil@beta
+npm install -g @sigil-ai/sigil@alpha
 cd /path/to/your/project
 sigil
 ```

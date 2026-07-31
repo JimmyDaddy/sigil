@@ -9,10 +9,16 @@ ruby -e 'require "yaml"; YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
 
 required_lines=(
   "  workflow_dispatch:"
+  "  release:"
+  "    types: [published]"
+  "  repository_dispatch:"
+  "    types: [sigil_published_distribution]"
   "  schedule:"
   "  attestations: read"
   "  contents: read"
   "  RELEASE_CHANNEL: beta"
+  "      available: \${{ steps.release.outputs.available }}"
+  "                printf 'available=false\\n' >> \"\${GITHUB_OUTPUT}\""
   "  npm-install:"
   "  github-release:"
   "  homebrew-install:"
@@ -21,7 +27,11 @@ required_lines=(
   "              \"repos/\${GITHUB_REPOSITORY}/releases/tags/\${tag}\""
   "          if [[ \"\$(jq -r '.immutable // false' <<<\"\${release}\")\" != \"true\" ]]; then"
   "          npm exec -- sigil doctor --output json > doctor.json"
+  "              sleep 30"
+  "            --retry 20 --retry-delay 30 --retry-all-errors \\"
+  "      - name: Wait for the public tap to converge"
   "            gh attestation verify \"\${archive}\" --repo \"\${GITHUB_REPOSITORY}\""
+  "          node scripts/release-candidate.mjs verify \\"
   "          brew install JimmyDaddy/sigil/sigil-ai"
   "          sigil doctor --output json > doctor.json"
 )
