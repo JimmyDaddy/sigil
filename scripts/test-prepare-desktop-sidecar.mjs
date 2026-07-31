@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   desktopSidecarPaths,
   parseDesktopSidecarArgs,
+  resolveDesktopSidecarTarget,
 } from "./prepare-desktop-sidecar.mjs";
 
 assert.deepEqual(parseDesktopSidecarArgs([]), {
@@ -29,6 +30,29 @@ assert.deepEqual(
 );
 assert.throws(() => parseDesktopSidecarArgs(["--target", "../escape"]));
 assert.throws(() => parseDesktopSidecarArgs(["--unknown"]));
+assert.equal(
+  resolveDesktopSidecarTarget(undefined, {
+    SIGIL_DESKTOP_SIDECAR_TARGET: "x86_64-apple-darwin",
+  }),
+  "x86_64-apple-darwin",
+);
+assert.equal(
+  resolveDesktopSidecarTarget(
+    "aarch64-apple-darwin",
+    { SIGIL_DESKTOP_SIDECAR_TARGET: "x86_64-apple-darwin" },
+    () => "unused-host",
+  ),
+  "aarch64-apple-darwin",
+);
+assert.equal(
+  resolveDesktopSidecarTarget(undefined, {}, () => "aarch64-apple-darwin"),
+  "aarch64-apple-darwin",
+);
+assert.throws(() =>
+  resolveDesktopSidecarTarget(undefined, {
+    SIGIL_DESKTOP_SIDECAR_TARGET: "../escape",
+  }),
+);
 
 const windows = desktopSidecarPaths("/repo", "x86_64-pc-windows-msvc", "release");
 assert.equal(windows.source, path.join("/repo", "target", "x86_64-pc-windows-msvc", "release", "sigil.exe"));

@@ -7,6 +7,7 @@ import path from "node:path";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
+const TARGET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function parseDesktopSidecarArgs(argv) {
   const options = { profile: "release", target: undefined, skipBuild: false };
@@ -28,7 +29,7 @@ export function parseDesktopSidecarArgs(argv) {
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(options.profile)) {
     throw new Error("profile must be a bounded Cargo profile name");
   }
-  if (options.target !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.target)) {
+  if (options.target !== undefined && !TARGET_PATTERN.test(options.target)) {
     throw new Error("target must be a bounded Rust target triple");
   }
   return options;
@@ -71,9 +72,22 @@ function resolveHostTarget() {
   return target;
 }
 
-export function prepareDesktopSidecar(argv = process.argv.slice(2)) {
+export function resolveDesktopSidecarTarget(
+  explicitTarget,
+  environment = process.env,
+  hostTargetResolver = resolveHostTarget,
+) {
+  const environmentTarget = environment.SIGIL_DESKTOP_SIDECAR_TARGET?.trim();
+  const target = explicitTarget ?? environmentTarget ?? hostTargetResolver();
+  if (!TARGET_PATTERN.test(target)) {
+    throw new Error("target must be a bounded Rust target triple");
+  }
+  return target;
+}
+
+export function prepareDesktopSidecar(argv = process.argv.slice(2), environment = process.env) {
   const options = parseDesktopSidecarArgs(argv);
-  const target = options.target ?? resolveHostTarget();
+  const target = resolveDesktopSidecarTarget(options.target, environment);
   const paths = desktopSidecarPaths(REPO_ROOT, target, options.profile);
   if (!options.skipBuild) {
     run("cargo", [

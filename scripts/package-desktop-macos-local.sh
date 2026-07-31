@@ -198,6 +198,7 @@ for target in "${targets[@]}"; do
     x86_64-apple-darwin) expected_arch="x86_64" ;;
   esac
 
+  SIGIL_DESKTOP_SIDECAR_TARGET="$target" \
   APPLE_SIGNING_IDENTITY="$identity" \
   TAURI_SIGNING_PRIVATE_KEY="$(<"$updater_key")" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_key_password" \

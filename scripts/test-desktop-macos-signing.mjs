@@ -94,6 +94,7 @@ for (const token of [
   "APPLE_SIGNING_IDENTITY",
   "security find-identity",
   "--target all",
+  'SIGIL_DESKTOP_SIDECAR_TARGET="$target"',
   "verify-desktop-macos.sh",
   "notarize-desktop-macos.sh",
   "notarize-desktop-macos-app.sh",
