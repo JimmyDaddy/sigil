@@ -50,7 +50,10 @@ Provider 生成请求与远程模型目录均遵循标准 `HTTP_PROXY`、`HTTPS_
 
 如果 Doctor 报告 Provider 配置无效或 schema 不兼容，请直接替换为当前
 `config_version = 2` connection 模板。Sigil 不迁移或推断旧 Provider 区块。不要新增重复
-connection，也不要手工编辑 credential ID。
+connection，也不要手工编辑 credential ID。Desktop 仍会以配置恢复状态打开所选工作区：
+进入**设置**，选择**替换无效配置**，检查 Provider、凭据来源和精确模型后再确认替换。
+TUI 会进入快速设置，并把最后一步明确标成**检查、替换无效配置并启动**。两条路径都会在
+配置锁内重新确认磁盘文件仍然无效；如果其他进程已把它修成有效配置，本次替换会被拒绝。
 
 ## 主题颜色难以阅读
 

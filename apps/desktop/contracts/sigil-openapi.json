@@ -4536,6 +4536,10 @@
               }
             ]
           },
+          "replace_invalid_config": {
+            "default": false,
+            "type": "boolean"
+          },
           "template": {
             "$ref": "#/components/schemas/ProviderSetupTemplate"
           }
@@ -4642,6 +4646,10 @@
                 "type": "null"
               }
             ]
+          },
+          "replace_invalid_config": {
+            "default": false,
+            "type": "boolean"
           },
           "template": {
             "$ref": "#/components/schemas/ProviderSetupTemplate"

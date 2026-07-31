@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_kernel::{ConfigUpdateLockGuard, ConnectionId, ModelRef, RootConfig, SecretString};
+use sigil_kernel::{ConnectionId, ModelRef, RootConfig, SecretString};
 use sigil_runtime::apply_new_install_orchestration_rollout;
 #[cfg(not(test))]
 use sigil_runtime::provider_connections::ConfiguredProviderCredentialStore;
 use sigil_runtime::provider_connections::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, CredentialRefConfig,
-    PreparedCredential, ProviderConfigPublisher, ProviderConnectionConfig, ProviderFamily,
-    ProviderProtocol, RootConfigPublisher, default_setup_root_config, load_provider_connections,
+    PreparedCredential, ProviderConnectionConfig, ProviderFamily, ProviderProtocol,
+    RootConfigPublisher, default_setup_root_config, load_provider_connections,
     materialize_root_config, provider_connection_template, save_connection_config,
+    save_connection_config_replacing_invalid,
 };
 
 use super::{
@@ -60,7 +61,12 @@ impl AppState {
                 "Up/Down choose · Enter continue · Ctrl-C quit".to_owned(),
             ]);
             if let Some(error) = &state.startup_error {
-                lines.extend([String::new(), format!("load failed: {error}")]);
+                lines.extend([
+                    String::new(),
+                    format!("load failed: {error}"),
+                    "The unreadable configuration will remain unchanged until you explicitly save this reviewed replacement."
+                        .to_owned(),
+                ]);
             }
             return lines;
         }
@@ -111,7 +117,11 @@ impl AppState {
             render_setup_action_row(
                 SetupField::Save,
                 state.selected_field,
-                "review, trust folder, save and start",
+                if state.existing_config_repair_required() {
+                    "review, replace invalid config and start"
+                } else {
+                    "review, trust folder, save and start"
+                },
             ),
             String::new(),
             "[review]".to_owned(),
@@ -137,6 +147,10 @@ impl AppState {
         if let Some(error) = &state.startup_error {
             lines.push(String::new());
             lines.push(format!("load failed: {error}"));
+            lines.push(
+                "The unreadable configuration will remain unchanged until you explicitly save this reviewed replacement."
+                    .to_owned(),
+            );
         }
 
         lines.push(String::new());
@@ -473,12 +487,6 @@ fn render_setup_action_row(field: SetupField, selected_field: SetupField, label:
 }
 
 pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
-    if state.existing_config_repair_required() {
-        return Some(
-            "existing config is invalid and remains unchanged; run `sigil doctor`, repair the file, then reopen setup"
-                .to_owned(),
-        );
-    }
     if state.model.trim().is_empty() {
         return Some("model cannot be empty".to_owned());
     }
@@ -624,16 +632,6 @@ fn setup_connection_identity(
 
 fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutcome)> {
     let root_config = build_setup_root_config(state)?;
-    if state.credential_source != SetupCredentialSource::SecureStore {
-        let lock = ConfigUpdateLockGuard::acquire(&state.config_path)?;
-        let publish_outcome = RootConfigPublisher.publish(
-            &state.config_path,
-            &persisted_root_config(&root_config),
-            &lock,
-        )?;
-        return Ok((root_config, publish_outcome));
-    }
-
     let loaded = load_provider_connections(&root_config);
     anyhow::ensure!(
         loaded.issues.is_empty(),
@@ -654,38 +652,61 @@ fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutc
         .into_iter()
         .map(|(id, loaded)| (id, loaded.config))
         .collect();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to initialize credential save runtime")?;
-    #[cfg(not(test))]
-    let credential_store = ConfiguredProviderCredentialStore::from_root_config(&root_config);
-    #[cfg(test)]
-    let credential_store = TestSetupCredentialStore::default();
-    let save = async {
-        save_connection_config(
-            &root_config,
-            &state.config_path,
-            ConnectionSaveDraft {
-                connections,
-                default_model,
-                credential_updates: vec![ConnectionCredentialUpdate {
-                    connection_id,
-                    prepared: PreparedCredential::api_key(
-                        family,
-                        state.api_key.expose_secret().trim().to_owned(),
-                    ),
-                }],
-            },
-            &credential_store,
-            &RootConfigPublisher,
-        )
-        .await
+    let credential_updates = if state.credential_source == SetupCredentialSource::SecureStore {
+        vec![ConnectionCredentialUpdate {
+            connection_id,
+            prepared: PreparedCredential::api_key(
+                family,
+                state.api_key.expose_secret().trim().to_owned(),
+            ),
+        }]
+    } else {
+        Vec::new()
     };
-    let outcome = runtime
-        .block_on(save)
-        .map_err(anyhow::Error::new)
-        .context("failed to save provider connection")?;
+    let save_draft = ConnectionSaveDraft {
+        connections,
+        default_model,
+        credential_updates,
+    };
+    let persisted = persisted_root_config(&root_config);
+    let config_path = state.config_path.clone();
+    let replace_invalid = state.existing_config_repair_required();
+    let outcome = std::thread::Builder::new()
+        .name("sigil-setup-save".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to initialize credential save runtime")?;
+            #[cfg(not(test))]
+            let credential_store =
+                ConfiguredProviderCredentialStore::from_root_config(&root_config);
+            #[cfg(test)]
+            let credential_store = TestSetupCredentialStore::default();
+            let outcome = if replace_invalid {
+                runtime.block_on(save_connection_config_replacing_invalid(
+                    &persisted,
+                    &config_path,
+                    save_draft,
+                    &credential_store,
+                    &RootConfigPublisher,
+                ))
+            } else {
+                runtime.block_on(save_connection_config(
+                    &persisted,
+                    &config_path,
+                    save_draft,
+                    &credential_store,
+                    &RootConfigPublisher,
+                ))
+            };
+            outcome
+                .map_err(anyhow::Error::new)
+                .context("failed to save provider connection")
+        })
+        .context("failed to spawn setup save thread")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("setup save thread panicked"))??;
     if outcome.publish_outcome == ConfigPublishOutcome::PublishedDurabilityUncertain {
         tracing::warn!("setup config was published but directory durability is uncertain");
     }

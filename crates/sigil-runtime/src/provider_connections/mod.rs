@@ -47,7 +47,7 @@ pub use loader::{load_provider_connections, materialize_root_config};
 pub use persistence::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, ConnectionSaveError,
     ConnectionSaveOutcome, ProviderConfigPublisher, RootConfigPublisher, save_connection_config,
-    save_connection_config_with_base,
+    save_connection_config_replacing_invalid, save_connection_config_with_base,
 };
 pub use recent::{load_recent_model_refs, recent_models_path, record_recent_model_ref};
 pub use route::{

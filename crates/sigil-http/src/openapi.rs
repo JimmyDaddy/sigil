@@ -1159,7 +1159,8 @@ pub fn http_openapi_document() -> Value {
                         },
                         "endpoint": { "type": ["string", "null"], "maxLength": 2048 },
                         "credential_source": { "$ref": "#/components/schemas/ProviderSetupCredentialSource" },
-                        "api_key": { "type": ["string", "null"], "format": "password", "maxLength": 16384, "writeOnly": true }
+                        "api_key": { "type": ["string", "null"], "format": "password", "maxLength": 16384, "writeOnly": true },
+                        "replace_invalid_config": { "type": "boolean", "default": false }
                     }
                 },
                 "ProviderSetupModel": {
@@ -1206,7 +1207,8 @@ pub fn http_openapi_document() -> Value {
                         "credential_source": { "$ref": "#/components/schemas/ProviderSetupCredentialSource" },
                         "api_key": { "type": ["string", "null"], "format": "password", "maxLength": 16384, "writeOnly": true },
                         "model_id": { "type": "string" },
-                        "label": { "type": ["string", "null"], "maxLength": 160 }
+                        "label": { "type": ["string", "null"], "maxLength": 160 },
+                        "replace_invalid_config": { "type": "boolean", "default": false }
                     }
                 },
                 "ProviderSetupSaveResult": {

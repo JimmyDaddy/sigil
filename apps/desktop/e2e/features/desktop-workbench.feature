@@ -42,3 +42,10 @@ Feature: Desktop workbench remains usable
     When I create a new desktop conversation
     And an unsupported conversation source is stored in the workspace
     Then I can permanently delete the unavailable source from conversation management
+
+  Scenario: Recover an invalid provider configuration without losing the workspace
+    Given the current-source desktop has restored the isolated workspace
+    When the provider configuration becomes invalid and Desktop restarts
+    Then the workspace opens in provider configuration recovery
+    When I explicitly replace the invalid provider configuration
+    Then the repaired workspace can create a new conversation

@@ -39,6 +39,7 @@ async function requestCacheKey(
     input.protocol ?? "",
     input.endpoint?.trim() ?? "",
     input.credentialSource,
+    input.replaceInvalidConfig ?? false,
     credentialFingerprint,
   ]);
 }

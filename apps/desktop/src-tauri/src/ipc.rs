@@ -252,6 +252,8 @@ pub(crate) struct DesktopProviderSetupCatalogInput {
     endpoint: Option<String>,
     credential_source: DesktopProviderSetupCredentialSourceInput,
     api_key: Option<String>,
+    #[serde(default)]
+    replace_invalid_config: bool,
 }
 
 impl DesktopProviderSetupCatalogInput {
@@ -262,6 +264,7 @@ impl DesktopProviderSetupCatalogInput {
             endpoint: self.endpoint,
             credential_source: self.credential_source.into(),
             api_key: self.api_key,
+            replace_invalid_config: self.replace_invalid_config,
         }
     }
 }
@@ -277,6 +280,8 @@ pub(crate) struct DesktopProviderSetupSaveInput {
     api_key: Option<String>,
     model_id: String,
     label: Option<String>,
+    #[serde(default)]
+    replace_invalid_config: bool,
 }
 
 impl DesktopProviderSetupSaveInput {
@@ -289,6 +294,7 @@ impl DesktopProviderSetupSaveInput {
             api_key: self.api_key,
             model_id: self.model_id,
             label: self.label,
+            replace_invalid_config: self.replace_invalid_config,
         }
     }
 }

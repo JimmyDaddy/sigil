@@ -1023,6 +1023,7 @@ export interface ProviderSetupCatalogInput {
   endpoint?: string;
   credentialSource: ProviderSetupCredentialSource;
   apiKey?: string;
+  replaceInvalidConfig?: boolean;
 }
 
 export interface ProviderSetupModel {

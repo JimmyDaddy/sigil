@@ -290,6 +290,112 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
 }
 
 #[tokio::test]
+async fn provider_setup_requires_explicit_intent_to_replace_an_invalid_config() {
+    let (provider_base_url, _, provider_server) =
+        spawn_provider_catalog_server(200, r#"{"data":[{"id":"repair-coder"}]}"#).await;
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(&config_path, "[legacy\nprovider = \"unsupported\"\n")
+        .expect("invalid config fixture should write");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, inventory) = http_raw_request(
+        address,
+        http_get("/settings/provider-connections", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(inventory["config_mode"], "invalid");
+    assert_eq!(
+        inventory["issues"][0]["code"],
+        "config_invalid_current_schema"
+    );
+    assert!(!inventory.to_string().contains("unsupported"));
+
+    let mut catalog_request = json!({
+        "template": "open_ai_compatible",
+        "protocol": "chat_completions",
+        "endpoint": provider_base_url,
+        "credential_source": "none"
+    });
+    let (status, rejected) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/catalog",
+            Some("secret-token"),
+            &catalog_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 422);
+    assert_eq!(rejected["error"]["code"], "provider_setup_invalid");
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("invalid config should remain"),
+        "[legacy\nprovider = \"unsupported\"\n"
+    );
+
+    catalog_request["replace_invalid_config"] = json!(true);
+    let (status, catalog) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections/catalog",
+            Some("secret-token"),
+            &catalog_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(catalog["models"][0]["model_id"], "repair-coder");
+
+    let mut save_request = catalog_request;
+    save_request["model_id"] = json!("repair-coder");
+    let (status, saved) = http_raw_request(
+        address,
+        http_post(
+            "/settings/provider-connections",
+            Some("secret-token"),
+            &save_request.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert_eq!(saved["inventory"]["config_mode"], "v2");
+    let persisted = fs::read_to_string(&config_path).expect("repaired config should read");
+    assert!(persisted.contains("config_version = 2"));
+    assert!(persisted.contains("repair-coder"));
+    assert!(!persisted.contains("[legacy"));
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
+    provider_server.abort();
+}
+
+#[tokio::test]
 async fn provider_setup_rejects_save_when_the_catalog_is_not_admitted() {
     let secret_canary = "provider-upstream-secret-canary";
     let (provider_base_url, _, provider_server) = spawn_provider_catalog_server(

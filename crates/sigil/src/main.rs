@@ -1120,13 +1120,10 @@ impl ServeOwnerChannelWatcher {
     }
 }
 
-fn load_serve_root_config(config_path: &Path) -> Result<RootConfig> {
+fn load_serve_root_config(config_path: &Path) -> RootConfig {
     match RootConfig::load(config_path) {
-        Ok(config) => Ok(config),
-        Err(_) if !config_path.exists() => {
-            Ok(sigil_runtime::provider_connections::default_setup_root_config())
-        }
-        Err(error) => Err(error),
+        Ok(config) => config,
+        Err(_) => sigil_runtime::provider_connections::default_setup_root_config(),
     }
 }
 
@@ -1139,7 +1136,7 @@ async fn serve_command(
 ) -> Result<()> {
     let config = options.http_config();
     let mut plan = build_serve_startup_plan(options.clone(), token)?;
-    let root_config = load_serve_root_config(config_path)?;
+    let root_config = load_serve_root_config(config_path);
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);

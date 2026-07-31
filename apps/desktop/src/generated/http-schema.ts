@@ -3006,6 +3006,8 @@ export interface components {
             credential_source: components["schemas"]["ProviderSetupCredentialSource"];
             endpoint?: string | null;
             protocol?: components["schemas"]["ProviderSetupProtocol"] | null;
+            /** @default false */
+            replace_invalid_config: boolean;
             template: components["schemas"]["ProviderSetupTemplate"];
         };
         /** @enum {string} */
@@ -3029,6 +3031,8 @@ export interface components {
             label?: string | null;
             model_id: string;
             protocol?: components["schemas"]["ProviderSetupProtocol"] | null;
+            /** @default false */
+            replace_invalid_config: boolean;
             template: components["schemas"]["ProviderSetupTemplate"];
         };
         ProviderSetupSaveResult: {

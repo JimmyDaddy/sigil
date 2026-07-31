@@ -375,6 +375,8 @@ pub struct HttpProviderSetupCatalogRequest {
     pub credential_source: HttpProviderSetupCredentialSource,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub replace_invalid_config: bool,
 }
 
 /// Secret-free model row returned by the setup catalog boundary.
@@ -418,6 +420,8 @@ pub struct HttpProviderSetupSaveRequest {
     pub model_id: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub replace_invalid_config: bool,
 }
 
 /// Secret-free result after atomically publishing one connection and saved default.

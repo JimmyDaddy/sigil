@@ -18,6 +18,7 @@ fn setup_lines_include_startup_error_and_missing_auth_summary() {
     let lines = app.setup_lines().join("\n");
 
     assert!(lines.contains("load failed: config load failed"));
+    assert!(lines.contains("explicitly save this reviewed replacement"));
     assert!(lines.contains("> DeepSeek"));
     assert!(lines.contains("SIGIL_API_KEY not set"));
     assert_eq!(app.last_notice(), Some("config load failed"));
@@ -111,7 +112,7 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
 }
 
 #[test]
-fn setup_never_overwrites_an_existing_malformed_config() -> Result<()> {
+fn setup_explicitly_replaces_an_existing_malformed_config() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     std::fs::write(&config_path, "this = [is malformed")?;
@@ -123,18 +124,20 @@ fn setup_never_overwrites_an_existing_malformed_config() -> Result<()> {
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.api_key = SecretString::new("staged-only");
     state.admit_current_model_for_test();
+    state.selected_field = SetupField::Save;
+    assert!(
+        app.setup_lines()
+            .join("\n")
+            .contains("replace invalid config and start")
+    );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
-    assert!(action.is_none());
-    assert_eq!(
-        std::fs::read_to_string(&config_path)?,
-        "this = [is malformed"
-    );
-    assert!(
-        app.last_notice()
-            .is_some_and(|notice| notice.contains("remains unchanged"))
-    );
+    assert!(matches!(action, Some(AppAction::SetupCompleted { .. })));
+    let persisted = std::fs::read_to_string(&config_path)?;
+    assert!(persisted.contains("config_version = 2"));
+    assert!(!persisted.contains("this = [is malformed"));
+    assert!(!persisted.contains("staged-only"));
     Ok(())
 }
 
@@ -157,7 +160,7 @@ fn setup_startup_recovery_error_blocks_publish_when_config_is_missing() -> Resul
     assert!(!config_path.exists());
     assert!(
         app.last_notice()
-            .is_some_and(|notice| notice.contains("remains unchanged"))
+            .is_some_and(|notice| notice.contains("config changed since Provider settings"))
     );
     Ok(())
 }

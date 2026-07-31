@@ -8,7 +8,11 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have landed after `v0.0.1-beta.1`.
+- Fixed invalid or non-current configuration blocking every Desktop workspace before Settings was
+  reachable. Desktop now starts a recovery-capable workspace service and offers an explicit
+  current-format replacement in Settings; TUI Quick Setup offers the same replacement path.
+  Neither surface reuses or migrates values from the invalid file, and both refuse to overwrite a
+  concurrently repaired valid config.
 
 ## v0.0.1-beta.1 - 2026-07-31
 

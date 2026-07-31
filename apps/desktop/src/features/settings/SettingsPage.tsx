@@ -165,6 +165,13 @@ export function SettingsPage({
                     <div className="provider-setup-actions">
                       <Button
                         type="button"
+                        variant="primary"
+                        onClick={() => setProviderSetupOpen(true)}
+                      >
+                        {t("replaceProviderConfig")}
+                      </Button>
+                      <Button
+                        type="button"
                         variant="secondary"
                         disabled={providerReloading}
                         onClick={() => void reloadProviderConfiguration()}
@@ -188,7 +195,7 @@ export function SettingsPage({
                   bridge={bridge}
                   workspaceId={workspaceId}
                   inventory={providerInventory}
-                  mode="settings"
+                  mode={providerInventory.configMode === "invalid" ? "repair" : "settings"}
                   onCancel={() => setProviderSetupOpen(false)}
                   onSaved={(inventory) => {
                     if (!onProviderInventoryChange(inventory)) return;

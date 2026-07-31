@@ -181,6 +181,7 @@ pub struct DesktopProviderSetupCatalogRequest {
     pub credential_source: DesktopProviderSetupCredentialSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    pub replace_invalid_config: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -222,6 +223,7 @@ pub struct DesktopProviderSetupSaveRequest {
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    pub replace_invalid_config: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

@@ -81,11 +81,11 @@ fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Resul
 }
 
 #[test]
-fn serve_root_config_uses_setup_shell_only_for_an_absent_config() -> Result<()> {
+fn serve_root_config_uses_setup_shell_for_an_absent_config() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let config_path = workspace.path().join("missing-sigil.toml");
 
-    let config = load_serve_root_config(&config_path)?;
+    let config = load_serve_root_config(&config_path);
 
     assert_eq!(config.workspace.root, ".");
     assert!(config.agent.runtime_provider.is_empty());
@@ -97,7 +97,8 @@ fn serve_root_config_uses_setup_shell_only_for_an_absent_config() -> Result<()> 
 }
 
 #[test]
-fn serve_root_config_loads_valid_config_and_rejects_malformed_existing_config() -> Result<()> {
+fn serve_root_config_loads_valid_config_and_recovers_with_a_shell_for_malformed_config()
+-> Result<()> {
     let workspace = tempfile::tempdir()?;
     let config_path = workspace.path().join("sigil.toml");
     fs::write(
@@ -117,7 +118,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 "#,
     )?;
 
-    let config = load_serve_root_config(&config_path)?;
+    let config = load_serve_root_config(&config_path);
     assert!(config.agent.runtime_provider.is_empty());
     assert_eq!(
         config
@@ -130,7 +131,10 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     assert_eq!(config.agent.model, "deepseek-v4-flash");
 
     fs::write(&config_path, "config_version = 2\n[agent\n")?;
-    assert!(load_serve_root_config(&config_path).is_err());
+    let recovery = load_serve_root_config(&config_path);
+    assert!(recovery.connections.is_empty());
+    assert!(recovery.agent.connection.is_none());
+    assert!(recovery.agent.model.is_empty());
     Ok(())
 }
 

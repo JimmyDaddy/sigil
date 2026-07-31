@@ -38,7 +38,7 @@ export function ProviderSetup({
   readonly bridge: DesktopBridge;
   readonly workspaceId: string;
   readonly inventory: ProviderConnectionInventory;
-  readonly mode: "onboarding" | "settings";
+  readonly mode: "onboarding" | "settings" | "repair";
   readonly onSaved: (inventory: ProviderConnectionInventory) => void;
   readonly onCancel?: () => void;
 }) {
@@ -76,8 +76,9 @@ export function ProviderSetup({
       endpoint: isCustom ? endpoint.trim() : undefined,
       credentialSource,
       apiKey: credentialSource === "secure_store" ? apiKey.trim() : undefined,
+      replaceInvalidConfig: mode === "repair",
     };
-  }, [apiKey, credentialSource, endpoint, isCustom, protocol, template]);
+  }, [apiKey, credentialSource, endpoint, isCustom, mode, protocol, template]);
 
   const chooseProvider = (choice: ProviderSetupTemplate) => {
     invalidateCatalogDraft();
@@ -198,11 +199,15 @@ export function ProviderSetup({
         <div>
           <p className="eyebrow">{t("providerSetupProgress", { current: progress, total: 3 })}</p>
           <h1 id="provider-setup-title">
-            {mode === "onboarding" ? t("providerSetupTitle") : t("addProviderConnection")}
+            {mode === "onboarding"
+              ? t("providerSetupTitle")
+              : mode === "repair"
+                ? t("replaceProviderConfig")
+                : t("addProviderConnection")}
           </h1>
-          <p>{t("providerSetupDetail")}</p>
+          <p>{mode === "repair" ? t("replaceProviderConfigDetail") : t("providerSetupDetail")}</p>
         </div>
-        {mode === "settings" && onCancel !== undefined ? (
+        {mode !== "onboarding" && onCancel !== undefined ? (
           <Button type="button" variant="quiet" onClick={onCancel}>{t("cancel")}</Button>
         ) : null}
       </header>
@@ -394,7 +399,11 @@ export function ProviderSetup({
               disabled={!canSave}
               onClick={() => void save()}
             >
-              {state === "saving" ? t("savingProvider") : t("saveAndContinue")}
+              {state === "saving"
+                ? t("savingProvider")
+                : mode === "repair"
+                  ? t("replaceProviderConfigAndContinue")
+                  : t("saveAndContinue")}
             </Button>
           </div>
         </div>

@@ -1312,6 +1312,87 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("Provider settings are unavailable")).toBeNull();
   });
 
+  it("repairs invalid provider configuration from Settings with explicit replacement intent", async () => {
+    const user = userEvent.setup();
+    const invalidInventory = {
+      configMode: "invalid" as const,
+      connections: [],
+      issues: [{
+        code: "config_invalid_current_schema",
+        message: "invalid current configuration",
+      }],
+    };
+    const repairedInventory = {
+      configMode: "v2" as const,
+      defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+      connections: [{
+        id: "deepseek-1",
+        label: "DeepSeek 1",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "api.deepseek.com",
+        credentialSource: "stored" as const,
+        readiness: "ready" as const,
+        defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
+      }],
+      issues: [],
+    };
+    const providerSetupCatalog = vi.fn(async () => ({
+      connectionId: "deepseek-1",
+      providerLabel: "DeepSeek",
+      state: "remote",
+      models: [{
+        modelId: "deepseek-v4-flash",
+        displayName: "DeepSeek V4 Flash",
+        availability: "available" as const,
+        recommended: true,
+        provenance: "remote" as const,
+      }],
+      suggestedModel: "deepseek-v4-flash",
+      manualEntryAllowed: false,
+    }));
+    const saveProviderSetup = vi.fn(async () => ({
+      defaultModel: repairedInventory.defaultModel,
+      inventory: repairedInventory,
+      saveWarning: false,
+    }));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      providerConnections: async () => invalidInventory,
+      providerSetupCatalog,
+      saveProviderSetup,
+    })} />);
+
+    await screen.findByRole("heading", { name: "Provider configuration is invalid" });
+    await user.click(screen.getAllByRole("button", { name: "Open settings" }).at(-1)!);
+    await user.click(await screen.findByRole("button", { name: "Replace invalid configuration" }));
+    expect(
+      await screen.findByRole("heading", { name: "Replace invalid configuration" }),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    await user.type(screen.getByLabelText("API key"), "replacement-secret");
+    await user.click(screen.getByRole("button", { name: "Continue to models" }));
+    await screen.findByRole("radio", { name: /DeepSeek V4 Flash/ });
+    await user.click(screen.getByRole("button", { name: "Replace configuration and continue" }));
+
+    await waitFor(() => expect(providerSetupCatalog).toHaveBeenCalledWith(
+      workspace.id,
+      expect.objectContaining({ replaceInvalidConfig: true }),
+    ));
+    await waitFor(() => expect(saveProviderSetup).toHaveBeenCalledWith(
+      workspace.id,
+      expect.objectContaining({
+        replaceInvalidConfig: true,
+        apiKey: "replacement-secret",
+      }),
+    ));
+    expect(await screen.findByText("DeepSeek 1")).toBeTruthy();
+  });
+
   it("shows the Sigil environment variable required by the selected provider", async () => {
     const user = userEvent.setup();
     render(<App bridge={bridgeWith({

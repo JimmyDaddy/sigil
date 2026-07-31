@@ -51,7 +51,12 @@ Provider generation and remote model discovery both honor the standard
 
 If Doctor reports an invalid or incompatible provider configuration, replace it with a current
 `config_version = 2` connection template. Sigil does not migrate or infer older provider blocks.
-Do not add duplicate connections or hand-edit credential IDs.
+Desktop still opens the selected workspace in a configuration recovery state: open **Settings**,
+choose **Replace invalid configuration**, review the provider, credential source, and exact model,
+then confirm the replacement. The TUI opens Quick Setup and labels its final action
+**replace invalid config and start**. Both paths recheck the live file under the configuration lock
+and refuse to overwrite a configuration that has become valid concurrently. Do not add duplicate
+connections or hand-edit credential IDs.
 
 ## Theme Colors Are Hard To Read
 

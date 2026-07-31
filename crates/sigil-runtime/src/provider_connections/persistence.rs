@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -168,8 +169,37 @@ pub async fn save_connection_config_with_base(
     .await
 }
 
+/// Replaces an existing unreadable or invalid configuration with one explicit current-schema
+/// provider setup.
+///
+/// The live file is checked again while holding the cross-process update lock. A concurrently
+/// repaired valid configuration is never overwritten.
+pub async fn save_connection_config_replacing_invalid(
+    replacement_base: &RootConfig,
+    path: &Path,
+    draft: ConnectionSaveDraft,
+    credential_store: &dyn ProviderCredentialStore,
+    publisher: &dyn ProviderConfigPublisher,
+) -> Result<ConnectionSaveOutcome, ConnectionSaveError> {
+    let transaction_lock = ConfigUpdateLockGuard::acquire(path)
+        .map_err(|source| ConnectionSaveError::TransactionLock { source })?;
+    save_connection_config_with_guard(
+        replacement_base,
+        replacement_base,
+        path,
+        draft,
+        credential_store,
+        publisher,
+        &transaction_lock,
+        ConnectionCompareAndSwap::Invalid,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
 enum ConnectionCompareAndSwap {
     Parsed,
+    Invalid,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -196,7 +226,16 @@ async fn save_connection_config_with_guard(
                     return Err(ConnectionSaveError::ConcurrentModification);
                 }
             }
+            ConnectionCompareAndSwap::Invalid => {
+                let live = fs::read_to_string(path)
+                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
+                if RootConfig::parse_persisted(&live).is_ok() {
+                    return Err(ConnectionSaveError::ConcurrentModification);
+                }
+            }
         }
+    } else if matches!(compare_and_swap, ConnectionCompareAndSwap::Invalid) {
+        return Err(ConnectionSaveError::ConcurrentModification);
     }
     let current_loaded = load_provider_connections(current);
     if current_loaded.mode != ConfigMode::V2 || !current_loaded.issues.is_empty() {

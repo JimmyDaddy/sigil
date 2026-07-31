@@ -19,6 +19,7 @@ use sigil_runtime::{
         RootConfigPublisher, connection_inventory_native, connection_semantic_fingerprint,
         default_setup_root_config, load_provider_connections, materialize_root_config,
         provider_connection_template, save_connection_config,
+        save_connection_config_replacing_invalid,
     },
     resolve_sigil_paths, secret_redactor_for_root_config,
     support::{
@@ -118,8 +119,10 @@ impl HttpSupportContext {
         if !self.config_path.exists() {
             return Ok(empty_provider_inventory());
         }
-        let root_config =
-            RootConfig::load(&self.config_path).context("load provider connection config")?;
+        let root_config = match RootConfig::load(&self.config_path) {
+            Ok(root_config) => root_config,
+            Err(_) => return Ok(invalid_provider_inventory()),
+        };
         Ok(project_provider_connections(connection_inventory_native(
             &root_config,
         )))
@@ -143,6 +146,7 @@ impl HttpSupportContext {
                 request.api_key,
                 None,
                 None,
+                request.replace_invalid_config,
             )
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         let result = self
@@ -169,6 +173,7 @@ impl HttpSupportContext {
                 request.api_key,
                 Some(request.model_id),
                 request.label,
+                request.replace_invalid_config,
             )
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         let catalog = self
@@ -185,7 +190,7 @@ impl HttpSupportContext {
             return Err(HttpProviderSetupFailure::Invalid);
         }
 
-        let save_current = if self.config_path.exists() {
+        let save_current = if self.config_path.exists() && !draft.replace_invalid_config {
             draft.current.clone()
         } else {
             draft.prepared_root.clone()
@@ -204,19 +209,29 @@ impl HttpSupportContext {
             .enable_all()
             .build()
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        let outcome = runtime
-            .block_on(save_connection_config(
+        let save_draft = ConnectionSaveDraft {
+            connections: draft.connections,
+            default_model: draft.default_model.clone(),
+            credential_updates,
+        };
+        let outcome = if draft.replace_invalid_config {
+            runtime.block_on(save_connection_config_replacing_invalid(
                 &save_current,
                 &self.config_path,
-                ConnectionSaveDraft {
-                    connections: draft.connections,
-                    default_model: draft.default_model.clone(),
-                    credential_updates,
-                },
+                save_draft,
                 &credential_store,
                 &RootConfigPublisher,
             ))
-            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        } else {
+            runtime.block_on(save_connection_config(
+                &save_current,
+                &self.config_path,
+                save_draft,
+                &credential_store,
+                &RootConfigPublisher,
+            ))
+        }
+        .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         let save_warning = outcome.old_credential_cleanup_warning
             || outcome.publish_outcome != ConfigPublishOutcome::Published;
         let inventory =
@@ -228,14 +243,6 @@ impl HttpSupportContext {
         })
     }
 
-    fn load_root_or_setup(&self) -> Result<RootConfig> {
-        if self.config_path.exists() {
-            RootConfig::load(&self.config_path).context("load provider connection config")
-        } else {
-            Ok(default_setup_root_config())
-        }
-    }
-
     fn prepare_provider_setup(
         &self,
         template: HttpProviderSetupTemplate,
@@ -245,10 +252,34 @@ impl HttpSupportContext {
         api_key: Option<String>,
         model_id: Option<String>,
         label: Option<String>,
+        replace_invalid_config: bool,
     ) -> Result<PreparedProviderSetup> {
-        let current = self.load_root_or_setup()?;
+        let current = if self.config_path.exists() {
+            match RootConfig::load(&self.config_path) {
+                Ok(current) => {
+                    anyhow::ensure!(
+                        !replace_invalid_config,
+                        "valid provider configuration must not be replaced as invalid"
+                    );
+                    current
+                }
+                Err(_) => {
+                    anyhow::ensure!(
+                        replace_invalid_config,
+                        "invalid provider configuration requires explicit replacement"
+                    );
+                    default_setup_root_config()
+                }
+            }
+        } else {
+            anyhow::ensure!(
+                !replace_invalid_config,
+                "missing provider configuration is not an invalid replacement"
+            );
+            default_setup_root_config()
+        };
         let loaded = load_provider_connections(&current);
-        if self.config_path.exists() {
+        if self.config_path.exists() && !replace_invalid_config {
             anyhow::ensure!(
                 matches!(loaded.mode, ConfigMode::V2) && loaded.issues.is_empty(),
                 "current provider connection config must be repaired before setup"
@@ -326,6 +357,7 @@ impl HttpSupportContext {
             default_model,
             connection,
             prepared_credential,
+            replace_invalid_config,
         })
     }
 
@@ -422,6 +454,7 @@ struct PreparedProviderSetup {
     default_model: ModelRef,
     connection: ProviderConnectionConfig,
     prepared_credential: Option<PreparedCredential>,
+    replace_invalid_config: bool,
 }
 
 fn setup_template_identity(
@@ -535,6 +568,19 @@ fn empty_provider_inventory() -> HttpProviderConnectionInventory {
         default_model: None,
         connections: Vec::new(),
         issues: Vec::new(),
+    }
+}
+
+fn invalid_provider_inventory() -> HttpProviderConnectionInventory {
+    HttpProviderConnectionInventory {
+        config_mode: HttpProviderConfigMode::Invalid,
+        default_model: None,
+        connections: Vec::new(),
+        issues: vec![HttpProviderConnectionIssue {
+            code: "config_invalid_current_schema".to_owned(),
+            message: "The current Sigil configuration is invalid and must be explicitly replaced."
+                .to_owned(),
+        }],
     }
 }
 

@@ -405,6 +405,125 @@ Then("I can permanently delete the unavailable source from conversation manageme
   });
 });
 
+When("the provider configuration becomes invalid and Desktop restarts", async () => {
+  const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
+  assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
+  writeFileSync(
+    resolve(runtimeRoot, "home", ".sigil", "sigil.toml"),
+    "[invalid",
+    { encoding: "utf8", mode: 0o600 },
+  );
+  await browser.refresh();
+});
+
+Then("the workspace opens in provider configuration recovery", async () => {
+  await $(".app-shell").waitForDisplayed({ timeout: 20_000 });
+  const workspace = await $(".workspace-switcher");
+  await workspace.waitUntil(
+    async () => (await workspace.getText()).includes("desktop-e2e-workspace"),
+    {
+      timeout: 20_000,
+      timeoutMsg: "invalid config prevented the isolated workspace from reopening",
+    },
+  );
+  const body = await $("body");
+  await body.waitUntil(
+    async () => /Provider configuration is invalid|Provider 配置无效/u.test(await body.getText()),
+    {
+      timeout: 20_000,
+      timeoutMsg: `Desktop did not enter provider configuration recovery:\n${await body.getText()}`,
+    },
+  );
+});
+
+When("I explicitly replace the invalid provider configuration", async () => {
+  const fixtureBaseUrl = process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL;
+  assert.ok(fixtureBaseUrl, "desktop E2E provider fixture URL is configured");
+  await $(".conversation-empty .sg-button-primary").click();
+  const replace = await $(".provider-setup-error .sg-button-primary");
+  await replace.waitForDisplayed();
+  await replace.click();
+  await $(".provider-setup-repair").waitForDisplayed();
+  const providerChoices = await $$(".provider-choice");
+  assert.equal(providerChoices.length, 5, "repair wizard did not expose all provider templates");
+  await providerChoices[4]?.click();
+
+  const form = await $(".provider-setup-form");
+  const endpoint = await form.$('input:not([type="password"])');
+  await endpoint.setValue(fixtureBaseUrl);
+  assert.equal(await endpoint.getValue(), fixtureBaseUrl);
+  const selects = await form.$$("select");
+  assert.equal(selects.length, 2, "repair form did not expose protocol and authentication");
+  const authentication = selects.at(-1);
+  assert.ok(authentication, "repair form authentication control is unavailable");
+  await browser.execute((element) => {
+    const select = element as HTMLSelectElement;
+    select.value = "none";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }, authentication);
+  await authentication.waitUntil(
+    async () => (await authentication.getValue()) === "none",
+    {
+      timeout: 5_000,
+      timeoutMsg: "repair form did not select no-authentication",
+    },
+  );
+  const continueToModels = await $(
+    ".provider-setup-repair .provider-setup-actions .sg-button-primary",
+  );
+  await continueToModels.waitForEnabled({
+    timeout: 5_000,
+    timeoutMsg: "repair form did not enable model discovery",
+  });
+  await browser.pause(100);
+  await $(".provider-setup-repair .provider-setup-actions .sg-button-primary").click();
+  const repairSurface = await $(".provider-setup-repair");
+  await browser.waitUntil(
+    async () =>
+      await $(".provider-model-list").isExisting()
+      || await $(".provider-setup-repair > p.provider-setup-error").isExisting(),
+    {
+      timeout: 20_000,
+      timeoutMsg: `repair catalog did not reach a terminal UI state:\n${await repairSurface.getText()}`,
+    },
+  );
+  const repairBody = await $("body").getText();
+  assert.equal(
+    await $(".provider-model-list").isExisting(),
+    true,
+    `repair catalog did not load:\n${repairBody}`,
+  );
+  assert.ok(
+    await $(
+      '.provider-model-list input[type="radio"][value="sigil-e2e-model"]',
+    ).isExisting(),
+    `repair catalog did not expose the fixture model:\n${repairBody}`,
+  );
+  await $(".provider-setup-repair .provider-setup-actions .sg-button-primary").click();
+  await $(".provider-connection-list").waitForDisplayed({
+    timeout: 20_000,
+    timeoutMsg: "the repaired provider inventory did not become visible",
+  });
+
+  const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
+  assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
+  const persisted = readFileSync(
+    resolve(runtimeRoot, "home", ".sigil", "sigil.toml"),
+    "utf8",
+  );
+  assert.match(persisted, /config_version = 2/u);
+  assert.doesNotMatch(persisted, /\[invalid/u);
+});
+
+Then("the repaired workspace can create a new conversation", async () => {
+  await $(".application-page-back").click();
+  const createConversation = await $(".topbar-actions .sg-icon-button-primary");
+  await createConversation.waitForEnabled({
+    timeout: 20_000,
+    timeoutMsg: "the repaired configuration did not enable new conversations",
+  });
+});
+
 function durableEvents(): string[] {
   const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
   assert.ok(runtimeRoot, "desktop E2E runtime root is configured");

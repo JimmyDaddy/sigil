@@ -1851,6 +1851,96 @@ async fn cow_rejects_a_stale_config_snapshot_before_writing_credentials() {
 }
 
 #[tokio::test]
+async fn cow_explicit_invalid_replacement_publishes_only_from_an_invalid_live_file() {
+    let root = current_root(
+        "deepseek",
+        "deepseek-v4-flash",
+        r#"base_url = "https://api.deepseek.com""#,
+    );
+    let loaded = load_provider_connections(&root);
+    let publisher = FakePublisher::published(ConfigPublishOutcome::Published);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("sigil.toml");
+    std::fs::write(&path, "[legacy\nprovider = \"unsupported\"\n")
+        .expect("invalid config should write");
+
+    let outcome = save_connection_config_replacing_invalid(
+        &root,
+        &path,
+        ConnectionSaveDraft {
+            connections: loaded
+                .connections
+                .into_iter()
+                .map(|(id, loaded)| (id, loaded.config))
+                .collect(),
+            default_model: loaded.default_model.expect("default model"),
+            credential_updates: Vec::new(),
+        },
+        &FakeCredentialStore::default(),
+        &publisher,
+    )
+    .await
+    .expect("explicit replacement should publish from an invalid live file");
+
+    assert_eq!(outcome.publish_outcome, ConfigPublishOutcome::Published);
+    assert!(
+        publisher
+            .published
+            .lock()
+            .expect("published config lock")
+            .as_ref()
+            .is_some_and(|published| published.config_version == sigil_kernel::CONFIG_VERSION_V2)
+    );
+}
+
+#[tokio::test]
+async fn cow_invalid_replacement_refuses_valid_or_missing_live_files() {
+    for live_state in ["valid", "missing"] {
+        let root = current_root(
+            "deepseek",
+            "deepseek-v4-flash",
+            r#"base_url = "https://api.deepseek.com""#,
+        );
+        let loaded = load_provider_connections(&root);
+        let publisher = FakePublisher::published(ConfigPublishOutcome::Published);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sigil.toml");
+        if live_state == "valid" {
+            root.save(&path).expect("valid config should write");
+        }
+
+        let result = save_connection_config_replacing_invalid(
+            &root,
+            &path,
+            ConnectionSaveDraft {
+                connections: loaded
+                    .connections
+                    .into_iter()
+                    .map(|(id, loaded)| (id, loaded.config))
+                    .collect(),
+                default_model: loaded.default_model.expect("default model"),
+                credential_updates: Vec::new(),
+            },
+            &FakeCredentialStore::default(),
+            &publisher,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ConnectionSaveError::ConcurrentModification)
+        ));
+        assert!(
+            publisher
+                .published
+                .lock()
+                .expect("published config lock")
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn cow_deletes_stored_record_after_connection_removal_is_published() {
     let retired_id = CredentialId::random();
     let store = FakeCredentialStore::default();

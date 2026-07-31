@@ -577,27 +577,34 @@ async fn desktop_launcher_uses_bounded_fallback_after_zero_grace_deadline() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn desktop_launcher_early_exit_error_does_not_disclose_paths() {
-    let workspace = test_workspace("desktop-launcher-invalid-config");
+async fn desktop_launcher_opens_a_recovery_server_for_invalid_config() {
+    let workspace = test_workspace("desktop-launcher-config-recovery");
     let config_path = workspace.join("sigil.toml");
     fs::write(&config_path, "[invalid").expect("invalid config fixture should write");
 
-    let error = sigil_desktop::DesktopLauncher::default()
+    let process = sigil_desktop::DesktopLauncher::default()
         .launch(sigil_desktop::DesktopLaunchRequest::new(
             env!("CARGO_BIN_EXE_sigil"),
             &config_path,
             &workspace,
         ))
         .await
-        .expect_err("invalid config should exit before readiness");
-    let projection = format!("{error:?} {error}");
-
-    assert!(matches!(
-        error,
-        sigil_desktop::DesktopLaunchError::ReadinessClosed
-    ));
-    assert!(!projection.contains(workspace.to_string_lossy().as_ref()));
-    assert!(!projection.contains(config_path.to_string_lossy().as_ref()));
+        .expect("invalid config should start a bounded recovery server");
+    let inventory = process
+        .client()
+        .provider_connections()
+        .await
+        .expect("recovery server should expose a safe provider inventory");
+    assert_eq!(
+        inventory.config_mode,
+        sigil_desktop::DesktopProviderConfigMode::Invalid
+    );
+    assert!(inventory.connections.is_empty());
+    assert_eq!(inventory.issues[0].code, "config_invalid_current_schema");
+    process
+        .shutdown()
+        .await
+        .expect("recovery server should shut down cleanly");
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
@@ -735,6 +742,7 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
             endpoint: Some(provider_endpoint.clone()),
             credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
             api_key: None,
+            replace_invalid_config: false,
         })
         .await
         .expect("typed client should load the exact real-server catalog");
@@ -750,6 +758,7 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
             api_key: None,
             model_id: "local-first-run-coder".to_owned(),
             label: Some("Local first run".to_owned()),
+            replace_invalid_config: false,
         })
         .await
         .expect("typed client should atomically save the selected real-server route");
@@ -767,6 +776,154 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
         .close(&opened.id)
         .await
         .expect("manager should gracefully close setup server");
+    assert!(report.success);
+    provider.join().expect("catalog fixture should join");
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_typed_client_explicitly_replaces_invalid_config_against_real_server() {
+    let workspace = test_workspace("desktop-provider-config-repair");
+    let config_path = workspace.join("sigil.toml");
+    fs::write(&config_path, "[legacy\nprovider = \"unsupported\"\n")
+        .expect("invalid config fixture should write");
+    let (provider_endpoint, provider) = spawn_model_catalog_fixture("local-repair-coder");
+    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let opened = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(
+                env!("CARGO_BIN_EXE_sigil"),
+                &config_path,
+                &workspace,
+            ),
+            "workspace",
+        ))
+        .await
+        .expect("manager should launch the recovery server");
+    let client = manager
+        .client(&opened.id)
+        .expect("recovery workspace should expose a typed client");
+
+    let rejected = client
+        .provider_setup_catalog(sigil_desktop::DesktopProviderSetupCatalogRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint.clone()),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+            replace_invalid_config: false,
+        })
+        .await;
+    assert!(
+        rejected.is_err(),
+        "invalid config replacement must require explicit intent"
+    );
+
+    let catalog = client
+        .provider_setup_catalog(sigil_desktop::DesktopProviderSetupCatalogRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint.clone()),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+            replace_invalid_config: true,
+        })
+        .await
+        .expect("explicit repair should load a current-schema catalog");
+    assert_eq!(catalog.models[0].model_id, "local-repair-coder");
+
+    let saved = client
+        .save_provider_setup(sigil_desktop::DesktopProviderSetupSaveRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+            model_id: "local-repair-coder".to_owned(),
+            label: Some("Recovered local provider".to_owned()),
+            replace_invalid_config: true,
+        })
+        .await
+        .expect("explicit repair should atomically replace the invalid config");
+    assert_eq!(
+        saved.inventory.config_mode,
+        sigil_desktop::DesktopProviderConfigMode::V2
+    );
+    assert_eq!(saved.inventory.connections.len(), 1);
+    let persisted = fs::read_to_string(&config_path).expect("repaired config should persist");
+    assert!(persisted.contains("config_version = 2"));
+    assert!(persisted.contains("local-repair-coder"));
+    assert!(!persisted.contains("[legacy"));
+
+    let report = manager
+        .close(&opened.id)
+        .await
+        .expect("recovery server should close");
+    assert!(report.success);
+    provider.join().expect("catalog fixture should join");
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_config_repair_refuses_to_overwrite_a_concurrently_valid_config() {
+    let workspace = test_workspace("desktop-provider-config-repair-race");
+    let config_path = workspace.join("sigil.toml");
+    fs::write(&config_path, "[invalid").expect("invalid config fixture should write");
+    let (provider_endpoint, provider) = spawn_model_catalog_fixture("local-race-coder");
+    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let opened = manager
+        .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
+            sigil_desktop::DesktopLaunchRequest::new(
+                env!("CARGO_BIN_EXE_sigil"),
+                &config_path,
+                &workspace,
+            ),
+            "workspace",
+        ))
+        .await
+        .expect("manager should launch the recovery server");
+    let client = manager
+        .client(&opened.id)
+        .expect("recovery workspace should expose a typed client");
+    client
+        .provider_setup_catalog(sigil_desktop::DesktopProviderSetupCatalogRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint.clone()),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+            replace_invalid_config: true,
+        })
+        .await
+        .expect("explicit repair should load its catalog");
+
+    write_config(&config_path, &provider_endpoint);
+    let valid_before = fs::read_to_string(&config_path).expect("valid config should read");
+    let rejected = client
+        .save_provider_setup(sigil_desktop::DesktopProviderSetupSaveRequest {
+            template: sigil_desktop::DesktopProviderSetupTemplate::OpenAiCompatible,
+            protocol: Some(sigil_desktop::DesktopProviderSetupProtocol::ChatCompletions),
+            endpoint: Some(provider_endpoint),
+            credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
+            api_key: None,
+            model_id: "local-race-coder".to_owned(),
+            label: Some("Must not replace".to_owned()),
+            replace_invalid_config: true,
+        })
+        .await;
+    assert!(
+        rejected.is_err(),
+        "repair intent must not replace a config that became valid"
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("valid config should remain readable"),
+        valid_before
+    );
+
+    let report = manager
+        .close(&opened.id)
+        .await
+        .expect("recovery server should close");
     assert!(report.success);
     provider.join().expect("catalog fixture should join");
     fs::remove_dir_all(workspace).expect("test workspace should remove");
