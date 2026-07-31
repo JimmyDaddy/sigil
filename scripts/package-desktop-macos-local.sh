@@ -198,7 +198,7 @@ for target in "${targets[@]}"; do
   esac
 
   APPLE_SIGNING_IDENTITY="$identity" \
-  TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key" \
+  TAURI_SIGNING_PRIVATE_KEY="$(<"$updater_key")" \
     pnpm --dir apps/desktop tauri build \
       --config src-tauri/tauri.bundle.conf.json \
       --config src-tauri/tauri.updater.conf.json \

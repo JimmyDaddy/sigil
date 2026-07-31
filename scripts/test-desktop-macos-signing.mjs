@@ -97,6 +97,7 @@ for (const token of [
   "verify-desktop-macos.sh",
   "notarize-desktop-macos.sh",
   "notarize-desktop-macos-app.sh",
+  'TAURI_SIGNING_PRIVATE_KEY="$(<"$updater_key")"',
   "TAURI_SIGNING_PRIVATE_KEY_PATH",
   "tauri.updater.conf.json",
   ".app.tar.gz",
