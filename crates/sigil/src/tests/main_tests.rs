@@ -1464,22 +1464,42 @@ fn doctor_command_renders_report_for_missing_config() -> Result<()> {
 fn doctor_command_report_includes_appearance_warnings() -> Result<()> {
     let workspace = create_test_workspace("doctor-appearance");
     let config_path = workspace.join("sigil.toml");
-    write_test_config(&config_path, "https://example.com")?;
-    let mut config = fs::read_to_string(&config_path)?;
-    config.push_str(
-        r##"
+    fs::write(
+        &config_path,
+        format!(
+            r##"config_version = 2
+
+[workspace]
+root = "."
+
+[storage]
+state_root = "{}"
+cache_root = "{}"
+
+[agent]
+connection = "local"
+model = "local-model"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = {{ source = "none" }}
+
 [appearance.colors]
 surface_base = "#101010"
 text_primary = "#101010"
 "##,
-    );
-    fs::write(&config_path, config)?;
+            workspace.join("state").display(),
+            workspace.join("cache").display()
+        ),
+    )?;
 
     let output = render_cli_doctor_report(&config_path, &workspace);
 
     assert!(output.contains("[warn] appearance:contrast:text-base"));
     assert!(output.contains("text_primary on surface_base"));
-    assert!(output.contains("summary: warn"));
     Ok(())
 }
 

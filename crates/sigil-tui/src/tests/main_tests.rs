@@ -910,6 +910,8 @@ fn process_app_action_handles_feedback_handoff_locally() -> anyhow::Result<()> {
 
 #[test]
 fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> anyhow::Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
     let mut app = AppState::from_setup(
         Path::new("sigil.toml").to_path_buf(),
         Path::new(".").to_path_buf(),
@@ -946,6 +948,8 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
 
 #[test]
 fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
     let mut config = test_config();
     config.model_request.request_timeout_secs = 1;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);

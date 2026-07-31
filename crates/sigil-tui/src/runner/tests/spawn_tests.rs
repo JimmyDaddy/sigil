@@ -189,6 +189,8 @@ fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Re
 
 #[test]
 fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-spawn-ok.jsonl");
@@ -256,6 +258,8 @@ fn spawn_agent_worker_initializes_v2_route_after_workspace_trust_prelude() -> Re
 
 #[test]
 fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -324,6 +328,8 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
 
 #[test]
 fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let script_path = temp.path().join("fake_mcp_server.py");
