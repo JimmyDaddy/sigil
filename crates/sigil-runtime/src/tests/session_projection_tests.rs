@@ -385,6 +385,83 @@ fn projection_rejects_incompatible_schema_without_deleting_it() -> Result<()> {
 }
 
 #[test]
+fn projection_replaces_an_obsolete_owned_cache_and_rebuilds_from_jsonl() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    finalized_session(
+        &lifecycle.session_dir.join("session.jsonl"),
+        "Current durable source",
+        "deepseek",
+        "chat",
+    )?;
+    projection.rebuild()?;
+    let connection = Connection::open(projection.database_path())?;
+    connection.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION - 1)?;
+    connection.execute(
+        "UPDATE session_catalog_entry_v1 SET title = 'stale cache value'",
+        [],
+    )?;
+    drop(connection);
+
+    let report = projection.reconcile()?;
+    let entries = projection.list_workspace_entries()?;
+
+    assert!(report.generation_changed);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].title.as_deref(), Some("Current durable source"));
+    let projection_parent = projection
+        .database_path()
+        .parent()
+        .expect("projection parent");
+    assert!(fs::read_dir(projection_parent)?.any(|entry| {
+        entry
+            .ok()
+            .and_then(|entry| entry.file_name().into_string().ok())
+            .is_some_and(|name| name.contains("session-catalog-v1.sqlite3-quarantine"))
+    }));
+    Ok(())
+}
+
+#[test]
+fn projection_does_not_replace_an_obsolete_cache_while_another_usage_lease_exists() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    finalized_session(
+        &lifecycle.session_dir.join("session.jsonl"),
+        "Current durable source",
+        "deepseek",
+        "chat",
+    )?;
+    projection.rebuild()?;
+    let connection = Connection::open(projection.database_path())?;
+    connection.pragma_update(None, "user_version", SESSION_CATALOG_SCHEMA_VERSION - 1)?;
+    drop(connection);
+    let recovery_lease = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(sqlite_sidecar_path(
+            projection.database_path(),
+            ".recovery-lock",
+        ))?;
+    FileExt::try_lock_shared(&recovery_lease)?;
+
+    let error = projection
+        .reconcile()
+        .expect_err("active usage lease must prevent cache replacement");
+
+    assert!(matches!(error, SessionCatalogProjectionError::RecoveryBusy));
+    let connection = Connection::open(projection.database_path())?;
+    let user_version: u16 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    assert_eq!(user_version, SESSION_CATALOG_SCHEMA_VERSION - 1);
+    Ok(())
+}
+
+#[test]
 fn projection_rejects_unowned_default_pragma_database() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (_lifecycle, projection) = projection_service(temp.path(), "workspace-1");
@@ -461,6 +538,31 @@ fn projection_rejects_unknown_persisted_source_state() -> Result<()> {
     let error = projection
         .list_workspace_entries()
         .expect_err("unknown state must not be coerced");
+
+    assert!(matches!(
+        error,
+        SessionCatalogProjectionError::Sqlite { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn projection_rejects_unknown_persisted_source_diagnostic() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    fs::write(lifecycle.session_dir.join("broken.jsonl"), b"not json\n")?;
+    projection.rebuild()?;
+    let connection = Connection::open(projection.database_path())?;
+    connection.execute(
+        "UPDATE session_catalog_entry_v1 SET source_diagnostic = 'future_diagnostic'",
+        [],
+    )?;
+    drop(connection);
+
+    let error = projection
+        .list_workspace_entries()
+        .expect_err("unknown diagnostic must not be coerced");
 
     assert!(matches!(
         error,
@@ -565,6 +667,19 @@ fn catalog_mutations_rename_and_delete_exact_durable_identity() -> Result<()> {
         Err(LocalSessionMutationError::Pinned)
     ));
     lifecycle.set_session_pin(&source, false, 301)?;
+    let active_writer = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(source.with_file_name("managed.jsonl.writer-lock"))?;
+    FileExt::try_lock_exclusive(&active_writer)?;
+    assert!(matches!(
+        projection.delete_session("managed.jsonl", &session_id),
+        Err(LocalSessionMutationError::WriterBusy)
+    ));
+    assert!(source.is_file());
+    drop(active_writer);
     let deleted = projection.delete_session("managed.jsonl", &session_id)?;
     assert!(deleted.projection_generation.is_some());
     assert!(!source.exists());
@@ -579,9 +694,16 @@ fn invalid_catalog_source_can_only_be_quarantined_with_exact_metadata() -> Resul
     fs::create_dir_all(&lifecycle.session_dir)?;
     let source = lifecycle.session_dir.join("broken.jsonl");
     fs::write(&source, b"not a session stream\n")?;
+    let resources = lifecycle.session_dir.join("broken");
+    fs::create_dir(&resources)?;
+    fs::write(resources.join("artifact.bin"), b"durable companion")?;
     projection.rebuild()?;
     let entry = projection.list_workspace_entries()?.remove(0);
     assert_eq!(entry.source_state, LocalSessionCatalogState::Invalid);
+    assert_eq!(
+        entry.source_diagnostic,
+        Some(SessionCatalogSourceDiagnostic::InvalidEventStream)
+    );
 
     assert!(matches!(
         projection.quarantine_invalid_source(
@@ -598,12 +720,21 @@ fn invalid_catalog_source_can_only_be_quarantined_with_exact_metadata() -> Resul
     )?;
 
     assert!(!source.exists());
+    let quarantine = lifecycle
+        .session_dir
+        .join(".quarantine")
+        .join(receipt.quarantine_name);
+    assert!(quarantine.join("session.jsonl").is_file());
+    assert_eq!(
+        fs::read(quarantine.join("resources/artifact.bin"))?,
+        b"durable companion"
+    );
+    assert!(!resources.exists());
     assert!(
         lifecycle
             .session_dir
-            .join(".quarantine")
-            .join(receipt.quarantine_name)
-            .exists()
+            .join("broken.jsonl.writer-lock")
+            .is_file()
     );
     assert!(projection.list_workspace_entries()?.is_empty());
     Ok(())
@@ -616,6 +747,9 @@ fn invalid_catalog_source_delete_requires_exact_metadata_and_an_idle_writer() ->
     fs::create_dir_all(&lifecycle.session_dir)?;
     let source = lifecycle.session_dir.join("broken.jsonl");
     fs::write(&source, b"not a session stream\n")?;
+    let resources = lifecycle.session_dir.join("broken");
+    fs::create_dir(&resources)?;
+    fs::write(resources.join("artifact.bin"), b"durable companion")?;
     projection.rebuild()?;
     let entry = projection.list_workspace_entries()?.remove(0);
 
@@ -640,9 +774,10 @@ fn invalid_catalog_source_delete_requires_exact_metadata_and_an_idle_writer() ->
             entry.source_bytes,
             entry.source_modified_at_unix_ms,
         ),
-        Err(LocalSessionMutationError::Unavailable { .. })
+        Err(LocalSessionMutationError::WriterBusy)
     ));
     assert!(source.exists());
+    assert!(resources.exists());
     drop(active_store);
     let receipt = projection.delete_invalid_source(
         "broken.jsonl",
@@ -653,7 +788,57 @@ fn invalid_catalog_source_delete_requires_exact_metadata_and_an_idle_writer() ->
     assert!(receipt.operation_id.starts_with("invalid-source-delete:"));
     assert!(receipt.projection_generation.is_some());
     assert!(!source.exists());
+    assert!(!resources.exists());
+    let operation_suffix = receipt
+        .operation_id
+        .strip_prefix("invalid-source-delete:")
+        .expect("operation suffix");
+    let tombstone = lifecycle
+        .session_dir
+        .join(".session-trash")
+        .join(format!("invalid-source-delete-{operation_suffix}"));
+    assert!(tombstone.join("session.jsonl").is_file());
+    assert_eq!(
+        fs::read(tombstone.join("resources/artifact.bin"))?,
+        b"durable companion"
+    );
+    assert!(
+        lifecycle
+            .session_dir
+            .join("broken.jsonl.writer-lock")
+            .is_file()
+    );
     assert!(projection.list_workspace_entries()?.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_source_cleanup_rejects_an_unsafe_companion_before_moving_jsonl() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let source = lifecycle.session_dir.join("broken.jsonl");
+    fs::write(&source, b"not a session stream\n")?;
+    let resources = lifecycle.session_dir.join("broken");
+    fs::create_dir(&resources)?;
+    symlink(temp.path().join("outside"), resources.join("unsafe-link"))?;
+    projection.rebuild()?;
+    let entry = projection.list_workspace_entries()?.remove(0);
+
+    assert!(matches!(
+        projection.delete_invalid_source(
+            "broken.jsonl",
+            entry.source_bytes,
+            entry.source_modified_at_unix_ms,
+        ),
+        Err(LocalSessionMutationError::Unavailable { .. })
+    ));
+    assert!(source.is_file());
+    assert!(resources.is_dir());
+    assert!(!lifecycle.session_dir.join(".session-trash").exists());
     Ok(())
 }
 
@@ -817,6 +1002,33 @@ fn projection_classifies_gap_checksum_and_mixed_identity_streams_as_invalid() ->
     );
     assert!(rows.iter().all(|row| row.session_id.is_none()));
     assert!(rows.iter().all(|row| row.title.is_none()));
+    Ok(())
+}
+
+#[test]
+fn projection_rejects_a_source_that_concatenates_multiple_session_streams() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (lifecycle, projection) = projection_service(temp.path(), "workspace-1");
+    fs::create_dir_all(&lifecycle.session_dir)?;
+    let first = temp.path().join("first.jsonl");
+    let second = temp.path().join("second.jsonl");
+    finalized_session(&first, "First", "deepseek", "chat")?;
+    finalized_session(&second, "Second", "anthropic", "claude")?;
+    let combined = format!(
+        "{}{}",
+        fs::read_to_string(first)?,
+        fs::read_to_string(second)?
+    );
+    fs::write(lifecycle.session_dir.join("combined.jsonl"), combined)?;
+
+    projection.rebuild()?;
+    let entry = projection.list_workspace_entries()?.remove(0);
+
+    assert_eq!(entry.source_state, LocalSessionCatalogState::Invalid);
+    assert_eq!(
+        entry.source_diagnostic,
+        Some(SessionCatalogSourceDiagnostic::InvalidEventStream)
+    );
     Ok(())
 }
 

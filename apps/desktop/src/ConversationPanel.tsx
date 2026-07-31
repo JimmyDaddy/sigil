@@ -36,6 +36,7 @@ import type {
   ConversationRecoveryView,
   ConversationTaskControl,
   PermissionMode,
+  ProviderConnectionInventory,
   ProviderModelRef,
   ReasoningEffort,
   RunContext,
@@ -56,6 +57,7 @@ import type {
   VerificationSummary,
 } from "./types";
 import type { ConversationDisplayPage as BridgeConversationDisplayPage } from "./types";
+import { providerModelRefsEqual } from "./types";
 import {
   createConversationContinuityState,
   reduceConversationContinuity,
@@ -90,6 +92,7 @@ interface ConversationPanelProps {
   bridge: DesktopBridge;
   workspaceId: string;
   session: SessionSummary;
+  providerInventory?: ProviderConnectionInventory;
   onInitialLoadComplete?: (sessionId: string) => void;
   onRunContextChange?: (context: RunContext) => void;
   onSessionCatalogChange?: () => void;
@@ -128,6 +131,7 @@ export function ConversationPanel({
   bridge,
   workspaceId,
   session,
+  providerInventory,
   onInitialLoadComplete,
   onRunContextChange,
   onSessionCatalogChange,
@@ -153,7 +157,7 @@ export function ConversationPanel({
   const [runContextReload, setRunContextReload] = useState(0);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
-  const [selectedModelName, setSelectedModelName] = useState<string>();
+  const [selectedModelRef, setSelectedModelRef] = useState<ProviderModelRef>();
   const [continuityState, dispatchContinuity] = useReducer(
     reduceConversationContinuity,
     session.id,
@@ -383,7 +387,7 @@ export function ConversationPanel({
     setRunContextError(false);
     setPermissionMode("manual");
     setReasoningEffort(undefined);
-    setSelectedModelName(undefined);
+    setSelectedModelRef(undefined);
     dispatchContinuity({ type: "session_selected", sessionId: session.id });
     dispatchLiveEvent({ type: "session_selected", sessionId: session.id });
     setPendingPrompt(undefined);
@@ -492,7 +496,7 @@ export function ConversationPanel({
         setRunContext(context);
         onRunContextChange?.(context);
         setRunContextError(false);
-        setSelectedModelName(context.modelName);
+        setSelectedModelRef(context.modelRef);
         setPermissionMode((current) =>
           activeRunIdRef.current === undefined ? context.defaultPermissionMode : current,
         );
@@ -1351,18 +1355,31 @@ export function ConversationPanel({
     try {
       const modelChanged =
         runContext !== undefined
-        && selectedModelName !== undefined
-        && selectedModelName !== runContext.modelName;
+        && selectedModelRef !== undefined
+        && !providerModelRefsEqual(selectedModelRef, runContext.modelRef);
       const selectedModelOption = runContext?.modelOptions.find(
-        (option) => option.modelName === selectedModelName,
+        (option) => providerModelRefsEqual(option.modelRef, selectedModelRef),
       );
       const selectedReasoningEffort = reasoningEffort !== undefined &&
         selectedModelOption?.availableReasoningEfforts.includes(reasoningEffort)
         ? reasoningEffort
         : undefined;
-      if (modelChanged && runContext !== undefined && selectedModelName !== undefined) {
-        if (selectedModelOption === undefined || !modelOptionIsSelectable(selectedModelOption)) {
-          onNotice(t("unsupportedModel", { value: selectedModelName }), true);
+      if (modelChanged && runContext !== undefined && selectedModelRef !== undefined) {
+        const selectedConnection = providerInventory?.connections.find(
+          (connection) => connection.id === selectedModelRef.connectionId,
+        );
+        if (
+          selectedModelOption === undefined
+          || !modelOptionIsSelectable(selectedModelOption)
+          || (
+            providerInventory !== undefined
+            && (
+              selectedConnection === undefined
+              || !["ready", "unverified"].includes(selectedConnection.readiness)
+            )
+          )
+        ) {
+          onNotice(t("unsupportedModel", { value: selectedModelRef.modelId }), true);
           return false;
         }
         const created = await onCreateSessionForModel(selectedModelOption.modelRef);
@@ -1742,7 +1759,6 @@ export function ConversationPanel({
   };
 
   const continuityLoading = conversationLoadingCopy(continuityState.lifecycle, t);
-
   return (
     <div className="conversation-layout">
       <section
@@ -2082,7 +2098,8 @@ export function ConversationPanel({
         composerRef={composerRef}
         runContext={runContext}
         runContextBusy={runContextBusy}
-        selectedModelName={selectedModelName}
+        providerConnections={providerInventory?.connections}
+        selectedModelRef={selectedModelRef}
         permissionMode={permissionMode}
         reasoningEffort={reasoningEffort}
         requestedSkill={requestedSkill}
@@ -2101,10 +2118,10 @@ export function ConversationPanel({
             onCommand={commandConversationQueue}
           />
         )}
-        onModelChange={(modelName) => {
-          setSelectedModelName(modelName);
+        onModelChange={(modelRef) => {
+          setSelectedModelRef(modelRef);
           const modelOption = runContext?.modelOptions.find(
-            (option) => option.modelName === modelName,
+            (option) => providerModelRefsEqual(option.modelRef, modelRef),
           );
           setReasoningEffort((current) =>
             current !== undefined && modelOption?.availableReasoningEfforts.includes(current)

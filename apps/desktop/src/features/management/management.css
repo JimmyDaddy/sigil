@@ -117,6 +117,7 @@
 }
 .library-state.state-ready { color: var(--sg-domain-color-on-success); }
 .library-state.state-invalid { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger-container); }
+.library-source-diagnostic { display: block; margin-top: 5px; color: var(--sg-sys-color-on-surface-subtle); font-size: 11px; line-height: 1.35; }
 .library-empty { display: grid; min-height: 320px; place-items: center; color: var(--sg-sys-color-on-surface-variant); }
 
 .batch-preview-summary {
@@ -275,6 +276,7 @@
 .provider-connection-list strong,
 .provider-connection-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .provider-connection-list span { color: var(--sg-sys-color-on-surface-variant); font-size: 12px; }
+.provider-connection-list .provider-connection-model { color: var(--sg-sys-color-on-surface); font-weight: 650; }
 .provider-connection-list small { flex: 0 0 auto; color: var(--sg-sys-color-on-surface-variant); font-size: 11px; font-weight: 600; }
 .provider-connection-list small[data-readiness="ready"] { color: var(--sg-domain-color-on-success); }
 .provider-connection-list small[data-readiness="invalid"],

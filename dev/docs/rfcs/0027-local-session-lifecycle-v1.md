@@ -70,7 +70,7 @@ delete preview 绑定 source canonical path、session id、bytes、mtime、conte
 3. 对 `.writer-lock` 获取非等待独占 lease，并在持有 lease 时重新验证 data file；
 4. 重新验证 source binding 与 preview digest；
 5. append `delete_planned` 并 fsync journal；
-6. remove data file 并 sync session directory；稳定的空 writer-lock sidecar 继续作为同名 session 的协调 inode 保留，catalog 不展示它，也不在释放 lease 时制造新旧 inode 竞态；
+6. 把 JSONL 与同名 resource tree 一起移动到 grace-period tombstone，并 sync tombstone/session directory；稳定的空 writer-lock sidecar 继续作为同名 session 的协调 inode 保留，catalog 不展示它，也不在释放 lease 时制造新旧 inode 竞态；
 7. append `delete_completed`。
 
 planned 已落盘但 completed 缺失时，recovery 根据 source 是否仍存在投影 `not_applied` 或 `uncertain`，不得自动重试删除。

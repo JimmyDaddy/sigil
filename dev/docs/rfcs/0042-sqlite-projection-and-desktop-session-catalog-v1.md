@@ -6,8 +6,10 @@
 
 ### 2026-07-31 current-only cutover
 
-Desktop catalog 当前只打开当前 SQLite application/schema version。本文中的旧 schema 状态和迁移
-讨论仅保留为历史设计记录；非当前数据库不会被升级或读取，用户可删除后由当前版本重建。
+Desktop catalog 当前只读取当前 SQLite application/schema version 的 row。本文中的旧 row schema 和迁移
+讨论仅保留为历史设计记录；同 application id 的较旧 projection cache 不做 row migration，而是在 exclusive
+recovery lease 下整体隔离后从当前 JSONL truth 重建。错误 application id、较新未知 version 与损坏数据库仍
+fail closed，不能被自动接管。
 
 基线：
 
@@ -113,6 +115,7 @@ contract。反过来，SQLite row 存在也不能证明源 session 可 resume �
 - `workspace_id`、relative `session_ref`、durable `session_id`；
 - source bytes、modified milliseconds、last stream sequence/event id/record checksum；
 - source state（ready/oversized/scan-budget-exceeded/unsupported-legacy/invalid）；
+- invalid source 的 path-free diagnostic（unsafe source、event stream、projection 或 missing identity）；
 - provider、model、bounded title、message/control counts、latest usage/task/readiness；
 - lifecycle-derived pinned bit；
 - projection schema version and indexed timestamp。
@@ -146,11 +149,14 @@ V1 使用 SQLite `application_id` 和 `user_version = 1`。schema 初始化在 `
 创建固定 DDL 与 indexes，不执行来自数据库内容的 SQL。连接使用 parameterized statement，关闭 trusted
 schema，并限制 busy wait。
 
-正式版前仍不需要 legacy application migration，但必须处理三种状态：
+正式版前仍不需要 durable/row migration，但必须处理四种状态：
 
 - empty/new database：只有`application_id=0`、`user_version=0`且`sqlite_schema`没有任何user object时才创建V1；
-- exact V1：正常打开；
-- wrong application id、未知 user version 或损坏：typed incompatible/corrupt，不静默删除。
+- exact current schema：正常打开；
+- same application id + older positive user version：不读取旧 row；释放 shared usage lease、取得 exclusive
+  recovery lease、再次确认仍为旧 cache 后，将 database/WAL/SHM 整体隔离并创建当前 schema，当前请求随后从
+  JSONL truth reconcile；
+- wrong application id、newer/unknown user version 或损坏：typed incompatible/corrupt，不静默删除。
 
 在写入persistent PRAGMA前必须完成database ownership/schema检查；新database由应用以no-follow、`0600`
 预创建，projection parent收紧为`0700`，WAL/SHM继承并复核owner-only权限。
@@ -159,7 +165,8 @@ recovery API 必须先取得独立于 SQLite connection 的 OS-backed recovery l
 quiescent；其他 Sigil process 持有 lease 或活动 connection 时 fail closed。随后才把全局数据库及
 `-wal`/`-shm` sidecar 移到同目录的 timestamped quarantine，再创建空 V1 并从当前workspace JSONL rebuild。
 该显式操作会使其他workspace的cached rows失效，report在旧库可读时给出`invalidated_workspace_count`；其事实
-源不变，并在各workspace下一次reconcile时恢复。自动HTTP query不执行quarantine/delete；恢复不能形成
+源不变，并在各workspace下一次reconcile时恢复。普通自动 query 不修复 corruption/wrong-owner/newer schema；
+只有已确认同 application id 的旧 rebuildable cache 才走上述 exclusive replacement。两条恢复路径都不能形成
 old/new database split-brain，也不能伪装成只影响当前workspace的局部修复。
 
 ## 9. Query and cursor contract

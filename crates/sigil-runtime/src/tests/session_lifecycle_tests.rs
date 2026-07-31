@@ -819,11 +819,7 @@ fn session_delete_rejects_an_active_writer_lease_before_planned_record() -> Resu
         .apply_delete(&refreshed, &[], 5678)
         .expect_err("active writer must fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("active or its writer lease is busy")
-    );
+    assert!(error.to_string().contains("session writer lease is busy"));
     assert!(source.exists());
     assert!(service.lifecycle_records()?.is_empty());
     drop(active_store);

@@ -1067,6 +1067,10 @@ restore 时：
 
 - active provider stream、tool、approval、task child 或 continuation 存在时拒绝；
 - idle switch 创建 fresh session；
+- Desktop 与 TUI 的候选值都使用完整 `connection_id/model_id`，不得在 renderer/view state 中
+  降级为裸 `model_id`；同名模型可同时属于不同 connection；
+- application run context 可以投影所有已配置 connection 的有界已知模型目录，但当前 session 的
+  capability binding 只绑定当前 connection，其他 connection 的 cache 刷新不能让当前 run 失效；
 - 不把 old provider continuation、compaction target proof、route pressure 或 usage budget 带到新 route；
 - recent model 只在 session 创建成功后记录；
 - set-default 与 start-session 是两个独立 mutation。
@@ -1176,6 +1180,9 @@ Desktop：
 - Desktop 打开项目后先加载 secret-free inventory；没有可用 saved default 时阻止新建会话，
   进入 `Provider -> Authentication -> Model -> Save` 三步向导；
 - 设置页不依赖已有会话即可查看 connection/readiness/credential source 并添加 connection；
+- Composer 按 Provider/connection 展示精确模型 route；跨 connection 选择通过 fresh-session API
+  生效，设置页通过 typed native/HTTP mutation 原子更新共享 saved default，不保存 renderer-local
+  Provider/model override；
 - renderer 的模型 view 使用十分钟进程内 cache，过期结果先展示后后台刷新，API key 只以
   SHA-256 fingerprint 参与 cache identity，cache 不保存 key；
 - R56.6 只要求 Desktop-ready contract，R56.8 完成 renderer、native command 和首次启动表面。

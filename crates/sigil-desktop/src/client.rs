@@ -20,10 +20,12 @@ use crate::{
         DesktopConversationRecoveryView, DesktopErrorResponse, DesktopIntentDropCommandReceipt,
         DesktopIntentDropPreviewRequest, DesktopIntentDropRequest, DesktopIntentOperationKind,
         DesktopIntentOperationPreview, DesktopIntentSource, DesktopIntentStackState,
-        DesktopIntentVersionRef, DesktopProviderConnectionInventory, DesktopProviderSetupCatalog,
-        DesktopProviderSetupCatalogRequest, DesktopProviderSetupSaveRequest,
-        DesktopProviderSetupSaveResult, DesktopRunCancelCommandReceipt, DesktopRunCancelRequest,
-        DesktopRunSnapshot, DesktopRunStartCommandReceipt, DesktopRunStartRequest,
+        DesktopIntentVersionRef, DesktopProviderConnectionInventory,
+        DesktopProviderDefaultModelSaveRequest, DesktopProviderDefaultModelSaveResult,
+        DesktopProviderSetupCatalog, DesktopProviderSetupCatalogRequest,
+        DesktopProviderSetupSaveRequest, DesktopProviderSetupSaveResult,
+        DesktopRunCancelCommandReceipt, DesktopRunCancelRequest, DesktopRunSnapshot,
+        DesktopRunStartCommandReceipt, DesktopRunStartRequest,
         DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchPlan,
         DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogBatchReceipt,
         DesktopSessionCatalogPage, DesktopSessionContinuityView, DesktopSessionCreateRequest,
@@ -153,6 +155,19 @@ impl DesktopHttpClient {
             self.route(["settings", "provider-connections"])?,
             &request,
             StatusCode::CREATED,
+        )
+        .await
+    }
+
+    /// Atomically selects an existing exact route as the shared default for future sessions.
+    pub async fn save_provider_default_model(
+        &self,
+        request: DesktopProviderDefaultModelSaveRequest,
+    ) -> Result<DesktopProviderDefaultModelSaveResult, DesktopClientError> {
+        self.put_json(
+            self.route(["settings", "provider-connections", "default-model"])?,
+            &request,
+            StatusCode::OK,
         )
         .await
     }
@@ -932,6 +947,20 @@ impl DesktopHttpClient {
         B: Serialize + ?Sized,
     {
         self.send_json(self.client.post(url).json(body), status)
+            .await
+    }
+
+    async fn put_json<T, B>(
+        &self,
+        url: Url,
+        body: &B,
+        status: StatusCode,
+    ) -> Result<T, DesktopClientError>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        self.send_json(self.client.put(url).json(body), status)
             .await
     }
 

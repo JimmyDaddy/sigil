@@ -4,7 +4,7 @@ import type { DesktopBridge } from "../../bridge";
 import type { ThemePreference } from "../../appearance/contract";
 import { useAppearance } from "../../appearance/ThemeProvider";
 import { type Locale, useLocale } from "../../i18n";
-import { readReopenLastWorkspace, writeDefaultModel, writeReopenLastWorkspace } from "../../preferences";
+import { readReopenLastWorkspace, writeReopenLastWorkspace } from "../../preferences";
 import { modelOptionIsSelectable } from "../../types";
 import type {
   ProviderConnectionInventory,
@@ -62,6 +62,11 @@ export function SettingsPage({
   const [reopenLastWorkspace, setReopenLastWorkspace] = useState(readReopenLastWorkspace);
   const [providerSetupOpen, setProviderSetupOpen] = useState(false);
   const [providerReloading, setProviderReloading] = useState(false);
+  const [defaultModelSaving, setDefaultModelSaving] = useState(false);
+  const effectiveDefaultModel = defaultModel ?? providerInventory?.defaultModel;
+  const defaultModelConnection = providerInventory?.connections.find(
+    (connection) => connection.id === (effectiveDefaultModel?.connectionId ?? modelContext?.modelRef.connectionId),
+  );
 
   const updateStartup = (enabled: boolean) => {
     if (!writeReopenLastWorkspace(enabled)) {
@@ -73,20 +78,46 @@ export function SettingsPage({
 
   const modelRefKey = (modelRef: ProviderModelRef) =>
     `${modelRef.connectionId}/${modelRef.modelId}`;
-  const updateDefaultModel = (selection: string) => {
+  const modelRefLabel = (modelRef: ProviderModelRef) => {
+    const option = modelContext?.modelOptions.find(
+      (candidate) => modelRefKey(candidate.modelRef) === modelRefKey(modelRef),
+    );
+    if (option === undefined || option.displayName === option.modelName) return modelRef.modelId;
+    return `${option.displayName} · ${option.modelName}`;
+  };
+  const updateDefaultModel = async (selection: string) => {
     const selected = modelContext?.modelOptions.find(
       (option) => modelRefKey(option.modelRef) === selection,
     );
-    const preference = selection === ""
+    const connection = providerInventory?.connections.find(
+      (candidate) => candidate.id === selected?.modelRef.connectionId,
+    );
+    if (
+      workspaceId === undefined
       || selected === undefined
       || !modelOptionIsSelectable(selected)
-      ? undefined
-      : selected.modelRef;
-    if (workspaceId === undefined || !writeDefaultModel(workspaceId, preference)) {
+      || connection === undefined
+      || !["ready", "unverified"].includes(connection.readiness)
+    ) {
       notify({ tone: "error", message: t("settingsSaveFailed") });
       return;
     }
-    onDefaultModelChange(preference);
+    setDefaultModelSaving(true);
+    try {
+      const result = await bridge.saveProviderDefaultModel(workspaceId, selected.modelRef);
+      if (!onProviderInventoryChange(result.inventory)) return;
+      onDefaultModelChange(result.defaultModel);
+      notify({
+        tone: result.saveWarning ? "warning" : "success",
+        message: result.saveWarning ? t("defaultModelSaveWarning") : t("defaultModelSaved"),
+      });
+    } catch {
+      if (isWorkspaceActive()) {
+        notify({ tone: "error", message: t("settingsSaveFailed") });
+      }
+    } finally {
+      if (isWorkspaceActive()) setDefaultModelSaving(false);
+    }
   };
   const reloadProviderConfiguration = async () => {
     if (workspaceId === undefined) return;
@@ -133,22 +164,32 @@ export function SettingsPage({
                   <p className="settings-control-unavailable">{t("noProviderConnections")}</p>
                 ) : (
                   <ul className="provider-connection-list">
-                    {providerInventory.connections.map((connection) => (
-                      <li key={connection.id}>
-                        <div>
-                          <strong>{connection.label}</strong>
-                          <span>{connection.providerLabel} · {connection.protocolLabel}</span>
-                          <span>
-                            {providerCredentialSourceLabel(connection.credentialSource, t)}
-                            {" · "}
-                            {connection.endpointDisplay}
-                          </span>
-                        </div>
-                        <small data-readiness={connection.readiness}>
-                          {providerReadinessLabel(connection.readiness, t)}
-                        </small>
-                      </li>
-                    ))}
+                    {providerInventory.connections.map((connection) => {
+                      const isDefaultConnection = effectiveDefaultModel?.connectionId === connection.id;
+                      return (
+                        <li key={connection.id}>
+                          <div>
+                            <strong>{connection.label}</strong>
+                            <span>{connection.providerLabel} · {connection.protocolLabel}</span>
+                            <span>
+                              {providerCredentialSourceLabel(connection.credentialSource, t)}
+                              {" · "}
+                              {connection.endpointDisplay}
+                            </span>
+                            <span className="provider-connection-model">
+                              {isDefaultConnection && effectiveDefaultModel !== undefined
+                                ? t("providerConnectionDefaultModel", {
+                                  model: modelRefLabel(effectiveDefaultModel),
+                                })
+                                : t("providerConnectionNotDefault")}
+                            </span>
+                          </div>
+                          <small data-readiness={connection.readiness}>
+                            {providerReadinessLabel(connection.readiness, t)}
+                          </small>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
                 {providerInventory.configMode === "v2" ? (
@@ -220,26 +261,43 @@ export function SettingsPage({
           ) : (
             <Select
               label={t("defaultModel")}
-              description={t("defaultModelProvider", { provider: modelContext.providerName })}
+              description={t("defaultModelProvider", {
+                connection: defaultModelConnection?.label ?? modelContext.modelRef.connectionId,
+                provider: defaultModelConnection?.providerLabel ?? modelContext.providerName,
+              })}
               value={
-                defaultModel === undefined ? "" : modelRefKey(defaultModel)
+                effectiveDefaultModel === undefined ? "" : modelRefKey(effectiveDefaultModel)
               }
-              onChange={(event) => updateDefaultModel(event.currentTarget.value)}
+              disabled={defaultModelSaving}
+              onChange={(event) => void updateDefaultModel(event.currentTarget.value)}
             >
-              <option value="">{t("workspaceDefaultModel")}</option>
               {modelContext.modelOptions.map((option) => (
                 <option
                   key={modelRefKey(option.modelRef)}
                   value={modelRefKey(option.modelRef)}
-                  disabled={!modelOptionIsSelectable(option)}
+                  disabled={
+                    !modelOptionIsSelectable(option)
+                    || !providerInventory?.connections.some(
+                      (connection) => connection.id === option.modelRef.connectionId
+                        && ["ready", "unverified"].includes(connection.readiness),
+                    )
+                  }
                 >
+                  {providerInventory?.connections.find(
+                    (connection) => connection.id === option.modelRef.connectionId,
+                  )?.providerLabel ?? option.modelRef.connectionId}
+                  {" · "}
+                  {providerInventory?.connections.find(
+                    (connection) => connection.id === option.modelRef.connectionId,
+                  )?.label ?? option.modelRef.connectionId}
+                  {" · "}
                   {option.displayName === option.modelName
                     ? option.modelName
                     : `${option.displayName} · ${option.modelName}`}
                   {option.availability === "available"
                     ? ""
                     : option.availability === "unverified"
-                      ? ` · ${t("unverified")}`
+                      ? ` · ${t("modelCatalogUnconfirmed")}`
                       : ` · ${t("unavailable")}`}
                 </option>
               ))}

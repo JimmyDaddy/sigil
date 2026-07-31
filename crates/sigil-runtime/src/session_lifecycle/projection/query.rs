@@ -162,7 +162,7 @@ impl SessionCatalogProjectionService {
                     message: "page limit overflowed".to_owned(),
                 })?;
         let mut statement = transaction.prepare(
-            "SELECT workspace_id, session_ref, session_id, source_state, source_bytes, \
+            "SELECT workspace_id, session_ref, session_id, source_state, source_diagnostic, source_bytes, \
              source_modified_at_unix_ms, source_content_sha256, first_stream_sequence, \
              last_stream_sequence, last_event_id, last_record_checksum, provider_name, model_name, \
              title, user_message_count, assistant_message_count, tool_result_count, \

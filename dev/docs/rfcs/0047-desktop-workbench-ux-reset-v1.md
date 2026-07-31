@@ -136,6 +136,12 @@ session identity，不伪造 lifecycle delete journal。两条路径都只在 co
 renderer 永远不接触绝对路径。Tauri session capability 同步允许这两个收窄 command，desktop UI gate 会比较 renderer bridge
 中的全部 `desktop_*` invoke 与 permission manifest，防止再次出现“command 已注册但 renderer 不可调用”的漂移。
 
+2026-07-31 follow-up：invalid source cleanup 现在把 JSONL 与同名 resource tree 作为一个 bundle 移入 quarantine
+或 grace-period tombstone，稳定 `.writer-lock` inode 保留；锁被其他 Sigil 进程持有时，single mutation 返回
+`durable_session_writer_busy`，batch receipt 返回 `writer_busy`，不再模糊成“暂时不可用”。Catalog row 增加
+path-free invalid diagnostic。会话库完成 batch 后会同时刷新自身 page 与 App-owned sidebar catalog，返回会话页时
+再做一次防御性 refresh，删除项不会继续残留在左侧列表。
+
 2026-07-21 notification follow-up：notification viewport 是注意力通道，不是事件日志。正常进度与界面已经明确表达的状态变化
 （例如启动/连接 run、请求取消、提交审批、切换 workspace、新建/重命名会话和自动刷新历史）必须静默，不得弹 toast。
 Sigil toast 只承载需要用户关注的错误，以及删除、隔离这类结果不容易从当前界面确认的高影响操作反馈；使用产品 mark、

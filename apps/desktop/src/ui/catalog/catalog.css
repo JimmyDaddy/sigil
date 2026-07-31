@@ -16,7 +16,7 @@ body { min-height: 100%; overflow: auto; }
 .catalog-workbench-frame { display: block; width: 100%; height: 640px; border: 0; background: var(--sg-sys-color-canvas); }
 .catalog-fixture-surface { display: grid; gap: var(--sg-sys-space-4); padding: var(--sg-sys-space-4); }
 .catalog-session-surface { max-width: var(--sg-sys-navigation-width); max-height: 560px; overflow: auto; }
-.catalog-composer-surface { display: flex; min-height: 480px; flex-direction: column; justify-content: flex-end; }
+.catalog-composer-surface { --conversation-content-max-width: 820px; --conversation-content-gutter: clamp(4px, 2vw, 24px); display: flex; min-height: 480px; flex-direction: column; justify-content: flex-end; }
 .catalog-empty { display: grid; min-height: 180px; place-content: center; gap: var(--sg-sys-space-2); color: var(--sg-sys-color-on-surface-variant); text-align: center; }
 [data-primitive-catalog] { display: flex; flex-wrap: wrap; align-items: start; gap: var(--sg-sys-space-3); }
 

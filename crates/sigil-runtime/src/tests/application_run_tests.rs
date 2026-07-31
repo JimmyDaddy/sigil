@@ -722,6 +722,62 @@ fn adapter_session_binding_accepts_connection_models_and_rejects_unknown_connect
 }
 
 #[test]
+fn run_context_catalog_keeps_same_model_ids_distinct_across_connections() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "deepseek-personal"
+model = "deepseek-v4-flash"
+
+[connections.deepseek-personal]
+label = "DeepSeek personal"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+
+[connections.deepseek-team]
+label = "DeepSeek team"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#,
+    )?;
+    let binding = bind_application_session(&config_path, temp.path(), None)?;
+
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+
+    let flash_routes = context
+        .model_options
+        .iter()
+        .filter(|option| option.model_ref.model_id == "deepseek-v4-flash")
+        .map(|option| option.model_ref.connection_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(flash_routes, vec!["deepseek-personal", "deepseek-team"]);
+    assert_eq!(
+        context
+            .model_options
+            .first()
+            .map(|option| &option.model_ref),
+        Some(&context.model_ref),
+    );
+    Ok(())
+}
+
+#[test]
 fn session_reopen_binding_requires_an_existing_durable_file() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");

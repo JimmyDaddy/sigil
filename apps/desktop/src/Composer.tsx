@@ -12,10 +12,12 @@ import {
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
-import { modelOptionIsSelectable } from "./types";
+import { modelOptionIsSelectable, providerModelRefKey, providerModelRefsEqual } from "./types";
 import type {
   AgentBinding,
   AgentCatalogEntry,
+  ProviderConnection,
+  ProviderModelRef,
   PermissionMode,
   ReasoningEffort,
   ModelOption,
@@ -23,7 +25,7 @@ import type {
   SkillBinding,
   SkillCatalogEntry,
 } from "./types";
-import { useLocale } from "./i18n";
+import { type Translate, useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
 import { Button, Dialog, IconButton, Popover, Select, TextArea, Tooltip } from "./ui/primitives";
 
@@ -41,7 +43,8 @@ export function Composer({
   composerRef,
   runContext,
   runContextBusy,
-  selectedModelName,
+  providerConnections,
+  selectedModelRef,
   permissionMode,
   reasoningEffort,
   requestedSkill,
@@ -77,7 +80,8 @@ export function Composer({
   composerRef: RefObject<HTMLTextAreaElement | null>;
   runContext?: RunContext;
   runContextBusy: boolean;
-  selectedModelName?: string;
+  providerConnections?: ProviderConnection[];
+  selectedModelRef?: ProviderModelRef;
   permissionMode: PermissionMode;
   reasoningEffort?: ReasoningEffort;
   requestedSkill?: SkillCatalogEntry;
@@ -87,7 +91,7 @@ export function Composer({
   queueBusy: boolean;
   queuePanel?: ReactNode;
   activityState?: ComposerActivityState;
-  onModelChange: (modelName: string) => void;
+  onModelChange: (modelRef: ProviderModelRef) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
   onNewSession: () => Promise<boolean>;
@@ -251,7 +255,10 @@ export function Composer({
           return true;
         }
         const selectedOption = runContext?.modelOptions.find(
-          (option) => option.modelName === (selectedModelName ?? runContext.modelName),
+          (option) => providerModelRefsEqual(
+            option.modelRef,
+            selectedModelRef ?? runContext.modelRef,
+          ),
         );
         if (!selectedOption?.availableReasoningEfforts.includes(argument as ReasoningEffort)) {
           onNotice(t("unsupportedEffort", { value: argument }), true);
@@ -265,14 +272,20 @@ export function Composer({
           modelSelectRef.current?.focus();
           return true;
         }
-        const model = runContext?.modelOptions.find(
-          (candidate) => candidate.modelName === argument,
+        const exact = runContext?.modelOptions.find(
+          (candidate) => providerModelRefKey(candidate.modelRef) === argument,
         );
-        if (model === undefined || !modelOptionIsSelectable(model)) {
+        const matches = runContext?.modelOptions.filter(
+          (candidate) => candidate.modelName === argument || candidate.modelRef.modelId === argument,
+        ) ?? [];
+        const model = exact ?? (matches.length === 1 ? matches[0] : undefined);
+        if (model === undefined || !modelOptionCanBeSelected(model, providerConnections)) {
           onNotice(t("unsupportedModel", { value: argument }), true);
           return false;
         }
-        if (model.modelName !== selectedModelName) onModelChange(model.modelName);
+        if (!providerModelRefsEqual(model.modelRef, selectedModelRef)) {
+          onModelChange(model.modelRef);
+        }
         return true;
       }
       case "open_agent_workbench":
@@ -313,24 +326,63 @@ export function Composer({
     setActiveSuggestion(0);
     requestAnimationFrame(() => focusWithoutScroll(composerRef.current));
   };
-  const modelName = selectedModelName ?? runContext?.modelName ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
   const modelOptions = runContext?.modelOptions ?? [];
-  const modelOption = modelOptions.find((option) => option.modelName === modelName);
-  const modelOptionValue = (option: ModelOption) =>
-    `${option.modelRef.connectionId}/${option.modelRef.modelId}`;
+  const effectiveModelRef = selectedModelRef ?? runContext?.modelRef;
+  const modelOption = modelOptions.find((option) =>
+    providerModelRefsEqual(option.modelRef, effectiveModelRef));
+  const modelName = modelOption?.modelName
+    ?? effectiveModelRef?.modelId
+    ?? (runContextBusy ? t("loadingModel") : t("modelUnavailable"));
+  const connectionFor = (modelRef: ProviderModelRef) =>
+    providerConnections?.find((connection) => connection.id === modelRef.connectionId);
+  const selectedConnection = effectiveModelRef === undefined
+    ? undefined
+    : connectionFor(effectiveModelRef);
+  const connectionLabel = selectedConnection?.label ?? effectiveModelRef?.connectionId ?? "—";
+  const providerLabel = selectedConnection?.providerLabel
+    ?? (runContext !== undefined
+      && effectiveModelRef?.connectionId === runContext.modelRef.connectionId
+      ? runContext.providerName
+      : "—");
+  const modelOptionValue = (option: ModelOption) => providerModelRefKey(option.modelRef);
   const modelOptionLabel = (option: ModelOption) => {
     const identity = option.displayName === option.modelName
       ? option.modelName
       : `${option.displayName} · ${option.modelName}`;
+    const connection = connectionFor(option.modelRef);
+    const optionConnection = connection?.label ?? option.modelRef.connectionId;
+    const optionProvider = connection?.providerLabel
+      ?? (runContext !== undefined
+        && option.modelRef.connectionId === runContext.modelRef.connectionId
+        ? runContext.providerName
+        : undefined);
+    const route = optionProvider === undefined
+      ? optionConnection
+      : `${optionProvider} · ${optionConnection}`;
+    const routeIdentity = `${route} · ${identity}`;
     return option.availability === "available"
-      ? identity
+      ? routeIdentity
       : option.availability === "unverified"
-        ? `${identity} · ${t("unverified")}`
-        : `${identity} · ${t("unavailable")}`;
+        ? `${routeIdentity} · ${t("modelCatalogUnconfirmed")}`
+        : `${routeIdentity} · ${t("unavailable")}`;
   };
   const selectedModelValue = modelOption === undefined ? "" : modelOptionValue(modelOption);
+  const modelTooltip = runContext === undefined
+    ? modelName
+    : modelOption?.availability === "unverified"
+      ? t("modelHintUnconfirmed", {
+        connection: connectionLabel,
+        provider: providerLabel,
+        model: modelOption.modelName,
+        source: modelProvenanceLabel(modelOption.provenance, t),
+      })
+      : t("modelHint", {
+        connection: connectionLabel,
+        provider: providerLabel,
+        model: modelOption?.modelName ?? modelName,
+      });
   const selectableModelCount = modelOptions.filter(
-    modelOptionIsSelectable,
+    (option) => modelOptionCanBeSelected(option, providerConnections),
   ).length;
   const availableReasoningEfforts = modelOption?.availableReasoningEfforts ?? [];
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
@@ -471,7 +523,7 @@ export function Composer({
         />
         <div className="composer-toolbar">
           <div className="composer-options">
-            <Tooltip label={runContext === undefined ? modelName : t("modelHint", { provider: runContext.providerName })}>
+            <Tooltip label={modelTooltip}>
               <div className="composer-model">
                 <Icon name="model" />
                 <Select
@@ -486,8 +538,8 @@ export function Composer({
                     const selected = modelOptions.find(
                       (option) => modelOptionValue(option) === event.target.value,
                     );
-                    if (selected !== undefined && modelOptionIsSelectable(selected)) {
-                      onModelChange(selected.modelName);
+                    if (selected !== undefined && modelOptionCanBeSelected(selected, providerConnections)) {
+                      onModelChange(selected.modelRef);
                     }
                   }}
                 >
@@ -495,7 +547,7 @@ export function Composer({
                     <option
                       key={modelOptionValue(option)}
                       value={modelOptionValue(option)}
-                      disabled={!modelOptionIsSelectable(option)}
+                      disabled={!modelOptionCanBeSelected(option, providerConnections)}
                     >
                       {modelOptionLabel(option)}
                     </option>
@@ -666,6 +718,31 @@ function composerActivityCopy(state: ComposerActivityState, t: ReturnType<typeof
     case "finalizing":
       return { label: t("composerActivityFinalizing"), detail: t("composerActivityFinalizingDetail") };
   }
+}
+
+function modelProvenanceLabel(
+  provenance: ModelOption["provenance"],
+  t: Translate,
+): string {
+  switch (provenance) {
+    case "remote": return t("modelProvenance_remote");
+    case "cache": return t("modelProvenance_cache");
+    case "bundled": return t("modelProvenance_bundled");
+    case "configured": return t("modelProvenance_configured");
+    case "manual": return t("modelProvenance_manual");
+  }
+}
+
+function modelOptionCanBeSelected(
+  option: ModelOption,
+  connections: ProviderConnection[] | undefined,
+): boolean {
+  if (!modelOptionIsSelectable(option)) return false;
+  if (connections === undefined) return true;
+  const connection = connections.find(
+    (candidate) => candidate.id === option.modelRef.connectionId,
+  );
+  return connection !== undefined && ["ready", "unverified"].includes(connection.readiness);
 }
 
 interface LeadingInvocationToken {

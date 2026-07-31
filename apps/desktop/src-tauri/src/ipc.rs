@@ -39,10 +39,10 @@ use sigil_desktop::{
     DesktopRunContextView, DesktopRunSnapshot, DesktopRunStatus, DesktopSessionCatalogBatchAction,
     DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
     DesktopSessionCatalogBatchPlanStatus, DesktopSessionCatalogBatchReceipt,
-    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogState,
-    DesktopSessionSnapshot, DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage,
-    DesktopSupportCheck, DesktopSupportDoctorReport, DesktopSupportEnvironment,
-    DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
+    DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogSourceDiagnostic,
+    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
+    DesktopSessionTranscriptPage, DesktopSupportCheck, DesktopSupportDoctorReport,
+    DesktopSupportEnvironment, DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
     DesktopTaskIntegrationAcceptanceView, DesktopTaskIntegrationReviewRequest,
     DesktopTaskIntegrationReviewView, DesktopTimelineEvent,
     DesktopToolArtifactAvailability as NativeToolArtifactAvailability,
@@ -284,6 +284,23 @@ pub(crate) struct DesktopProviderSetupSaveInput {
     replace_invalid_config: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopProviderDefaultModelSaveInput {
+    model_ref: DesktopProviderModelRefInput,
+}
+
+impl DesktopProviderDefaultModelSaveInput {
+    pub(crate) fn into_native(self) -> sigil_desktop::DesktopProviderDefaultModelSaveRequest {
+        sigil_desktop::DesktopProviderDefaultModelSaveRequest {
+            model_ref: sigil_desktop::DesktopProviderModelRef {
+                connection_id: self.model_ref.connection_id,
+                model_id: self.model_ref.model_id,
+            },
+        }
+    }
+}
+
 impl DesktopProviderSetupSaveInput {
     pub(crate) fn into_native(self) -> DesktopProviderSetupSaveRequest {
         DesktopProviderSetupSaveRequest {
@@ -437,6 +454,26 @@ impl From<DesktopProviderSetupSaveResult> for DesktopProviderSetupSaveSummary {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopProviderDefaultModelSaveSummary {
+    default_model: DesktopProviderModelRefSummary,
+    inventory: DesktopProviderConnectionInventorySummary,
+    save_warning: bool,
+}
+
+impl From<sigil_desktop::DesktopProviderDefaultModelSaveResult>
+    for DesktopProviderDefaultModelSaveSummary
+{
+    fn from(value: sigil_desktop::DesktopProviderDefaultModelSaveResult) -> Self {
+        Self {
+            default_model: value.default_model.into(),
+            inventory: value.inventory.into(),
+            save_warning: value.save_warning,
+        }
+    }
+}
+
 fn provider_credential_source_label(value: DesktopProviderCredentialSource) -> &'static str {
     match value {
         DesktopProviderCredentialSource::Environment => "environment",
@@ -505,6 +542,15 @@ pub(crate) enum DesktopCatalogState {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DesktopCatalogSourceDiagnostic {
+    UnsafeSource,
+    InvalidEventStream,
+    InvalidProjection,
+    MissingSessionIdentity,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopCatalogPage {
     workspace_id: String,
@@ -525,6 +571,8 @@ struct DesktopCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     source_state: DesktopCatalogState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_diagnostic: Option<DesktopCatalogSourceDiagnostic>,
     source_bytes: u64,
     source_modified_at_unix_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1904,6 +1952,19 @@ impl From<DesktopSessionCatalogState> for DesktopCatalogState {
     }
 }
 
+impl From<DesktopSessionCatalogSourceDiagnostic> for DesktopCatalogSourceDiagnostic {
+    fn from(value: DesktopSessionCatalogSourceDiagnostic) -> Self {
+        match value {
+            DesktopSessionCatalogSourceDiagnostic::UnsafeSource => Self::UnsafeSource,
+            DesktopSessionCatalogSourceDiagnostic::InvalidEventStream => Self::InvalidEventStream,
+            DesktopSessionCatalogSourceDiagnostic::InvalidProjection => Self::InvalidProjection,
+            DesktopSessionCatalogSourceDiagnostic::MissingSessionIdentity => {
+                Self::MissingSessionIdentity
+            }
+        }
+    }
+}
+
 impl From<DesktopSessionCatalogPage> for DesktopCatalogPage {
     fn from(value: DesktopSessionCatalogPage) -> Self {
         Self {
@@ -1972,6 +2033,7 @@ impl From<DesktopSessionCatalogEntry> for DesktopCatalogEntry {
             session_ref: value.session_ref,
             session_id: value.session_id,
             source_state: value.source_state.into(),
+            source_diagnostic: value.source_diagnostic.map(Into::into),
             source_bytes: value.source_bytes,
             source_modified_at_unix_ms: value.source_modified_at_unix_ms,
             provider_name: value.provider_name,

@@ -1084,6 +1084,112 @@ fn provider_connection_inventory_decodes_only_the_secret_free_native_contract() 
     );
 }
 
+#[tokio::test]
+async fn save_provider_default_model_uses_the_exact_put_route_and_compound_identity() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("loopback listener should expose its address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("request should connect");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1_024];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await.expect("request should read");
+            assert!(read > 0, "request closed before its headers completed");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).expect("headers should be UTF-8");
+        assert!(
+            headers.starts_with("PUT /settings/provider-connections/default-model HTTP/1.1\r\n")
+        );
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer ")
+        );
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::parse::<usize>)
+            })
+            .expect("request should include a valid content length")
+            .expect("content length should be numeric");
+        while request.len() - header_end < content_length {
+            let read = stream.read(&mut buffer).await.expect("body should read");
+            assert!(read > 0, "request closed before its body completed");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let body: serde_json::Value =
+            serde_json::from_slice(&request[header_end..header_end + content_length])
+                .expect("request body should be JSON");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "model_ref": {
+                    "connection_id": "gateway-team",
+                    "model_id": "deepseek-v4-flash"
+                }
+            })
+        );
+
+        let response_body = serde_json::json!({
+            "default_model": {
+                "connection_id": "gateway-team",
+                "model_id": "deepseek-v4-flash"
+            },
+            "inventory": {
+                "config_mode": "v2",
+                "default_model": {
+                    "connection_id": "gateway-team",
+                    "model_id": "deepseek-v4-flash"
+                },
+                "connections": [],
+                "issues": []
+            },
+            "save_warning": false
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("response should write");
+    });
+
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token should generate")),
+    );
+    let result = client
+        .save_provider_default_model(DesktopProviderDefaultModelSaveRequest {
+            model_ref: crate::DesktopProviderModelRef {
+                connection_id: "gateway-team".to_owned(),
+                model_id: "deepseek-v4-flash".to_owned(),
+            },
+        })
+        .await
+        .expect("exact default route should save");
+
+    assert_eq!(result.default_model.connection_id, "gateway-team");
+    assert_eq!(result.default_model.model_id, "deepseek-v4-flash");
+    assert!(!result.save_warning);
+    server.await.expect("server task should complete");
+}
+
 #[test]
 fn session_management_contract_is_exact_and_path_free() {
     let rename = DesktopSessionRenameRequest {

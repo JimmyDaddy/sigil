@@ -347,7 +347,7 @@ export function ProviderSetup({
                 description={[
                   model.modelId,
                   model.recommended ? t("recommended") : undefined,
-                  model.availability === "unverified" ? t("unverified") : undefined,
+                  model.availability === "unverified" ? t("modelCatalogUnconfirmed") : undefined,
                 ].filter(Boolean).join(" · ")}
                 value={model.modelId}
                 checked={modelId === model.modelId}

@@ -213,6 +213,25 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       },
       saveWarning: false,
     }),
+    saveProviderDefaultModel: async (_workspaceId, modelRef) => ({
+      defaultModel: modelRef,
+      inventory: {
+        configMode: "v2",
+        defaultModel: modelRef,
+        connections: [{
+          id: modelRef.connectionId,
+          label: "DeepSeek",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "environment",
+          readiness: "ready",
+          defaultModel: modelRef,
+        }],
+        issues: [],
+      },
+      saveWarning: false,
+    }),
     pickWorkspace: async () => ({ cancelled: false, workspace }),
     openRecentWorkspace: async () => workspace,
     closeWorkspace: async () => [],
@@ -1575,20 +1594,50 @@ describe("desktop workspace and history shell", () => {
       label: "New conversation",
       runCount: 0,
     }));
+    const saveProviderDefaultModel = vi.fn(async (_workspaceId: string, modelRef: {
+      connectionId: string;
+      modelId: string;
+    }) => ({
+      defaultModel: modelRef,
+      inventory: {
+        configMode: "v2" as const,
+        defaultModel: modelRef,
+        connections: [{
+          id: "deepseek-default",
+          label: "DeepSeek",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "environment" as const,
+          readiness: "ready" as const,
+          defaultModel: modelRef,
+        }],
+        issues: [],
+      },
+      saveWarning: false,
+    }));
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
       createSession,
+      saveProviderDefaultModel,
     })} />);
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await screen.findByRole("combobox", { name: "Model" });
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByText(
+      "New conversation default: DeepSeek V4 Flash · deepseek-v4-flash",
+    )).toBeTruthy();
+    expect(screen.getByText(/Connection DeepSeek · Provider DeepSeek/)).toBeTruthy();
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Default model for new conversations" }),
       "deepseek-default/deepseek-v4-pro",
     );
-    expect(window.localStorage.getItem("sigil.desktop.default-models.v2")).toContain("deepseek-v4-pro");
+    await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenCalledWith(
+      workspace.id,
+      { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+    ));
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
@@ -1993,6 +2042,7 @@ describe("desktop workspace and history shell", () => {
 
   it("previews and executes selected conversation mutations through the batch contract", async () => {
     const user = userEvent.setup();
+    let deleted = false;
     const entry = {
       sessionRef: "batch-ready.jsonl",
       sessionId: "durable-batch-ready",
@@ -2016,22 +2066,27 @@ describe("desktop workspace and history shell", () => {
       blocked: 0,
       items: [{ sessionRef: entry.sessionRef, status: "executable" as const }],
     }));
-    const executeSessionCatalogBatch = vi.fn(async () => ({
-      planId: "sha256:batch-ready",
-      action: "delete_sessions" as const,
-      total: 1,
-      completed: 1,
-      failed: 0,
-      skipped: 0,
-      items: [{ sessionRef: entry.sessionRef, outcome: "completed" as const }],
-    }));
+    const executeSessionCatalogBatch = vi.fn(async () => {
+      deleted = true;
+      return {
+        planId: "sha256:batch-ready",
+        action: "delete_sessions" as const,
+        total: 1,
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+        items: [{ sessionRef: entry.sessionRef, outcome: "completed" as const }],
+      };
+    });
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
       }),
-      catalog: async () => ({ ...emptyCatalog, generation: 7, entries: [entry], nextCursor: "cursor-2" }),
+      catalog: async () => deleted
+        ? { ...emptyCatalog, generation: 8, entries: [] }
+        : { ...emptyCatalog, generation: 7, entries: [entry], nextCursor: "cursor-2" },
       planSessionCatalogBatch,
       executeSessionCatalogBatch,
     })} />);
@@ -2060,6 +2115,9 @@ describe("desktop workspace and history shell", () => {
       items: [{ sessionRef: entry.sessionRef, sessionId: entry.sessionId }],
     }));
     expect(await screen.findByRole("heading", { name: "Latest batch result" })).toBeTruthy();
+    expect(await screen.findByText("No conversations match these filters.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Back to conversations" }));
+    await waitFor(() => expect(screen.queryByText("Batch ready session")).toBeNull());
   });
 
   it("offers source cleanup for a selected invalid source", async () => {
@@ -2067,6 +2125,7 @@ describe("desktop workspace and history shell", () => {
     const entry = {
       sessionRef: "invalid.jsonl",
       sourceState: "invalid" as const,
+      sourceDiagnostic: "invalid_event_stream" as const,
       sourceBytes: 256,
       sourceModifiedAtUnixMs: 1_784_419_100_000,
       title: "Invalid session",
@@ -2084,6 +2143,19 @@ describe("desktop workspace and history shell", () => {
       blocked: 0,
       items: [{ sessionRef: entry.sessionRef, status: "executable" as const }],
     }));
+    const executeSessionCatalogBatch = vi.fn(async () => ({
+      planId: "sha256:invalid-delete",
+      action: "delete_invalid_sources" as const,
+      total: 1,
+      completed: 0,
+      failed: 1,
+      skipped: 0,
+      items: [{
+        sessionRef: entry.sessionRef,
+        outcome: "failed" as const,
+        reason: "writer_busy",
+      }],
+    }));
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
@@ -2092,10 +2164,12 @@ describe("desktop workspace and history shell", () => {
       }),
       catalog: async () => ({ ...emptyCatalog, generation: 8, entries: [entry] }),
       planSessionCatalogBatch,
+      executeSessionCatalogBatch,
     })} />);
 
     await screen.findByText("Invalid session");
     await user.click(screen.getByRole("button", { name: "Manage conversations" }));
+    expect(await screen.findByText("Unreadable or identity-conflicting event stream")).toBeTruthy();
     await user.click(await screen.findByRole("checkbox", { name: "Select conversation: Invalid session" }));
 
     expect(screen.getByRole("button", { name: "Delete unavailable (1)" }).hasAttribute("disabled")).toBe(false);
@@ -2108,6 +2182,8 @@ describe("desktop workspace and history shell", () => {
         sourceModifiedAtUnixMs: entry.sourceModifiedAtUnixMs,
       }],
     });
+    await user.click(await screen.findByRole("button", { name: "Apply action" }));
+    expect(await screen.findByText("failed: In use by another Sigil instance")).toBeTruthy();
   });
 
   it("stores the startup restore preference and honors it on the next bootstrap", async () => {
@@ -4195,7 +4271,7 @@ describe("desktop workspace and history shell", () => {
     expect(selectedEffortBinding).toBe("effort-binding-deepseek-v4-flash");
   });
 
-  it("creates a fresh exact-model conversation before starting a switched-model run", async () => {
+  it("creates a fresh exact-route conversation before starting a cross-provider run", async () => {
     const user = userEvent.setup();
     const selectedModels: Array<RunContext["modelRef"] | undefined> = [];
     const runSelections: Array<{
@@ -4205,11 +4281,48 @@ describe("desktop workspace and history shell", () => {
       effort?: string;
       effortBinding?: string;
     }> = [];
+    const gatewayOption: RunContext["modelOptions"][number] = {
+      ...defaultRunContext.modelOptions[0],
+      modelRef: { connectionId: "gateway-team", modelId: "deepseek-v4-flash" },
+      displayName: "Gateway Flash",
+      provenance: "remote",
+      reasoningEffortBinding: "effort-binding-gateway-flash",
+    };
     const bridge = bridgeWith({
       bootstrap: async () => ({
         protocolVersion: 2,
         workspaces: [workspace],
         recentWorkspaces: [],
+      }),
+      providerConnections: async () => ({
+        configMode: "v2",
+        defaultModel: defaultRunContext.modelRef,
+        connections: [
+          {
+            id: "deepseek-default",
+            label: "DeepSeek",
+            providerLabel: "DeepSeek",
+            protocolLabel: "DeepSeek",
+            endpointDisplay: "api.deepseek.com",
+            credentialSource: "environment",
+            readiness: "ready",
+            defaultModel: defaultRunContext.modelRef,
+          },
+          {
+            id: "gateway-team",
+            label: "Team gateway",
+            providerLabel: "OpenAI-compatible",
+            protocolLabel: "Chat Completions",
+            endpointDisplay: "gateway.example",
+            credentialSource: "stored",
+            readiness: "ready",
+          },
+        ],
+        issues: [],
+      }),
+      runContext: async () => ({
+        ...defaultRunContext,
+        modelOptions: [defaultRunContext.modelOptions[0], gatewayOption],
       }),
       createSession: async (_workspaceId, _label, modelRef) => {
         selectedModels.push(modelRef);
@@ -4253,7 +4366,7 @@ describe("desktop workspace and history shell", () => {
     const composer = await readyComposer();
     await user.selectOptions(
       await screen.findByRole("combobox", { name: "Model" }),
-      "deepseek-default/deepseek-v4-pro",
+      "gateway-team/deepseek-v4-flash",
     );
     expect((screen.getByRole("combobox", { name: "Reasoning effort" }) as HTMLSelectElement).value).toBe("max");
     expect(screen.queryByRole("option", { name: "Effort unavailable" })).toBeNull();
@@ -4263,8 +4376,8 @@ describe("desktop workspace and history shell", () => {
     expect(selectedModels).toEqual([
       undefined,
       {
-        connectionId: "deepseek-default",
-        modelId: "deepseek-v4-pro",
+        connectionId: "gateway-team",
+        modelId: "deepseek-v4-flash",
       },
     ]);
     expect(runSelections).toEqual([{
@@ -4272,7 +4385,7 @@ describe("desktop workspace and history shell", () => {
       modelName: undefined,
       binding: undefined,
       effort: "max",
-      effortBinding: "effort-binding-deepseek-v4-pro",
+      effortBinding: "effort-binding-gateway-flash",
     }]);
   });
 

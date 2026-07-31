@@ -1,44 +1,37 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readDefaultModel, writeDefaultModel } from "./preferences";
+import { readLastSession, writeLastSession } from "./preferences";
 
 afterEach(() => {
   window.localStorage.clear();
 });
 
-describe("desktop provider model preferences", () => {
-  it("round-trips an exact compound model identity", () => {
-    expect(writeDefaultModel("workspace-1", {
-      connectionId: "openai-primary",
-      modelId: "gpt-4.1",
+describe("desktop session preferences", () => {
+  it("round-trips an exact durable session identity", () => {
+    expect(writeLastSession("workspace-1", {
+      sessionRef: "session-1.jsonl",
+      sessionId: "session-1",
+      label: "Provider switching",
     })).toBe(true);
 
-    expect(readDefaultModel("workspace-1")).toEqual({
-      connectionId: "openai-primary",
-      modelId: "gpt-4.1",
+    expect(readLastSession("workspace-1")).toEqual({
+      sessionRef: "session-1.jsonl",
+      sessionId: "session-1",
+      label: "Provider switching",
     });
   });
 
-  it("does not guess a connection for a removed bare model preference", () => {
+  it("rejects malformed durable session identities", () => {
     window.localStorage.setItem(
-      "sigil.desktop.default-models.v1",
-      JSON.stringify({ "workspace-1": "deepseek-v4-pro" }),
-    );
-
-    expect(readDefaultModel("workspace-1")).toBeUndefined();
-  });
-
-  it("rejects malformed compound identities", () => {
-    window.localStorage.setItem(
-      "sigil.desktop.default-models.v2",
+      "sigil.desktop.last-sessions.v1",
       JSON.stringify({
         "workspace-1": {
-          connectionId: "",
-          modelId: "gpt-4.1",
+          sessionRef: "",
+          sessionId: "session-1",
         },
       }),
     );
 
-    expect(readDefaultModel("workspace-1")).toBeUndefined();
+    expect(readLastSession("workspace-1")).toBeUndefined();
   });
 });

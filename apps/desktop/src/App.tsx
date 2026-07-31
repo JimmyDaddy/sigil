@@ -14,7 +14,6 @@ import { SupportPage } from "./features/support/SupportPage";
 import { DESKTOP_ROUTE_MAP, useDesktopRouter } from "./features/navigation/useDesktopRouter";
 import { WorkspaceSwitcher } from "./features/workspaces/WorkspaceSwitcher";
 import {
-  readDefaultModel,
   readLastSession,
   readReopenLastWorkspace,
   writeLastSession,
@@ -359,6 +358,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const inventory = await bridge.providerConnections(workspaceId);
       if (workspaceId !== activeWorkspaceIdRef.current) return;
       setProviderInventory(inventory);
+      setDefaultModel(inventory.defaultModel);
       setProviderInventoryState("ready");
     } catch {
       if (workspaceId !== activeWorkspaceIdRef.current) return;
@@ -385,7 +385,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     setSessionMessage(undefined);
     setFailedSessionEntry(undefined);
     setWorkspaceRunContext(undefined);
-    setDefaultModel(activeWorkspaceId === undefined ? undefined : readDefaultModel(activeWorkspaceId));
+    setDefaultModel(undefined);
     if (activeWorkspaceId !== undefined) setWorkspaceRecovery(undefined);
     if (activeWorkspaceId === undefined) return;
 
@@ -601,7 +601,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       const selectedDefaultModel = requestedModel ?? (
         defaultModel !== undefined
           && workspaceRunContext !== undefined
-          && defaultModel.connectionId === workspaceRunContext.modelRef.connectionId
           && workspaceRunContext.modelOptions.some(
             (option) =>
               option.modelRef.connectionId === defaultModel.connectionId
@@ -1039,7 +1038,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
             <ConversationLibrary
               bridge={bridge}
               workspaceId={activeWorkspace.id}
-              onBack={back}
+              onBack={() => {
+                void loadHistory(activeWorkspace.id);
+                back();
+              }}
+              onCatalogChanged={async () => {
+                await loadHistory(activeWorkspace.id);
+              }}
               onOpen={(entry) => {
                 navigate("conversation");
                 void openSession(entry);
@@ -1156,6 +1161,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 bridge={bridge}
                 workspaceId={activeWorkspace.id}
                 session={selectedSession}
+                providerInventory={providerInventory}
                 onInitialLoadComplete={finishConversationNavigation}
                 onRunContextChange={captureRunContext}
                 onSessionCatalogChange={() => {

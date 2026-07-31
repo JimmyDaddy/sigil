@@ -6,7 +6,7 @@ use sigil_kernel::PublicRunEventKind;
 use sigil_runtime::{
     LocalSessionCatalogState, LocalSessionMutationError, SessionCatalogProjectionEntry,
     SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
-    SessionCatalogProjectionService,
+    SessionCatalogProjectionService, SessionCatalogSourceDiagnostic,
     application_run::{
         DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE, MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE,
     },
@@ -29,14 +29,14 @@ use crate::{
     dto::{
         HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest,
         HttpConversationQueueCommandRequest, HttpConversationRecoveryCommandAction,
-        HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpProviderSetupCatalogRequest,
-        HttpProviderSetupSaveRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
-        HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
-        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
-        HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
-        HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
-        HttpTaskIntegrationReviewRequest, HttpTaskPauseRequest, HttpToolArtifactReadRequest,
-        HttpVerificationRerunRequest,
+        HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpProviderDefaultModelSaveRequest,
+        HttpProviderSetupCatalogRequest, HttpProviderSetupSaveRequest, HttpRunCancelRequest,
+        HttpRunStartRequest, HttpServerInfo, HttpSessionCatalogBatchExecuteRequest,
+        HttpSessionCatalogBatchPlanRequest, HttpSessionCreateRequest, HttpSessionDeleteRequest,
+        HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
+        HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
+        HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpTaskIntegrationReviewRequest,
+        HttpTaskPauseRequest, HttpToolArtifactReadRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -80,6 +80,8 @@ struct HttpSessionCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     source_state: LocalSessionCatalogState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_diagnostic: Option<SessionCatalogSourceDiagnostic>,
     source_bytes: u64,
     source_modified_at_unix_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +120,7 @@ impl From<SessionCatalogProjectionEntry> for HttpSessionCatalogEntry {
             session_ref: entry.session_ref,
             session_id: entry.session_id,
             source_state: entry.source_state,
+            source_diagnostic: entry.source_diagnostic,
             source_bytes: entry.source_bytes,
             source_modified_at_unix_ms: entry.source_modified_at_unix_ms,
             provider_name: entry.provider_name,
@@ -549,6 +552,30 @@ fn route_http_request(
             Err(error) => provider_setup_error_response(
                 error,
                 "provider setup could not be saved; review provider, authentication, endpoint, and model",
+            ),
+        };
+    }
+
+    if request.method == "PUT" && request.path == "/settings/provider-connections/default-model" {
+        let Some(support_context) = support_context else {
+            return http_error_response(
+                503,
+                "provider_setup_unavailable",
+                "provider settings are unavailable",
+            );
+        };
+        let Ok(body) = parse_json_body::<HttpProviderDefaultModelSaveRequest>(&request.body) else {
+            return http_error_response(
+                400,
+                "invalid_provider_default_model_request",
+                "invalid provider default model body",
+            );
+        };
+        return match support_context.save_provider_default_model(body) {
+            Ok(result) => json_response(200, json!(result)),
+            Err(error) => provider_setup_error_response(
+                error,
+                "the selected connection/model route could not be saved as the default",
             ),
         };
     }
@@ -1939,6 +1966,11 @@ fn session_mutation_error_response(error: LocalSessionMutationError) -> HttpResp
             409,
             "durable_session_pinned",
             "unpin the saved conversation before deleting it",
+        ),
+        LocalSessionMutationError::WriterBusy => http_error_response(
+            409,
+            "durable_session_writer_busy",
+            "another Sigil instance is using this conversation; close it and try again",
         ),
         LocalSessionMutationError::Unavailable { source } => {
             eprintln!("session catalog mutation unavailable: {source:#}");

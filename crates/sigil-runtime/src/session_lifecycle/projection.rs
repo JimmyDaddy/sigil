@@ -21,7 +21,8 @@ use thiserror::Error as ThisError;
 use super::{
     LocalSessionCatalogState, LocalSessionLifecycleLimits, LocalSessionLifecycleService,
     LocalSessionMutationError, SessionCandidate, acquire_session_writer_lease,
-    direct_jsonl_candidates, hash_file_bounded, modified_at_unix_ms,
+    direct_jsonl_candidates, hash_file_bounded, map_session_writer_lease_mutation_error,
+    modified_at_unix_ms, move_session_bundle, move_session_to_tombstone,
 };
 
 mod query;
@@ -31,9 +32,9 @@ pub use query::{
     SessionCatalogProjectionQuery,
 };
 
-pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 2;
+pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 3;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
-const SESSION_CATALOG_PROJECTION_REVISION: u16 = 2;
+const SESSION_CATALOG_PROJECTION_REVISION: u16 = 3;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
 const SESSION_CATALOG_TITLE_MAX_BYTES: usize = 160;
@@ -55,6 +56,7 @@ CREATE TABLE session_catalog_entry_v1 (
     session_ref TEXT NOT NULL,
     session_id TEXT,
     source_state TEXT NOT NULL,
+    source_diagnostic TEXT,
     source_bytes INTEGER NOT NULL CHECK (source_bytes >= 0),
     source_modified_at_unix_ms INTEGER NOT NULL CHECK (source_modified_at_unix_ms >= 0),
     source_content_sha256 TEXT,
@@ -146,6 +148,8 @@ pub struct SessionCatalogProjectionEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub source_state: LocalSessionCatalogState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_diagnostic: Option<SessionCatalogSourceDiagnostic>,
     pub source_bytes: u64,
     pub source_modified_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +181,16 @@ pub struct SessionCatalogProjectionEntry {
     #[serde(default)]
     pub pinned: bool,
     pub indexed_at_unix_ms: u64,
+}
+
+/// Stable, path-free explanation for an invalid catalog source.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCatalogSourceDiagnostic {
+    UnsafeSource,
+    InvalidEventStream,
+    InvalidProjection,
+    MissingSessionIdentity,
 }
 
 /// Diagnostics for one explicit full rebuild of a workspace catalog projection.
@@ -464,7 +478,7 @@ impl SessionCatalogProjectionService {
             return Err(LocalSessionMutationError::NotReady);
         }
         let source_writer_lease = acquire_session_writer_lease(&source_path)
-            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+            .map_err(map_session_writer_lease_mutation_error)?;
         let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
             _ => LocalSessionMutationError::Unavailable {
@@ -488,11 +502,8 @@ impl SessionCatalogProjectionService {
             operation_id.trim_start_matches("session-quarantine:"),
             session_ref_text
         );
-        fs::rename(&source_path, quarantine_dir.join(&quarantine_name)).map_err(|source| {
-            LocalSessionMutationError::Unavailable {
-                source: anyhow::Error::new(source),
-            }
-        })?;
+        move_session_bundle(&source_path, &quarantine_dir, &quarantine_name)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
         drop(source_writer_lease);
         let projection_generation = self.reconcile().ok().map(|report| report.generation);
         Ok(SessionCatalogQuarantineReceipt {
@@ -503,12 +514,13 @@ impl SessionCatalogProjectionService {
         })
     }
 
-    /// Permanently removes one exact unavailable source and refreshes SQLite.
+    /// Removes one exact unavailable source from the active catalog and refreshes SQLite.
     ///
     /// This operation is intentionally separate from audited durable-session deletion: malformed
     /// input has no trustworthy session identity to bind to the lifecycle journal. The direct-child
     /// reference, catalog state, byte length, and modified timestamp are all revalidated under the
-    /// session-maintenance lease before the regular file is removed.
+    /// session-maintenance lease before the JSONL and its companion resource directory move into a
+    /// grace-period tombstone. The stable writer-lock inode intentionally remains in place.
     ///
     /// # Errors
     ///
@@ -556,7 +568,7 @@ impl SessionCatalogProjectionService {
             return Err(LocalSessionMutationError::NotReady);
         }
         let source_writer_lease = acquire_session_writer_lease(&source_path)
-            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
+            .map_err(map_session_writer_lease_mutation_error)?;
         let metadata = fs::symlink_metadata(&source_path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => LocalSessionMutationError::NotFound,
             _ => LocalSessionMutationError::Unavailable {
@@ -572,14 +584,15 @@ impl SessionCatalogProjectionService {
             return Err(LocalSessionMutationError::IdentityChanged);
         }
 
-        fs::remove_file(&source_path).map_err(|source| LocalSessionMutationError::Unavailable {
-            source: anyhow::Error::new(source),
-        })?;
+        let operation_suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tombstone_id = format!("invalid-source-delete-{operation_suffix}");
+        move_session_to_tombstone(&source_path, &tombstone_id)
+            .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
         drop(source_writer_lease);
         let projection_generation = self.reconcile().ok().map(|report| report.generation);
         Ok(SessionCatalogInvalidSourceDeleteReceipt {
             session_ref: session_ref_text,
-            operation_id: format!("invalid-source-delete:{}", uuid::Uuid::new_v4()),
+            operation_id: format!("invalid-source-delete:{operation_suffix}"),
             projection_generation,
         })
     }
@@ -634,11 +647,49 @@ impl SessionCatalogProjectionService {
     fn open_connection(&self) -> Result<SessionCatalogConnection, SessionCatalogProjectionError> {
         prepare_database_parent(&self.database_path)?;
         let usage_lease = self.acquire_shared_usage_lease()?;
-        let connection = self.open_database_connection()?;
+        let connection = match self.open_database_connection() {
+            Ok(connection) => connection,
+            Err(error) if obsolete_rebuildable_schema(&error) => {
+                drop(usage_lease);
+                self.replace_obsolete_projection_schema()?;
+                let usage_lease = self.acquire_shared_usage_lease()?;
+                let connection = self.open_database_connection()?;
+                return Ok(SessionCatalogConnection {
+                    connection,
+                    _usage_lease: Some(usage_lease),
+                });
+            }
+            Err(error) => return Err(error),
+        };
         Ok(SessionCatalogConnection {
             connection,
             _usage_lease: Some(usage_lease),
         })
+    }
+
+    fn replace_obsolete_projection_schema(&self) -> Result<(), SessionCatalogProjectionError> {
+        let recovery_lease = self.acquire_exclusive_recovery_lease()?;
+        match self.open_database_connection() {
+            Ok(connection) => {
+                drop(connection);
+                drop(recovery_lease);
+                return Ok(());
+            }
+            Err(error) if obsolete_rebuildable_schema(&error) => {}
+            Err(error) => return Err(error),
+        }
+        let quarantine = quarantine_sqlite_files(&self.database_path)?;
+        match self.open_database_connection() {
+            Ok(connection) => {
+                drop(connection);
+                drop(recovery_lease);
+                Ok(())
+            }
+            Err(error) => {
+                quarantine_failed_rebuild(&self.database_path, quarantine.as_ref());
+                Err(error)
+            }
+        }
     }
 
     fn open_connection_under_recovery(
@@ -983,20 +1034,36 @@ impl SessionCatalogProjectionService {
             indexed_at_unix_ms,
         );
         if initial_state != LocalSessionCatalogState::Ready {
+            if candidate.symlink_or_non_file {
+                entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::UnsafeSource);
+            }
             return Ok(entry);
         }
         let records = match JsonlSessionStore::read_event_records(&candidate.path) {
             Ok(records) => records,
             Err(_) => {
                 entry.source_state = LocalSessionCatalogState::Invalid;
+                entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidEventStream);
                 return Ok(entry);
             }
         };
         ensure_source_stable(&candidate)?;
         let snapshot = match session_list_projection_from_records(&records) {
             Ok(snapshot) if snapshot.sessions.len() == 1 => snapshot,
-            Ok(_) | Err(_) => {
+            Ok(snapshot) if snapshot.sessions.is_empty() => {
                 entry.source_state = LocalSessionCatalogState::Invalid;
+                entry.source_diagnostic =
+                    Some(SessionCatalogSourceDiagnostic::MissingSessionIdentity);
+                return Ok(entry);
+            }
+            Ok(_) => {
+                entry.source_state = LocalSessionCatalogState::Invalid;
+                entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidProjection);
+                return Ok(entry);
+            }
+            Err(_) => {
+                entry.source_state = LocalSessionCatalogState::Invalid;
+                entry.source_diagnostic = Some(SessionCatalogSourceDiagnostic::InvalidProjection);
                 return Ok(entry);
             }
         };
@@ -1131,7 +1198,7 @@ fn list_workspace_entries(
     workspace_id: &str,
 ) -> Result<Vec<SessionCatalogProjectionEntry>, SessionCatalogProjectionError> {
     let mut statement = connection.prepare(
-        "SELECT workspace_id, session_ref, session_id, source_state, source_bytes, \
+        "SELECT workspace_id, session_ref, session_id, source_state, source_diagnostic, source_bytes, \
          source_modified_at_unix_ms, source_content_sha256, first_stream_sequence, \
          last_stream_sequence, last_event_id, last_record_checksum, provider_name, model_name, \
          title, user_message_count, assistant_message_count, tool_result_count, \
@@ -1600,6 +1667,7 @@ fn empty_projection_entry(
         session_ref,
         session_id: None,
         source_state,
+        source_diagnostic: None,
         source_bytes: candidate.bytes,
         source_modified_at_unix_ms: candidate.modified_at_unix_ms,
         source_content_sha256: None,
@@ -1800,7 +1868,7 @@ fn upsert_entry(
 ) -> Result<(), SessionCatalogProjectionError> {
     transaction.execute(
         "INSERT INTO session_catalog_entry_v1(\
-             workspace_id, session_ref, session_id, source_state, source_bytes, \
+             workspace_id, session_ref, session_id, source_state, source_diagnostic, source_bytes, \
              source_modified_at_unix_ms, source_content_sha256, first_stream_sequence, \
              last_stream_sequence, last_event_id, last_record_checksum, provider_name, model_name, \
              title, title_search, user_message_count, assistant_message_count, tool_result_count, \
@@ -1808,10 +1876,11 @@ fn upsert_entry(
              pinned, indexed_at_unix_ms\
          ) VALUES (\
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-             ?18, ?19, ?20, ?21, ?22, ?23, ?24\
+             ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25\
          ) ON CONFLICT(workspace_id, session_ref) DO UPDATE SET \
              session_id = excluded.session_id, \
              source_state = excluded.source_state, \
+             source_diagnostic = excluded.source_diagnostic, \
              source_bytes = excluded.source_bytes, \
              source_modified_at_unix_ms = excluded.source_modified_at_unix_ms, \
              source_content_sha256 = excluded.source_content_sha256, \
@@ -1837,6 +1906,7 @@ fn upsert_entry(
             entry.session_ref,
             entry.session_id,
             catalog_state_name(entry.source_state),
+            entry.source_diagnostic.map(source_diagnostic_name),
             to_i64(entry.source_bytes, "source_bytes")?,
             to_i64(
                 entry.source_modified_at_unix_ms,
@@ -1865,6 +1935,16 @@ fn upsert_entry(
     Ok(())
 }
 
+fn obsolete_rebuildable_schema(error: &SessionCatalogProjectionError) -> bool {
+    matches!(
+        error,
+        SessionCatalogProjectionError::IncompatibleSchema {
+            application_id: SESSION_CATALOG_APPLICATION_ID,
+            user_version,
+        } if *user_version > 0 && *user_version < i32::from(SESSION_CATALOG_SCHEMA_VERSION)
+    )
+}
+
 fn decode_entry_row(
     row: &rusqlite::Row<'_>,
 ) -> Result<SessionCatalogProjectionEntry, rusqlite::Error> {
@@ -1873,25 +1953,26 @@ fn decode_entry_row(
         session_ref: row.get(1)?,
         session_id: row.get(2)?,
         source_state: decode_catalog_state(row.get::<_, String>(3)?, 3)?,
-        source_bytes: decode_u64(row.get(4)?, 4)?,
-        source_modified_at_unix_ms: decode_u64(row.get(5)?, 5)?,
-        source_content_sha256: row.get(6)?,
-        first_stream_sequence: decode_optional_u64(row.get(7)?, 7)?,
-        last_stream_sequence: decode_optional_u64(row.get(8)?, 8)?,
-        last_event_id: row.get(9)?,
-        last_record_checksum: row.get(10)?,
-        provider_name: row.get(11)?,
-        model_name: row.get(12)?,
-        title: row.get(13)?,
-        user_message_count: decode_u64(row.get(14)?, 14)?,
-        assistant_message_count: decode_u64(row.get(15)?, 15)?,
-        tool_result_count: decode_u64(row.get(16)?, 16)?,
-        control_entry_count: decode_u64(row.get(17)?, 17)?,
-        latest_usage: decode_optional(row.get(18)?, 18)?,
-        latest_task: decode_optional(row.get(19)?, 19)?,
-        latest_readiness: decode_optional(row.get(20)?, 20)?,
-        pinned: row.get::<_, i64>(21)? != 0,
-        indexed_at_unix_ms: decode_u64(row.get(22)?, 22)?,
+        source_diagnostic: decode_optional_source_diagnostic(row.get(4)?, 4)?,
+        source_bytes: decode_u64(row.get(5)?, 5)?,
+        source_modified_at_unix_ms: decode_u64(row.get(6)?, 6)?,
+        source_content_sha256: row.get(7)?,
+        first_stream_sequence: decode_optional_u64(row.get(8)?, 8)?,
+        last_stream_sequence: decode_optional_u64(row.get(9)?, 9)?,
+        last_event_id: row.get(10)?,
+        last_record_checksum: row.get(11)?,
+        provider_name: row.get(12)?,
+        model_name: row.get(13)?,
+        title: row.get(14)?,
+        user_message_count: decode_u64(row.get(15)?, 15)?,
+        assistant_message_count: decode_u64(row.get(16)?, 16)?,
+        tool_result_count: decode_u64(row.get(17)?, 17)?,
+        control_entry_count: decode_u64(row.get(18)?, 18)?,
+        latest_usage: decode_optional(row.get(19)?, 19)?,
+        latest_task: decode_optional(row.get(20)?, 20)?,
+        latest_readiness: decode_optional(row.get(21)?, 21)?,
+        pinned: row.get::<_, i64>(22)? != 0,
+        indexed_at_unix_ms: decode_u64(row.get(23)?, 23)?,
     })
 }
 
@@ -1902,6 +1983,39 @@ fn catalog_state_name(state: LocalSessionCatalogState) -> &'static str {
         LocalSessionCatalogState::ScanBudgetExceeded => "scan_budget_exceeded",
         LocalSessionCatalogState::Invalid => "invalid",
     }
+}
+
+fn source_diagnostic_name(diagnostic: SessionCatalogSourceDiagnostic) -> &'static str {
+    match diagnostic {
+        SessionCatalogSourceDiagnostic::UnsafeSource => "unsafe_source",
+        SessionCatalogSourceDiagnostic::InvalidEventStream => "invalid_event_stream",
+        SessionCatalogSourceDiagnostic::InvalidProjection => "invalid_projection",
+        SessionCatalogSourceDiagnostic::MissingSessionIdentity => "missing_session_identity",
+    }
+}
+
+fn decode_optional_source_diagnostic(
+    value: Option<String>,
+    column: usize,
+) -> Result<Option<SessionCatalogSourceDiagnostic>, rusqlite::Error> {
+    value
+        .map(|value| match value.as_str() {
+            "unsafe_source" => Ok(SessionCatalogSourceDiagnostic::UnsafeSource),
+            "invalid_event_stream" => Ok(SessionCatalogSourceDiagnostic::InvalidEventStream),
+            "invalid_projection" => Ok(SessionCatalogSourceDiagnostic::InvalidProjection),
+            "missing_session_identity" => {
+                Ok(SessionCatalogSourceDiagnostic::MissingSessionIdentity)
+            }
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                column,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown session catalog source diagnostic {value}"),
+                )),
+            )),
+        })
+        .transpose()
 }
 
 fn decode_catalog_state(

@@ -4451,6 +4451,38 @@
         ],
         "type": "string"
       },
+      "ProviderDefaultModelSaveRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "model_ref": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          }
+        },
+        "required": [
+          "model_ref"
+        ],
+        "type": "object"
+      },
+      "ProviderDefaultModelSaveResult": {
+        "additionalProperties": false,
+        "properties": {
+          "default_model": {
+            "$ref": "#/components/schemas/ProviderModelRef"
+          },
+          "inventory": {
+            "$ref": "#/components/schemas/ProviderConnectionInventory"
+          },
+          "save_warning": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "default_model",
+          "inventory",
+          "save_warning"
+        ],
+        "type": "object"
+      },
       "ProviderModelRef": {
         "additionalProperties": false,
         "properties": {
@@ -5922,6 +5954,19 @@
           "source_bytes": {
             "format": "uint64",
             "type": "integer"
+          },
+          "source_diagnostic": {
+            "enum": [
+              "unsafe_source",
+              "invalid_event_stream",
+              "invalid_projection",
+              "missing_session_identity",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source_modified_at_unix_ms": {
             "format": "uint64",
@@ -9591,6 +9636,46 @@
           }
         },
         "summary": "Load an exact connection-scoped provider model catalog"
+      }
+    },
+    "/settings/provider-connections/default-model": {
+      "put": {
+        "description": "Atomically selects one already configured exact connection/model route for future sessions. Existing durable sessions remain unchanged.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderDefaultModelSaveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderDefaultModelSaveResult"
+                }
+              }
+            },
+            "description": "Saved exact default route and refreshed inventory"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Set the shared default model route"
       }
     },
     "/support/bundle": {

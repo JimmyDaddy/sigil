@@ -433,6 +433,22 @@ pub struct HttpProviderSetupSaveResult {
     pub save_warning: bool,
 }
 
+/// Existing exact route selected as the shared default for future sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderDefaultModelSaveRequest {
+    pub model_ref: HttpProviderModelRef,
+}
+
+/// Secret-free result after atomically changing only the saved default route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpProviderDefaultModelSaveResult {
+    pub default_model: HttpProviderModelRef,
+    pub inventory: HttpProviderConnectionInventory,
+    pub save_warning: bool,
+}
+
 /// Immutable, secret-free metadata published after the local listener is ready.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -4,6 +4,8 @@ import type { DesktopBridge } from "../../bridge";
 import type {
   CatalogPage,
   ConversationDisplayPage,
+  ProviderConnectionInventory,
+  ProviderModelRef,
   RunAttachment,
   RunContext,
   SessionSummary,
@@ -369,6 +371,17 @@ const runContext: RunContext = {
       defaultReasoningEffort: "max",
       reasoningEffortBinding: "catalog-effort-binding-pro",
     },
+    {
+      modelRef: { connectionId: "gateway-team", modelId: "deepseek-v4-flash" },
+      displayName: "DeepSeek V4 Flash",
+      availability: "available",
+      recommendation: "standard",
+      provenance: "remote",
+      modelName: "deepseek-v4-flash",
+      availableReasoningEfforts: ["low", "medium", "high"],
+      defaultReasoningEffort: "high",
+      reasoningEffortBinding: "catalog-effort-binding-gateway",
+    },
   ],
   modelSelection: "fresh_session",
   modelSelectionBinding: "catalog-model-binding",
@@ -382,6 +395,38 @@ const runContext: RunContext = {
   contextWindowSource: "provider",
   extensionCatalog: { commands: [], skills: [], agents: [] },
 };
+
+function providerInventory(defaultModel: ProviderModelRef): ProviderConnectionInventory {
+  return {
+    configMode: "v2",
+    defaultModel,
+    connections: [
+      {
+        id: runContext.modelRef.connectionId,
+        label: "DeepSeek Personal",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "api.deepseek.com",
+        credentialSource: "environment",
+        readiness: "ready",
+        defaultModel: defaultModel.connectionId === runContext.modelRef.connectionId
+          ? defaultModel
+          : undefined,
+      },
+      {
+        id: "gateway-team",
+        label: "Gateway Team",
+        providerLabel: "OpenAI compatible",
+        protocolLabel: "Responses",
+        endpointDisplay: "gateway.example.test",
+        credentialSource: "stored",
+        readiness: "ready",
+        defaultModel: defaultModel.connectionId === "gateway-team" ? defaultModel : undefined,
+      },
+    ],
+    issues: [],
+  };
+}
 
 const verification: VerificationSummary = {
   taskId: "catalog-task",
@@ -470,21 +515,7 @@ export function createCatalogWorkbenchBridge(
       privacy: { included: ["build metadata"], excluded: ["credentials"], reviewBeforeSharing: true },
     }),
     exportSupportBundle: async () => ({ cancelled: false, fileName: "sigil-support-catalog.json" }),
-    providerConnections: async () => ({
-      configMode: "v2",
-      defaultModel: runContext.modelRef,
-      connections: [{
-        id: runContext.modelRef.connectionId,
-        label: "DeepSeek",
-        providerLabel: "DeepSeek",
-        protocolLabel: "DeepSeek",
-        endpointDisplay: "api.deepseek.com",
-        credentialSource: "environment",
-        readiness: "ready",
-        defaultModel: runContext.modelRef,
-      }],
-      issues: [],
-    }),
+    providerConnections: async () => providerInventory(runContext.modelRef),
     providerSetupCatalog: async () => ({
       connectionId: runContext.modelRef.connectionId,
       providerLabel: "DeepSeek",
@@ -504,27 +535,15 @@ export function createCatalogWorkbenchBridge(
         connectionId: runContext.modelRef.connectionId,
         modelId: input.modelId,
       },
-      inventory: {
-        configMode: "v2",
-        defaultModel: {
-          connectionId: runContext.modelRef.connectionId,
-          modelId: input.modelId,
-        },
-        connections: [{
-          id: runContext.modelRef.connectionId,
-          label: "DeepSeek",
-          providerLabel: "DeepSeek",
-          protocolLabel: "DeepSeek",
-          endpointDisplay: "api.deepseek.com",
-          credentialSource: "environment",
-          readiness: "ready",
-          defaultModel: {
-            connectionId: runContext.modelRef.connectionId,
-            modelId: input.modelId,
-          },
-        }],
-        issues: [],
-      },
+      inventory: providerInventory({
+        connectionId: runContext.modelRef.connectionId,
+        modelId: input.modelId,
+      }),
+      saveWarning: false,
+    }),
+    saveProviderDefaultModel: async (_workspaceId, modelRef) => ({
+      defaultModel: modelRef,
+      inventory: providerInventory(modelRef),
       saveWarning: false,
     }),
     pickWorkspace: async () => ({ cancelled: true }),

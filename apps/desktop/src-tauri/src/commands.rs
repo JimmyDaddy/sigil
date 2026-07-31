@@ -44,7 +44,8 @@ use crate::{
         DesktopConversationRecoveryCommandReceipt, DesktopConversationRecoveryView,
         DesktopExternalUrlInput, DesktopIntentDropExecutionSummary, DesktopIntentDropInput,
         DesktopIntentDropPreviewInput, DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
-        DesktopProviderConnectionInventorySummary, DesktopProviderSetupCatalogInput,
+        DesktopProviderConnectionInventorySummary, DesktopProviderDefaultModelSaveInput,
+        DesktopProviderDefaultModelSaveSummary, DesktopProviderSetupCatalogInput,
         DesktopProviderSetupCatalogSummary, DesktopProviderSetupSaveInput,
         DesktopProviderSetupSaveSummary, DesktopRunAttachInput, DesktopRunAttachment,
         DesktopRunCancelInput, DesktopRunContext, DesktopRunStartInput, DesktopRunSummary,
@@ -197,6 +198,26 @@ pub(crate) async fn desktop_save_provider_setup(
         .map_err(project_manager_error)?;
     client
         .save_provider_setup(input.into_native())
+        .await
+        .map(Into::into)
+        .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_save_provider_default_model(
+    workspace_id: String,
+    input: DesktopProviderDefaultModelSaveInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopProviderDefaultModelSaveSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .save_provider_default_model(input.into_native())
         .await
         .map(Into::into)
         .map_err(project_client_error)

@@ -10,6 +10,13 @@ catalog. The saved default and every running session refer to the compound
 `connection-id/model-id` identity, so changing providers cannot reuse another connection's model
 fallback.
 
+Desktop groups the known models from every configured, usable connection in the composer. Picking
+a different Provider or model creates a fresh conversation on that exact route; the conversation
+you are viewing is never rewritten in place. In **Settings**, choosing a default publishes the
+same shared `connection-id/model-id` used by the TUI. In the TUI, `/model` performs the same
+fresh-session switch, and `D` on an exact model candidate changes only the default for future
+sessions.
+
 ## Choose A Provider
 
 | Provider | Use it for | Image input | Config value |

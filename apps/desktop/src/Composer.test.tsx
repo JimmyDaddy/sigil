@@ -6,7 +6,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./Composer";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
 import { LocaleProvider } from "./i18n";
-import type { AgentBinding, ReasoningEffort, RunContext, SkillBinding } from "./types";
+import type {
+  AgentBinding,
+  ProviderConnection,
+  ProviderModelRef,
+  ReasoningEffort,
+  RunContext,
+  SkillBinding,
+} from "./types";
 
 afterEach(() => {
   cleanup();
@@ -270,7 +277,8 @@ function renderComposer(overrides: {
   onNotice?: (message: string, error?: boolean) => void;
   activityState?: ComposerActivityState;
   runContext?: RunContext;
-  onModelChange?: (modelName: string) => void;
+  providerConnections?: ProviderConnection[];
+  onModelChange?: (modelRef: ProviderModelRef) => void;
 } = {}) {
   const onSubmit = overrides.onSubmit ?? vi.fn(async (
     _prompt: string,
@@ -289,7 +297,16 @@ function renderComposer(overrides: {
   const onNotice = overrides.onNotice ?? vi.fn((_message: string, _error?: boolean) => undefined);
   const runContext = overrides.runContext ?? context;
   const onModelChange =
-    overrides.onModelChange ?? vi.fn((_modelName: string) => undefined);
+    overrides.onModelChange ?? vi.fn((_modelRef: ProviderModelRef) => undefined);
+  const providerConnections = overrides.providerConnections ?? [{
+    id: "deepseek-default",
+    label: "DeepSeek 1",
+    providerLabel: "DeepSeek",
+    protocolLabel: "DeepSeek",
+    endpointDisplay: "api.deepseek.com",
+    credentialSource: "environment",
+    readiness: "ready",
+  }];
   render(
     <LocaleProvider>
       <Composer
@@ -302,7 +319,8 @@ function renderComposer(overrides: {
         composerRef={createRef<HTMLTextAreaElement>()}
         runContext={runContext}
         runContextBusy={false}
-        selectedModelName={runContext.modelName}
+        providerConnections={providerConnections}
+        selectedModelRef={runContext.modelRef}
         permissionMode="manual"
         reasoningEffort="max"
         queueCount={overrides.queueCount ?? 0}
@@ -345,7 +363,7 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
-  it("labels unverified exact models and keeps them selectable", async () => {
+  it("labels provider-unconfirmed exact models and keeps them selectable", async () => {
     const onModelChange = vi.fn();
     const unverifiedContext: RunContext = {
       ...context,
@@ -359,7 +377,7 @@ describe("structured composer", () => {
 
     const model = screen.getByRole("combobox", { name: "Model" });
     const unverified = within(model).getByRole("option", {
-      name: /DeepSeek V4 Pro.*Unverified/,
+      name: /DeepSeek 1.*DeepSeek V4 Pro.*Not confirmed by provider/,
     }) as HTMLOptionElement;
     expect(unverified.disabled).toBe(false);
 
@@ -367,7 +385,86 @@ describe("structured composer", () => {
       model,
       "deepseek-default/deepseek-v4-pro",
     );
-    expect(onModelChange).toHaveBeenCalledWith("deepseek-v4-pro");
+    expect(onModelChange).toHaveBeenCalledWith({
+      connectionId: "deepseek-default",
+      modelId: "deepseek-v4-pro",
+    });
+  });
+
+  it("keeps the exact connection and provider visible in the model route", async () => {
+    renderComposer({
+      providerConnections: [{
+        id: "deepseek-default",
+        label: "DeepSeek 1",
+        providerLabel: "DeepSeek",
+        protocolLabel: "DeepSeek",
+        endpointDisplay: "api.deepseek.com",
+        credentialSource: "environment",
+        readiness: "ready",
+      }],
+    });
+
+    const model = screen.getByRole("combobox", { name: "Model" });
+    expect(within(model).getByRole("option", {
+      name: /DeepSeek 1.*DeepSeek V4 Flash.*deepseek-v4-flash/,
+    })).toBeTruthy();
+
+    const tooltipAnchor = model.closest(".sg-tooltip-anchor");
+    expect(tooltipAnchor).not.toBeNull();
+    fireEvent.pointerEnter(tooltipAnchor!);
+    expect((await screen.findByRole("tooltip")).textContent).toContain(
+      "Connection DeepSeek 1 · Provider DeepSeek · Model deepseek-v4-flash",
+    );
+  });
+
+  it("selects an exact cross-provider route even when model ids are identical", async () => {
+    const onModelChange = vi.fn();
+    const sameIdContext: RunContext = {
+      ...context,
+      modelOptions: [
+        context.modelOptions[0],
+        {
+          ...context.modelOptions[0],
+          modelRef: { connectionId: "gateway-team", modelId: "deepseek-v4-flash" },
+          displayName: "Gateway Flash",
+          provenance: "remote",
+        },
+      ],
+    };
+    renderComposer({
+      runContext: sameIdContext,
+      onModelChange,
+      providerConnections: [
+        {
+          id: "deepseek-default",
+          label: "DeepSeek 1",
+          providerLabel: "DeepSeek",
+          protocolLabel: "DeepSeek",
+          endpointDisplay: "api.deepseek.com",
+          credentialSource: "environment",
+          readiness: "ready",
+        },
+        {
+          id: "gateway-team",
+          label: "Team gateway",
+          providerLabel: "OpenAI-compatible",
+          protocolLabel: "Chat Completions",
+          endpointDisplay: "gateway.example",
+          credentialSource: "stored",
+          readiness: "ready",
+        },
+      ],
+    });
+
+    const model = screen.getByRole("combobox", { name: "Model" });
+    expect(within(model).getByRole("option", {
+      name: /OpenAI-compatible.*Team gateway.*Gateway Flash.*deepseek-v4-flash/,
+    })).toBeTruthy();
+    await userEvent.setup().selectOptions(model, "gateway-team/deepseek-v4-flash");
+    expect(onModelChange).toHaveBeenCalledWith({
+      connectionId: "gateway-team",
+      modelId: "deepseek-v4-flash",
+    });
   });
 
   it("keeps the current task state visible above the composer", () => {

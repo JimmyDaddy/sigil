@@ -2369,41 +2369,58 @@ fn application_model_catalog_entries(
     cache_root: &Path,
 ) -> Vec<crate::provider_connections::ModelCatalogEntry> {
     let loaded = crate::provider_connections::load_provider_connections(root_config);
-    let connection = loaded.connections.get(&current_model.connection_id);
-    let cached = crate::provider_connections::fresh_cached_model_entries_native(
-        cache_root,
-        root_config,
-        &current_model.connection_id,
-    );
-    let cache_proved_absence = cached.is_some();
-    let mut entries = cached.unwrap_or_else(|| {
-        connection
-            .map(|connection| {
-                crate::provider_connections::bundled_model_entries(&connection.config)
-            })
-            .unwrap_or_default()
-    });
-    if !entries
-        .iter()
-        .any(|entry| entry.model_ref == *current_model)
-    {
-        entries.push(crate::provider_connections::ModelCatalogEntry {
-            model_ref: current_model.clone(),
-            display_name: current_model.model_id.clone(),
-            availability: if cache_proved_absence {
-                crate::provider_connections::ModelAvailability::ConfiguredUnavailable
-            } else {
-                crate::provider_connections::ModelAvailability::Unverified
-            },
-            recommendation: crate::provider_connections::ModelRecommendation::Standard,
-            provenance: crate::provider_connections::ModelCatalogProvenance::Configured,
+    let mut entries = Vec::new();
+    for connection in loaded.connections.values() {
+        let cached = crate::provider_connections::fresh_cached_model_entries_native(
+            cache_root,
+            root_config,
+            &connection.config.id,
+        );
+        let cache_proved_absence = cached.is_some();
+        let mut connection_entries = cached.unwrap_or_else(|| {
+            crate::provider_connections::bundled_model_entries(&connection.config)
         });
+        for required in [Some(current_model), loaded.default_model.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|model_ref| model_ref.connection_id == connection.config.id)
+        {
+            if !connection_entries
+                .iter()
+                .any(|entry| entry.model_ref == *required)
+            {
+                connection_entries.push(crate::provider_connections::ModelCatalogEntry {
+                    model_ref: required.clone(),
+                    display_name: required.model_id.clone(),
+                    availability: if cache_proved_absence {
+                        crate::provider_connections::ModelAvailability::ConfiguredUnavailable
+                    } else {
+                        crate::provider_connections::ModelAvailability::Unverified
+                    },
+                    recommendation: crate::provider_connections::ModelRecommendation::Standard,
+                    provenance: crate::provider_connections::ModelCatalogProvenance::Configured,
+                });
+            }
+        }
+        entries.extend(connection_entries);
     }
+    entries.sort_by(|left, right| {
+        left.model_ref
+            .connection_id
+            .cmp(&right.model_ref.connection_id)
+            .then_with(|| left.model_ref.model_id.cmp(&right.model_ref.model_id))
+    });
+    entries.dedup_by(|left, right| left.model_ref == right.model_ref);
     entries.sort_by(|left, right| {
         let left_current = left.model_ref != *current_model;
         let right_current = right.model_ref != *current_model;
         left_current
             .cmp(&right_current)
+            .then_with(|| {
+                left.model_ref
+                    .connection_id
+                    .cmp(&right.model_ref.connection_id)
+            })
             .then_with(|| {
                 let left_standard = left.recommendation
                     != crate::provider_connections::ModelRecommendation::Recommended;
@@ -2425,6 +2442,9 @@ fn application_model_selection_binding(
         current_model.connection_id, current_model.model_id,
     );
     for option in model_options {
+        if option.model_ref.connection_id != current_model.connection_id {
+            continue;
+        }
         use std::fmt::Write as _;
         let _ = writeln!(
             material,
@@ -2441,12 +2461,15 @@ fn application_model_selection_binding(
 
 fn application_model_option_views(
     root_config: &RootConfig,
-    provider_name: &str,
     catalog_entries: Vec<crate::provider_connections::ModelCatalogEntry>,
 ) -> Vec<ApplicationModelOptionView> {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
     catalog_entries
         .into_iter()
-        .map(|entry| {
+        .filter_map(|entry| {
+            let connection = loaded.connections.get(&entry.model_ref.connection_id)?;
+            let provider_name =
+                crate::provider_connections::runtime_provider_name(&connection.config);
             let model_name = entry.model_ref.model_id.clone();
             let mut model_config = root_config.clone();
             model_config.agent.runtime_provider = provider_name.to_owned();
@@ -2460,7 +2483,7 @@ fn application_model_option_views(
                 &model_name,
                 &available_reasoning_efforts,
             );
-            ApplicationModelOptionView {
+            Some(ApplicationModelOptionView {
                 model_ref: entry.model_ref,
                 display_name: entry.display_name,
                 availability: entry.availability,
@@ -2470,7 +2493,7 @@ fn application_model_option_views(
                 available_reasoning_efforts,
                 default_reasoning_effort,
                 reasoning_effort_binding,
-            }
+            })
         })
         .collect()
 }
@@ -2676,8 +2699,7 @@ pub fn application_run_context_view(
         crate::application_extension_catalog_view(&root_config, &workspace_root, &entries)?;
     let catalog_entries =
         application_model_catalog_entries(&root_config, &route.model_ref, &sigil_paths.cache_root);
-    let model_options =
-        application_model_option_views(&root_config, &provider_name, catalog_entries);
+    let model_options = application_model_option_views(&root_config, catalog_entries);
     let model_selection_binding =
         application_model_selection_binding(&route.model_ref, &model_options);
     Ok(ApplicationRunContextView {
@@ -3581,8 +3603,7 @@ fn admit_application_model_selection(
         .ok_or_else(|| ApplicationRunPrepareError::execution(anyhow!("session_route_missing")))?;
     let catalog_entries =
         application_model_catalog_entries(root_config, &route.model_ref, cache_root);
-    let available_models =
-        application_model_option_views(root_config, session.provider_name(), catalog_entries);
+    let available_models = application_model_option_views(root_config, catalog_entries);
     let expected_binding = application_model_selection_binding(&route.model_ref, &available_models);
     if binding != expected_binding {
         return Err(ApplicationRunPrepareError::InvalidInvocation {

@@ -18,7 +18,7 @@ use sigil_runtime::{
         ProviderConnectionConfig, ProviderFamily, ProviderModelCatalogService, ProviderProtocol,
         RootConfigPublisher, connection_inventory_native, connection_semantic_fingerprint,
         default_setup_root_config, load_provider_connections, materialize_root_config,
-        provider_connection_template, save_connection_config,
+        provider_connection_template, resolve_model_route, save_connection_config,
         save_connection_config_replacing_invalid,
     },
     resolve_sigil_paths, secret_redactor_for_root_config,
@@ -32,10 +32,11 @@ use sigil_runtime::{
 use crate::dto::{
     HttpProviderConfigMode, HttpProviderConnectionEntry, HttpProviderConnectionInventory,
     HttpProviderConnectionIssue, HttpProviderConnectionReadiness, HttpProviderCredentialSource,
-    HttpProviderModelRef, HttpProviderSetupCatalog, HttpProviderSetupCatalogRequest,
-    HttpProviderSetupCredentialSource, HttpProviderSetupModel, HttpProviderSetupProtocol,
-    HttpProviderSetupSaveRequest, HttpProviderSetupSaveResult, HttpProviderSetupTemplate,
-    HttpSupportBundleExport, HttpSupportDoctorReport,
+    HttpProviderDefaultModelSaveRequest, HttpProviderDefaultModelSaveResult, HttpProviderModelRef,
+    HttpProviderSetupCatalog, HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource,
+    HttpProviderSetupModel, HttpProviderSetupProtocol, HttpProviderSetupSaveRequest,
+    HttpProviderSetupSaveResult, HttpProviderSetupTemplate, HttpSupportBundleExport,
+    HttpSupportDoctorReport,
 };
 
 /// Process-private inputs used to project path-free desktop diagnostics.
@@ -240,6 +241,54 @@ impl HttpSupportContext {
             default_model: project_model_ref(draft.default_model),
             inventory,
             save_warning,
+        })
+    }
+
+    /// Atomically changes the shared default route without rewriting a connection or credential.
+    ///
+    /// Existing sessions retain their durable exact route. The new default is used only when a
+    /// product surface creates a fresh session without an explicit model reference.
+    pub(crate) fn save_provider_default_model(
+        &self,
+        request: HttpProviderDefaultModelSaveRequest,
+    ) -> std::result::Result<HttpProviderDefaultModelSaveResult, HttpProviderSetupFailure> {
+        let current =
+            RootConfig::load(&self.config_path).map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let loaded = load_provider_connections(&current);
+        if loaded.mode != ConfigMode::V2 || !loaded.issues.is_empty() {
+            return Err(HttpProviderSetupFailure::Invalid);
+        }
+        let model_ref = ModelRef::new(
+            ConnectionId::new(request.model_ref.connection_id)
+                .map_err(|_| HttpProviderSetupFailure::Invalid)?,
+            request.model_ref.model_id,
+        )
+        .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        resolve_model_route(&current, &model_ref).map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let mut inventory = connection_inventory_native(&current);
+        let connection_is_usable = inventory.entries.iter().any(|entry| {
+            entry.id == model_ref.connection_id
+                && matches!(
+                    entry.readiness,
+                    ConnectionReadiness::Ready | ConnectionReadiness::Unverified
+                )
+        });
+        if !connection_is_usable {
+            return Err(HttpProviderSetupFailure::Invalid);
+        }
+        let mut next = current.clone();
+        next.agent.connection = Some(model_ref.connection_id.clone());
+        next.agent.model = model_ref.model_id.clone();
+        next.save_if_unchanged(&self.config_path, &current)
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        inventory.default_model = Some(model_ref.clone());
+        for entry in &mut inventory.entries {
+            entry.default_model = (entry.id == model_ref.connection_id).then(|| model_ref.clone());
+        }
+        Ok(HttpProviderDefaultModelSaveResult {
+            default_model: project_model_ref(model_ref),
+            inventory: project_provider_connections(inventory),
+            save_warning: false,
         })
     }
 

@@ -234,6 +234,20 @@ pub struct DesktopProviderSetupSaveResult {
     pub save_warning: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderDefaultModelSaveRequest {
+    pub model_ref: DesktopProviderModelRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopProviderDefaultModelSaveResult {
+    pub default_model: DesktopProviderModelRef,
+    pub inventory: DesktopProviderConnectionInventory,
+    pub save_warning: bool,
+}
+
 /// Request body for creating one process-local session handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
@@ -1007,6 +1021,16 @@ pub enum DesktopSessionCatalogState {
     Invalid,
 }
 
+/// Path-free explanation for an invalid historical catalog source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionCatalogSourceDiagnostic {
+    UnsafeSource,
+    InvalidEventStream,
+    InvalidProjection,
+    MissingSessionIdentity,
+}
+
 /// One compact, body-free historical catalog row.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1016,6 +1040,8 @@ pub struct DesktopSessionCatalogEntry {
     #[serde(default)]
     pub session_id: Option<String>,
     pub source_state: DesktopSessionCatalogState,
+    #[serde(default)]
+    pub source_diagnostic: Option<DesktopSessionCatalogSourceDiagnostic>,
     pub source_bytes: u64,
     pub source_modified_at_unix_ms: u64,
     #[serde(default)]

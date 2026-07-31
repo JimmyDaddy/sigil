@@ -93,6 +93,12 @@ export type CatalogSourceState =
   | "scan_budget_exceeded"
   | "invalid";
 
+export type CatalogSourceDiagnostic =
+  | "unsafe_source"
+  | "invalid_event_stream"
+  | "invalid_projection"
+  | "missing_session_identity";
+
 export interface CatalogRequest {
   limit?: number;
   cursor?: string;
@@ -106,6 +112,7 @@ export interface CatalogEntry {
   sessionRef: string;
   sessionId?: string;
   sourceState: CatalogSourceState;
+  sourceDiagnostic?: CatalogSourceDiagnostic;
   sourceBytes: number;
   sourceModifiedAtUnixMs: number;
   providerName?: string;
@@ -1054,6 +1061,12 @@ export interface ProviderSetupSaveResult {
     saveWarning: boolean;
 }
 
+export interface ProviderDefaultModelSaveResult {
+  defaultModel: ProviderModelRef;
+  inventory: ProviderConnectionInventory;
+  saveWarning: boolean;
+}
+
 export function providerInventoryIsUsable(
   inventory: ProviderConnectionInventory | undefined,
 ): boolean {
@@ -1075,6 +1088,17 @@ export interface ModelOption {
   availableReasoningEfforts: ReasoningEffort[];
   defaultReasoningEffort?: ReasoningEffort;
   reasoningEffortBinding?: string;
+}
+
+export function providerModelRefKey(modelRef: ProviderModelRef): string {
+  return `${modelRef.connectionId}/${modelRef.modelId}`;
+}
+
+export function providerModelRefsEqual(
+  left: ProviderModelRef | undefined,
+  right: ProviderModelRef | undefined,
+): boolean {
+  return left?.connectionId === right?.connectionId && left?.modelId === right?.modelId;
 }
 
 export function modelOptionIsSelectable(option: ModelOption): boolean {

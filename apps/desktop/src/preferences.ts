@@ -1,7 +1,4 @@
-import type { ProviderModelRef } from "./types";
-
 const REOPEN_LAST_WORKSPACE_KEY = "sigil.desktop.reopen-last-workspace.v1";
-const DEFAULT_MODELS_KEY = "sigil.desktop.default-models.v2";
 const LAST_SESSIONS_KEY = "sigil.desktop.last-sessions.v1";
 
 export interface LastSessionPreference {
@@ -21,30 +18,6 @@ export function readReopenLastWorkspace(): boolean {
 export function writeReopenLastWorkspace(enabled: boolean): boolean {
   try {
     window.localStorage.setItem(REOPEN_LAST_WORKSPACE_KEY, String(enabled));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function readDefaultModel(workspaceId: string): ProviderModelRef | undefined {
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(DEFAULT_MODELS_KEY) ?? "{}");
-    if (!isUnknownRecord(value)) return undefined;
-    return parseProviderModelRef(value[workspaceId]);
-  } catch {
-    return undefined;
-  }
-}
-
-export function writeDefaultModel(workspaceId: string, modelRef?: ProviderModelRef): boolean {
-  try {
-    const current: unknown = JSON.parse(window.localStorage.getItem(DEFAULT_MODELS_KEY) ?? "{}");
-    const models = isUnknownRecord(current) ? current : {};
-    const next = { ...models };
-    if (modelRef === undefined) delete next[workspaceId];
-    else next[workspaceId] = modelRef;
-    window.localStorage.setItem(DEFAULT_MODELS_KEY, JSON.stringify(next));
     return true;
   } catch {
     return false;
@@ -80,21 +53,6 @@ export function writeLastSession(
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseProviderModelRef(value: unknown): ProviderModelRef | undefined {
-  if (!isUnknownRecord(value)) return undefined;
-  const connectionId = value.connectionId;
-  const modelId = value.modelId;
-  if (
-    typeof connectionId !== "string"
-    || connectionId.trim() === ""
-    || typeof modelId !== "string"
-    || modelId.trim() === ""
-  ) {
-    return undefined;
-  }
-  return { connectionId, modelId };
 }
 
 function parseLastSession(value: unknown): LastSessionPreference | undefined {

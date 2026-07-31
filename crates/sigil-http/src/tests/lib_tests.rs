@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use fs2::FileExt;
 use serde_json::{Value, json};
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
@@ -287,6 +288,106 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
         .expect("server should join")
         .expect("server should stop cleanly");
     provider_server.abort();
+}
+
+#[tokio::test]
+async fn provider_default_model_switch_updates_only_the_shared_future_session_route() {
+    let temp = tempfile::tempdir().expect("temporary directory should open");
+    let config_path = temp.path().join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "alpha"
+model = "alpha-model"
+
+[connections.alpha]
+label = "Alpha"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:41001/v1"
+credential = { source = "none" }
+
+[connections.beta]
+label = "Beta"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:41002/v1"
+credential = { source = "none" }
+"#,
+    )
+    .expect("test configuration should write");
+    let parsed =
+        sigil_kernel::RootConfig::load(&config_path).expect("test configuration should load");
+    let beta_ref = sigil_kernel::ModelRef::new(
+        sigil_kernel::ConnectionId::new("beta").expect("connection id"),
+        "beta-model",
+    )
+    .expect("model ref");
+    sigil_runtime::provider_connections::resolve_model_route(&parsed, &beta_ref)
+        .expect("beta route should resolve");
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::new(HttpSessionRunRegistry::new(Arc::new(
+            RecordingRunDriver::default(),
+        ))),
+    )
+    .await
+    .expect("listener should bind")
+    .with_support_context(HttpSupportContext::new(
+        &config_path,
+        temp.path(),
+        SupportBuildInfo::new("0.0.1-test", "abc123", "test-target", "debug"),
+    ));
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, saved) = http_raw_request(
+        address,
+        http_put(
+            "/settings/provider-connections/default-model",
+            Some("secret-token"),
+            &json!({
+                "model_ref": {
+                    "connection_id": "beta",
+                    "model_id": "beta-model"
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, 200, "default-route save response: {saved}");
+    assert_eq!(saved["default_model"]["connection_id"], "beta");
+    assert_eq!(saved["default_model"]["model_id"], "beta-model");
+    assert_eq!(
+        saved["inventory"]["connections"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let persisted = fs::read_to_string(&config_path).expect("saved config should read");
+    assert!(persisted.contains("connection = \"beta\""));
+    assert!(persisted.contains("model = \"beta-model\""));
+    assert!(persisted.contains("[connections.alpha]"));
+    assert!(persisted.contains("[connections.beta]"));
+
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server should join")
+        .expect("server should stop cleanly");
 }
 
 #[tokio::test]
@@ -1137,6 +1238,10 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
 
     let invalid_source = sessions.join("broken.jsonl");
     fs::write(&invalid_source, b"not a session stream\n").expect("invalid source should write");
+    let invalid_resources = sessions.join("broken");
+    fs::create_dir(&invalid_resources).expect("invalid resource root should create");
+    fs::write(invalid_resources.join("artifact.bin"), b"companion")
+        .expect("invalid resource companion should write");
     let (status, invalid_page) = http_raw_request(
         address,
         http_get("/session-catalog?state=invalid", Some("secret-token"), None),
@@ -1144,6 +1249,10 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     .await;
     assert_eq!(status, 200);
     assert_eq!(invalid_page["entries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        invalid_page["entries"][0]["source_diagnostic"],
+        "invalid_event_stream"
+    );
     let quarantine_body = json!({
         "session_ref": invalid_page["entries"][0]["session_ref"],
         "source_bytes": invalid_page["entries"][0]["source_bytes"],
@@ -1167,15 +1276,16 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
             .is_some_and(|value| value.starts_with("session-quarantine:"))
     );
     assert!(!invalid_source.exists());
-    assert!(
-        sessions
-            .join(".quarantine")
-            .join(
-                quarantined["quarantine_name"]
-                    .as_str()
-                    .expect("quarantine name")
-            )
-            .exists()
+    let quarantine = sessions.join(".quarantine").join(
+        quarantined["quarantine_name"]
+            .as_str()
+            .expect("quarantine name"),
+    );
+    assert!(quarantine.join("session.jsonl").is_file());
+    assert_eq!(
+        fs::read(quarantine.join("resources/artifact.bin"))
+            .expect("quarantined companion should read"),
+        b"companion"
     );
 
     let disposable_source = sessions.join("disposable.jsonl");
@@ -1194,6 +1304,28 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         "source_modified_at_unix_ms": disposable_entry["source_modified_at_unix_ms"]
     })
     .to_string();
+    let disposable_writer_lease = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(sessions.join("disposable.jsonl.writer-lock"))
+        .expect("writer lease should open");
+    FileExt::try_lock_exclusive(&disposable_writer_lease)
+        .expect("writer lease should be owned by the test");
+    let (status, busy_delete) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/delete-invalid-source",
+            Some("secret-token"),
+            &delete_invalid_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(busy_delete["error"]["code"], "durable_session_writer_busy");
+    assert!(disposable_source.is_file());
+    drop(disposable_writer_lease);
     let (status, deleted_invalid) = http_raw_request(
         address,
         http_post(
@@ -1275,6 +1407,73 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
     assert_eq!(status, 200);
     assert_eq!(invalid_deleted["completed"], 1);
     assert!(!removed_format_source.exists());
+
+    let busy_batch_source = sessions.join("busy-batch.jsonl");
+    fs::write(&busy_batch_source, b"not a session stream\n")
+        .expect("busy batch source should write");
+    let (status, busy_batch_page) = http_raw_request(
+        address,
+        http_get("/session-catalog?state=invalid", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let busy_batch_entry = busy_batch_page["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["session_ref"] == "busy-batch.jsonl")
+        })
+        .expect("busy batch source should be listed");
+    let busy_batch_items = json!([{
+        "session_ref": busy_batch_entry["session_ref"],
+        "source_bytes": busy_batch_entry["source_bytes"],
+        "source_modified_at_unix_ms": busy_batch_entry["source_modified_at_unix_ms"],
+    }]);
+    let busy_batch_plan_body = json!({
+        "action": "delete_invalid_sources",
+        "items": busy_batch_items,
+    })
+    .to_string();
+    let (status, busy_batch_plan) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/plan",
+            Some("secret-token"),
+            &busy_batch_plan_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let busy_batch_execute_body = json!({
+        "plan_id": busy_batch_plan["plan_id"],
+        "action": "delete_invalid_sources",
+        "items": busy_batch_items,
+    })
+    .to_string();
+    let busy_batch_writer_lease = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(sessions.join("busy-batch.jsonl.writer-lock"))
+        .expect("busy batch writer lease should open");
+    FileExt::try_lock_exclusive(&busy_batch_writer_lease)
+        .expect("busy batch writer lease should be owned by the test");
+    let (status, busy_batch_receipt) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/execute",
+            Some("secret-token"),
+            &busy_batch_execute_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(busy_batch_receipt["failed"], 1);
+    assert_eq!(busy_batch_receipt["items"][0]["reason"], "writer_busy");
+    assert!(busy_batch_source.is_file());
+    drop(busy_batch_writer_lease);
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving
@@ -3094,6 +3293,11 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert!(
         document["paths"]["/settings/provider-connections/catalog"]["post"]["responses"]["200"]
+            .is_object()
+    );
+    assert!(
+        document["paths"]["/settings/provider-connections/default-model"]["put"]["responses"]
+            ["200"]
             .is_object()
     );
     assert_eq!(
@@ -7945,6 +8149,16 @@ fn http_post(path: &str, token: Option<&str>, body: &str) -> String {
         .unwrap_or_default();
     format!(
         "POST {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn http_put(path: &str, token: Option<&str>, body: &str) -> String {
+    let auth = token
+        .map(|token| format!("authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "PUT {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
         body.len()
     )
 }

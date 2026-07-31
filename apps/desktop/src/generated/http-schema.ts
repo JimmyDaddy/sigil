@@ -1922,6 +1922,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/provider-connections/default-model": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set the shared default model route
+         * @description Atomically selects one already configured exact connection/model route for future sessions. Existing durable sessions remain unchanged.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ProviderDefaultModelSaveRequest"];
+                };
+            };
+            responses: {
+                /** @description Saved exact default route and refreshed inventory */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProviderDefaultModelSaveResult"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                422: components["responses"]["BadRequest"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/support/bundle": {
         parameters: {
             query?: never;
@@ -2988,6 +3035,14 @@ export interface components {
         ProviderConnectionReadiness: "ready" | "needs_credential" | "credential_unavailable" | "needs_model" | "unverified" | "invalid";
         /** @enum {string} */
         ProviderCredentialSource: "environment" | "stored" | "none";
+        ProviderDefaultModelSaveRequest: {
+            model_ref: components["schemas"]["ProviderModelRef"];
+        };
+        ProviderDefaultModelSaveResult: {
+            default_model: components["schemas"]["ProviderModelRef"];
+            inventory: components["schemas"]["ProviderConnectionInventory"];
+            save_warning: boolean;
+        };
         ProviderModelRef: {
             connection_id: string;
             model_id: string;
@@ -3317,6 +3372,8 @@ export interface components {
             session_ref: string;
             /** Format: uint64 */
             source_bytes: number;
+            /** @enum {string|null} */
+            source_diagnostic?: "unsafe_source" | "invalid_event_stream" | "invalid_projection" | "missing_session_identity" | null;
             /** Format: uint64 */
             source_modified_at_unix_ms: number;
             /** @enum {string} */

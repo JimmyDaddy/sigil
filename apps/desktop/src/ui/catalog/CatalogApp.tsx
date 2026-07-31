@@ -24,7 +24,11 @@ import {
   themeColorScheme,
 } from "../../appearance/resolveTheme";
 import type { ResolvedTheme } from "../../appearance/contract";
-import type { ConversationQueueView } from "../../types";
+import type {
+  ConversationQueueView,
+  ProviderConnection,
+  ProviderModelRef,
+} from "../../types";
 
 const catalogQueue: ConversationQueueView = {
   schemaVersion: 1,
@@ -58,6 +62,27 @@ const catalogQueue: ConversationQueueView = {
   ],
   truncated: false,
 };
+
+const catalogProviderConnections: ProviderConnection[] = [
+  {
+    id: "deepseek-default",
+    label: "DeepSeek Personal",
+    providerLabel: "DeepSeek",
+    protocolLabel: "DeepSeek",
+    endpointDisplay: "api.deepseek.com",
+    credentialSource: "environment",
+    readiness: "ready",
+  },
+  {
+    id: "gateway-team",
+    label: "Gateway Team",
+    providerLabel: "OpenAI compatible",
+    protocolLabel: "Responses",
+    endpointDisplay: "gateway.example.test",
+    credentialSource: "stored",
+    readiness: "ready",
+  },
+];
 
 export function CatalogApp() {
   const [fixtureId, setFixtureId] = useState(catalogFixtures[0]?.id ?? "no-workspace");
@@ -154,7 +179,11 @@ function FixtureSurface({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [permissionMode, setPermissionMode] = useState<"read-only" | "manual" | "auto-edit" | "danger-full-access">("manual");
   const [reasoningEffort, setReasoningEffort] = useState<"low" | "medium" | "high" | "max">("max");
+  const [selectedModelRef, setSelectedModelRef] = useState<ProviderModelRef>();
   const counts = fixture.degradedCounts;
+  useEffect(() => {
+    setSelectedModelRef(fixture.composer?.context.modelRef);
+  }, [fixture.composer?.context.modelRef]);
   if (fixture.fullWorkbench) {
     return (
       <iframe
@@ -207,7 +236,8 @@ function FixtureSurface({
             composerRef={composerRef}
             runContext={fixture.composer.context}
             runContextBusy={false}
-            selectedModelName={fixture.composer.context.modelName}
+            providerConnections={catalogProviderConnections}
+            selectedModelRef={selectedModelRef ?? fixture.composer.context.modelRef}
             permissionMode={permissionMode}
             reasoningEffort={reasoningEffort}
             requestedSkill={undefined}
@@ -224,7 +254,7 @@ function FixtureSurface({
                 onCommand={async () => false}
               />
             )}
-            onModelChange={() => undefined}
+            onModelChange={setSelectedModelRef}
             onNewSession={() => Promise.resolve(true)}
             onOpenSessionPicker={() => undefined}
             onOpenSettings={() => undefined}

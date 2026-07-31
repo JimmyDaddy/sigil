@@ -7,6 +7,7 @@ const srcRoot = join(desktopRoot, "src");
 const foundations = join(srcRoot, "ui", "foundations");
 const stylesPath = join(srcRoot, "styles.css");
 const conversationStylesPath = join(srcRoot, "features", "conversation", "conversation.css");
+const catalogStylesPath = join(srcRoot, "ui", "catalog", "catalog.css");
 const referencePath = join(foundations, "reference.css");
 const themesPath = join(foundations, "themes.css");
 const densityPath = join(foundations, "density.css");
@@ -277,12 +278,21 @@ if (!styles.includes("grid-template-columns: var(--sg-sys-navigation-width) minm
   fail("resizable desktop navigation and compact fallback contract is missing");
 }
 const conversationStyles = readFileSync(conversationStylesPath, "utf8");
+const catalogStyles = readFileSync(catalogStylesPath, "utf8");
 if (!styles.includes(".sg-bounded-content")
   || !/\.timeline\s*\{[^}]*overflow-x:\s*hidden/.test(conversationStyles)) {
   fail("bounded prose and no-container-horizontal-scroll contract is missing");
 }
 if (!/\.timeline\s*\{[^}]*grid-auto-rows:\s*max-content/.test(conversationStyles)) {
   fail("conversation timeline rows may shrink and overlap under a constrained approval dock");
+}
+if (!/\.composer-model select,[^}]*\.composer-effort select\s*\{[^}]*min-height:\s*0[^}]*box-shadow:\s*none/.test(conversationStyles)
+  || !conversationStyles.includes(".composer-model:hover, .composer-mode:hover, .composer-effort:hover")
+  || !conversationStyles.includes(".composer-model:focus-within, .composer-mode:focus-within, .composer-effort:focus-within")) {
+  fail("composer select pills must own hover and focus styling at the outer pill boundary");
+}
+if (!/\.catalog-composer-surface\s*\{[^}]*--conversation-content-max-width:[^;}]+;[^}]*--conversation-content-gutter:/.test(catalogStyles)) {
+  fail("composer catalog fixture is missing production conversation width tokens");
 }
 for (const localScrollSurface of [".markdown-table-scroll", ".code-block pre", ".tool-output", ".diff-viewer pre"]) {
   const selector = localScrollSurface.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

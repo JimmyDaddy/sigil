@@ -128,6 +128,27 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/settings/provider-connections/default-model": {
+                "put": {
+                    "summary": "Set the shared default model route",
+                    "description": "Atomically selects one already configured exact connection/model route for future sessions. Existing durable sessions remain unchanged.",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ProviderDefaultModelSaveRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": { "description": "Saved exact default route and refreshed inventory", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProviderDefaultModelSaveResult" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "422": { "$ref": "#/components/responses/BadRequest" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "Read this authenticated local API description",
@@ -1212,6 +1233,24 @@ pub fn http_openapi_document() -> Value {
                     }
                 },
                 "ProviderSetupSaveResult": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["default_model", "inventory", "save_warning"],
+                    "properties": {
+                        "default_model": { "$ref": "#/components/schemas/ProviderModelRef" },
+                        "inventory": { "$ref": "#/components/schemas/ProviderConnectionInventory" },
+                        "save_warning": { "type": "boolean" }
+                    }
+                },
+                "ProviderDefaultModelSaveRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["model_ref"],
+                    "properties": {
+                        "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" }
+                    }
+                },
+                "ProviderDefaultModelSaveResult": {
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["default_model", "inventory", "save_warning"],
@@ -2464,6 +2503,10 @@ pub fn http_openapi_document() -> Value {
                         "source_state": {
                             "type": "string",
                             "enum": ["ready", "oversized", "scan_budget_exceeded", "invalid"]
+                        },
+                        "source_diagnostic": {
+                            "type": ["string", "null"],
+                            "enum": ["unsafe_source", "invalid_event_stream", "invalid_projection", "missing_session_identity", null]
                         },
                         "source_bytes": { "type": "integer", "format": "uint64" },
                         "source_modified_at_unix_ms": { "type": "integer", "format": "uint64" },

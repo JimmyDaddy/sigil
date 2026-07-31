@@ -5,6 +5,7 @@ import { useLocale } from "../../i18n";
 import type {
   CatalogEntry,
   CatalogPage,
+  CatalogSourceDiagnostic,
   CatalogSourceState,
   SessionCatalogBatchAction,
   SessionCatalogBatchItem,
@@ -31,11 +32,13 @@ export function ConversationLibrary({
   bridge,
   workspaceId,
   onBack,
+  onCatalogChanged,
   onOpen,
 }: {
   readonly bridge: DesktopBridge;
   readonly workspaceId: string;
   readonly onBack: () => void;
+  readonly onCatalogChanged: () => Promise<void>;
   readonly onOpen: (entry: CatalogEntry) => void;
 }) {
   const { locale, t } = useLocale();
@@ -149,7 +152,7 @@ export function ConversationLibrary({
       setReceipt(next);
       setPlan(undefined);
       setSelectedRefs(new Set());
-      await load();
+      await Promise.all([load(), onCatalogChanged()]);
       notify({
         tone: next.failed > 0 ? "warning" : "success",
         message: `${t("batchCompleted", { count: next.completed })} · ${t("batchFailed", { count: next.failed })}`,
@@ -276,7 +279,12 @@ export function ConversationLibrary({
                       ) : <span>{title}</span>}
                       <small>{entry.modelName ?? entry.sessionRef}</small>
                     </th>
-                    <td><span className={`library-state state-${entry.sourceState}`}>{stateLabel(entry.sourceState, t)}</span></td>
+                    <td>
+                      <span className={`library-state state-${entry.sourceState}`}>{stateLabel(entry.sourceState, t)}</span>
+                      {entry.sourceDiagnostic === undefined ? null : (
+                        <small className="library-source-diagnostic">{diagnosticLabel(entry.sourceDiagnostic, t)}</small>
+                      )}
+                    </td>
                     <td>{entry.providerName ?? "—"}</td>
                     <td>{entry.userMessageCount + entry.assistantMessageCount} · {entry.toolResultCount}</td>
                     <td>{formatDate(entry.sourceModifiedAtUnixMs, locale)}</td>
@@ -384,7 +392,20 @@ function reasonLabel(reason: string | undefined, t: ReturnType<typeof useLocale>
     case "not_found": return t("batchReasonNotFound");
     case "duplicate": return t("batchReasonDuplicate");
     case "invalid_request": return t("batchReasonInvalidRequest");
+    case "writer_busy": return t("batchReasonWriterBusy");
     default: return t("batchReasonUnavailable");
+  }
+}
+
+function diagnosticLabel(
+  diagnostic: CatalogSourceDiagnostic,
+  t: ReturnType<typeof useLocale>["t"],
+): string {
+  switch (diagnostic) {
+    case "unsafe_source": return t("sourceDiagnosticUnsafe");
+    case "invalid_event_stream": return t("sourceDiagnosticEventStream");
+    case "invalid_projection": return t("sourceDiagnosticProjection");
+    case "missing_session_identity": return t("sourceDiagnosticMissingIdentity");
   }
 }
 

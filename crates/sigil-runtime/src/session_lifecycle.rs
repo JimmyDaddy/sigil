@@ -42,6 +42,7 @@ pub use projection::{
     SessionCatalogProjectionQuery, SessionCatalogProjectionRebuildReport,
     SessionCatalogProjectionReconcileReport, SessionCatalogProjectionRecoveryReport,
     SessionCatalogProjectionService, SessionCatalogQuarantineReceipt,
+    SessionCatalogSourceDiagnostic,
 };
 
 use journal::LocalSessionLifecycleJournal;
@@ -169,6 +170,8 @@ pub enum LocalSessionMutationError {
     IdentityChanged,
     #[error("pinned local session cannot be deleted")]
     Pinned,
+    #[error("local session writer lease is busy")]
+    WriterBusy,
     #[error("local session mutation is unavailable")]
     Unavailable {
         #[source]
@@ -1049,7 +1052,7 @@ impl LocalSessionLifecycleService {
             .preview_delete(&binding.session_log_path, protected_paths)
             .map_err(|source| LocalSessionMutationError::Unavailable { source })?;
         self.apply_delete(&preview, protected_paths, applied_at_unix_ms)
-            .map_err(|source| LocalSessionMutationError::Unavailable { source })
+            .map_err(map_session_operation_mutation_error)
     }
 
     /// Builds a read-only, content-bound preview for deleting one inactive local session.
@@ -1924,19 +1927,37 @@ fn reject_source_symlink_and_escape(
     Ok(())
 }
 
-fn acquire_session_writer_lease(source_path: &Path) -> Result<File> {
+#[derive(Debug, ThisError)]
+enum SessionWriterLeaseError {
+    #[error("session writer lease is busy")]
+    Busy,
+    #[error("session writer lease is unavailable")]
+    Unavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+fn acquire_session_writer_lease(
+    source_path: &Path,
+) -> std::result::Result<File, SessionWriterLeaseError> {
     let file_name = source_path
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("source session file name is invalid"))?;
+        .ok_or_else(|| SessionWriterLeaseError::Unavailable {
+            source: anyhow!("source session file name is invalid"),
+        })?;
     let lease_path = source_path.with_file_name(format!("{file_name}.writer-lock"));
     if lease_path.exists()
         && fs::symlink_metadata(&lease_path)
-            .with_context(|| format!("failed to inspect {}", lease_path.display()))?
+            .with_context(|| format!("failed to inspect {}", lease_path.display()))
+            .map_err(|source| SessionWriterLeaseError::Unavailable { source })?
             .file_type()
             .is_symlink()
     {
-        bail!("session writer lease must not be a symlink");
+        return Err(SessionWriterLeaseError::Unavailable {
+            source: anyhow!("session writer lease must not be a symlink"),
+        });
     }
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true).truncate(false);
@@ -1944,15 +1965,46 @@ fn acquire_session_writer_lease(source_path: &Path) -> Result<File> {
     options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     let lease = options
         .open(&lease_path)
-        .with_context(|| format!("failed to open {}", lease_path.display()))?;
-    harden_private_open_file(&lease, &lease_path, "session writer lease")?;
-    lease.try_lock().with_context(|| {
-        format!(
-            "session is active or its writer lease is busy: {}",
-            source_path.display()
-        )
-    })?;
+        .with_context(|| format!("failed to open {}", lease_path.display()))
+        .map_err(|source| SessionWriterLeaseError::Unavailable { source })?;
+    harden_private_open_file(&lease, &lease_path, "session writer lease")
+        .map_err(|source| SessionWriterLeaseError::Unavailable { source })?;
+    match lease.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err(SessionWriterLeaseError::Busy),
+        Err(fs::TryLockError::Error(error)) => {
+            return Err(SessionWriterLeaseError::Unavailable {
+                source: anyhow::Error::new(error).context(format!(
+                    "failed to lock session writer lease for {}",
+                    source_path.display()
+                )),
+            });
+        }
+    }
     Ok(lease)
+}
+
+fn map_session_writer_lease_mutation_error(
+    error: SessionWriterLeaseError,
+) -> LocalSessionMutationError {
+    match error {
+        SessionWriterLeaseError::Busy => LocalSessionMutationError::WriterBusy,
+        SessionWriterLeaseError::Unavailable { source } => {
+            LocalSessionMutationError::Unavailable { source }
+        }
+    }
+}
+
+fn map_session_operation_mutation_error(source: anyhow::Error) -> LocalSessionMutationError {
+    if source.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<SessionWriterLeaseError>(),
+            Some(SessionWriterLeaseError::Busy)
+        )
+    }) {
+        return LocalSessionMutationError::WriterBusy;
+    }
+    LocalSessionMutationError::Unavailable { source }
 }
 
 fn session_writer_is_inactive(source_path: &Path) -> Result<bool> {
@@ -2138,36 +2190,64 @@ fn move_session_to_tombstone(source_path: &Path, tombstone_id: &str) -> Result<(
         .parent()
         .ok_or_else(|| anyhow!("source session has no parent directory"))?;
     let trash = session_parent.join(".session-trash");
-    if trash.exists() {
+    let created_trash = if trash.exists() {
         let metadata = fs::symlink_metadata(&trash)
             .with_context(|| format!("failed to inspect {}", trash.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             bail!("session tombstone root must be a real directory");
         }
+        false
     } else {
         fs::create_dir(&trash).with_context(|| format!("failed to create {}", trash.display()))?;
-    }
-    let tombstone = trash.join(tombstone_id);
-    fs::create_dir(&tombstone)
-        .with_context(|| format!("failed to create {}", tombstone.display()))?;
-    let tombstoned_session = tombstone.join("session.jsonl");
-    fs::rename(source_path, &tombstoned_session)
-        .with_context(|| format!("failed to tombstone {}", source_path.display()))?;
-    let resource_path = session_resource_path(source_path)?;
-    if resource_path.exists() {
-        let destination = tombstone.join("resources");
-        if let Err(error) = fs::rename(&resource_path, &destination) {
-            let rollback = fs::rename(&tombstoned_session, source_path);
-            if rollback.is_ok() {
-                let _ = fs::remove_dir(&tombstone);
-            }
-            return Err(error)
-                .with_context(|| format!("failed to tombstone {}", resource_path.display()));
+        true
+    };
+    if let Err(error) = move_session_bundle(source_path, &trash, tombstone_id) {
+        if created_trash {
+            let _ = fs::remove_dir(&trash);
         }
+        return Err(error);
     }
-    sync_directory(&tombstone)?;
     sync_directory(&trash)?;
     sync_directory(session_parent)
+}
+
+fn move_session_bundle(source_path: &Path, bundle_root: &Path, bundle_name: &str) -> Result<()> {
+    let root_metadata = fs::symlink_metadata(bundle_root)
+        .with_context(|| format!("failed to inspect {}", bundle_root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!("session bundle root must be a real directory");
+    }
+    let resource_path = session_resource_path(source_path)?;
+    if resource_path.exists() {
+        measure_directory_tree_bounded(&resource_path)?;
+    }
+    let bundle = bundle_root.join(bundle_name);
+    fs::create_dir(&bundle).with_context(|| format!("failed to create {}", bundle.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to restrict {}", bundle.display()))?;
+    let bundled_session = bundle.join("session.jsonl");
+    if let Err(error) = fs::rename(source_path, &bundled_session) {
+        let _ = fs::remove_dir(&bundle);
+        return Err(error).with_context(|| format!("failed to move {}", source_path.display()));
+    }
+    if resource_path.exists() {
+        let destination = bundle.join("resources");
+        if let Err(error) = fs::rename(&resource_path, &destination) {
+            let rollback = fs::rename(&bundled_session, source_path);
+            if rollback.is_ok() {
+                let _ = fs::remove_dir(&bundle);
+            }
+            return Err(error)
+                .with_context(|| format!("failed to move {}", resource_path.display()));
+        }
+    }
+    sync_directory(&bundle)?;
+    sync_directory(bundle_root)?;
+    if let Some(source_parent) = source_path.parent() {
+        sync_directory(source_parent)?;
+    }
+    Ok(())
 }
 
 fn acquire_tombstone_artifact_locks(tombstone: &Path) -> Result<Option<Vec<File>>> {

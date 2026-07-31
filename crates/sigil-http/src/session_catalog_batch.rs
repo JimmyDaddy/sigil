@@ -346,6 +346,7 @@ fn mutation_error_code(error: &LocalSessionMutationError) -> &'static str {
         LocalSessionMutationError::NotReady => "not_ready",
         LocalSessionMutationError::IdentityChanged => "identity_changed",
         LocalSessionMutationError::Pinned => "pinned",
+        LocalSessionMutationError::WriterBusy => "writer_busy",
         LocalSessionMutationError::Unavailable { .. } => "unavailable",
     }
 }

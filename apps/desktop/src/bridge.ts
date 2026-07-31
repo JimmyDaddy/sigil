@@ -41,6 +41,7 @@ import type {
   RunAttachment,
   PermissionMode,
   ProviderConnectionInventory,
+  ProviderDefaultModelSaveResult,
   ProviderModelRef,
   ProviderSetupCatalog,
   ProviderSetupCatalogInput,
@@ -94,6 +95,10 @@ export interface DesktopBridge {
     workspaceId: string,
     input: ProviderSetupSaveInput,
   ): Promise<ProviderSetupSaveResult>;
+  saveProviderDefaultModel(
+    workspaceId: string,
+    modelRef: ProviderModelRef,
+  ): Promise<ProviderDefaultModelSaveResult>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
   closeWorkspace(workspaceId: string, confirmActiveRuns?: boolean): Promise<WorkspaceSummary[]>;
@@ -251,6 +256,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<ProviderSetupCatalog>("desktop_provider_setup_catalog", { workspaceId, input }),
   saveProviderSetup: (workspaceId, input) =>
     invoke<ProviderSetupSaveResult>("desktop_save_provider_setup", { workspaceId, input }),
+  saveProviderDefaultModel: (workspaceId, modelRef) =>
+    invoke<ProviderDefaultModelSaveResult>("desktop_save_provider_default_model", {
+      workspaceId,
+      input: { modelRef },
+    }),
   pickWorkspace: () =>
     invoke<WorkspaceSelection>("desktop_pick_workspace"),
   openRecentWorkspace: (recentId) =>
