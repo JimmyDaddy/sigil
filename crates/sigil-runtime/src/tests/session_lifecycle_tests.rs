@@ -931,6 +931,38 @@ fn session_pin_is_identity_bound_and_blocks_direct_delete_until_unpinned() -> Re
 }
 
 #[test]
+fn session_pin_waits_for_brief_internal_maintenance_instead_of_failing_busy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "pin after maintenance")?;
+    let journal = temp.path().join("lifecycle.jsonl");
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
+            .with_lifecycle_journal_path(&journal);
+    let maintenance_path = temp.path().join("lifecycle.jsonl.maintenance-lock");
+    let maintenance = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(maintenance_path)?;
+    maintenance.try_lock()?;
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        drop(maintenance);
+    });
+
+    service.set_session_pin(&source, true, 100)?;
+    release
+        .join()
+        .map_err(|_| anyhow!("maintenance release thread panicked"))?;
+    assert!(service.catalog()?.entries[0].pinned);
+    Ok(())
+}
+
+#[test]
 fn session_pin_becomes_whole_store_hold_for_manifest_only_artifact_gc() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let sessions = temp.path().join("sessions");

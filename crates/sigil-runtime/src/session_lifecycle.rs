@@ -3,7 +3,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -61,6 +62,8 @@ pub const SESSION_DELETE_TOMBSTONE_GRACE_MS: u64 = 24 * 60 * 60 * 1_000;
 const SESSION_TITLE_MAX_BYTES: usize = 160;
 const SESSION_RESOURCE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const SESSION_RESOURCE_MAX_ENTRIES: usize = 200_000;
+const SESSION_MAINTENANCE_LEASE_WAIT: Duration = Duration::from_millis(250);
+const SESSION_MAINTENANCE_LEASE_RETRY: Duration = Duration::from_millis(2);
 
 /// Explicit resource limits for local session discovery and portable export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1496,9 +1499,22 @@ impl LocalSessionLifecycleService {
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
         harden_private_open_file(&lease, &path, "session maintenance lease")?;
-        lease
-            .try_lock()
-            .context("another local session maintenance operation is active")?;
+        let deadline = Instant::now() + SESSION_MAINTENANCE_LEASE_WAIT;
+        loop {
+            match lease.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(SESSION_MAINTENANCE_LEASE_RETRY);
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    bail!("another local session maintenance operation is active");
+                }
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(error)
+                        .context("failed to acquire the local session maintenance lease");
+                }
+            }
+        }
         Ok(lease)
     }
 
