@@ -6,7 +6,8 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use sigil_kernel::{
     ControlEntry, ConversationForkOutput, ConversationForkProjection, ConversationTurnForkRequest,
-    JsonlSessionStore, ResolvedModelRoute, RootConfig, SessionLogEntry, fork_conversation_at_turn,
+    JsonlSessionStore, ResolvedModelRoute, RootConfig, Session, SessionLogEntry, SessionRef,
+    fork_conversation_at_turn,
 };
 use sigil_runtime::{
     LocalSessionCatalogEntry, LocalSessionCatalogState, LocalSessionLifecycleService,
@@ -71,22 +72,40 @@ pub(in crate::runner) fn inspect_local_session(
 pub(in crate::runner) fn fork_local_session(
     service: &LocalSessionLifecycleService,
     source_path: &Path,
+    active_session: Option<(&Path, &Session)>,
     root_config: &RootConfig,
     current_model_route: &ResolvedModelRoute,
 ) -> Result<ConversationForkOutput> {
-    let entry = inspect_local_session(service, source_path)?;
-    let records = JsonlSessionStore::read_event_records(&entry.path)
-        .with_context(|| format!("failed to read {}", entry.path.display()))?;
+    let canonical_source = fs::canonicalize(source_path)
+        .with_context(|| format!("failed to canonicalize {}", source_path.display()))?;
+    let active_session = active_session
+        .and_then(|(path, session)| fs::canonicalize(path).ok().map(|path| (path, session)))
+        .filter(|(path, _)| path == &canonical_source);
+    let (source_session_ref, records) = if let Some((_, session)) = active_session {
+        let source_session_ref = SessionRef::new_relative(
+            canonical_source
+                .file_name()
+                .ok_or_else(|| anyhow!("source session has no file name"))?,
+        )?;
+        let records = session
+            .read_durable_event_records()
+            .with_context(|| format!("failed to read {}", canonical_source.display()))?;
+        (source_session_ref, records)
+    } else {
+        let entry = inspect_local_session(service, &canonical_source)?;
+        let records = JsonlSessionStore::read_event_records(&entry.path)
+            .with_context(|| format!("failed to read {}", entry.path.display()))?;
+        (entry.session_ref, records)
+    };
     let point = ConversationForkProjection::from_records(&records)?
         .latest()
         .cloned()
         .ok_or_else(|| anyhow!("conversation fork requires a finalized user turn"))?;
-    let parent = entry
-        .path
+    let parent = canonical_source
         .parent()
         .ok_or_else(|| anyhow!("source session has no parent directory"))?;
     let destination_path = allocate_fork_path(parent, current_unix_time_ms());
-    let source_store = JsonlSessionStore::new(&entry.path)?;
+    let source_store = JsonlSessionStore::new(&canonical_source)?;
     let resolved_model_route = source_route_for_fork(&records, root_config, current_model_route)?;
     let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
         root_config,
@@ -98,7 +117,7 @@ pub(in crate::runner) fn fork_local_session(
         &records,
         &ConversationTurnForkRequest {
             source_turn_digest: point.source_turn_digest,
-            source_session_ref: entry.session_ref,
+            source_session_ref,
             destination_path,
             provider_name,
             model_name: resolved_model_route.model_ref.model_id.clone(),

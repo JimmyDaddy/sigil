@@ -8,13 +8,14 @@ use sigil_kernel::{
     StorageRoot, ToolRegistry,
 };
 use sigil_runtime::{
-    LocalSessionLifecycleOperationKind, LocalSessionLifecycleRecoveryStatus,
-    LocalSessionLifecycleService, SessionExportV1, SessionRetentionPolicy, resolve_sigil_paths,
+    LocalSessionLifecycleLimits, LocalSessionLifecycleOperationKind,
+    LocalSessionLifecycleRecoveryStatus, LocalSessionLifecycleService, SessionExportV1,
+    SessionRetentionPolicy, resolve_sigil_paths,
 };
 use tempfile::tempdir;
 
 use super::{
-    super::{WorkerCommand, WorkerMessage},
+    super::{WorkerCommand, WorkerMessage, worker_loop::fork_local_session},
     common::{PlannedProvider, spawn_test_worker, test_root_config},
 };
 
@@ -226,14 +227,19 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: current_path.clone(),
         current_model_route: invalid_current_route,
     })?;
-    assert!(matches!(
-        worker.recv_until(|message| matches!(
+    let invalid_route_error = match worker.recv_until(|message| {
+        matches!(
             message,
             WorkerMessage::LocalSessionLifecycleFailed { request_id: 19, .. }
-        ))?,
-        WorkerMessage::LocalSessionLifecycleFailed { error, .. }
-            if error.contains("explicit current route")
-    ));
+        )
+    })? {
+        WorkerMessage::LocalSessionLifecycleFailed { error, .. } => error,
+        _ => unreachable!(),
+    };
+    assert!(
+        invalid_route_error.contains("explicit current route"),
+        "unexpected invalid-route failure: {invalid_route_error}"
+    );
 
     worker.send(WorkerCommand::ForkLocalSession {
         request_id: 20,
@@ -285,5 +291,67 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         entry.kind == LocalSessionLifecycleOperationKind::Retention
             && entry.status == LocalSessionLifecycleRecoveryStatus::Completed
     }));
+    Ok(())
+}
+
+#[test]
+fn active_session_fork_uses_the_owned_writer_instead_of_catalog_scanning() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir(&workspace_root)?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let source_path = session_dir.join("current.jsonl");
+    write_finalized_session(&source_path, "current")?;
+
+    let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.config_version = CONFIG_VERSION_V2;
+    root_config.agent.runtime_provider.clear();
+    root_config.agent.connection = Some(ConnectionId::new("current-route")?);
+    root_config.agent.model = "current-route-model".to_owned();
+    root_config.connections.insert(
+        "current-route".to_owned(),
+        json!({
+            "label": "current-route",
+            "provider": "deepseek",
+            "protocol": "deepseek",
+            "base_url": "https://api.deepseek.com",
+            "credential": {
+                "source": "environment",
+                "name": "SIGIL_API_KEY"
+            }
+        }),
+    );
+    let current_model_route =
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)?.1;
+    let active_store = JsonlSessionStore::new(&source_path)?;
+    let active_session =
+        Session::load_from_store("deepseek", "deepseek-v4-flash", active_store.clone())?;
+    let service =
+        LocalSessionLifecycleService::new("workspace", &session_dir, temp.path().join("exports"))
+            .with_limits(LocalSessionLifecycleLimits {
+                max_total_validation_bytes: 0,
+                ..LocalSessionLifecycleLimits::default()
+            });
+
+    let error = fork_local_session(
+        &service,
+        &source_path,
+        None,
+        &root_config,
+        &current_model_route,
+    )
+    .expect_err("an external source should still require a ready catalog entry");
+    assert!(error.to_string().contains("not ready"));
+
+    let output = fork_local_session(
+        &service,
+        &source_path,
+        Some((&source_path, &active_session)),
+        &root_config,
+        &current_model_route,
+    )?;
+    assert!(output.destination_path.is_file());
+    assert_eq!(output.copied_message_count, 2);
     Ok(())
 }

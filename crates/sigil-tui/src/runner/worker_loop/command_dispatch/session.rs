@@ -112,9 +112,22 @@ where
                     continue;
                 }
                 let service = local_session_lifecycle_service(root_config, workspace_root);
+                let active_session = local_session_lifecycle_service_for_source(
+                    root_config,
+                    workspace_root,
+                    &source_path,
+                )
+                .and_then(|_| {
+                    state
+                        .session
+                        .current
+                        .as_ref()
+                        .map(|session| (state.session.log_path.as_path(), session))
+                });
                 let output = match fork_local_session(
                     &service,
                     &source_path,
+                    active_session,
                     root_config,
                     &current_model_route,
                 ) {
