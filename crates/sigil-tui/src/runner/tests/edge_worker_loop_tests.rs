@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::runner::TerminalTaskControlIdentity;
 use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileId, AgentProfileSnapshotId,
@@ -33,17 +34,18 @@ use super::{
         McpActivationStatus, WorkerCommand, WorkerCommandSender, WorkerMessage,
         elicitation_bridge::ChannelMcpElicitationHandler,
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
+        terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
         worker_event::WorkerMcpRuntimeEventSender,
         worker_loop::{
             CreateTaskFromPlanRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
-            agent_result_continuation_run_result, append_mcp_elicitation_audits,
-            artifact_gc_task_metrics, cancel_terminal_task, close_agent_thread,
-            create_task_from_plan, next_task_id, partition_agent_result_continuations,
+            WorkerLoopTerminalRuntime, agent_result_continuation_run_result,
+            append_mcp_elicitation_audits, artifact_gc_task_metrics, cancel_terminal_task,
+            close_agent_thread, create_task_from_plan, durable_terminal_tool_result_metadata,
+            next_task_id, partition_agent_result_continuations,
             pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
-            queued_background_ready_transient_context, refresh_terminal_task_statuses,
-            resolve_continue_task, run_worker_loop, session_ref_for_log_path,
-            worker_reactor_metrics,
+            queued_background_ready_transient_context, resolve_continue_task, run_worker_loop,
+            session_ref_for_log_path, worker_reactor_metrics,
         },
         worker_loop::{append_cancelled_task_state, append_paused_task_state},
     },
@@ -1221,13 +1223,16 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
     let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
     let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
-    let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
+    let surface = sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust(
         &root_config,
         &provider.capabilities(),
         temp.path().to_path_buf(),
         elicitation_handler,
         mcp_event_handler,
+        sigil_kernel::WorkspaceTrust::Unknown,
     )?;
+    let registry = surface.registry;
+    let terminal_control = surface.terminal_control;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1292,11 +1297,25 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         duration_ms: Some(1),
         subjects: Vec::new(),
         changed_files: Vec::new(),
-        metadata: start.metadata.clone(),
+        metadata: durable_terminal_tool_result_metadata(&start.metadata),
         error: None,
-        model_content_hash: Some("terminal-start-result".to_owned()),
+        model_content_hash: Some("0".repeat(64)),
     })))?;
-    session.append_control(ControlEntry::TerminalTask(start_entry))?;
+    let live_entry =
+        runtime.block_on(terminal_control.status(temp.path(), &TerminalTaskId::new(task_id)?))?;
+    assert!(live_entry.generation >= start_entry.generation);
+    session.append_control(ControlEntry::TerminalTask(live_entry))?;
+    let terminal_identity = TerminalTaskControlIdentity {
+        session_scope_id: session.session_scope_id().to_owned(),
+        run_id: "foreground-run-terminal-cancel".to_owned(),
+        task_id: task_id.to_owned(),
+        expected_generation: session
+            .terminal_task_projection()
+            .tasks
+            .get(&TerminalTaskId::new(task_id)?)
+            .expect("started terminal should be projected")
+            .generation,
+    };
     let options = sigil_runtime::build_run_options(
         &root_config,
         temp.path().to_path_buf(),
@@ -1304,14 +1323,32 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     );
     let mut current_session = None;
 
-    let (entry, entries) = cancel_terminal_task(
+    let stale_identity = TerminalTaskControlIdentity {
+        expected_generation: terminal_identity.expected_generation.saturating_sub(1),
+        ..terminal_identity.clone()
+    };
+    let stale_error = cancel_terminal_task(
         &runtime,
-        registry,
+        registry.clone(),
+        &terminal_control,
         &root_config,
         &options,
         &session_log_path,
         &mut current_session,
-        task_id.to_owned(),
+        &stale_identity,
+    )
+    .expect_err("stale terminal generation must fail before cancellation");
+    assert!(stale_error.contains("generation changed"));
+
+    let (entry, entries) = cancel_terminal_task(
+        &runtime,
+        registry,
+        &terminal_control,
+        &root_config,
+        &options,
+        &session_log_path,
+        &mut current_session,
+        &terminal_identity,
     )
     .map_err(anyhow::Error::msg)?;
 
@@ -1320,13 +1357,27 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         entry.cleanup.as_ref().map(|cleanup| cleanup.status),
         Some(ExecutionCleanupStatus::Completed)
     ));
+    assert!(entry.output_preview.is_none());
+    let output_hash = entry
+        .output_hash
+        .as_deref()
+        .expect("cancelled terminal should retain a final output digest");
+    let output_digest = output_hash.strip_prefix("sha256:").unwrap_or(output_hash);
+    assert_eq!(output_digest.len(), 64);
+    assert!(output_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(entry.output_total_bytes > 0);
+    let planned_hash = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ToolPermissionPlannedV2(planned))
+            if planned.tool_name == "terminal_cancel" =>
+        {
+            Some(planned.plan_hash.clone())
+        }
+        _ => None,
+    });
     assert!(
-        entry
-            .output_preview
-            .as_deref()
-            .is_some_and(|preview| preview.contains("cancel-tail"))
+        planned_hash.is_some(),
+        "terminal cancel should persist its V2 plan"
     );
-    assert!(entry.output_hash.is_some());
     assert!(entries.iter().any(|entry| {
         matches!(
             entry,
@@ -1334,6 +1385,9 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
                 if execution.tool_name == "terminal_cancel"
                     && execution.status == ToolExecutionStatus::Started
                     && execution.model_content_hash.is_none()
+                    && execution.metadata.details.get("permission_plan_hash")
+                        .and_then(serde_json::Value::as_str)
+                        == planned_hash.as_deref()
         )
     }));
     assert!(entries.iter().any(|entry| {
@@ -1377,158 +1431,6 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
 }
 
 #[test]
-fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -> Result<()> {
-    let temp = tempdir()?;
-    let root_config = test_root_config(temp.path(), "planned", "planned-model");
-    let provider = PlannedProvider::new(Vec::new());
-    let (message_tx, _message_rx) = mpsc::channel();
-    let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
-    let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
-    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
-    let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
-        &root_config,
-        &provider.capabilities(),
-        temp.path().to_path_buf(),
-        elicitation_handler,
-        mcp_event_handler,
-    )?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()?;
-    let session_log_path = temp.path().join(".sigil/sessions/session-terminal.jsonl");
-    let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::load_from_store("planned", "planned-model", store.clone())?;
-    let recorder = MutationEventRecorder::new(store);
-    let start_profile = recorder.execution_mutation_profile(
-        temp.path(),
-        &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
-        "call-terminal-start",
-        "terminal_start",
-        ToolEffect::Unknown,
-    )?;
-    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
-        call_id: "call-terminal-start".to_owned(),
-        tool_name: "terminal_start".to_owned(),
-        status: ToolExecutionStatus::Started,
-        duration_ms: None,
-        subjects: Vec::new(),
-        changed_files: Vec::new(),
-        metadata: ToolResultMeta {
-            details: serde_json::json!({
-                "execution_mutation_profile": start_profile,
-            }),
-            ..ToolResultMeta::default()
-        },
-        error: None,
-        model_content_hash: None,
-    })))?;
-
-    let tool_context = ToolContext::new(temp.path().to_path_buf(), 5);
-    let task_id = "terminal-natural-exit";
-    let start = runtime.block_on(
-        registry.execute(
-            tool_context.clone(),
-            ToolCall {
-                id: "call-terminal-start".to_owned(),
-                name: "terminal_start".to_owned(),
-                args_json: serde_json::json!({
-                    "task_id": task_id,
-                    "command": "printf terminal-mutated > terminal-natural.txt; printf natural-tail",
-                    "mode": "background"
-                })
-                .to_string(),
-            },
-        ),
-    )?;
-    let start_entry = TerminalTaskEntry::from_tool_result_details(&start.metadata.details)?
-        .expect("terminal_start should return terminal metadata");
-    runtime.block_on(wait_for_terminal_output(
-        &registry,
-        tool_context,
-        task_id,
-        "natural-tail",
-    ))?;
-
-    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
-        call_id: "call-terminal-start".to_owned(),
-        tool_name: "terminal_start".to_owned(),
-        status: ToolExecutionStatus::Completed,
-        duration_ms: Some(1),
-        subjects: Vec::new(),
-        changed_files: Vec::new(),
-        metadata: start.metadata.clone(),
-        error: None,
-        model_content_hash: Some("terminal-start-result".to_owned()),
-    })))?;
-    session.append_control(ControlEntry::TerminalTask(start_entry))?;
-
-    let options = sigil_runtime::build_run_options(
-        &root_config,
-        temp.path().to_path_buf(),
-        sigil_kernel::InteractionMode::Interactive,
-    );
-    let mut current_session = Some(session);
-    let active_task_ids = current_session
-        .as_ref()
-        .expect("terminal session should exist")
-        .terminal_task_projection()
-        .active_task_ids
-        .into_iter()
-        .collect();
-    let mut updates = Vec::new();
-    for _ in 0..40 {
-        updates = refresh_terminal_task_statuses(
-            &runtime,
-            &registry,
-            &options,
-            &session_log_path,
-            &mut current_session,
-            &active_task_ids,
-        )
-        .map_err(anyhow::Error::msg)?;
-        if !updates.is_empty() {
-            break;
-        }
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(25)).await });
-    }
-
-    assert_eq!(updates.len(), 1);
-    let (entry, entries) = updates.remove(0);
-    assert!(matches!(
-        entry.status,
-        TerminalTaskStatus::Exited { exit_code: Some(0) }
-    ));
-    assert!(entries.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TerminalTask(task))
-                if task.handle.task_id.as_str() == task_id
-                    && matches!(task.status, TerminalTaskStatus::Exited { exit_code: Some(0) })
-        )
-    }));
-    let detected = JsonlSessionStore::read_event_records(&session_log_path)?
-        .into_iter()
-        .filter_map(|record| match record {
-            SessionStreamRecord::Stored(event)
-                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
-            {
-                Some(event)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(detected.len(), 1);
-    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
-    assert_eq!(payload.tool_call_id.as_deref(), Some("call-terminal-start"));
-    assert_eq!(payload.tool_name, "terminal_start");
-    assert!(!payload.unknown_dirty);
-    assert!(payload.from_workspace_snapshot_id.is_some());
-    assert!(payload.to_workspace_snapshot_id.is_some());
-    Ok(())
-}
-
-#[test]
 fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
     let temp = tempdir()?;
     let root_config = test_root_config(temp.path(), "planned", "planned-model");
@@ -1537,13 +1439,16 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
     let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
     let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new_test(mcp_event_tx));
-    let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
+    let surface = sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust(
         &root_config,
         &provider.capabilities(),
         temp.path().to_path_buf(),
         elicitation_handler,
         mcp_event_handler,
+        sigil_kernel::WorkspaceTrust::Unknown,
     )?;
+    let registry = surface.registry;
+    let terminal_control = surface.terminal_control;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1557,6 +1462,17 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         "terminal-missing-manager",
         TerminalTaskStatus::Running,
     )?))?;
+    let terminal_identity = TerminalTaskControlIdentity {
+        session_scope_id: session.session_scope_id().to_owned(),
+        run_id: "foreground-run-terminal-missing".to_owned(),
+        task_id: "terminal-missing-manager".to_owned(),
+        expected_generation: session
+            .terminal_task_projection()
+            .tasks
+            .get(&TerminalTaskId::new("terminal-missing-manager")?)
+            .expect("terminal fixture should be projected")
+            .generation,
+    };
     let options = sigil_runtime::build_run_options(
         &root_config,
         temp.path().to_path_buf(),
@@ -1567,11 +1483,12 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
     let error = cancel_terminal_task(
         &runtime,
         registry,
+        &terminal_control,
         &root_config,
         &options,
         &session_log_path,
         &mut current_session,
-        "terminal-missing-manager".to_owned(),
+        &terminal_identity,
     )
     .expect_err("unknown manager task should fail");
     let entries = current_session
@@ -1889,12 +1806,12 @@ fn spawn_loop_with_shared_agent(
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
     );
-    let provider_capabilities = agent.provider_capabilities();
     let agent_for_loop = Arc::clone(&agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
     let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(
         WorkerMcpRuntimeEventSender::new(event_tx.clone()),
     ));
+    let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
 
     let handle = thread::Builder::new()
         .name("sigil-edge-worker-loop-test".to_owned())
@@ -1910,7 +1827,6 @@ fn spawn_loop_with_shared_agent(
                 runtime,
                 agent_for_loop,
                 root_config,
-                provider_capabilities,
                 workspace_root,
                 session_log_path,
                 options,
@@ -1922,6 +1838,7 @@ fn spawn_loop_with_shared_agent(
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                 },
+                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
             );
         })
         .map_err(|error| anyhow::anyhow!("failed to spawn worker loop: {error}"))?;
@@ -1947,9 +1864,10 @@ async fn wait_for_terminal_output(
                     id: format!("call-terminal-read-{attempt}"),
                     name: "terminal_read".to_owned(),
                     args_json: serde_json::json!({
-                        "task_id": task_id,
-                        "limit_bytes": 1024,
-                        "include_content": true
+                    "task_id": task_id,
+                    "offset": 0,
+                    "limit_bytes": 1024,
+                    "include_content": true
                     })
                     .to_string(),
                 },
@@ -1965,14 +1883,14 @@ async fn wait_for_terminal_output(
 
 fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<TerminalTaskEntry> {
     Ok(TerminalTaskEntry {
+        schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
         handle: TerminalTaskHandle {
             task_id: TerminalTaskId::new(task_id)?,
-            command: "sleep 5".to_owned(),
-            cwd: PathBuf::from("."),
-            shell: "sh".to_owned(),
-            log_path: PathBuf::from(".sigil/terminal")
-                .join(task_id)
-                .join("output.log"),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "sh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: format!("terminal-log:{task_id}"),
             created_at_ms: 10,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -1980,9 +1898,11 @@ fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<Term
             enforcement_backend_capabilities: None,
             sandbox_profile: None,
         },
+        generation: 1,
         status,
-        output_preview: Some("old preview".to_owned()),
-        output_hash: Some("sha256:old".to_owned()),
+        readiness: sigil_kernel::TerminalReadinessStatus::None,
+        output_preview: None,
+        output_hash: Some(sigil_kernel::stable_event_hash("old output")),
         output_truncated: false,
         output_total_bytes: 0,
         output_limit_bytes: None,

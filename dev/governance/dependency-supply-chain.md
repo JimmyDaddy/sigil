@@ -2,6 +2,15 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## Shell permission-plan fuzz harness（RFC-0060）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `libfuzzer-sys` | `0.4`；仅独立 `fuzz/` workspace | `sigil-tools-builtin/shell_permission_plan` | 由 `cargo-fuzz` 将有界 UTF-8 POSIX 命令直接送入 production `bash` tool 的单一 `permission_plan`；验证 parser/planner 对畸形、深层和组合输入不 panic，并保留 fail-closed 错误作为合法结果 | MIT OR Apache-2.0；rust-fuzz/libfuzzer | 不进入根 workspace、正常测试图或发布二进制；target 将单次输入限制在 16 KiB，不执行命令、不访问 provider 或网络。升级时必须重新执行 target 编译、bounded smoke、`cargo deny` 与 `cargo audit` |
+
+`serde_json` 以及 `sigil-kernel` / `sigil-tools-builtin` 都复用 production 已有版本和代码路径；fuzz
+target 不复制 Shell 风险规则，也不以测试专用 parser 代替真实权限计划。CI 的 bounded smoke 只证明持续可构建和无即时 panic，长时间 campaign 仍属于发布前安全门禁。
+
 ## TUI / CLI 更新器
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

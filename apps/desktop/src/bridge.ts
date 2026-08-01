@@ -37,6 +37,7 @@ import type {
   SessionRenameInput,
   SessionSummary,
   RunAttachInput,
+  RunApprovalSnapshot,
   RunStreamStatus,
   RunAttachment,
   PermissionMode,
@@ -52,6 +53,7 @@ import type {
   RunContext,
   RunSummary,
   TimelineEvent,
+  TerminalTaskCancelSummary,
   WorkspaceSelection,
   WorkspaceSummary,
   ApprovalDecisionSummary,
@@ -172,7 +174,7 @@ export interface DesktopBridge {
     sessionId: string,
     prompt: string,
     permissionMode: PermissionMode,
-    modelName?: string,
+    modelRef?: ProviderModelRef,
     modelSelectionBinding?: string,
     reasoningEffort?: ReasoningEffort,
     reasoningEffortBinding?: string,
@@ -188,6 +190,13 @@ export interface DesktopBridge {
   ): Promise<RunSummary>;
   attachRun(workspaceId: string, input: RunAttachInput): Promise<RunAttachment>;
   cancelRun(workspaceId: string, sessionId: string, runId: string): Promise<RunSummary>;
+  cancelTerminalTask(
+    workspaceId: string,
+    sessionId: string,
+    runId: string,
+    taskId: string,
+    expectedGeneration: number,
+  ): Promise<TerminalTaskCancelSummary>;
   pauseTask(
     workspaceId: string,
     sessionId: string,
@@ -228,6 +237,9 @@ export interface DesktopBridge {
     request: IntentDropBinding,
   ): Promise<IntentDropExecution>;
   subscribeRunEvents(listener: (event: TimelineEvent) => void): Promise<() => void>;
+  subscribeRunApprovalSnapshots(
+    listener: (snapshot: RunApprovalSnapshot) => void,
+  ): Promise<() => void>;
   subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
   subscribeAppearance(listener: (snapshot: AppearanceSnapshot) => void): Promise<() => void>;
   subscribeUpdate(listener: (snapshot: DesktopUpdateSnapshot) => void): Promise<() => void>;
@@ -352,7 +364,7 @@ export const desktopBridge: DesktopBridge = {
     sessionId,
     prompt,
     permissionMode,
-    modelName,
+    modelRef,
     modelSelectionBinding,
     reasoningEffort,
     reasoningEffortBinding,
@@ -365,7 +377,7 @@ export const desktopBridge: DesktopBridge = {
         sessionId,
         prompt,
         permissionMode,
-        modelName,
+        modelRef,
         modelSelectionBinding,
         reasoningEffort,
         reasoningEffortBinding,
@@ -387,6 +399,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<RunSummary>("desktop_cancel_run", {
       workspaceId,
       input: { sessionId, runId },
+    }),
+  cancelTerminalTask: (workspaceId, sessionId, runId, taskId, expectedGeneration) =>
+    invoke<TerminalTaskCancelSummary>("desktop_cancel_terminal_task", {
+      workspaceId,
+      input: { sessionId, runId, taskId, expectedGeneration },
     }),
   pauseTask: (workspaceId, sessionId, runId, request) =>
     invoke<RunSummary>("desktop_pause_task", {
@@ -438,6 +455,8 @@ export const desktopBridge: DesktopBridge = {
     }),
   subscribeRunEvents: async (listener) =>
     listen<TimelineEvent>("sigil-run-event", (event) => listener(event.payload)),
+  subscribeRunApprovalSnapshots: async (listener) =>
+    listen<RunApprovalSnapshot>("sigil-run-approval-snapshot", (event) => listener(event.payload)),
   subscribeRunStreamStatus: async (listener) =>
     listen<RunStreamStatus>("sigil-run-stream-status", (event) => listener(event.payload)),
   subscribeAppearance: async (listener) =>

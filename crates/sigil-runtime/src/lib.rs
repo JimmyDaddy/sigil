@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
-    AgentRole, AgentRunOptions, ApprovalMode, ExecutionBackend, InteractionMode, McpServerConfig,
+    AgentRole, AgentRunOptions, ExecutionBackend, InteractionMode, McpServerConfig,
     McpServerStartup, MutationEventRecorder, NetworkEffect, NetworkPolicy,
     PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
     ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
@@ -122,6 +122,7 @@ pub mod skills;
 mod stable_mcp_search;
 pub mod streamable_http;
 pub mod support;
+pub mod terminal_lifecycle;
 pub mod url_capability;
 pub mod web_destination;
 mod web_fetch_tool;
@@ -216,6 +217,7 @@ pub use paths::{
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
+    PluginHookExecutionAdmissionError, PluginHookExecutionAdmissionErrorCode,
     PluginHookExecutionOutcome, PluginHookExecutionRequest, PluginHookExecutionRunner,
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
     discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
@@ -272,7 +274,7 @@ pub use remote_mcp::{
 };
 pub use session_control::{
     append_session_control_entries, append_session_control_entries_and_track_detached,
-    current_unix_time_ms,
+    current_unix_time_ms, reconcile_terminal_tasks_after_restart,
 };
 pub use session_lifecycle::{
     DEFAULT_SESSION_CATALOG_MAX_ENTRIES, DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES,
@@ -319,6 +321,9 @@ pub use task_completion_progress::{
     TaskCompletionOutcome, TaskCompletionProgress, TaskCompletionProgressMember,
     TaskCompletionProgressSnapshot,
 };
+pub use terminal_lifecycle::{
+    ApplicationTerminalLifecycleHandler, ApplicationTerminalLifecycleRouter,
+};
 pub use url_capability::{
     DEFAULT_URL_CAPABILITY_CAPACITY, DEFAULT_URL_CAPABILITY_TTL, UrlCapabilityLookupError,
     WebUrlCapability, WebUrlCapabilityStore, attach_session_url_capability_store,
@@ -357,9 +362,11 @@ pub use mcp_registry::{
     build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust,
     build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
-    build_tool_surface_without_eager_mcp_with_workspace_trust, mcp_process_receipts_summary,
-    mcp_stdio_boundary_summary, refresh_mcp_server_tools_from_product_surface,
-    refresh_mcp_server_tools_with_mcp_handlers,
+    build_tool_surface_without_eager_mcp_with_workspace_trust,
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle,
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory,
+    mcp_process_receipts_summary, mcp_stdio_boundary_summary,
+    refresh_mcp_server_tools_from_product_surface, refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     register_mcp_server_declarations,

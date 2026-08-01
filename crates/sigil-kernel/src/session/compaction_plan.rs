@@ -480,7 +480,7 @@ fn pending_tool_or_approval_call_ids(records: &[SessionStreamRecord]) -> Result<
                     ToolApprovalAuditAction::Resolved | ToolApprovalAuditAction::PreviewFailed => {
                         pending.remove(&approval.call_id);
                     }
-                    ToolApprovalAuditAction::PolicyEvaluated => {}
+                    ToolApprovalAuditAction::DecisionAccepted => {}
                 }
             }
             Some(SessionLogEntry::Control(ControlEntry::ToolExecution(execution))) => {

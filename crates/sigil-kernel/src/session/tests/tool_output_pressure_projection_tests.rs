@@ -3,13 +3,13 @@ use anyhow::Result;
 use super::*;
 use crate::session::ToolResultRecordedV2;
 use crate::{
-    ApprovalMode, ControlEntry, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope,
+    ControlEntry, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope,
     ExternalProvenanceEntry, ExternalTrust, FileType, JsonlSessionStore, ModelMessage,
     MutationCommitted, MutationPrepared, MutationSubject, MutationSyncClass, ReceiptStatus,
-    RedactionState, Session, SessionContextProjection, SnapshotCoverage, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolArtifactSensitivity, ToolCall,
-    ToolExecutionEntry, ToolExecutionStatus, ToolResult, ToolResultMeta, VerificationBinding,
-    VerificationReceipt, VerificationRecordedEntry,
+    RedactionState, Session, SessionContextProjection, SnapshotCoverage, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolArtifactSensitivity, ToolCall, ToolExecutionEntry, ToolExecutionStatus,
+    ToolResult, ToolResultMeta, VerificationBinding, VerificationReceipt,
+    VerificationRecordedEntry,
 };
 
 fn session_fixture() -> Result<(tempfile::TempDir, Session)> {
@@ -66,30 +66,11 @@ fn records(session: &Session) -> Result<Vec<SessionStreamRecord>> {
 }
 
 fn requested_approval(call_id: &str) -> ControlEntry {
-    ControlEntry::ToolApproval(ToolApprovalEntry {
-        action: ToolApprovalAuditAction::Requested,
-        call_id: call_id.to_owned(),
-        tool_name: "shell".to_owned(),
-        access: ToolAccess::Read,
-        network_effect: None,
-        local_policy_decision: ApprovalMode::Ask,
-        network_policy_decision: ApprovalMode::Allow,
-        source_policy_decision: ApprovalMode::Allow,
-        operation: None,
-        risk: None,
-        subjects: Vec::new(),
-        subject_zones: Vec::new(),
-        policy_decision: ApprovalMode::Ask,
-        external_directory_required: false,
-        confirmation: None,
-        snapshot_required: false,
-        command_permission_matches: Vec::new(),
-        allow_source: None,
-        grant_call_id: None,
-        user_decision: None,
-        reason: None,
-        preview_hash: None,
-    })
+    ControlEntry::ToolApproval(ToolApprovalEntry::test_fixture(
+        ToolApprovalAuditAction::Requested,
+        call_id,
+        "shell",
+    ))
 }
 
 fn verification_for(call_id: &str, source_event_id: &str) -> VerificationRecordedEntry {

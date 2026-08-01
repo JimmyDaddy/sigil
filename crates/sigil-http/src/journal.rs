@@ -48,6 +48,13 @@ impl HttpDurableProtocolJournal {
         let path = canonical_durable_path(path.into()).map_err(HttpProtocolJournalError::io)?;
         let lease = acquire_exclusive_lease(&path).map_err(HttpProtocolJournalError::io)?;
         let mut state = if path.exists() {
+            let bytes_on_disk = path.metadata().map_err(HttpProtocolJournalError::io)?.len();
+            if bytes_on_disk > MAX_HTTP_PROTOCOL_JOURNAL_BYTES as u64 {
+                return Err(HttpProtocolJournalError::JournalTooLarge {
+                    bytes: usize::try_from(bytes_on_disk).unwrap_or(usize::MAX),
+                    limit: MAX_HTTP_PROTOCOL_JOURNAL_BYTES,
+                });
+            }
             let bytes = read_bounded(&path, MAX_HTTP_PROTOCOL_JOURNAL_BYTES)
                 .map_err(HttpProtocolJournalError::io)?;
             serde_json::from_slice::<HttpProtocolJournalFile>(&bytes)
@@ -81,14 +88,68 @@ impl HttpDurableProtocolJournal {
     ///
     /// Returns an error for transient events, non-monotonic run sequences, or failed durable I/O.
     pub fn append(&self, event: HttpProtocolEvent) -> Result<(), HttpProtocolJournalError> {
+        self.append_with_stream_continuation(event, false)
+    }
+
+    /// Durably records one event while optionally keeping a foreground-terminal stream open for
+    /// terminal tasks that still have a live process owner.
+    pub fn append_with_stream_continuation(
+        &self,
+        event: HttpProtocolEvent,
+        keep_stream_open: bool,
+    ) -> Result<(), HttpProtocolJournalError> {
+        self.append_with_stream_policy(event, keep_stream_open, false)
+    }
+
+    /// Durably appends the final terminal-task lifecycle and closes the retained stream in the
+    /// same filesystem commit. This keeps lifecycle publication retry-safe: a failed persist
+    /// consumes neither the event sequence nor the stream-close transition.
+    pub fn append_and_close_stream(
+        &self,
+        event: HttpProtocolEvent,
+    ) -> Result<(), HttpProtocolJournalError> {
+        self.append_with_stream_policy(event, false, true)
+    }
+
+    fn append_with_stream_policy(
+        &self,
+        event: HttpProtocolEvent,
+        keep_stream_open: bool,
+        close_after_append: bool,
+    ) -> Result<(), HttpProtocolJournalError> {
         let event = canonical_durable_event(event)?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| HttpProtocolJournalError::Unavailable)?;
         let mut candidate = state.clone();
-        candidate.append(event)?;
+        let key = HttpProtocolStreamKey::new(
+            event.run_event.session_id.clone(),
+            event.run_event.run_id.clone(),
+        );
+        candidate.append(event, keep_stream_open)?;
+        if close_after_append {
+            candidate.close_stream(&key)?;
+        }
         candidate.trim(self.max_events)?;
+        persist_state(&self.path, &candidate)?;
+        *state = candidate;
+        Ok(())
+    }
+
+    /// Closes one stream after every persistent terminal task reached an owner-confirmed terminal.
+    pub fn close_stream(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<(), HttpProtocolJournalError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        let mut candidate = state.clone();
+        let key = HttpProtocolStreamKey::new(session_id, run_id);
+        candidate.close_stream(&key)?;
         persist_state(&self.path, &candidate)?;
         *state = candidate;
         Ok(())
@@ -159,6 +220,22 @@ impl HttpDurableProtocolJournal {
             .get(&HttpProtocolStreamKey::new(session_id, run_id))
             .map(|watermark| watermark.latest_sequence))
     }
+
+    /// Returns whether one durable stream still accepts events from its exact process owner.
+    pub fn stream_accepts_events(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<bool>, HttpProtocolJournalError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        Ok(state
+            .high_watermarks
+            .get(&HttpProtocolStreamKey::new(session_id, run_id))
+            .map(|watermark| watermark.accepts_events))
+    }
 }
 
 /// Durable journal failures.
@@ -209,6 +286,22 @@ impl HttpProtocolJournalError {
             message: error.to_string(),
         }
     }
+
+    /// Returns whether an existing replay journal may be isolated and rebuilt at server startup.
+    ///
+    /// These failures describe invalid content in the HTTP replay projection itself. The journal
+    /// is not the canonical conversation or command-idempotency store, so a new server process can
+    /// safely start with an empty replay window after preserving the invalid file for diagnostics.
+    #[must_use]
+    pub const fn permits_replay_rebuild(&self) -> bool {
+        matches!(
+            self,
+            Self::Corrupt { .. }
+                | Self::EventTooLarge { .. }
+                | Self::JournalTooLarge { .. }
+                | Self::StreamCapacity
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -218,7 +311,11 @@ struct HttpProtocolJournalState {
 }
 
 impl HttpProtocolJournalState {
-    fn append(&mut self, event: HttpProtocolEvent) -> Result<(), HttpProtocolJournalError> {
+    fn append(
+        &mut self,
+        event: HttpProtocolEvent,
+        keep_stream_open: bool,
+    ) -> Result<(), HttpProtocolJournalError> {
         validate_event_size(&event)?;
         let key = HttpProtocolStreamKey::new(
             event.run_event.session_id.clone(),
@@ -241,7 +338,7 @@ impl HttpProtocolJournalState {
                 received,
             });
         }
-        let terminal = protocol_event_is_terminal(&event);
+        let terminal = protocol_event_is_terminal(&event) && !keep_stream_open;
         self.high_watermarks.insert(
             key,
             HttpProtocolStreamWatermark {
@@ -253,6 +350,21 @@ impl HttpProtocolJournalState {
             },
         );
         self.events.push(event);
+        Ok(())
+    }
+
+    fn close_stream(
+        &mut self,
+        key: &HttpProtocolStreamKey,
+    ) -> Result<(), HttpProtocolJournalError> {
+        let watermark =
+            self.high_watermarks
+                .get_mut(key)
+                .ok_or_else(|| HttpProtocolJournalError::Corrupt {
+                    message: "terminal stream watermark is missing".to_owned(),
+                })?;
+        watermark.terminal = true;
+        watermark.accepts_events = false;
         Ok(())
     }
 
@@ -422,18 +534,28 @@ impl HttpProtocolJournalFile {
                 event.run_event.session_id.clone(),
                 event.run_event.run_id.clone(),
             );
-            let (previous, terminal) = observed.get(&key).copied().unwrap_or((0, false));
-            if terminal || event.run_event.sequence <= previous {
+            let (previous, foreground_terminal_seen) =
+                observed.get(&key).copied().unwrap_or((0, false));
+            if event.run_event.sequence <= previous
+                || (foreground_terminal_seen
+                    && !matches!(
+                        event.run_event.event,
+                        sigil_kernel::PublicRunEventKind::TerminalLifecycle { .. }
+                    ))
+            {
                 return Err(HttpProtocolJournalError::Corrupt {
                     message: "journal event sequences are not ordered".to_owned(),
                 });
             }
             observed.insert(
                 key,
-                (event.run_event.sequence, protocol_event_is_terminal(event)),
+                (
+                    event.run_event.sequence,
+                    foreground_terminal_seen || protocol_event_is_terminal(event),
+                ),
             );
         }
-        for (key, (sequence, terminal)) in observed {
+        for (key, (sequence, _foreground_terminal_seen)) in observed {
             let Some(watermark) = high_watermarks.get(&key) else {
                 return Err(HttpProtocolJournalError::Corrupt {
                     message: "journal watermark is missing for a retained event".to_owned(),
@@ -441,7 +563,6 @@ impl HttpProtocolJournalFile {
             };
             if watermark.latest_sequence != sequence
                 || watermark.evicted_through_sequence >= sequence
-                || terminal != watermark.terminal
             {
                 return Err(HttpProtocolJournalError::Corrupt {
                     message: "journal watermark disagrees with retained events".to_owned(),

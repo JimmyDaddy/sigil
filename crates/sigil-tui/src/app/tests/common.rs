@@ -4,6 +4,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
+    sigil_kernel::ApprovalRequestIdentityV2 {
+        session_id: "session-tui-test".to_owned(),
+        run_id: "run-tui-test".to_owned(),
+        call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
+        plan_hash: "plan-tui-test".to_owned(),
+        policy_version: "policy-tui-test".to_owned(),
+        execution_binding_hash: "binding-tui-test".to_owned(),
+        expires_at_ms: u64::MAX,
+    }
+}
+
 pub(crate) fn test_config() -> RootConfig {
     let storage_id = TEST_STORAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let storage_root = std::env::temp_dir().join(format!(
@@ -628,6 +641,16 @@ pub(crate) fn multi_file_approval_preview() -> ToolPreview {
 
 pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPreview) -> Result<()> {
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-1"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-1".to_owned(),
             name: "write_file".to_owned(),

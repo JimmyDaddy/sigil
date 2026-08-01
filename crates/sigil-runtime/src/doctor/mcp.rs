@@ -1,4 +1,5 @@
 use super::*;
+use std::ffi::OsStr;
 
 pub(super) fn check_mcp_servers(
     report: &mut DoctorReport,
@@ -468,6 +469,15 @@ impl CommandStatus {
 }
 
 pub(super) fn command_status(command: &str, base_dir: &Path) -> CommandStatus {
+    let search_path = env::var_os("PATH");
+    command_status_with_search_path(command, base_dir, search_path.as_deref())
+}
+
+pub(super) fn command_status_with_search_path(
+    command: &str,
+    base_dir: &Path,
+    search_path: Option<&OsStr>,
+) -> CommandStatus {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return CommandStatus::Empty;
@@ -485,7 +495,7 @@ pub(super) fn command_status(command: &str, base_dir: &Path) -> CommandStatus {
             CommandStatus::Missing
         };
     }
-    let Some(paths) = env::var_os("PATH") else {
+    let Some(paths) = search_path else {
         return CommandStatus::Missing;
     };
     if env::split_paths(&paths).any(|path| path.join(trimmed).exists()) {

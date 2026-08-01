@@ -87,6 +87,41 @@ fn launch_failure_does_not_require_a_workspace_local_config() {
 }
 
 #[test]
+fn classified_startup_failures_expose_safe_actionable_causes() {
+    let cases = [
+        (
+            DesktopStartupFailure::WorkspaceBusy,
+            "workspace_server_busy",
+            "Close the other process",
+        ),
+        (
+            DesktopStartupFailure::AdapterStateInvalid,
+            "workspace_server_state_invalid",
+            "could not be repaired",
+        ),
+        (
+            DesktopStartupFailure::LoopbackUnavailable,
+            "workspace_server_loopback_unavailable",
+            "loopback connection",
+        ),
+    ];
+
+    for (failure, expected_code, expected_message) in cases {
+        let projected = project_manager_error(DesktopWorkspaceManagerError::Launch(
+            DesktopLaunchError::StartupRejected(failure),
+        ));
+        assert_eq!(projected.code, expected_code);
+        assert!(projected.message.contains(expected_message));
+        assert!(!projected.message.contains('/'));
+        assert!(
+            projected
+                .recovery_actions
+                .contains(&DesktopRecoveryAction::RetryCurrent)
+        );
+    }
+}
+
+#[test]
 fn command_error_recovery_actions_are_bounded_deduplicated_and_camel_case() {
     let projected = DesktopCommandError::new("temporary", "Temporary failure")
         .with_recovery_actions([
@@ -274,7 +309,7 @@ fn session_projection_drops_server_private_durable_fields() {
 #[test]
 fn continuity_projection_drops_private_scope_and_preserves_exact_owner_revision() {
     let owner_revision = format!("sha256:{}", "a".repeat(64));
-    let projected = DesktopConversationContinuity::from(DesktopSessionContinuityView {
+    let projected = DesktopConversationContinuity::try_from(DesktopSessionContinuityView {
         durable_session_scope_id: "durable-secret-scope".to_owned(),
         durable_frontier: DesktopDurableSessionFrontier {
             through_stream_sequence: 42,
@@ -283,11 +318,13 @@ fn continuity_projection_drops_private_scope_and_preserves_exact_owner_revision(
             run_id: "http-run-1".to_owned(),
             owner_revision: owner_revision.clone(),
         }),
+        retained_terminal_runs: Vec::new(),
         recovery_actions: vec![
             DesktopContinuityRecoveryAction::RetryCurrent,
             DesktopContinuityRecoveryAction::ContinueReadOnly,
         ],
-    });
+    })
+    .expect("continuity should project");
     let json = serde_json::to_value(projected).expect("continuity should serialize");
 
     assert_eq!(json["durableFrontier"]["throughStreamSequence"], 42);

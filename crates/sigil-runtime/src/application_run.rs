@@ -32,7 +32,6 @@ use crate::{
     activate_eager_remote_mcp_server,
     application_queue::{ApplicationQueuedRunPrepareError, PreparedApplicationQueuedRunInput},
     attach_remote_mcp_activation_presenter, attach_session_url_capability_store,
-    build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
     context_candidates_from_safe_sources, current_unix_time_ms,
     product_view::{ApplicationAgentActivityView, agent_activity_product_view_from_entries},
     resolve_sigil_paths, secret_redactor_for_root_config, unsupported_mcp_elicitation_handler,
@@ -228,7 +227,7 @@ pub struct ApplicationSessionBinding {
 /// Exact reasoning-effort capabilities for one selectable provider model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationModelOptionView {
-    /// Exact connection/model identity accepted when creating a fresh session.
+    /// Exact connection/model identity accepted for a new session or the next run boundary.
     pub model_ref: ModelRef,
     /// Provider-owned display label.
     pub display_name: String,
@@ -251,13 +250,13 @@ pub struct ApplicationModelOptionView {
 /// Provider-neutral facts needed to configure and explain the next application run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationRunContextView {
-    /// Compound connection/model identity durably frozen for this session.
+    /// Compound connection/model identity selected for the next run in this session.
     pub model_ref: ModelRef,
-    /// Provider identity durably frozen for this session.
+    /// Provider identity selected for the next run in this session.
     pub provider_name: String,
-    /// Model identity durably frozen for this session.
+    /// Model identity selected for the next run in this session.
     pub model_name: String,
-    /// Exact connection-scoped catalog and effort projection for fresh-session selection.
+    /// Exact connection-scoped catalog and effort projection for same-session selection.
     pub model_options: Vec<ApplicationModelOptionView>,
     /// Opaque binding proving the exact current model and connection-scoped catalog.
     pub model_selection_binding: String,
@@ -417,6 +416,44 @@ pub struct ApplicationRunServices {
     session_leases: Arc<ApplicationSessionLeaseManager>,
     task_role_provider_builder:
         Option<Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>>,
+    terminal_lifecycle_handler: Option<Arc<dyn crate::ApplicationTerminalLifecycleHandler>>,
+}
+
+/// Process-local typed control for persistent terminal tasks admitted by one prepared run.
+#[derive(Clone, Debug)]
+pub struct ApplicationTerminalTaskControl {
+    workspace_root: PathBuf,
+    owner: sigil_tools_builtin::TerminalTaskControlHandle,
+}
+
+impl ApplicationTerminalTaskControl {
+    fn new(workspace_root: PathBuf, owner: sigil_tools_builtin::TerminalTaskControlHandle) -> Self {
+        Self {
+            workspace_root,
+            owner,
+        }
+    }
+
+    /// Cancels one exact terminal task through its original process owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task identity is invalid, not owned by this run surface, or its
+    /// process-tree cleanup cannot be confirmed.
+    pub async fn cancel(&self, task_id: &str) -> Result<sigil_kernel::TerminalTaskEntry> {
+        let task_id = sigil_kernel::TerminalTaskId::new(task_id)?;
+        self.owner.cancel(&self.workspace_root, &task_id).await
+    }
+
+    /// Reads the latest exact owner state for one terminal task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task identity is invalid or not owned by this run surface.
+    pub async fn status(&self, task_id: &str) -> Result<sigil_kernel::TerminalTaskEntry> {
+        let task_id = sigil_kernel::TerminalTaskId::new(task_id)?;
+        self.owner.status(&self.workspace_root, &task_id).await
+    }
 }
 
 impl std::fmt::Debug for ApplicationRunServices {
@@ -428,6 +465,10 @@ impl std::fmt::Debug for ApplicationRunServices {
             .field(
                 "task_role_provider_builder",
                 &self.task_role_provider_builder.is_some(),
+            )
+            .field(
+                "terminal_lifecycle_handler",
+                &self.terminal_lifecycle_handler.is_some(),
             )
             .finish()
     }
@@ -441,6 +482,7 @@ impl ApplicationRunServices {
             disclosure_presenter,
             session_leases: Arc::new(ApplicationSessionLeaseManager::new()),
             task_role_provider_builder: None,
+            terminal_lifecycle_handler: None,
         }
     }
 
@@ -454,6 +496,7 @@ impl ApplicationRunServices {
             disclosure_presenter,
             session_leases,
             task_role_provider_builder: None,
+            terminal_lifecycle_handler: None,
         }
     }
 
@@ -464,6 +507,16 @@ impl ApplicationRunServices {
         builder: Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
     ) -> Self {
         self.task_role_provider_builder = Some(builder);
+        self
+    }
+
+    /// Installs the adapter-owned bounded terminal lifecycle projection.
+    #[must_use]
+    pub fn with_terminal_lifecycle_handler(
+        mut self,
+        handler: Arc<dyn crate::ApplicationTerminalLifecycleHandler>,
+    ) -> Self {
+        self.terminal_lifecycle_handler = Some(handler);
         self
     }
 
@@ -488,9 +541,16 @@ pub trait ApplicationRunEventHandler {
 pub struct PreparedApplicationRun {
     execution: ApplicationRunExecution,
     control: ApplicationRunControl,
+    terminal_control: ApplicationTerminalTaskControl,
 }
 
 impl PreparedApplicationRun {
+    /// Returns the typed persistent-terminal owner retained beyond the foreground model turn.
+    #[must_use]
+    pub fn terminal_control(&self) -> ApplicationTerminalTaskControl {
+        self.terminal_control.clone()
+    }
+
     /// Separates the execution payload from its root cancellation authority.
     ///
     /// The caller must keep `control` alive until the execution reaches a terminal state.
@@ -1867,23 +1927,25 @@ async fn assemble_application_tool_surface(
     redactor: &sigil_kernel::SecretRedactor,
     skill_descriptor: Option<&sigil_kernel::SkillDescriptor>,
     tool_scope: Option<&ToolRegistryScope>,
+    terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
 ) -> Result<(crate::RuntimeToolSurface, Vec<String>)> {
-    let surface =
-        build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
-            root_config,
-            provider_capabilities,
-            workspace_root.to_path_buf(),
-            mutation_recorder,
-            workspace_trust,
-            sigil_kernel::ExtensionProcessNetworkAdmission::new(
-                options.permission_context.network_policy,
-                false,
-            ),
-        )
-        .await?;
+    let surface = crate::mcp_registry::build_tool_surface_with_terminal_lifecycle(
+        root_config,
+        provider_capabilities,
+        workspace_root.to_path_buf(),
+        mutation_recorder,
+        workspace_trust,
+        sigil_kernel::ExtensionProcessNetworkAdmission::new(
+            options.permission_context.network_policy,
+            false,
+        ),
+        terminal_lifecycle_sink,
+    )
+    .await?;
     let crate::RuntimeToolSurface {
         mut registry,
         context_resolver,
+        terminal_control,
     } = surface;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
@@ -1934,6 +1996,7 @@ async fn assemble_application_tool_surface(
         crate::RuntimeToolSurface {
             registry,
             context_resolver,
+            terminal_control,
         },
         warnings,
     ))
@@ -2061,6 +2124,12 @@ async fn prepare_application_run_internal(
             .map_err(ApplicationRunPrepareError::execution)?;
     }
     orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
+    let terminal_lifecycle_sink = Arc::new(crate::ApplicationTerminalLifecycleRouter::new(
+        mutation_recorder.clone(),
+        session.session_scope_id(),
+        &run_id,
+        services.terminal_lifecycle_handler.clone(),
+    )) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -2073,6 +2142,7 @@ async fn prepare_application_run_internal(
         &redactor,
         skill_descriptor.as_ref(),
         tool_scope.as_ref(),
+        terminal_lifecycle_sink,
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
@@ -2087,6 +2157,10 @@ async fn prepare_application_run_internal(
         .await
         .unwrap_or_default();
     input = input.with_runtime_context(runtime_context.clone());
+    let terminal_control = ApplicationTerminalTaskControl::new(
+        workspace_root.clone(),
+        surface.terminal_control.clone(),
+    );
     let registry = surface.registry;
     let parent_session_ref = SessionRef::new_relative(
         session_path
@@ -2254,6 +2328,7 @@ async fn prepare_application_run_internal(
             events,
             _session_lease: session_lease,
         },
+        terminal_control,
     };
     Ok((prepared, queued_first_assembly))
 }
@@ -2438,13 +2513,10 @@ fn application_model_selection_binding(
     model_options: &[ApplicationModelOptionView],
 ) -> String {
     let mut material = format!(
-        "sigil-application-model-selection-v2\n{}/{}\n",
+        "sigil-application-model-selection-v3\n{}/{}\n",
         current_model.connection_id, current_model.model_id,
     );
     for option in model_options {
-        if option.model_ref.connection_id != current_model.connection_id {
-            continue;
-        }
         use std::fmt::Write as _;
         let _ = writeln!(
             material,
@@ -2626,8 +2698,13 @@ pub(crate) fn load_application_session_for_route(
     let persisted = session.resolved_model_route().ok_or_else(|| {
         anyhow!("session_route_missing: start a new session or fork with the current route")
     })?;
-    crate::provider_connections::validate_persisted_model_route(root_config, persisted)
-        .map_err(anyhow::Error::new)?;
+    let persisted_provider =
+        crate::provider_connections::validate_persisted_model_route(root_config, persisted)
+            .map_err(anyhow::Error::new)?;
+    anyhow::ensure!(
+        persisted_provider == session.provider_name(),
+        "session_route_drift: durable provider identity does not match its selected route"
+    );
     anyhow::ensure!(
         persisted.model_ref.model_id == session.model_name(),
         "session_route_drift: durable model identity does not match its frozen route"
@@ -2720,13 +2797,25 @@ pub fn application_run_context_view(
 }
 
 fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedModelRoute> {
-    entries.iter().find_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::SessionIdentity {
-            resolved_model_route: Some(route),
-            ..
-        }) => Some(route.clone()),
-        _ => None,
-    })
+    let mut route = None;
+    let mut identity_seen = false;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route,
+                ..
+            }) if !identity_seen => {
+                identity_seen = true;
+                route = resolved_model_route.clone();
+            }
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                resolved_model_route,
+                ..
+            }) if identity_seen => route = Some(resolved_model_route.clone()),
+            _ => {}
+        }
+    }
+    route
 }
 
 fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, String)> {
@@ -2740,10 +2829,13 @@ fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, 
             }) if identity.is_none() => {
                 identity = Some((provider_name.clone(), model_name.clone()));
             }
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
-                if identity.is_some() =>
-            {
-                if let Some((_, current_model)) = identity.as_mut() {
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                provider_name,
+                model_name,
+                ..
+            }) if identity.is_some() => {
+                if let Some((current_provider, current_model)) = identity.as_mut() {
+                    *current_provider = provider_name.clone();
                     *current_model = model_name.clone();
                 }
             }
@@ -3233,7 +3325,7 @@ fn prepare_application_run_blocking(
             message: "application run constraints must be non-zero and non-empty".to_owned(),
         });
     }
-    let root_config = load_application_root_config(&request.config_path)?;
+    let mut root_config = load_application_root_config(&request.config_path)?;
     let workspace_root = resolve_workspace_root(
         &request.config_path,
         &request.launch_cwd,
@@ -3270,22 +3362,48 @@ fn prepare_application_run_blocking(
     conversation_lifecycle
         .reconcile_unfinished(current_unix_time_ms())
         .map_err(ApplicationRunPrepareError::execution)?;
-    admit_application_model_selection(&request, &root_config, &session, &sigil_paths.cache_root)?;
-    let session_route = session
-        .resolved_model_route()
-        .cloned()
+    let selected_model = admit_application_model_selection(
+        &request,
+        &root_config,
+        &session,
+        &sigil_paths.cache_root,
+    )?;
+    let session_route = selected_model
+        .as_ref()
+        .map(|(_, route)| route.clone())
+        .or_else(|| session.resolved_model_route().cloned())
         .ok_or_else(|| ApplicationRunPrepareError::execution(anyhow!("session_route_missing")))?;
     let runtime_provider_name =
         crate::provider_connections::validate_persisted_model_route(&root_config, &session_route)
             .map_err(ApplicationRunPrepareError::configuration)?;
+    if let Some((selected_provider_name, _)) = selected_model.as_ref()
+        && selected_provider_name != &runtime_provider_name
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "selected provider identity does not match its exact route".to_owned(),
+        });
+    }
     let mut identity_config = root_config.clone();
-    identity_config.agent.runtime_provider = runtime_provider_name;
+    identity_config.agent.runtime_provider = runtime_provider_name.clone();
+    identity_config.agent.connection = Some(session_route.model_ref.connection_id.clone());
     identity_config.agent.model = session_route.model_ref.model_id.clone();
-    admit_application_reasoning_effort(&request, &identity_config)?;
+    admit_application_reasoning_effort(
+        &request,
+        &runtime_provider_name,
+        &session_route.model_ref.model_id,
+    )?;
+    root_config.agent.runtime_provider = runtime_provider_name;
+    root_config.agent.connection = Some(session_route.model_ref.connection_id.clone());
+    root_config.agent.model = session_route.model_ref.model_id.clone();
     if request.skill_binding.is_some() && request.agent_binding.is_some() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "a run cannot invoke an inline skill and an agent profile together".to_owned(),
         });
+    }
+    if let Some((provider_name, selected_route)) = selected_model {
+        session
+            .select_model_route(provider_name, selected_route)
+            .map_err(ApplicationRunPrepareError::execution)?;
     }
     let loaded_skill =
         admit_application_skill_binding(&request, &root_config, &workspace_root, &mut session)?;
@@ -3497,7 +3615,8 @@ fn admit_application_agent_binding(
 
 fn admit_application_reasoning_effort(
     request: &ApplicationRunRequest,
-    root_config: &RootConfig,
+    provider_name: &str,
+    model_name: &str,
 ) -> std::result::Result<(), ApplicationRunPrepareError> {
     match (
         request.reasoning_effort.as_ref(),
@@ -3512,21 +3631,9 @@ fn admit_application_reasoning_effort(
         }
         (Some(_), Some(_)) => {}
     }
-    let (provider_name, route) =
-        crate::provider_connections::resolve_default_model_route(root_config).map_err(|error| {
-            ApplicationRunPrepareError::InvalidInvocation {
-                message: format!("default model route is unavailable: {error}"),
-            }
-        })?;
-    let supported = crate::reasoning_effort::supported_reasoning_efforts(
-        &provider_name,
-        &route.model_ref.model_id,
-    );
-    let expected_binding = crate::reasoning_effort::reasoning_effort_binding(
-        &provider_name,
-        &route.model_ref.model_id,
-        &supported,
-    );
+    let supported = crate::reasoning_effort::supported_reasoning_efforts(provider_name, model_name);
+    let expected_binding =
+        crate::reasoning_effort::reasoning_effort_binding(provider_name, model_name, &supported);
     if expected_binding.as_deref() != request.reasoning_effort_binding.as_deref() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "reasoning effort capability binding is stale".to_owned(),
@@ -3549,84 +3656,78 @@ fn admit_application_model_selection(
     root_config: &RootConfig,
     session: &Session,
     cache_root: &Path,
-) -> std::result::Result<(), ApplicationRunPrepareError> {
+) -> std::result::Result<Option<(String, ResolvedModelRoute)>, ApplicationRunPrepareError> {
     match (
         request.model_connection_id.as_ref(),
         request.model_name.as_deref(),
         request.model_selection_binding.as_deref(),
     ) {
         (Some(connection_id), Some(model_name), None) => {
-            let route = session.resolved_model_route().ok_or_else(|| {
-                ApplicationRunPrepareError::execution(anyhow!("session_route_missing"))
+            let model_ref = ModelRef::new(connection_id.clone(), model_name).map_err(|error| {
+                ApplicationRunPrepareError::InvalidInvocation {
+                    message: error.to_string(),
+                }
             })?;
-            if &route.model_ref.connection_id != connection_id
-                || route.model_ref.model_id != model_name
-            {
+            if !application_model_ref_is_selectable(root_config, &model_ref, cache_root) {
                 return Err(ApplicationRunPrepareError::InvalidInvocation {
-                    message:
-                        "explicit connection/model route requires binding a fresh exact session"
-                            .to_owned(),
+                    message: format!(
+                        "model {}/{} is not admitted by the exact connection catalog",
+                        model_ref.connection_id, model_ref.model_id
+                    ),
                 });
             }
-            return Ok(());
+            let selected =
+                crate::provider_connections::resolve_model_route(root_config, &model_ref)
+                    .map_err(ApplicationRunPrepareError::configuration)?;
+            Ok(Some(selected))
         }
-        (Some(_), None, _) | (None, Some(_), None) | (Some(_), Some(_), Some(_)) => {
-            return Err(ApplicationRunPrepareError::InvalidInvocation {
-                message:
-                    "connection and model must be supplied together without a UI capability binding"
-                        .to_owned(),
-            });
-        }
-        (None, None, None) => return Ok(()),
-        (None, _, _) => {}
-    }
-    let (requested_model, binding) = match (
-        request.model_name.as_deref(),
-        request.model_selection_binding.as_deref(),
-    ) {
-        (None, None) => return Ok(()),
-        (None, Some(_)) | (Some(_), None) => {
-            return Err(ApplicationRunPrepareError::InvalidInvocation {
-                message: "model selection and capability binding must be supplied together"
-                    .to_owned(),
-            });
-        }
-        (Some(model), Some(binding)) => (model, binding),
-    };
-    let requested_model =
-        crate::normalize_provider_model_alias(session.provider_name(), requested_model)
-            .ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
-                message: "application run model must not be empty".to_owned(),
+        (None, None, None) => Ok(None),
+        (Some(connection_id), Some(model_name), Some(binding)) => {
+            let current_route = session.resolved_model_route().ok_or_else(|| {
+                ApplicationRunPrepareError::execution(anyhow!("session_route_missing"))
             })?;
-    let route = session
-        .resolved_model_route()
-        .ok_or_else(|| ApplicationRunPrepareError::execution(anyhow!("session_route_missing")))?;
-    let catalog_entries =
-        application_model_catalog_entries(root_config, &route.model_ref, cache_root);
-    let available_models = application_model_option_views(root_config, catalog_entries);
-    let expected_binding = application_model_selection_binding(&route.model_ref, &available_models);
-    if binding != expected_binding {
-        return Err(ApplicationRunPrepareError::InvalidInvocation {
-            message: "model selection capability binding is stale".to_owned(),
-        });
+            let catalog_entries = application_model_catalog_entries(
+                root_config,
+                &current_route.model_ref,
+                cache_root,
+            );
+            let available_models = application_model_option_views(root_config, catalog_entries);
+            let expected_binding =
+                application_model_selection_binding(&current_route.model_ref, &available_models);
+            if binding != expected_binding {
+                return Err(ApplicationRunPrepareError::InvalidInvocation {
+                    message: "model selection capability binding is stale".to_owned(),
+                });
+            }
+            let model_ref = ModelRef::new(connection_id.clone(), model_name).map_err(|error| {
+                ApplicationRunPrepareError::InvalidInvocation {
+                    message: error.to_string(),
+                }
+            })?;
+            if !available_models.iter().any(|option| {
+                option.model_ref == model_ref
+                    && option.availability
+                        != crate::provider_connections::ModelAvailability::ConfiguredUnavailable
+            }) {
+                return Err(ApplicationRunPrepareError::InvalidInvocation {
+                    message: format!(
+                        "model {}/{} is not available for the configured provider connection",
+                        model_ref.connection_id, model_ref.model_id
+                    ),
+                });
+            }
+            let selected =
+                crate::provider_connections::resolve_model_route(root_config, &model_ref)
+                    .map_err(ApplicationRunPrepareError::configuration)?;
+            Ok(Some(selected))
+        }
+        (Some(_), None, _) | (None, Some(_), _) | (None, None, Some(_)) => {
+            Err(ApplicationRunPrepareError::InvalidInvocation {
+                message: "connection, model, and capability binding must be supplied together"
+                    .to_owned(),
+            })
+        }
     }
-    if !available_models.iter().any(|option| {
-        option.model_ref.connection_id == route.model_ref.connection_id
-            && option.model_ref.model_id == requested_model
-    }) {
-        return Err(ApplicationRunPrepareError::InvalidInvocation {
-            message: format!(
-                "model {requested_model} is not available for the configured provider"
-            ),
-        });
-    }
-    if requested_model != session.model_name() {
-        return Err(ApplicationRunPrepareError::InvalidInvocation {
-            message: "model switching requires binding a fresh session before preparing the run"
-                .to_owned(),
-        });
-    }
-    Ok(())
 }
 
 pub(crate) fn constrain_application_tool_registry(

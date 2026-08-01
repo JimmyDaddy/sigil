@@ -195,6 +195,13 @@ where
         .active_task_ids
         .into_iter()
         .collect();
+    state.session.terminal_lifecycle_generations = session
+        .terminal_task_projection()
+        .tasks
+        .into_iter()
+        .map(|(task_id, summary)| (task_id, summary.generation))
+        .collect();
+    state.session.terminal_task_control_identities.clear();
     state.session.detached_durable_controls.clear();
     if !same_logical_session {
         state.session.exact_prompts.clear();

@@ -1,11 +1,17 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    NetworkEffect, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject,
-    ToolSubjectKind, ToolSubjectScope, infer_tool_operation,
+    ExecutionContainmentRequest, NetworkEffect, ToolAccess, ToolAnalysisReason,
+    ToolAnalysisReasonCode, ToolAnalysisStatus, ToolApprovalSessionGrantUnavailableReasonCode,
+    ToolCategory, ToolPermissionEffect, ToolPermissionPlanV2, ToolPermissionSummary,
+    ToolPreviewCapability, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope, infer_tool_operation,
 };
 
 use super::{
@@ -15,7 +21,7 @@ use super::{
     PermissionPolicyChain, PermissionRisk, PermissionRule, ToolOperation,
     classify_path_trust_analysis, classify_path_trust_analysis_with_context,
     classify_path_trust_zone, classify_path_trust_zone_with_context,
-    tool_approval_session_grant_available,
+    tool_approval_session_grant_availability_for_plan, tool_approval_session_grant_available,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -96,6 +102,15 @@ fn path_subject(path: &str) -> ToolSubject {
 }
 
 fn external_path_subject(path: PathBuf) -> ToolSubject {
+    ToolSubject::path_with_scope(
+        path.display().to_string(),
+        path.display().to_string(),
+        Some(path),
+        ToolSubjectScope::External,
+    )
+}
+
+fn external_canonical_path_subject(path: PathBuf) -> ToolSubject {
     ToolSubject::path_with_scope(
         path.display().to_string(),
         path.display().to_string(),
@@ -406,7 +421,7 @@ fn auto_edit_allows_file_edits_readonly_shell_and_network_policy_allow() -> Resu
 }
 
 #[test]
-fn danger_full_access_bypasses_normal_protected_path_overlay() -> Result<()> {
+fn danger_full_access_cannot_bypass_protected_path_circuit_breaker() -> Result<()> {
     let config = PermissionConfig {
         mode: PermissionMode::DangerFullAccess,
         ..PermissionConfig::default()
@@ -418,7 +433,169 @@ fn danger_full_access_bypasses_normal_protected_path_overlay() -> Result<()> {
     )?;
 
     assert_eq!(decision.risk, PermissionRisk::Protected);
-    assert_eq!(decision.mode, ApprovalMode::Allow);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn critical_path_circuit_breaker_denies_root_home_and_system_mutations() -> Result<()> {
+    let config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new(&config);
+    let root = std::fs::canonicalize(std::path::MAIN_SEPARATOR.to_string())?;
+    let home = std::fs::canonicalize(super::home_dir()?)?.join("sigil-hard-safety-target");
+    let system = super::platform_critical_system_roots()
+        .iter()
+        .next()
+        .cloned()
+        .expect("supported test platforms have critical system roots")
+        .join("sigil-hard-safety-target");
+
+    for (label, access, operation, subject) in [
+        (
+            "root",
+            ToolAccess::Execute,
+            ToolOperation::ExecuteDestructiveCommand,
+            external_canonical_path_subject(root),
+        ),
+        (
+            "home",
+            ToolAccess::Write,
+            ToolOperation::RecursiveDelete,
+            external_canonical_path_subject(home),
+        ),
+        (
+            "system",
+            ToolAccess::Write,
+            ToolOperation::EditFile,
+            external_canonical_path_subject(system.clone()),
+        ),
+        (
+            "system-unknown",
+            ToolAccess::Execute,
+            ToolOperation::ExecuteUnknownCommand,
+            external_canonical_path_subject(system),
+        ),
+    ] {
+        let decision = policy.decide_with_operation_and_default(
+            &spec(access),
+            "bash",
+            access,
+            operation,
+            vec![subject],
+            Some(ApprovalMode::Allow),
+        )?;
+        assert_eq!(decision.risk, PermissionRisk::Protected, "{label}");
+        assert_eq!(decision.mode, ApprovalMode::Deny, "{label}");
+        assert!(!decision.external_directory_required, "{label}");
+        assert!(!tool_approval_session_grant_available(&decision), "{label}");
+        assert!(decision.reasons.iter().any(|reason| {
+            reason.source == super::PermissionDecisionSource::HardSafety
+                && reason.code == "critical_path_circuit_breaker"
+        }));
+        let mut approval_override = decision;
+        approval_override.request_external_directory_interactive_approval();
+        assert_eq!(approval_override.mode, ApprovalMode::Deny, "{label}");
+    }
+    Ok(())
+}
+
+#[test]
+fn critical_path_circuit_breaker_preserves_read_only_access_and_workspace_operations() -> Result<()>
+{
+    let home = std::fs::canonicalize(super::home_dir()?)?;
+    let system = super::platform_critical_system_roots()
+        .iter()
+        .next()
+        .cloned()
+        .expect("supported test platforms have critical system roots");
+    for path in [
+        std::fs::canonicalize(std::path::MAIN_SEPARATOR.to_string())?,
+        home.clone(),
+        system,
+    ] {
+        let decision = super::PermissionDecision::new_with_operation(
+            ApprovalMode::Allow,
+            ToolOperation::Read,
+            ToolAccess::Read,
+            vec![external_canonical_path_subject(path)],
+            false,
+        );
+        assert_eq!(decision.mode, ApprovalMode::Allow);
+        assert_ne!(decision.risk, PermissionRisk::Protected);
+    }
+
+    let workspace_path = home.join("workspace/src/main.rs");
+    let workspace_subject = ToolSubject::path_with_scope(
+        "src/main.rs",
+        "src/main.rs",
+        Some(workspace_path),
+        ToolSubjectScope::Workspace,
+    );
+    let edit = super::PermissionDecision::new_with_operation(
+        ApprovalMode::Allow,
+        ToolOperation::EditFile,
+        ToolAccess::Write,
+        vec![workspace_subject.clone()],
+        false,
+    );
+    let delete = super::PermissionDecision::new_with_operation(
+        ApprovalMode::Allow,
+        ToolOperation::DeleteFile,
+        ToolAccess::Write,
+        vec![workspace_subject],
+        false,
+    );
+    assert_eq!(edit.mode, ApprovalMode::Allow);
+    assert_eq!(edit.risk, PermissionRisk::Medium);
+    assert_eq!(delete.mode, ApprovalMode::Ask);
+    assert_eq!(delete.risk, PermissionRisk::Destructive);
+
+    let external_home_edit = super::PermissionDecision::new_with_operation(
+        ApprovalMode::Allow,
+        ToolOperation::EditFile,
+        ToolAccess::Write,
+        vec![external_canonical_path_subject(
+            home.join("Documents/note.txt"),
+        )],
+        false,
+    );
+    assert_eq!(external_home_edit.mode, ApprovalMode::Allow);
+    assert_eq!(external_home_edit.risk, PermissionRisk::Medium);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn critical_path_circuit_breaker_uses_symlink_resolved_canonical_subject() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let link = temp.path().join("home-link");
+    symlink(super::home_dir()?, &link)?;
+    let subject = ToolSubject::path_with_scope(
+        link.display().to_string(),
+        link.display().to_string(),
+        Some(link.canonicalize()?),
+        ToolSubjectScope::External,
+    );
+    let decision = super::PermissionDecision::new_with_policy_mode_operation_zones_and_overlays(
+        PermissionMode::DangerFullAccess,
+        ApprovalMode::Allow,
+        ToolOperation::RecursiveDelete,
+        ToolAccess::Write,
+        vec![subject],
+        vec![PathTrustZone::External],
+        Vec::new(),
+        false,
+    );
+
+    assert_eq!(decision.risk, PermissionRisk::Protected);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert!(!tool_approval_session_grant_available(&decision));
     Ok(())
 }
 
@@ -718,6 +895,34 @@ fn terminal_input_cannot_be_auto_allowed_by_execute_allow() -> Result<()> {
     assert_eq!(decision.operation, ToolOperation::SendTerminalInput);
     assert_eq!(decision.risk, PermissionRisk::High);
     assert_eq!(decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn terminal_management_respects_explicit_allow_without_input_overlay() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([
+            ("terminal_resize".to_owned(), ApprovalMode::Allow),
+            ("terminal_cancel".to_owned(), ApprovalMode::Allow),
+        ]),
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new(&config);
+
+    for (tool_name, operation) in [
+        ("terminal_resize", ToolOperation::ResizeTerminalTask),
+        ("terminal_cancel", ToolOperation::CancelTerminalTask),
+    ] {
+        let decision = policy.decide(
+            &spec(ToolAccess::Execute),
+            tool_name,
+            vec![ToolSubject::command("terminal_task:task-1", tool_name)],
+        )?;
+
+        assert_eq!(decision.operation, operation);
+        assert_eq!(decision.risk, PermissionRisk::Medium);
+        assert_eq!(decision.mode, ApprovalMode::Allow);
+    }
     Ok(())
 }
 
@@ -1157,6 +1362,93 @@ fn session_grant_availability_requires_stable_low_or_medium_risk_scope() -> Resu
 }
 
 #[test]
+fn session_grant_availability_reports_one_typed_reason_or_none() {
+    let decision = super::PermissionDecision::new(
+        ApprovalMode::Ask,
+        "read_file",
+        ToolAccess::Read,
+        vec![path_subject("src/main.rs")],
+        false,
+    );
+    let mut plan = ToolPermissionPlanV2 {
+        schema_version: crate::TOOL_PERMISSION_PLAN_SCHEMA_VERSION,
+        tool_name: "read_file".to_owned(),
+        access: ToolAccess::Read,
+        operation: ToolOperation::Read,
+        effects: BTreeSet::from([ToolPermissionEffect::FileRead]),
+        subjects: decision.subjects.clone(),
+        analysis: ToolAnalysisStatus::Complete,
+        containment: ExecutionContainmentRequest::default(),
+        semantic_scope: Some(ToolSemanticScope::new("file_read", 1)),
+        tool_default_mode: None,
+        analysis_bindings: BTreeMap::from([
+            ("execution_backend".to_owned(), "local".to_owned()),
+            ("execution_profile".to_owned(), "workspace".to_owned()),
+            ("environment_binding".to_owned(), "default".to_owned()),
+        ]),
+        plan_hash: "sha256:test".to_owned(),
+        safe_summary: ToolPermissionSummary::default(),
+    };
+    let available = tool_approval_session_grant_availability_for_plan(&decision, &plan);
+    assert!(available.is_available());
+    assert_eq!(available.unavailable_reason(), None);
+
+    plan.analysis = ToolAnalysisStatus::Conservative {
+        reasons: vec![ToolAnalysisReason::new(
+            ToolAnalysisReasonCode::UnprovenContainment,
+            Option::<String>::None,
+        )],
+    };
+    let unavailable = tool_approval_session_grant_availability_for_plan(&decision, &plan);
+    assert!(!unavailable.is_available());
+    assert_eq!(
+        unavailable.unavailable_reason().map(|reason| reason.code),
+        Some(ToolApprovalSessionGrantUnavailableReasonCode::AnalysisIncomplete)
+    );
+
+    plan.analysis = ToolAnalysisStatus::Complete;
+    plan.semantic_scope = None;
+    assert_eq!(
+        tool_approval_session_grant_availability_for_plan(&decision, &plan)
+            .unavailable_reason()
+            .map(|reason| reason.code),
+        Some(ToolApprovalSessionGrantUnavailableReasonCode::SemanticScopeUnavailable)
+    );
+
+    plan.semantic_scope = Some(ToolSemanticScope::new("file_read", 1));
+    plan.effects.insert(ToolPermissionEffect::CredentialAccess);
+    assert_eq!(
+        tool_approval_session_grant_availability_for_plan(&decision, &plan)
+            .unavailable_reason()
+            .map(|reason| reason.code),
+        Some(ToolApprovalSessionGrantUnavailableReasonCode::NonGrantableEffect)
+    );
+
+    plan.effects.remove(&ToolPermissionEffect::CredentialAccess);
+    plan.analysis_bindings.clear();
+    assert_eq!(
+        tool_approval_session_grant_availability_for_plan(&decision, &plan)
+            .unavailable_reason()
+            .map(|reason| reason.code),
+        Some(ToolApprovalSessionGrantUnavailableReasonCode::ContainmentBindingUnavailable)
+    );
+
+    plan.analysis_bindings = BTreeMap::from([
+        ("execution_backend".to_owned(), "local".to_owned()),
+        ("execution_profile".to_owned(), "workspace".to_owned()),
+        ("environment_binding".to_owned(), "default".to_owned()),
+    ]);
+    let mut confirmation_decision = decision;
+    confirmation_decision.confirmation = Some(PermissionConfirmation::Standard);
+    assert_eq!(
+        tool_approval_session_grant_availability_for_plan(&confirmation_decision, &plan)
+            .unavailable_reason()
+            .map(|reason| reason.code),
+        Some(ToolApprovalSessionGrantUnavailableReasonCode::ConfirmationRequired)
+    );
+}
+
+#[test]
 fn workspace_config_secret_write_is_protected_and_not_session_grantable() -> Result<()> {
     let decision = PermissionPolicy::new(&PermissionConfig::default()).decide(
         &spec(ToolAccess::Write),
@@ -1199,7 +1491,7 @@ fn sensitive_named_doc_write_is_protected_by_overlay() -> Result<()> {
 }
 
 #[test]
-fn session_grant_availability_allows_exact_high_risk_commands_only() -> Result<()> {
+fn session_grant_availability_rejects_unknown_high_risk_commands() -> Result<()> {
     let exact_command = PermissionPolicy::new(&PermissionConfig::default()).decide(
         &spec(ToolAccess::Execute),
         "bash",
@@ -1210,7 +1502,7 @@ fn session_grant_availability_allows_exact_high_risk_commands_only() -> Result<(
         ToolOperation::ExecuteUnknownCommand
     );
     assert_eq!(exact_command.risk, PermissionRisk::High);
-    assert!(tool_approval_session_grant_available(&exact_command));
+    assert!(!tool_approval_session_grant_available(&exact_command));
 
     let truncated_command = PermissionPolicy::new(&PermissionConfig::default()).decide(
         &spec(ToolAccess::Execute),

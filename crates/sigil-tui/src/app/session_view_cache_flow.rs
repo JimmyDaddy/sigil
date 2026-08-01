@@ -187,14 +187,6 @@ impl AppState {
         }
     }
 
-    pub(in crate::app) fn mark_current_session_entries_changed(&mut self) {
-        self.session_browser.current_entries_revision = self
-            .session_browser
-            .current_entries_revision
-            .saturating_add(1);
-        self.refresh_session_view_cache();
-    }
-
     pub(in crate::app) fn mark_current_session_entries_changed_live(&mut self) {
         let session_review_lines = self
             .session_browser

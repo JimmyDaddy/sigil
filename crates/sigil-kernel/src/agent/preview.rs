@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
+    ApprovalRequestIdentityV2, ToolPermissionPlanV2,
     event::{EventHandler, RunEvent},
     permission::{ApprovalMode, PermissionDecision},
     provider::ToolCall,
@@ -55,6 +56,7 @@ pub(super) fn preparation_policy_fingerprint(decision: &PermissionDecision) -> R
 pub(super) fn approval_permission_signature(
     call: &ToolCall,
     spec: &ToolSpec,
+    plan_hash: &str,
     policy_fingerprint: &str,
     preview_hash: Option<&str>,
 ) -> Result<String> {
@@ -64,6 +66,7 @@ pub(super) fn approval_permission_signature(
         "raw_args": call.args_json,
         "access": spec.access,
         "declared_network_effect": spec.network_effect,
+        "plan_hash": plan_hash,
         "policy_fingerprint": policy_fingerprint,
         "preview_hash": preview_hash,
     }))
@@ -128,6 +131,8 @@ pub(super) async fn capture_tool_preview_for_decision<H>(
     call: &ToolCall,
     spec: &ToolSpec,
     decision: &PermissionDecision,
+    approval_identity: Option<&ApprovalRequestIdentityV2>,
+    permission_plan: &ToolPermissionPlanV2,
     prepared: Option<PreparedToolCall>,
 ) -> Result<ToolPreviewCapture>
 where
@@ -168,14 +173,17 @@ where
         }
     };
 
-    if let Some(error) = preview_error.as_ref() {
+    if let (Some(error), Some(approval_identity)) = (preview_error.as_ref(), approval_identity) {
         append_tool_approval_audit(
             session,
             call,
             decision,
+            approval_identity,
+            permission_plan,
             ToolApprovalAuditAction::PreviewFailed,
             None,
             Some(error.clone()),
+            None,
             None,
         )?;
     }

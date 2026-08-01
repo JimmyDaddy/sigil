@@ -1,5 +1,10 @@
 use super::*;
 
+const TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_BYTES: u64 = 64 * 1024;
+const TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_INTERVAL_MS: u64 = 250;
+pub(super) const TERMINAL_LIFECYCLE_ROUTE_MAX_ATTEMPTS: usize = 3;
+const TERMINAL_LIFECYCLE_ROUTE_RETRY_DELAYS_MS: [u64; 2] = [25, 100];
+
 #[derive(Clone)]
 pub struct TerminalProcessManager {
     workspace_root: PathBuf,
@@ -103,9 +108,39 @@ impl TerminalProcessManager {
     /// Returns an error when the command is empty, cwd escapes the workspace, artifacts cannot be
     /// created, the task id already exists, or process spawn fails.
     pub async fn start(&self, request: TerminalStartRequest) -> Result<TerminalTaskEntry> {
+        self.start_with_readiness(request, TerminalReadinessCondition::None)
+            .await
+    }
+
+    /// Starts one non-PTY background process with an optional output readiness condition.
+    pub async fn start_with_readiness(
+        &self,
+        request: TerminalStartRequest,
+        readiness: TerminalReadinessCondition,
+    ) -> Result<TerminalTaskEntry> {
+        self.start_with_readiness_and_sink(request, readiness, None)
+            .await
+    }
+
+    /// Starts one non-PTY task and binds owner lifecycle changes to a run-scoped sink.
+    pub async fn start_with_readiness_and_sink(
+        &self,
+        request: TerminalStartRequest,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
         let plan = self
             .prepare_start(request, TerminalStartMode::LocalProcess)
             .await?;
+        // The lifecycle owner and its watch channel exist before the child can emit or exit.
+        let lifecycle = TerminalLifecycleOwner::new(
+            plan.task_id.clone(),
+            plan.initial_entry.handle.execution_backend,
+            plan.initial_entry.handle.sandbox_profile,
+            &readiness,
+        )?;
+        let lifecycle_route_baseline = lifecycle.snapshot();
+        let lifecycle_route_receiver = lifecycle.subscribe();
 
         let mut command_process = Command::new(&plan.shell);
         command_process
@@ -131,11 +166,12 @@ impl TerminalProcessManager {
                 );
             }
         };
+        lifecycle.mark_running();
         let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(
             open_append_file(&plan.artifacts.absolute_output).await?,
             self.artifact_limits.combined_bytes,
         )));
-        let capture_ledger = Arc::new(TerminalCaptureLedger::default());
+        let capture_ledger = Arc::new(TerminalCaptureLedger::with_lifecycle(lifecycle.clone()));
         let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
         let stdout_task = spawn_capture_task(
             child.stdout.take(),
@@ -159,13 +195,24 @@ impl TerminalProcessManager {
         let (cancel_tx, cancel_rx) = mpsc::channel(1);
         let managed = ManagedTerminalTask {
             summary: Arc::clone(&summary),
+            lifecycle: lifecycle.clone(),
             control: TerminalTaskControl::Process { cancel_tx },
+            lifecycle_route_abort: None,
         };
 
         self.tasks
             .lock()
             .await
             .insert(plan.task_id.clone(), managed);
+        self.attach_lifecycle_route(
+            &plan.task_id,
+            Arc::clone(&summary),
+            lifecycle.clone(),
+            lifecycle_route_receiver,
+            lifecycle_route_baseline,
+            lifecycle_sink,
+        )
+        .await?;
         self.record_permission_context(&plan)?;
         tokio::spawn(run_terminal_worker(TerminalWorker {
             _process_owner: process_owner,
@@ -180,6 +227,7 @@ impl TerminalProcessManager {
             cancel_rx,
             preview_limit_bytes: self.preview_limit_bytes,
             cancel_grace: self.cancel_grace,
+            lifecycle,
         }));
 
         Ok(plan.initial_entry)
@@ -196,12 +244,49 @@ impl TerminalProcessManager {
         request: TerminalStartRequest,
         pty_size: Option<TerminalPtySize>,
     ) -> Result<TerminalTaskEntry> {
+        self.start_pty_with_readiness(request, pty_size, TerminalReadinessCondition::None)
+            .await
+    }
+
+    /// Starts one PTY-backed task with an optional output readiness condition.
+    pub async fn start_pty_with_readiness(
+        &self,
+        request: TerminalStartRequest,
+        pty_size: Option<TerminalPtySize>,
+        readiness: TerminalReadinessCondition,
+    ) -> Result<TerminalTaskEntry> {
+        self.start_pty_with_readiness_and_sink(request, pty_size, readiness, None)
+            .await
+    }
+
+    /// Starts one PTY task and binds owner lifecycle changes to a run-scoped sink.
+    pub async fn start_pty_with_readiness_and_sink(
+        &self,
+        request: TerminalStartRequest,
+        pty_size: Option<TerminalPtySize>,
+        readiness: TerminalReadinessCondition,
+        lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<TerminalTaskEntry> {
         let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
-        let pty_runtime =
-            spawn_pty_runtime(&plan, pty_size.unwrap_or_default(), self.artifact_limits)?;
+        // Construct the observer before the PTY child can emit or exit.
+        let lifecycle = TerminalLifecycleOwner::new(
+            plan.task_id.clone(),
+            plan.initial_entry.handle.execution_backend,
+            plan.initial_entry.handle.sandbox_profile,
+            &readiness,
+        )?;
+        let lifecycle_route_baseline = lifecycle.snapshot();
+        let lifecycle_route_receiver = lifecycle.subscribe();
+        let pty_runtime = spawn_pty_runtime(
+            &plan,
+            pty_size.unwrap_or_default(),
+            self.artifact_limits,
+            lifecycle.clone(),
+        )?;
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let managed = ManagedTerminalTask {
             summary: Arc::clone(&summary),
+            lifecycle: lifecycle.clone(),
             control: TerminalTaskControl::Pty {
                 io_control: Arc::clone(&pty_runtime.io_control),
                 killer: Arc::clone(&pty_runtime.killer),
@@ -212,12 +297,22 @@ impl TerminalProcessManager {
                 artifacts: Arc::new(plan.artifacts.clone()),
                 preview_limit_bytes: self.preview_limit_bytes,
             },
+            lifecycle_route_abort: None,
         };
 
         self.tasks
             .lock()
             .await
             .insert(plan.task_id.clone(), managed);
+        self.attach_lifecycle_route(
+            &plan.task_id,
+            Arc::clone(&summary),
+            lifecycle.clone(),
+            lifecycle_route_receiver,
+            lifecycle_route_baseline,
+            lifecycle_sink,
+        )
+        .await?;
         self.record_permission_context(&plan)?;
         tokio::spawn(run_pty_worker(PtyWorker {
             _process_owner: pty_runtime.process_owner,
@@ -233,6 +328,7 @@ impl TerminalProcessManager {
             child_exit_rx: pty_runtime.child_exit_rx,
             preview_limit_bytes: self.preview_limit_bytes,
             cancel_grace: self.cancel_grace,
+            lifecycle,
         }));
 
         Ok(plan.initial_entry)
@@ -244,8 +340,217 @@ impl TerminalProcessManager {
     ///
     /// Returns an error when `task_id` is not managed by this process manager.
     pub async fn status(&self, task_id: &TerminalTaskId) -> Result<TerminalTaskEntry> {
+        Ok(self.snapshot(task_id).await?.entry)
+    }
+
+    /// Returns the exact current live owner snapshot.
+    pub async fn snapshot(&self, task_id: &TerminalTaskId) -> Result<TerminalTaskSnapshot> {
         let task = self.managed_task(task_id).await?;
-        Ok(task.summary.lock().await.clone())
+        let lifecycle = task.lifecycle.snapshot();
+        let mut entry = task.summary.lock().await.clone();
+        entry.schema_version = sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION;
+        entry.generation = lifecycle.generation;
+        entry.status = lifecycle.status;
+        entry.readiness = lifecycle.readiness.clone();
+        entry.output_total_bytes = entry.output_total_bytes.max(lifecycle.total_output_bytes);
+        entry.updated_at_ms = entry.updated_at_ms.max(lifecycle.emitted_at_ms);
+        Ok(TerminalTaskSnapshot {
+            entry,
+            generation: lifecycle.generation,
+            readiness: lifecycle.readiness,
+        })
+    }
+
+    /// Subscribes to bounded owner lifecycle wakes for runtime adapters.
+    pub async fn subscribe(
+        &self,
+        task_id: &TerminalTaskId,
+    ) -> Result<watch::Receiver<TerminalLifecycleEvent>> {
+        let task = self.managed_task(task_id).await?;
+        Ok(task.lifecycle.subscribe())
+    }
+
+    /// Waits on the task owner's lifecycle generation without a polling cadence.
+    pub async fn wait(
+        &self,
+        task_id: &TerminalTaskId,
+        after_generation: u64,
+        condition: TerminalWaitCondition,
+        max_wait: Duration,
+    ) -> Result<TerminalWaitResult> {
+        let task = self.managed_task(task_id).await?;
+        let outcome = task
+            .lifecycle
+            .wait(after_generation, &condition, max_wait)
+            .await?;
+        let snapshot = self.snapshot(task_id).await?;
+        Ok(TerminalWaitResult { outcome, snapshot })
+    }
+
+    /// Marks a still-waiting readiness probe as timed out.
+    pub async fn mark_readiness_timed_out(&self, task_id: &TerminalTaskId) -> Result<()> {
+        let task = self.managed_task(task_id).await?;
+        task.lifecycle.mark_readiness_timed_out();
+        Ok(())
+    }
+
+    async fn attach_lifecycle_route(
+        &self,
+        task_id: &TerminalTaskId,
+        summary: Arc<Mutex<TerminalTaskEntry>>,
+        lifecycle: TerminalLifecycleOwner,
+        mut receiver: watch::Receiver<TerminalLifecycleEvent>,
+        mut last_published: TerminalLifecycleEvent,
+        sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    ) -> Result<()> {
+        let Some(sink) = sink else {
+            return Ok(());
+        };
+        let manager = self.clone();
+        let route_task_id = task_id.clone();
+        let route = tokio::spawn(async move {
+            loop {
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+                let event = receiver.borrow_and_update().clone();
+                if !should_publish_lifecycle_event(&last_published, &event) {
+                    continue;
+                }
+                let mut published_event = None;
+                let mut final_error = None;
+                for attempt in 0..TERMINAL_LIFECYCLE_ROUTE_MAX_ATTEMPTS {
+                    let update = lifecycle_update_for_event(&summary, &event).await;
+                    let result = match update {
+                        Ok(update) => {
+                            let projected_event = update.event.clone();
+                            match sink.publish(update).await {
+                                Ok(()) => {
+                                    published_event = Some(projected_event);
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    Err(error.context("terminal lifecycle sink publish failed"))
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            Err(error.context("terminal lifecycle durable projection failed"))
+                        }
+                    };
+                    if result.is_ok() {
+                        break;
+                    }
+                    final_error = result.err();
+                    if let Some(delay_ms) = TERMINAL_LIFECYCLE_ROUTE_RETRY_DELAYS_MS.get(attempt) {
+                        sleep(Duration::from_millis(*delay_ms)).await;
+                    }
+                }
+                let Some(event) = published_event else {
+                    let error = final_error.unwrap_or_else(|| {
+                        anyhow!("terminal lifecycle route failed without a diagnostic")
+                    });
+                    manager
+                        .fail_lifecycle_route(&route_task_id, &summary, &lifecycle, &error)
+                        .await;
+                    break;
+                };
+                let terminal = event.status.is_terminal();
+                last_published = event;
+                if terminal {
+                    break;
+                }
+            }
+        });
+        let abort = route.abort_handle();
+        drop(route);
+        let mut tasks = self.tasks.lock().await;
+        let managed = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow!("terminal task disappeared before lifecycle routing"))?;
+        managed.lifecycle_route_abort = Some(abort);
+        Ok(())
+    }
+
+    async fn fail_lifecycle_route(
+        &self,
+        task_id: &TerminalTaskId,
+        summary: &Arc<Mutex<TerminalTaskEntry>>,
+        lifecycle: &TerminalLifecycleOwner,
+        error: &anyhow::Error,
+    ) {
+        let diagnostic = format!("{error:#}");
+        let reason = format!(
+            "terminal_lifecycle_route_failed:sha256:{:x}",
+            Sha256::digest(diagnostic.as_bytes())
+        );
+        let cancellation = self.cancel(task_id).await;
+        for _ in 0..TERMINAL_LIFECYCLE_ROUTE_MAX_ATTEMPTS {
+            let total_output_bytes = summary.lock().await.output_total_bytes;
+            let event = lifecycle.prepare_terminal(
+                TerminalTaskStatus::Failed {
+                    reason: reason.clone(),
+                },
+                total_output_bytes,
+            );
+            let mut entry = summary.lock().await.clone();
+            entry.generation = event.generation;
+            entry.status = event.status.clone();
+            entry.readiness = event.readiness.clone();
+            entry.output_total_bytes = entry.output_total_bytes.max(event.total_output_bytes);
+            entry.updated_at_ms = entry.updated_at_ms.max(event.emitted_at_ms);
+            if let Err(error) = &cancellation {
+                entry.cleanup = Some(ExecutionCleanupReceipt::unknown(format!(
+                    "terminal_lifecycle_route_cleanup_unconfirmed:sha256:{:x}",
+                    Sha256::digest(error.to_string().as_bytes())
+                )));
+            }
+            let persisted = if let Ok(projected) = entry.durable_projection()
+                && let Ok(artifacts) = self.artifacts_for(task_id)
+            {
+                write_task_meta(&artifacts.absolute_meta, &projected)
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            if !persisted {
+                break;
+            }
+            let mut stored = summary.lock().await;
+            let previous = std::mem::replace(&mut *stored, entry);
+            if lifecycle.commit_prepared_terminal(event) {
+                return;
+            }
+            *stored = previous;
+        }
+
+        let total_output_bytes = summary.lock().await.output_total_bytes;
+        lifecycle.mark_terminal(
+            TerminalTaskStatus::Failed {
+                reason: reason.clone(),
+            },
+            total_output_bytes,
+        );
+        let event = lifecycle.snapshot();
+        let mut entry = summary.lock().await.clone();
+        entry.generation = event.generation;
+        entry.status = event.status;
+        entry.readiness = event.readiness;
+        entry.output_total_bytes = entry.output_total_bytes.max(event.total_output_bytes);
+        entry.updated_at_ms = entry.updated_at_ms.max(event.emitted_at_ms);
+        if let Err(error) = cancellation {
+            entry.cleanup = Some(ExecutionCleanupReceipt::unknown(format!(
+                "terminal_lifecycle_route_cleanup_unconfirmed:sha256:{:x}",
+                Sha256::digest(error.to_string().as_bytes())
+            )));
+        }
+        *summary.lock().await = entry.clone();
+        if let Ok(projected) = entry.durable_projection()
+            && let Ok(artifacts) = self.artifacts_for(task_id)
+        {
+            let _ = write_task_meta(&artifacts.absolute_meta, &projected).await;
+        }
     }
 
     /// Reads a bounded slice of the combined output log.
@@ -260,11 +565,18 @@ impl TerminalProcessManager {
         limit_bytes: usize,
     ) -> Result<TerminalReadResult> {
         let task = self.managed_task(task_id).await?;
-        let entry = task.summary.lock().await.clone();
-        let path = self.stored_artifact_path(&entry.handle.log_path)?;
+        let mut entry = task.summary.lock().await.clone();
+        let path = self.artifacts_for(task_id)?.absolute_output;
         let limit_bytes = limit_bytes.clamp(1, HARD_TERMINAL_READ_LIMIT_BYTES);
         let mut read =
             read_terminal_output_log(task_id.clone(), &path, offset, limit_bytes).await?;
+        let lifecycle = task.lifecycle.snapshot();
+        entry.status = lifecycle.status.clone();
+        entry.output_total_bytes = entry.output_total_bytes.max(lifecycle.total_output_bytes);
+        entry.updated_at_ms = entry.updated_at_ms.max(lifecycle.emitted_at_ms);
+        read.generation = lifecycle.generation;
+        read.readiness = lifecycle.readiness;
+        read.no_change = read.returned_bytes == 0;
         read.latest_entry = Some(entry);
         Ok(read)
     }
@@ -370,7 +682,7 @@ impl TerminalProcessManager {
     /// Returns an error when `task_id` is unknown or the cancel request cannot be sent.
     pub async fn cancel(&self, task_id: &TerminalTaskId) -> Result<TerminalTaskEntry> {
         let task = self.managed_task(task_id).await?;
-        let current = task.summary.lock().await.clone();
+        let current = self.snapshot(task_id).await?.entry;
         if current.status.is_terminal() {
             return Ok(current);
         }
@@ -385,9 +697,9 @@ impl TerminalProcessManager {
                         anyhow!("terminal task is no longer running: {}", task_id.as_str())
                     })?;
                 match response.await {
-                    Ok(entry) => Ok(entry),
+                    Ok(_) => Ok(self.snapshot(task_id).await?.entry),
                     Err(_) => {
-                        let entry = task.summary.lock().await.clone();
+                        let entry = self.snapshot(task_id).await?.entry;
                         if entry.status.is_terminal() {
                             Ok(entry)
                         } else {
@@ -410,7 +722,7 @@ impl TerminalProcessManager {
                 preview_limit_bytes,
                 ..
             } => {
-                cancel_pty_task(
+                let entry = cancel_pty_task(
                     &task.summary,
                     Arc::clone(killer),
                     Arc::clone(io_control),
@@ -421,7 +733,10 @@ impl TerminalProcessManager {
                     artifacts.clone(),
                     *preview_limit_bytes,
                 )
-                .await
+                .await?;
+                task.lifecycle
+                    .mark_terminal(entry.status, entry.output_total_bytes);
+                Ok(self.snapshot(task_id).await?.entry)
             }
         }
     }
@@ -479,6 +794,7 @@ impl TerminalProcessManager {
             .ok_or_else(|| anyhow!("unknown terminal task: {}", task_id.as_str()))
     }
 
+    #[cfg(test)]
     pub(super) fn stored_artifact_path(&self, relative_path: &Path) -> Result<PathBuf> {
         if relative_path.is_absolute() {
             bail!(
@@ -523,6 +839,7 @@ impl TerminalProcessManager {
                     command: plan.command.clone(),
                     cwd: plan.resolved_cwd.absolute.clone(),
                     shell: plan.shell.clone(),
+                    scratch_root: plan.env.get(SIGIL_SCRATCH_DIR_ENV).map(PathBuf::from),
                 },
             );
         Ok(())
@@ -573,10 +890,11 @@ impl TerminalProcessManager {
 
         let handle = TerminalTaskHandle {
             task_id: task_id.clone(),
-            command: command.clone(),
-            cwd: resolved_cwd.relative.clone(),
-            shell: shell_program.clone(),
-            log_path: artifacts.relative_output.clone(),
+            command_sha256: sigil_kernel::stable_event_hash(command.as_bytes()),
+            cwd_label: terminal_relative_label(&resolved_cwd.relative),
+            shell_label: terminal_shell_label(&shell_program),
+            shell_sha256: sigil_kernel::stable_event_hash(shell_program.as_bytes()),
+            log_ref: format!("terminal-log:{}", task_id.as_str()),
             created_at_ms,
             execution_backend: Some(execution.execution_backend),
             execution_backend_capabilities: Some(execution.execution_backend_capabilities),
@@ -585,8 +903,11 @@ impl TerminalProcessManager {
             sandbox_profile: Some(execution.sandbox_profile),
         };
         let initial_entry = TerminalTaskEntry {
+            schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
             handle: handle.clone(),
+            generation: 0,
             status: TerminalTaskStatus::Running,
+            readiness: TerminalReadinessStatus::None,
             output_preview: None,
             output_hash: None,
             output_truncated: false,
@@ -596,6 +917,7 @@ impl TerminalProcessManager {
             cleanup: None,
             updated_at_ms: created_at_ms,
         };
+        initial_entry.validate_durable()?;
         write_task_meta(&artifacts.absolute_meta, &initial_entry).await?;
 
         Ok(TerminalTaskStartPlan {
@@ -610,6 +932,63 @@ impl TerminalProcessManager {
             pty_command: execution.pty_command,
         })
     }
+}
+
+async fn lifecycle_update_for_event(
+    summary: &Arc<Mutex<TerminalTaskEntry>>,
+    event: &TerminalLifecycleEvent,
+) -> Result<sigil_kernel::TerminalLifecycleUpdateV2> {
+    let mut entry = summary.lock().await.clone();
+    entry.schema_version = sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION;
+    entry.generation = event.generation;
+    entry.status = event.status.clone();
+    entry.readiness = event.readiness.clone();
+    entry.output_total_bytes = entry.output_total_bytes.max(event.total_output_bytes);
+    entry.updated_at_ms = entry.updated_at_ms.max(event.emitted_at_ms);
+    let entry = entry.durable_projection()?;
+    let mut event = event.clone();
+    event.status = entry.status.clone();
+    event.readiness = entry.readiness.clone();
+    Ok(sigil_kernel::TerminalLifecycleUpdateV2 { event, task: entry })
+}
+
+fn terminal_relative_label(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        return ".".to_owned();
+    }
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn terminal_shell_label(shell_program: &str) -> String {
+    Path::new(shell_program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("shell")
+        .chars()
+        .take(sigil_kernel::MAX_TERMINAL_SHELL_LABEL_BYTES)
+        .collect()
+}
+
+pub(super) fn should_publish_lifecycle_event(
+    previous: &TerminalLifecycleEvent,
+    current: &TerminalLifecycleEvent,
+) -> bool {
+    if current.generation <= previous.generation {
+        return false;
+    }
+    if current.status != previous.status
+        || current.readiness != previous.readiness
+        || current.status.is_terminal()
+    {
+        return true;
+    }
+    current
+        .total_output_bytes
+        .saturating_sub(previous.total_output_bytes)
+        >= TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_BYTES
+        && current.emitted_at_ms.saturating_sub(previous.emitted_at_ms)
+            >= TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_INTERVAL_MS
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -654,7 +1033,9 @@ impl From<TerminalPtyExecution> for TerminalStartExecution {
 #[derive(Clone)]
 pub(super) struct ManagedTerminalTask {
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
+    pub(super) lifecycle: TerminalLifecycleOwner,
     pub(super) control: TerminalTaskControl,
+    pub(super) lifecycle_route_abort: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Clone)]

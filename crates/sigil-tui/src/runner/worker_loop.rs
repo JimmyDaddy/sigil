@@ -61,14 +61,16 @@ use super::{
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{
-        McpActivationStatus, McpOAuthUserAction, QueueMoveDirection,
-        ToolArtifactDisplayReadFailure, V2CompactionApplySource, WorkerApprovalCommand,
-        WorkerCommand, WorkerMessage,
+        McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
+        ToolArtifactDisplayReadFailure, V2CompactionApplySource, WORKER_COMMAND_PROTOCOL_VERSION,
+        WorkerApprovalCommand, WorkerApprovalCommandReceipt, WorkerApprovalDecision,
+        WorkerApprovalRouteState, WorkerCommand, WorkerMessage,
     },
     session_flow::{
         load_routed_session_with_runtime_attachments, load_session,
         load_session_with_runtime_attachments,
     },
+    terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
     worker_event::{
         WorkerActiveProjectionObserver, WorkerEvent, WorkerEventInbox, WorkerEventPayloadSender,
         WorkerReadiness, WorkerWakeCoalescer,
@@ -92,7 +94,7 @@ mod session_lifecycle_runtime;
 mod session_transition;
 mod state;
 mod task_runtime;
-mod terminal_refresh;
+mod terminal_control;
 
 pub(in crate::runner) use active_run::{
     ActiveRun, ActiveRunStopDisposition, RunTaskPayload, RunTaskResult,
@@ -173,8 +175,10 @@ pub(in crate::runner) use queue_driver::{
     QueuedConversationCandidatePreparation, prepare_next_queued_conversation_candidate,
     prepare_next_queued_conversation_pressure_admission, queue_conversation_input,
 };
+pub(in crate::runner) use scheduler::{
+    WorkerLoopTerminalRuntime, finish_idle_auto_compaction, run_worker_loop,
+};
 pub use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
-pub(in crate::runner) use scheduler::{finish_idle_auto_compaction, run_worker_loop};
 pub(in crate::runner) use session_lifecycle_runtime::{
     apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
     inspect_local_session, local_session_lifecycle_service,
@@ -197,8 +201,10 @@ pub(in crate::runner) use task_runtime::{
     skill_child_session_objective, skill_invocation_prompt, spawn_skill_child_run,
     spawn_task_continue, spawn_task_run,
 };
-pub(in crate::runner) use terminal_refresh::{
-    cancel_terminal_task, refresh_terminal_task_statuses,
+#[cfg(test)]
+pub(in crate::runner) use terminal_control::durable_terminal_tool_result_metadata;
+pub(in crate::runner) use terminal_control::{
+    cancel_terminal_task, terminal_start_execution_profile_for_task,
 };
 
 #[cfg(test)]
@@ -220,5 +226,4 @@ pub(in crate::runner) use task_runtime::{
     plan_handoff_workspace_snapshot_id, skill_child_agent_role,
 };
 
-const TERMINAL_TASK_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const MCP_REFRESH_RETRY_INTERVAL: Duration = Duration::from_millis(250);

@@ -42,6 +42,7 @@
 | **Desktop or terminal**<br>Use the surface that fits your workflow while keeping the same conversation, task, approval, and recovery semantics. | **Review before risk**<br>Inspect approvals and diffs before writes, commands, network access, or external integrations proceed. |
 | **Resumable sessions**<br>Return to saved work and recover interrupted tasks without silently rerunning an unfinished tool. | **Models and tools, your way**<br>Choose among supported providers, add MCP integrations, and enable repository-aware assistance when you need it. |
 | **Large outputs stay inspectable**<br>Sigil keeps bounded conversation views while preserving policy-safe tool output as session-scoped artifacts for precise, paged follow-up reads. | **Cache-stable context**<br>Historical tool output ages deterministically before semantic compaction, so long sessions shed token pressure without rewriting the active cached prefix. |
+| **Commands have one lifecycle**<br>Finite checks run in the foreground with live progress; persistent or interactive work uses explicit terminal tasks and event-driven waits. | **Approval matches real effects**<br>One immutable permission plan binds parsed commands, targets, containment, policy, approval, audit, and execution across Desktop and TUI. |
 
 ## Start in under a minute
 

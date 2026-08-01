@@ -18,8 +18,12 @@ use super::{
     elicitation_bridge::ChannelMcpElicitationHandler,
     mcp_event_bridge::ChannelMcpRuntimeEventHandler,
     protocol::{McpActivationStatus, WorkerCommandSender, WorkerMessage},
+    terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
     worker_event::WorkerMcpRuntimeEventSender,
-    worker_loop::{RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers, run_worker_loop},
+    worker_loop::{
+        RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers, WorkerLoopTerminalRuntime,
+        run_worker_loop,
+    },
 };
 
 pub fn spawn_agent_worker(
@@ -41,8 +45,8 @@ pub fn spawn_agent_worker(
                 return;
             };
 
-            let (_, route) = match initialize_worker_session_route(&root_config, &session_log_path)
-            {
+            let (_, route) =
+                match initialize_worker_session_route(&root_config, &session_log_path) {
                 Ok(route) => route,
                 Err(error) => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
@@ -82,14 +86,35 @@ pub fn spawn_agent_worker(
                         return;
                     }
                 };
-            let surface =
-                match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust(
+            let store = match JsonlSessionStore::new(&session_log_path) {
+                Ok(store) => store,
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            };
+            let recorder_session = Session::new("runtime", "eager-mcp").with_store(store.clone());
+            let egress_recorder = match recorder_session.egress_audit_recorder() {
+                Ok(recorder) => recorder,
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            };
+            let mutation_recorder = MutationEventRecorder::new(store);
+            let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
+            let terminal_lifecycle_factory: Arc<
+                dyn sigil_kernel::TerminalLifecycleSinkFactory,
+            > =
+                Arc::new(terminal_lifecycle_router.clone());
+            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory(
                     &root_config,
                     &provider_capabilities,
                     workspace_root.clone(),
                     elicitation_handler.clone(),
                     mcp_event_handler.clone(),
                     workspace_trust,
+                    terminal_lifecycle_factory,
                 ) {
                     Ok(surface) => surface,
                     Err(error) => {
@@ -97,6 +122,7 @@ pub fn spawn_agent_worker(
                         return;
                     }
                 };
+            let terminal_control = surface.terminal_control.clone();
             let mut registry = surface.registry;
             let context_resolver = surface.context_resolver;
             let disclosure_presenter: Arc<dyn EgressDisclosurePresenter> = Arc::new(
@@ -122,26 +148,6 @@ pub fn spawn_agent_worker(
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                 return;
             }
-            let (mutation_recorder, egress_recorder) =
-                match JsonlSessionStore::new(&session_log_path) {
-                    Ok(store) => {
-                        let recorder_session =
-                            Session::new("runtime", "eager-mcp").with_store(store.clone());
-                        let egress_recorder = match recorder_session.egress_audit_recorder() {
-                            Ok(recorder) => recorder,
-                            Err(error) => {
-                                let _ =
-                                    message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                                return;
-                            }
-                        };
-                        (MutationEventRecorder::new(store), egress_recorder)
-                    }
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                        return;
-                    }
-                };
             spawn_eager_mcp_startup_tasks(
                 &runtime,
                 registry.clone(),
@@ -161,7 +167,6 @@ pub fn spawn_agent_worker(
                 runtime,
                 agent,
                 root_config,
-                provider_capabilities,
                 workspace_root,
                 session_log_path,
                 options,
@@ -173,6 +178,10 @@ pub fn spawn_agent_worker(
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                     context_resolver,
                 },
+                WorkerLoopTerminalRuntime::new(
+                    terminal_lifecycle_router,
+                    Some(terminal_control),
+                ),
             );
         })
         .context("failed to spawn sigil agent worker")?;

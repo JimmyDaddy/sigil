@@ -1,7 +1,11 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Result, anyhow};
@@ -14,10 +18,9 @@ use crate::{
     CompactionConfig, CompletionRequest, MemoryConfig, MessageRole, NetworkEffect, NetworkPolicy,
     PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
     PlanPermissionGrantedEntry, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningStreamSupport, TaskId, Tool, ToolAccess, ToolApproval, ToolApprovalSessionGrantEntry,
-    ToolApprovalSessionGrantExpiry, ToolCategory, ToolContext, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
+    ReasoningStreamSupport, TaskId, Tool, ToolAccess, ToolApproval, ToolCategory, ToolContext,
+    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectScope,
 };
 
 fn spec(
@@ -112,145 +115,6 @@ fn plan_approval_does_not_override_network_ask_or_deny() -> Result<()> {
             }
         );
     }
-    Ok(())
-}
-
-fn command_subject_audit(command: &str) -> ToolSubjectAudit {
-    ToolSubjectAudit {
-        kind: ToolSubjectKind::Command,
-        original: command.to_owned(),
-        normalized: command.to_owned(),
-        canonical_path: None,
-        scope: ToolSubjectScope::Unknown,
-    }
-}
-
-fn network_endpoint(url: &str) -> ToolSubject {
-    ToolSubject {
-        kind: ToolSubjectKind::NetworkEndpoint,
-        original: url.to_owned(),
-        normalized: url.to_owned(),
-        canonical_path: None,
-        scope: ToolSubjectScope::External,
-    }
-}
-
-fn network_endpoint_audit(url: &str) -> ToolSubjectAudit {
-    ToolSubjectAudit {
-        kind: ToolSubjectKind::NetworkEndpoint,
-        original: url.to_owned(),
-        normalized: url.to_owned(),
-        canonical_path: None,
-        scope: ToolSubjectScope::External,
-    }
-}
-
-#[test]
-fn session_grant_requires_exact_network_effect_match() -> Result<()> {
-    let command = "cargo check";
-    let tool_spec = spec(
-        "bash",
-        ToolCategory::Shell,
-        ToolAccess::Execute,
-        Some(NetworkEffect::Unknown),
-        ToolPreviewCapability::None,
-    );
-    let decision = policy_decision(
-        crate::PermissionMode::Manual,
-        NetworkPolicy::Allow,
-        &tool_spec,
-        ToolOperation::ExecuteUnknownCommand,
-        vec![ToolSubject::command(command, command)],
-    )?;
-    assert_eq!(decision.mode, ApprovalMode::Ask);
-    assert!(crate::tool_approval_session_grant_available(&decision));
-
-    let mut session = Session::new("test", "test");
-    session.append_control(ControlEntry::ToolApprovalSessionGrant(
-        ToolApprovalSessionGrantEntry {
-            call_id: "older-call".to_owned(),
-            tool_name: "bash".to_owned(),
-            access: ToolAccess::Execute,
-            network_effect: Some(NetworkEffect::Read),
-            operation: ToolOperation::ExecuteUnknownCommand,
-            risk: crate::PermissionRisk::High,
-            subjects: vec![command_subject_audit(command)],
-            subject_zones: vec![crate::PathTrustZone::Unknown],
-            facets: vec![crate::ToolApprovalSessionGrantFacet::Local],
-            scope: crate::ToolApprovalSessionGrantScope::ExactSubjects,
-            expires: ToolApprovalSessionGrantExpiry::Session,
-            granted_at_ms: 42,
-        },
-    ))?;
-
-    let (decision, grant) = tool_session_grant_decision_override(&session, "bash", decision);
-    assert_eq!(decision.mode, ApprovalMode::Ask);
-    assert!(grant.is_none());
-    Ok(())
-}
-
-#[test]
-fn network_read_tool_session_grant_reuses_across_public_endpoints() -> Result<()> {
-    let tool_spec = spec(
-        "webfetch",
-        ToolCategory::Search,
-        ToolAccess::Read,
-        Some(NetworkEffect::Read),
-        ToolPreviewCapability::None,
-    );
-    let first_url = "https://example.com/first";
-    let second_url = "https://docs.example.org/second";
-    let decision = policy_decision(
-        crate::PermissionMode::Manual,
-        NetworkPolicy::Ask,
-        &tool_spec,
-        ToolOperation::NetworkRequest,
-        vec![network_endpoint(second_url)],
-    )?;
-    assert_eq!(decision.local_policy_decision, ApprovalMode::Allow);
-    assert_eq!(decision.network_policy_decision, ApprovalMode::Ask);
-    assert!(crate::tool_approval_session_grant_available(&decision));
-
-    let mut session = Session::new("test", "test");
-    session.append_control(ControlEntry::ToolApprovalSessionGrant(
-        ToolApprovalSessionGrantEntry {
-            call_id: "first-fetch".to_owned(),
-            tool_name: "webfetch".to_owned(),
-            access: ToolAccess::Read,
-            network_effect: Some(NetworkEffect::Read),
-            operation: ToolOperation::NetworkRequest,
-            risk: crate::PermissionRisk::High,
-            subjects: vec![network_endpoint_audit(first_url)],
-            subject_zones: vec![crate::PathTrustZone::Unknown],
-            facets: vec![crate::ToolApprovalSessionGrantFacet::Network],
-            scope: crate::ToolApprovalSessionGrantScope::NetworkReadTool,
-            expires: ToolApprovalSessionGrantExpiry::Session,
-            granted_at_ms: 42,
-        },
-    ))?;
-
-    let (decision, grant) = tool_session_grant_decision_override(&session, "webfetch", decision);
-    assert_eq!(decision.network_policy_decision, ApprovalMode::Allow);
-    assert_eq!(decision.mode, ApprovalMode::Allow);
-    assert!(grant.is_some());
-
-    let other_tool_decision = policy_decision(
-        crate::PermissionMode::Manual,
-        NetworkPolicy::Ask,
-        &spec(
-            "remote_read",
-            ToolCategory::Custom,
-            ToolAccess::Read,
-            Some(NetworkEffect::Read),
-            ToolPreviewCapability::None,
-        ),
-        ToolOperation::NetworkRequest,
-        vec![network_endpoint(second_url)],
-    )?;
-    let (other_tool_decision, grant) =
-        tool_session_grant_decision_override(&session, "remote_read", other_tool_decision);
-    assert_eq!(other_tool_decision.mode, ApprovalMode::Ask);
-    assert!(grant.is_none());
     Ok(())
 }
 
@@ -402,6 +266,121 @@ struct NetworkContextProbe {
     observed: Arc<Mutex<Option<(NetworkPolicy, bool)>>>,
 }
 
+struct NetworkSessionGrantProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for NetworkSessionGrantProvider {
+    fn name(&self) -> &str {
+        "network-session-grant-test"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        NetworkApprovalProvider { args_json: "{}" }.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if matches!(call_index, 0 | 2) {
+            let call_id = format!("network-session-call-{}", (call_index / 2) + 1);
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(crate::ToolCall {
+                    id: call_id,
+                    name: "network_session_probe".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+struct NetworkSessionGrantProbe {
+    observed: Arc<Mutex<Vec<(NetworkPolicy, bool)>>>,
+}
+
+#[async_trait]
+impl Tool for NetworkSessionGrantProbe {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "network_session_probe",
+            ToolCategory::Custom,
+            ToolAccess::Read,
+            Some(NetworkEffect::Read),
+            ToolPreviewCapability::None,
+        )
+    }
+
+    fn permission_plan(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        Ok(crate::ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: ToolOperation::NetworkRequest,
+            effects: BTreeSet::from([crate::ToolPermissionEffect::NetworkRead]),
+            subjects: vec![ToolSubject::mcp_tool("network-session-probe")],
+            analysis: crate::ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(crate::ToolSemanticScope::new(
+                "network_read:session_probe",
+                1,
+            )),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([
+                ("execution_backend".to_owned(), "test-network-v1".to_owned()),
+                ("execution_profile".to_owned(), "network-read".to_owned()),
+                (
+                    "environment_binding".to_owned(),
+                    "test-restricted-v1".to_owned(),
+                ),
+            ]),
+            safe_summary: crate::ToolPermissionSummary {
+                title: "Read test network source".to_owned(),
+                detail: "Exercise reusable network approval authority".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        let authorization = (ctx.network_policy(), ctx.explicit_network_approval());
+        if authorization == (NetworkPolicy::Ask, false) {
+            return Ok(ToolResult::error(
+                call_id,
+                "network_session_probe",
+                crate::ToolErrorKind::PermissionDenied,
+                "network session probe requires current network authorization",
+            ));
+        }
+        self.observed
+            .lock()
+            .map_err(|_| anyhow!("network session observation lock poisoned"))?
+            .push(authorization);
+        Ok(ToolResult::ok(
+            call_id,
+            "network_session_probe",
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
 #[async_trait]
 impl Tool for NetworkContextProbe {
     fn spec(&self) -> ToolSpec {
@@ -414,17 +393,28 @@ impl Tool for NetworkContextProbe {
         )
     }
 
-    fn permission_network_effect(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Option<NetworkEffect>> {
-        match args.get("effect").and_then(serde_json::Value::as_str) {
-            None | Some("read") => Ok(Some(NetworkEffect::Read)),
-            Some("mutate") => Ok(Some(NetworkEffect::Mutate)),
-            Some("unknown") => Ok(Some(NetworkEffect::Unknown)),
-            Some(effect) => Err(anyhow!("unsupported network effect {effect}")),
-        }
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        let network_effect = match args.get("effect").and_then(serde_json::Value::as_str) {
+            None | Some("read") => Some(NetworkEffect::Read),
+            Some("mutate") => Some(NetworkEffect::Mutate),
+            Some("unknown") => Some(NetworkEffect::Unknown),
+            Some(effect) => return Err(anyhow!("unsupported network effect {effect}")),
+        };
+        crate::declared_tool_permission_plan(
+            &self.spec(),
+            args,
+            crate::DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect,
+                subjects: Vec::new(),
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(
@@ -449,6 +439,10 @@ impl Tool for NetworkContextProbe {
 
 struct ExplicitNetworkApproveHandler;
 
+struct ExplicitNetworkApproveForSessionHandler {
+    approvals: Arc<AtomicUsize>,
+}
+
 impl crate::ApprovalHandler for ExplicitNetworkApproveHandler {
     fn approve_tool_call(
         &mut self,
@@ -456,6 +450,21 @@ impl crate::ApprovalHandler for ExplicitNetworkApproveHandler {
         _spec: &ToolSpec,
     ) -> Result<ToolApproval> {
         Ok(ToolApproval::Approve)
+    }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        true
+    }
+}
+
+impl crate::ApprovalHandler for ExplicitNetworkApproveForSessionHandler {
+    fn approve_tool_call(
+        &mut self,
+        _call: &crate::ToolCall,
+        _spec: &ToolSpec,
+    ) -> Result<ToolApproval> {
+        self.approvals.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolApproval::ApproveForSession)
     }
 
     fn approval_is_explicit_user_action(&self) -> bool {
@@ -576,6 +585,85 @@ async fn agent_marks_network_ask_context_only_for_explicit_user_approval() -> Re
 }
 
 #[tokio::test]
+async fn agent_reuses_exact_network_session_grant_without_second_prompt() -> Result<()> {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(NetworkSessionGrantProbe {
+        observed: Arc::clone(&observed),
+    }));
+    let agent = Agent::new(
+        NetworkSessionGrantProvider {
+            calls: Arc::clone(&provider_calls),
+        },
+        tools,
+    );
+    let mut session = Session::new("network-session-grant-test", "test-model");
+    let mut event_handler = crate::NoopEventHandler;
+    let mut approval_handler = ExplicitNetworkApproveForSessionHandler {
+        approvals: Arc::clone(&approvals),
+    };
+    let run_options = || {
+        let mut options = interactive_options(NetworkPolicy::Ask);
+        options.permission_config.mode = crate::PermissionMode::DangerFullAccess;
+        options
+    };
+
+    let first = agent
+        .run_with_approval(
+            &mut session,
+            "read the network source once",
+            run_options(),
+            &mut event_handler,
+            &mut approval_handler,
+        )
+        .await?;
+    let second = agent
+        .run_with_approval(
+            &mut session,
+            "read the same network source again",
+            run_options(),
+            &mut event_handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(first.final_text, "done");
+    assert_eq!(second.final_text, "done");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *observed
+            .lock()
+            .map_err(|_| anyhow!("network session assertion lock poisoned"))?,
+        vec![(NetworkPolicy::Ask, true), (NetworkPolicy::Ask, true)]
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            crate::SessionLogEntry::Control(crate::ControlEntry::ToolApprovalSessionGrant(grant))
+                if grant.source_call_id == "network-session-call-1"
+                    && grant.facets
+                        == vec![crate::ToolApprovalSessionGrantFacet::Network]
+                    && grant.scope == crate::ToolApprovalSessionGrantScope::ExactSubjects
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            crate::SessionLogEntry::Control(
+                crate::ControlEntry::ToolPermissionDecisionV2(decision)
+            ) if decision.call_id == "network-session-call-2"
+                && decision.policy_decision == ApprovalMode::Allow
+                && decision.allow_source
+                    == Some(crate::ToolApprovalAllowSource::SessionGrant)
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn network_ask_rejects_auto_and_all_non_explicit_approving_variants() -> Result<()> {
     let (auto_session, auto_executed) =
         run_network_probe_with_handler(crate::AutoApproveHandler).await?;
@@ -641,10 +729,11 @@ async fn approval_time_args_cannot_change_read_network_effect_to_mutate_or_unkno
                 entry,
                 crate::SessionLogEntry::Control(crate::ControlEntry::ToolApproval(approval))
                     if approval.action == crate::ToolApprovalAuditAction::Resolved
-                        && approval.user_decision
-                            == Some(crate::ToolApprovalUserDecision::Denied)
+                        && approval.user_decision.is_none()
+                        && approval.terminal_status
+                            == Some(crate::ToolApprovalTerminalStatusV2::Stale)
                         && approval.reason.as_deref().is_some_and(|reason| {
-                            reason.contains("altered the permission scope")
+                            reason.contains("altered the permission plan")
                         })
             )
         }));

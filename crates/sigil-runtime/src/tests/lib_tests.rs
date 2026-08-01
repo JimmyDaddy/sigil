@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc,
@@ -15,15 +15,18 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ConnectionId, ControlEntry,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
-    ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
-    InteractionMode, JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup,
-    McpServerTrustPolicy, ModelRef, MutationEventRecorder, NetworkEffect, ProviderCapabilities,
-    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionLogEntry,
-    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, Tool, ToolAccess,
-    ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolLifecycleOwner,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubjectKind, WorkspaceTrust,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
+    ExecutionNetworkReceipt, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxStrategyConfig, InteractionMode, JsonlSessionStore, LanguageServerConfig,
+    McpServerConfig, McpServerStartup, McpServerTrustPolicy, ModelRef, MutationEventRecorder,
+    NetworkEffect, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport, RoleModelConfig,
+    RootConfig, Session, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
+    SkillTrustState, TERMINAL_TASK_SCHEMA_VERSION, TerminalLifecycleEvent, TerminalLifecycleSink,
+    TerminalLifecycleUpdateV2, TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus, Tool,
+    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolExecutionStatus,
+    ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubjectKind, WorkspaceTrust, durable_tool_execution_entry,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -32,6 +35,7 @@ use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 
 use super::{
+    ApplicationTerminalLifecycleHandler, ApplicationTerminalLifecycleRouter,
     ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher,
     activate_eager_remote_mcp_server, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
     activate_or_refresh_configured_remote_mcp_server, build_plan_prompt_tool_registry,
@@ -47,6 +51,51 @@ use super::{
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     register_lazy_mcp_activation_tool, secret_redactor_for_root_config, shutdown_registered_tools,
 };
+
+#[test]
+fn production_runtime_tools_expose_only_native_permission_plans() {
+    let sources = [
+        ("web_search_tool.rs", include_str!("../web_search_tool.rs")),
+        ("web_fetch_tool.rs", include_str!("../web_fetch_tool.rs")),
+        ("remote_mcp.rs", include_str!("../remote_mcp.rs")),
+        ("mcp_registry.rs", include_str!("../mcp_registry.rs")),
+        ("skills/load.rs", include_str!("../skills/load.rs")),
+        (
+            "agent_tools/surface.rs",
+            include_str!("../agent_tools/surface.rs"),
+        ),
+        (
+            "agent_supervisor/task_discovery.rs",
+            include_str!("../agent_supervisor/task_discovery.rs"),
+        ),
+    ];
+    let legacy_permission_paths = [
+        "fn permission_subjects(",
+        "fn permission_access(",
+        "fn permission_network_effect(",
+        "fn permission_operation(",
+        "fn permission_default_mode(",
+        ".permission_subjects(",
+        ".permission_access(",
+        ".permission_network_effect(",
+        ".permission_operation(",
+        ".permission_default_mode(",
+    ];
+
+    for (name, source) in sources {
+        assert_eq!(
+            source.matches("fn permission_plan(").count(),
+            1,
+            "{name} must expose exactly one native permission plan"
+        );
+        for legacy in legacy_permission_paths {
+            assert!(
+                !source.contains(legacy),
+                "{name} must not retain legacy permission path {legacy}"
+            );
+        }
+    }
+}
 
 fn sandbox_execution_config(
     backend: ExecutionBackendKind,
@@ -224,6 +273,154 @@ fn detached_session_control_tracking_records_only_successful_durable_appends() -
     ));
     assert_eq!(entries.len(), 1);
     assert!(current_session.is_none());
+    Ok(())
+}
+
+fn runtime_terminal_entry(
+    _root: &Path,
+    generation: u64,
+    status: TerminalTaskStatus,
+    readiness: TerminalReadinessStatus,
+) -> Result<TerminalTaskEntry> {
+    Ok(TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        handle: TerminalTaskHandle {
+            task_id: TerminalTaskId::new("terminal-runtime-test")?,
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:terminal-runtime-test".to_owned(),
+            created_at_ms: 1,
+            execution_backend: None,
+            execution_backend_capabilities: None,
+            enforcement_backend: None,
+            enforcement_backend_capabilities: None,
+            sandbox_profile: None,
+        },
+        generation,
+        status,
+        readiness,
+        output_preview: None,
+        output_hash: None,
+        output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
+        cleanup: None,
+        updated_at_ms: generation,
+    })
+}
+
+#[derive(Debug)]
+struct DurableFirstTerminalHandler {
+    path: PathBuf,
+    handled: Arc<AtomicUsize>,
+}
+
+impl ApplicationTerminalLifecycleHandler for DurableFirstTerminalHandler {
+    fn handle_terminal_lifecycle(
+        &self,
+        _session_id: &str,
+        _run_id: &str,
+        event: &TerminalLifecycleEvent,
+    ) -> Result<()> {
+        let entries = JsonlSessionStore::read_entries(&self.path)?;
+        let projection = TerminalTaskProjection::from_entries(&entries);
+        let task = projection
+            .tasks
+            .get(&event.task_id)
+            .expect("live publication must follow the durable append");
+        assert_eq!(task.generation, event.generation);
+        self.handled.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_lifecycle_router_appends_exact_snapshot_before_live_publication() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("terminal-route.jsonl");
+    let store = JsonlSessionStore::new(path.clone())?;
+    let handled = Arc::new(AtomicUsize::new(0));
+    let router = ApplicationTerminalLifecycleRouter::new(
+        MutationEventRecorder::new(store),
+        "session-route",
+        "run-route",
+        Some(Arc::new(DurableFirstTerminalHandler {
+            path: path.clone(),
+            handled: Arc::clone(&handled),
+        })),
+    );
+    let task = runtime_terminal_entry(
+        temp.path(),
+        1,
+        TerminalTaskStatus::Running,
+        TerminalReadinessStatus::Ready {
+            kind: TerminalReadinessKind::OutputContains,
+            ready_at_ms: 1,
+        },
+    )?;
+    router
+        .publish(TerminalLifecycleUpdateV2 {
+            event: TerminalLifecycleEvent {
+                task_id: task.handle.task_id.clone(),
+                execution_backend: task.handle.execution_backend,
+                sandbox_profile: task.handle.sandbox_profile,
+                generation: task.generation,
+                status: task.status.clone(),
+                readiness: task.readiness.clone(),
+                total_output_bytes: task.output_total_bytes,
+                emitted_at_ms: task.updated_at_ms,
+            },
+            task,
+        })
+        .await?;
+
+    assert_eq!(handled.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
+fn terminal_restart_reconciliation_is_one_shot_and_never_replays_processes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("terminal-restart.jsonl");
+    let mut session = Session::new("deepseek", "deepseek-v4-pro")
+        .with_store(JsonlSessionStore::new(path.clone())?);
+    let session_scope_id = session.session_scope_id().to_owned();
+    session.append_control(ControlEntry::TerminalTask(runtime_terminal_entry(
+        temp.path(),
+        7,
+        TerminalTaskStatus::Running,
+        TerminalReadinessStatus::Waiting {
+            kind: TerminalReadinessKind::OutputContains,
+        },
+    )?))?;
+    drop(session);
+
+    let interrupted = super::reconcile_terminal_tasks_after_restart(&path, &session_scope_id, 100)?;
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].generation, 8);
+    assert_eq!(interrupted[0].status, TerminalTaskStatus::Interrupted);
+    assert!(matches!(
+        interrupted[0].readiness,
+        TerminalReadinessStatus::Failed { .. }
+    ));
+    assert_eq!(
+        interrupted[0]
+            .cleanup
+            .as_ref()
+            .map(|receipt| receipt.status),
+        Some(ExecutionCleanupStatus::Unknown)
+    );
+    assert!(
+        super::reconcile_terminal_tasks_after_restart(&path, &session_scope_id, 200,)?.is_empty()
+    );
+
+    let projection = TerminalTaskProjection::from_entries(&JsonlSessionStore::read_entries(&path)?);
+    let task = projection.latest().expect("reconciled task");
+    assert_eq!(task.generation, 8);
+    assert_eq!(task.status, TerminalTaskStatus::Interrupted);
     Ok(())
 }
 
@@ -873,6 +1070,52 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 }
 
 #[tokio::test]
+async fn terminal_start_result_projects_optional_output_hash_into_durable_audit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
+    let mut registry = build_tool_registry(
+        &test_root_config("deepseek"),
+        &provider_capabilities,
+        temp.path().to_path_buf(),
+    )
+    .await?;
+    let call = ToolCall {
+        id: "terminal-runtime-audit".to_owned(),
+        name: "terminal_start".to_owned(),
+        args_json: json!({
+            "task_id": "runtime-audit",
+            "command": "tail -f /dev/null",
+            "mode": "background",
+            "readiness": { "kind": "none" }
+        })
+        .to_string(),
+    };
+    let mut result = registry
+        .execute(ToolContext::new(temp.path().to_path_buf(), 5), call.clone())
+        .await?;
+    result.metadata.details["output_hash"] = json!("2".repeat(64));
+
+    let execution = durable_tool_execution_entry(
+        &call,
+        &[],
+        ToolExecutionStatus::Completed,
+        Some(1),
+        Some(&result),
+    )?;
+    let expected_hash = format!("sha256:{}", "2".repeat(64));
+    assert_eq!(
+        execution.metadata.details["output_hash"],
+        json!(expected_hash)
+    );
+    let mut session = Session::new("runtime-audit", "runtime-audit");
+    session.append_control(ControlEntry::ToolExecution(Box::new(execution)))?;
+    let tools = registry.drain_by_name_prefix("");
+    shutdown_registered_tools(&tools).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<()> {
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
@@ -1366,8 +1609,9 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
                 name: "terminal_start".to_owned(),
                 args_json: json!({
                     "task_id": "runtime-sandboxed-pty",
-                    "command": "printf runtime > runtime.txt",
+                    "command": "printf runtime > runtime.txt; tail -f /dev/null",
                     "shell": "/bin/sh",
+                    "mode": "interactive",
                     "pty": true
                 })
                 .to_string(),
@@ -1392,6 +1636,17 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
         result.metadata.details["enforcement_backend_capabilities"]["persistent_pty"],
         json!(true)
     );
+    let cancelled = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            ToolCall {
+                id: "terminal-sandboxed-pty-cancel".to_owned(),
+                name: "terminal_cancel".to_owned(),
+                args_json: json!({ "task_id": "runtime-sandboxed-pty" }).to_string(),
+            },
+        )
+        .await?;
+    assert!(!cancelled.is_error());
     Ok(())
 }
 
@@ -1589,10 +1844,12 @@ while True:
         name: "mcp_activate_server".to_owned(),
         args_json: json!({ "server_name": "lazy" }).to_string(),
     };
-    let approved_subjects = registry.permission_subjects(
-        &ToolContext::new(temp.path().to_path_buf(), 5),
-        &activation_call,
-    )?;
+    let approved_subjects = registry
+        .permission_plan(
+            &ToolContext::new(temp.path().to_path_buf(), 5),
+            &activation_call,
+        )?
+        .subjects;
     let mut stale_subjects = approved_subjects.clone();
     stale_subjects
         .iter_mut()
@@ -2498,16 +2755,32 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
         args_json: json!({"server_name": "lazy"}).to_string(),
     };
     let activation_context = ToolContext::new(std::env::current_dir()?, 5);
+    let activation_plan = registry.permission_plan(&activation_context, &activation_call)?;
     assert_eq!(
-        registry.permission_operation(&activation_context, &activation_call)?,
+        activation_plan.operation,
         sigil_kernel::ToolOperation::NetworkRequest
     );
-    assert_eq!(
-        registry.permission_network_effect(&activation_context, &activation_call)?,
-        Some(NetworkEffect::Unknown)
+    assert!(
+        activation_plan
+            .effects
+            .contains(&sigil_kernel::ToolPermissionEffect::NetworkUnknown)
+    );
+    assert_eq!(activation_plan.access, ToolAccess::Execute);
+    assert_eq!(activation_plan.tool_default_mode, Some(ApprovalMode::Ask));
+    assert!(
+        activation_plan
+            .subjects
+            .iter()
+            .any(|subject| subject.normalized == "mcp_server:lazy")
+    );
+    assert!(
+        activation_plan
+            .subjects
+            .iter()
+            .any(|subject| subject.normalized == "mcp_trust_class:self_hosted")
     );
 
-    let missing_name = registry.permission_subjects(
+    let missing_name = registry.permission_plan(
         &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-missing-name".to_owned(),
@@ -2517,12 +2790,12 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     );
     assert!(
         missing_name
-            .expect_err("missing server name should fail permission subjects")
+            .expect_err("missing server name should fail permission planning")
             .to_string()
             .contains("missing server_name")
     );
 
-    let unknown_default = registry.permission_default_mode(
+    let unknown_plan = registry.permission_plan(
         &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-unknown-default".to_owned(),
@@ -2530,7 +2803,15 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
             args_json: json!({"server_name": "other"}).to_string(),
         },
     )?;
-    assert_eq!(unknown_default, None);
+    assert_eq!(unknown_plan.tool_default_mode, None);
+    assert_eq!(unknown_plan.access, ToolAccess::Execute);
+    assert!(
+        unknown_plan
+            .effects
+            .contains(&sigil_kernel::ToolPermissionEffect::NetworkUnknown)
+    );
+    assert_eq!(unknown_plan.subjects.len(), 1);
+    assert_eq!(unknown_plan.subjects[0].normalized, "mcp_server:other");
 
     let unknown_audit = registry.egress_audit(
         &ToolContext::new(std::env::current_dir()?, 5),
@@ -2556,7 +2837,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     assert!(unknown.content.contains("unknown lazy MCP server other"));
 
     registry.register(Arc::new(ExistingMcpTool));
-    let subjects = registry.permission_subjects(
+    let repeated_activation_plan = registry.permission_plan(
         &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-lazy-subjects".to_owned(),
@@ -2564,26 +2845,15 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
             args_json: json!({"server_name": "lazy"}).to_string(),
         },
     )?;
-    assert!(
-        subjects
-            .iter()
-            .any(|subject| subject.normalized == "mcp_server:lazy")
+    assert_eq!(
+        repeated_activation_plan.plan_hash,
+        activation_plan.plan_hash
     );
-    assert!(
-        subjects
-            .iter()
-            .any(|subject| subject.normalized == "mcp_trust_class:self_hosted")
+    assert_eq!(repeated_activation_plan.subjects, activation_plan.subjects);
+    assert_eq!(
+        repeated_activation_plan.tool_default_mode,
+        activation_plan.tool_default_mode
     );
-
-    let default_mode = registry.permission_default_mode(
-        &ToolContext::new(std::env::current_dir()?, 5),
-        &ToolCall {
-            id: "activate-lazy-default".to_owned(),
-            name: "mcp_activate_server".to_owned(),
-            args_json: json!({"server_name": "lazy"}).to_string(),
-        },
-    )?;
-    assert_eq!(default_mode, Some(ApprovalMode::Ask));
 
     let audit = registry.egress_audit(
         &ToolContext::new(std::env::current_dir()?, 5),
@@ -2831,6 +3101,16 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
                             "name": "echo",
                             "description": "Echo fixture",
                             "inputSchema": { "type": "object" }
+                        }, {
+                            "name": "mutate",
+                            "description": "Mutation fixture",
+                            "inputSchema": { "type": "object" },
+                            "annotations": {
+                                "readOnlyHint": false,
+                                "destructiveHint": true,
+                                "idempotentHint": false,
+                                "openWorldHint": true
+                            }
                         }]
                     }
                 })
@@ -2870,8 +3150,9 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
     )
     .await?;
 
-    assert_eq!(added, 1);
+    assert_eq!(added, 2);
     assert!(registry.spec_for("mcp__remote_eager__echo").is_some());
+    assert!(registry.spec_for("mcp__remote_eager__mutate").is_some());
     let store = JsonlSessionStore::new(temp.path().join("remote-execution-session.jsonl"))?;
     let context =
         ToolContext::new(temp.path(), 5).with_mutation_recorder(MutationEventRecorder::new(store));
@@ -2880,6 +3161,61 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
         name: "mcp__remote_eager__echo".to_owned(),
         args_json: "{}".to_owned(),
     };
+    let unknown_plan = registry.permission_plan(&context, &remote_call)?;
+    let repeated_unknown_plan = registry.permission_plan(&context, &remote_call)?;
+    assert_eq!(unknown_plan.access, ToolAccess::Execute);
+    assert_eq!(
+        unknown_plan.operation,
+        sigil_kernel::ToolOperation::NetworkRequest
+    );
+    assert_eq!(unknown_plan.tool_default_mode, Some(ApprovalMode::Allow));
+    assert_eq!(unknown_plan.plan_hash, repeated_unknown_plan.plan_hash);
+    assert_eq!(unknown_plan.subjects, repeated_unknown_plan.subjects);
+    assert!(
+        unknown_plan
+            .subjects
+            .iter()
+            .any(|subject| subject.normalized == "mcp_trust_class:self_hosted")
+    );
+    assert!(matches!(
+        unknown_plan.analysis,
+        sigil_kernel::ToolAnalysisStatus::Conservative { .. }
+    ));
+    assert!(
+        unknown_plan
+            .effects
+            .contains(&sigil_kernel::ToolPermissionEffect::Unknown)
+    );
+    assert_eq!(
+        unknown_plan
+            .analysis_bindings
+            .get("execution_backend")
+            .map(String::as_str),
+        Some("mcp_streamable_http_v2")
+    );
+    let persisted_plan = serde_json::to_string(&unknown_plan)?;
+    assert!(!persisted_plan.contains("fixture.invalid"));
+
+    let mutation_plan = registry.permission_plan(
+        &context,
+        &ToolCall {
+            id: "remote-eager-mutate".to_owned(),
+            name: "mcp__remote_eager__mutate".to_owned(),
+            args_json: "{}".to_owned(),
+        },
+    )?;
+    assert_eq!(mutation_plan.access, ToolAccess::Write);
+    assert!(mutation_plan.analysis.is_complete());
+    assert!(
+        mutation_plan
+            .effects
+            .contains(&sigil_kernel::ToolPermissionEffect::RemoteMutation)
+    );
+    assert!(
+        mutation_plan
+            .effects
+            .contains(&sigil_kernel::ToolPermissionEffect::NetworkMutate)
+    );
     assert!(
         registry
             .execution_mutation_profile(&context, &remote_call)?

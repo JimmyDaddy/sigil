@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, time::Duration};
 
 use anyhow::Result;
 use serde_json::json;
@@ -101,7 +101,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: target_path.clone(),
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionInspected { request_id: 11, .. }))?,
+        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(message, WorkerMessage::LocalSessionInspected { request_id: 11, .. }))?,
         WorkerMessage::LocalSessionInspected { entry, .. }
             if entry.finalized_turn_count == 1 && entry.title.as_deref() == Some("target")
     ));
@@ -110,7 +110,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         request_id: 12,
         source_path: target_path.clone(),
     })?;
-    let export_path = match worker.recv_until(|message| {
+    let export_path = match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(
             message,
             WorkerMessage::LocalSessionExported { request_id: 12, .. }
@@ -131,7 +131,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         pinned: true,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(
+        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(
             message,
             WorkerMessage::LocalSessionPinChanged { request_id: 13, .. }
                 | WorkerMessage::LocalSessionLifecycleFailed { request_id: 13, .. }
@@ -144,7 +144,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         pinned: false,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(
+        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(
             message,
             WorkerMessage::LocalSessionPinChanged { request_id: 14, .. }
                 | WorkerMessage::LocalSessionLifecycleFailed { request_id: 14, .. }
@@ -156,15 +156,16 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         request_id: 15,
         source_path: target_path.clone(),
     })?;
-    let delete_preview = match worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::LocalSessionDeletePreviewed { request_id: 15, .. }
-        )
-    })? {
-        WorkerMessage::LocalSessionDeletePreviewed { preview, .. } => preview,
-        _ => unreachable!(),
-    };
+    let delete_preview =
+        match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::LocalSessionDeletePreviewed { request_id: 15, .. }
+            )
+        })? {
+            WorkerMessage::LocalSessionDeletePreviewed { preview, .. } => preview,
+            _ => unreachable!(),
+        };
     assert_eq!(
         delete_preview.source_session_ref.as_path(),
         Path::new("target.jsonl")
@@ -174,7 +175,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         preview: delete_preview,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionDeleted { request_id: 16, .. }))?,
+        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(message, WorkerMessage::LocalSessionDeleted { request_id: 16, .. }))?,
         WorkerMessage::LocalSessionDeleted { output, .. }
             if output.source_session_ref.as_path() == Path::new("target.jsonl")
     ));
@@ -188,15 +189,16 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
             expire_older_than_ms: None,
         },
     })?;
-    let retention_preview = match worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::SessionRetentionPreviewed { request_id: 17, .. }
-        )
-    })? {
-        WorkerMessage::SessionRetentionPreviewed { preview, .. } => preview,
-        _ => unreachable!(),
-    };
+    let retention_preview =
+        match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::SessionRetentionPreviewed { request_id: 17, .. }
+            )
+        })? {
+            WorkerMessage::SessionRetentionPreviewed { preview, .. } => preview,
+            _ => unreachable!(),
+        };
     assert_eq!(retention_preview.candidates.len(), 1);
     assert_eq!(
         retention_preview.candidates[0]
@@ -210,7 +212,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         preview: retention_preview,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::SessionRetentionApplied { request_id: 18, .. }))?,
+        worker.recv_until_with_timeout(Duration::from_secs(10), |message| matches!(message, WorkerMessage::SessionRetentionApplied { request_id: 18, .. }))?,
         WorkerMessage::SessionRetentionApplied { output, .. }
             if output.deleted_sessions == 1
     ));
@@ -227,15 +229,16 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: current_path.clone(),
         current_model_route: invalid_current_route,
     })?;
-    let invalid_route_error = match worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::LocalSessionLifecycleFailed { request_id: 19, .. }
-        )
-    })? {
-        WorkerMessage::LocalSessionLifecycleFailed { error, .. } => error,
-        _ => unreachable!(),
-    };
+    let invalid_route_error =
+        match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::LocalSessionLifecycleFailed { request_id: 19, .. }
+            )
+        })? {
+            WorkerMessage::LocalSessionLifecycleFailed { error, .. } => error,
+            _ => unreachable!(),
+        };
     assert!(
         invalid_route_error.contains("explicit current route"),
         "unexpected invalid-route failure: {invalid_route_error}"
@@ -246,7 +249,7 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         source_path: current_path,
         current_model_route,
     })?;
-    let fork_path = match worker.recv_until(|message| {
+    let fork_path = match worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(
             message,
             WorkerMessage::LocalSessionForked { request_id: 20, .. }

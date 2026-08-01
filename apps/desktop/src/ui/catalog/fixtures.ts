@@ -224,7 +224,7 @@ export const catalogFixtures: readonly CatalogFixture[] = [
             reasoningEffortBinding: "catalog-composer-effort-binding-gateway",
           },
         ],
-        modelSelection: "fresh_session",
+        modelSelection: "same_session",
         modelSelectionBinding: "catalog-composer-model-binding",
         defaultPermissionMode: "manual",
         availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],

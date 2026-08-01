@@ -16,8 +16,9 @@ use crate::{
     shell_runtime::ResolvedShell,
     terminal_process::{self, TerminalExecutionConfig},
     terminal_tools::{
-        TerminalCancelTool, TerminalInputTool, TerminalProcessManagers, TerminalReadTool,
-        TerminalResizeTool, TerminalStartTool,
+        TerminalCancelTool, TerminalInputTool, TerminalLifecycleRoute, TerminalProcessManagers,
+        TerminalReadTool, TerminalResizeTool, TerminalStartTool, TerminalTaskControlHandle,
+        TerminalWaitTool,
     },
     tool_artifact_tool::ReadToolArtifactTool,
 };
@@ -78,6 +79,7 @@ pub fn register_builtin_tools_with_paths_and_execution_backend(
         paths,
         execution_backend,
         TerminalExecutionConfig::default(),
+        None,
     );
 }
 
@@ -87,12 +89,47 @@ pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
     execution_backend: Arc<dyn ExecutionBackend>,
     execution_config: &ExecutionConfig,
 ) {
+    register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+        registry,
+        paths,
+        execution_backend,
+        execution_config,
+        None,
+    );
+}
+
+/// Registers built-ins with a session-bound terminal lifecycle route.
+pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    execution_backend: Arc<dyn ExecutionBackend>,
+    execution_config: &ExecutionConfig,
+    terminal_lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+) -> TerminalTaskControlHandle {
     register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         registry,
         paths,
         execution_backend,
         TerminalExecutionConfig::from_execution_config(execution_config),
-    );
+        terminal_lifecycle_sink.map(TerminalLifecycleRoute::Bound),
+    )
+}
+
+/// Registers built-ins with a factory that freezes a lifecycle sink from each exact tool context.
+pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    execution_backend: Arc<dyn ExecutionBackend>,
+    execution_config: &ExecutionConfig,
+    terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
+) -> TerminalTaskControlHandle {
+    register_builtin_tools_with_paths_execution_backend_and_terminal_config(
+        registry,
+        paths,
+        execution_backend,
+        TerminalExecutionConfig::from_execution_config(execution_config),
+        Some(TerminalLifecycleRoute::Factory(terminal_lifecycle_factory)),
+    )
 }
 
 fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
@@ -100,13 +137,22 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     paths: BuiltinToolPaths,
     execution_backend: Arc<dyn ExecutionBackend>,
     terminal_execution_config: TerminalExecutionConfig,
-) {
+    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+) -> TerminalTaskControlHandle {
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
         terminal_execution_config.with_default_shell(default_shell.clone());
-    let terminal_managers = Arc::new(TerminalProcessManagers::new(terminal_execution_config));
+    let terminal_managers = Arc::new(
+        TerminalProcessManagers::new(terminal_execution_config)
+            .with_lifecycle_route(terminal_lifecycle_route),
+    );
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
+    let terminal_control = TerminalTaskControlHandle::new(
+        Arc::clone(&terminal_managers),
+        terminal_tasks_root.clone(),
+        terminal_tasks_label_root.clone(),
+    );
     registry.register(Arc::new(ReadFileTool));
     registry.register(Arc::new(ReadToolArtifactTool));
     registry.register(Arc::new(WriteFileTool));
@@ -137,6 +183,11 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         artifact_root: terminal_tasks_root.clone(),
         artifact_label_root: terminal_tasks_label_root.clone(),
     }));
+    registry.register(Arc::new(TerminalWaitTool {
+        managers: Arc::clone(&terminal_managers),
+        artifact_root: terminal_tasks_root.clone(),
+        artifact_label_root: terminal_tasks_label_root.clone(),
+    }));
     registry.register(Arc::new(TerminalInputTool {
         managers: Arc::clone(&terminal_managers),
         artifact_root: terminal_tasks_root.clone(),
@@ -152,4 +203,5 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         artifact_label_root: terminal_tasks_label_root,
         managers: terminal_managers,
     }));
+    terminal_control
 }

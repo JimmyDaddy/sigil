@@ -151,7 +151,8 @@ fn enter_plan_mode_ui_command_is_not_handled_by_global_dispatch() {
 }
 
 #[test]
-fn focused_terminal_task_cancel_rejects_missing_busy_and_inactive_tasks() -> Result<()> {
+fn focused_terminal_task_cancel_rejects_missing_owner_and_inactive_tasks_while_busy() -> Result<()>
+{
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     let missing = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
@@ -163,11 +164,20 @@ fn focused_terminal_task_cancel_rejects_missing_busy_and_inactive_tasks() -> Res
     ))]);
     app.timeline_state.selected_tool_activity_key = Some("terminal_task:terminal-1".to_owned());
     app.runtime.is_busy = true;
+    app.terminal_task_control_identities.insert(
+        "terminal-1".to_owned(),
+        crate::runner::TerminalTaskControlIdentity {
+            session_scope_id: "session-scope-1".to_owned(),
+            run_id: "foreground-run-1".to_owned(),
+            task_id: "terminal-1".to_owned(),
+            expected_generation: 1,
+        },
+    );
     let busy = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
     assert!(busy.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("wait for the active run before cancelling terminal task")
+        Some("Alt-X again to cancel terminal task terminal-1")
     );
 
     app.runtime.is_busy = false;
@@ -192,12 +202,14 @@ fn dispatch_terminal_entry(
     status: sigil_kernel::TerminalTaskStatus,
 ) -> Result<sigil_kernel::TerminalTaskEntry> {
     Ok(sigil_kernel::TerminalTaskEntry {
+        schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
         handle: sigil_kernel::TerminalTaskHandle {
             task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
-            command: "cargo test".to_owned(),
-            cwd: Path::new(".").to_path_buf(),
-            shell: "sh".to_owned(),
-            log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "sh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: format!("terminal-log:{task_id}"),
             created_at_ms: 10,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -205,7 +217,9 @@ fn dispatch_terminal_entry(
             enforcement_backend_capabilities: None,
             sandbox_profile: None,
         },
+        generation: 1,
         status,
+        readiness: sigil_kernel::TerminalReadinessStatus::None,
         output_preview: Some("running output".to_owned()),
         output_hash: Some("hash".to_owned()),
         output_truncated: false,

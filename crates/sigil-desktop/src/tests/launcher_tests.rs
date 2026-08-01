@@ -118,3 +118,24 @@ async fn startup_line_reader_enforces_single_record_cap() {
         Err(DesktopLaunchError::ReadinessTooLarge)
     ));
 }
+
+#[test]
+fn startup_stderr_classification_is_bounded_and_path_free() {
+    assert_eq!(
+        classify_startup_stderr(
+            b"error: failed to acquire durable lease /private/path.lock: Resource temporarily unavailable"
+        ),
+        Some(DesktopStartupFailure::WorkspaceBusy)
+    );
+    assert_eq!(
+        classify_startup_stderr(
+            b"error: http protocol journal is corrupt: non-canonical durable event"
+        ),
+        Some(DesktopStartupFailure::AdapterStateInvalid)
+    );
+    assert_eq!(
+        classify_startup_stderr(b"error: Address already in use (os error 48)"),
+        Some(DesktopStartupFailure::LoopbackUnavailable)
+    );
+    assert_eq!(classify_startup_stderr(b"arbitrary private failure"), None);
+}

@@ -953,11 +953,11 @@ credential = { source = "none" }
             name: tool_name.to_owned(),
             args_json: args_json.to_owned(),
         };
-        let subjects = registry
-            .permission_subjects(&context, &call)
-            .expect("every MCP surface should expose permission subjects");
+        let plan = registry
+            .permission_plan(&context, &call)
+            .expect("every MCP surface should expose one permission plan");
         assert!(
-            subjects.iter().any(|subject| {
+            plan.subjects.iter().any(|subject| {
                 subject
                     .original
                     .contains(&declaration.authorization_fingerprint)

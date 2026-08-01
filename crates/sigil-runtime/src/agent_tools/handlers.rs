@@ -66,6 +66,14 @@ impl EventHandler for ChatChildEventHandler<'_> {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         match event {
             RunEvent::ToolApprovalRequested {
+                approval_identity,
+                effects,
+                analysis,
+                containment,
+                safe_summary,
+                decision_reasons,
+                session_grant_available,
+                session_grant_unavailable_reason,
                 call,
                 spec,
                 subjects,
@@ -81,6 +89,14 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 command_permission_matches,
                 preview,
             } => self.inner.handle(RunEvent::ToolApprovalRequested {
+                approval_identity,
+                effects,
+                analysis,
+                containment,
+                safe_summary,
+                decision_reasons,
+                session_grant_available,
+                session_grant_unavailable_reason,
                 call,
                 spec,
                 subjects,
@@ -98,10 +114,12 @@ impl EventHandler for ChatChildEventHandler<'_> {
             }),
             RunEvent::ToolApprovalResolved {
                 call_id,
+                approval_request_id,
                 approved,
                 reason,
             } => self.inner.handle(RunEvent::ToolApprovalResolved {
                 call_id,
+                approval_request_id,
                 approved,
                 reason,
             }),
@@ -186,6 +204,9 @@ impl ApprovalHandler for ChatAgentApprovalRouteHandler<'_> {
             | ToolApproval::ApproveForSession
             | ToolApproval::ApproveWithArgs { .. } => AgentRouteStatus::Resolved,
             ToolApproval::Deny { .. } => AgentRouteStatus::Rejected,
+            ToolApproval::Expired { .. } => AgentRouteStatus::Expired,
+            ToolApproval::Cancelled { .. } => AgentRouteStatus::Cancelled,
+            ToolApproval::Stale { .. } => AgentRouteStatus::Stale,
         };
         self.parent_session
             .append_control(ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {
@@ -225,6 +246,9 @@ impl ApprovalHandler for ChatAgentApprovalRouteHandler<'_> {
             | ToolApproval::ApproveForSession
             | ToolApproval::ApproveWithArgs { .. } => AgentRouteStatus::Resolved,
             ToolApproval::Deny { .. } => AgentRouteStatus::Rejected,
+            ToolApproval::Expired { .. } => AgentRouteStatus::Expired,
+            ToolApproval::Cancelled { .. } => AgentRouteStatus::Cancelled,
+            ToolApproval::Stale { .. } => AgentRouteStatus::Stale,
         };
         self.parent_session
             .append_control(ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {

@@ -159,6 +159,10 @@ export interface ConversationContinuity {
     throughStreamSequence: number;
   };
   foregroundOwner?: ForegroundRunOwner;
+  retainedTerminalRuns: Array<{
+    runId: string;
+    terminalTasks: TimelineTerminalTask[];
+  }>;
   recoveryActions: ContinuityRecoveryAction[];
 }
 
@@ -960,7 +964,7 @@ export interface RunContext {
   providerName: string;
   modelName: string;
   modelOptions: ModelOption[];
-  modelSelection: "fresh_session";
+  modelSelection: "same_session";
   modelSelectionBinding: string;
   defaultPermissionMode: PermissionMode;
   availablePermissionModes: PermissionMode[];
@@ -1134,9 +1138,18 @@ export interface RunAttachInput {
 }
 
 export interface ApprovalDecisionSummary {
+  commandId: string;
+  clientId: string;
+  sessionId: string;
   runId: string;
   callId: string;
-  decision: "approved" | "denied";
+  approvalRequestId: string;
+  expectedStreamSequence?: number;
+  correlationId?: string;
+  decision: "approved" | "approved_for_session" | "denied";
+  routeState: "decision_accepted" | "delivery_uncertain" | "terminal";
+  registryRevision: number;
+  replayed: boolean;
 }
 
 export interface VerificationRerunBinding {
@@ -1393,6 +1406,7 @@ export type TimelineEventKind =
   | "tool_started"
   | "tool_completed"
   | "tool_progress"
+  | "terminal_lifecycle"
   | "tool_result"
   | "approval_requested"
   | "approval_resolved"
@@ -1404,6 +1418,25 @@ export type TimelineEventKind =
   | "run_cancelled"
   | "other";
 
+export type SessionGrantUnavailableReasonCode =
+  | "analysis_incomplete"
+  | "semantic_scope_unavailable"
+  | "non_grantable_effect"
+  | "containment_binding_unavailable"
+  | "policy_decision_not_grantable"
+  | "no_reusable_approval_facet"
+  | "network_scope_not_grantable"
+  | "confirmation_required"
+  | "snapshot_required"
+  | "subject_scope_unavailable"
+  | "risk_not_grantable"
+  | "external_mutation"
+  | "operation_not_grantable";
+
+export interface SessionGrantUnavailableReason {
+  code: SessionGrantUnavailableReasonCode;
+}
+
 export interface TimelineApproval {
   callId: string;
   toolName: string;
@@ -1412,6 +1445,16 @@ export interface TimelineApproval {
   policyVersion: string;
   expiresAtMs: number;
   sessionGrantAvailable?: boolean;
+  sessionGrantUnavailableReason?: SessionGrantUnavailableReason;
+  effects?: string[];
+  subjects?: string[];
+  analysisStatus?: string;
+  analysisReasonCodes?: string[];
+  analysisReasons?: string[];
+  containment?: string[];
+  decisionReasons?: string[];
+  safeSummaryTitle?: string;
+  safeSummaryDetail?: string;
   toolInput?: string;
   operation?: string;
   risk?: string;
@@ -1456,6 +1499,47 @@ export interface TimelineTask {
   conflicts?: string[];
 }
 
+export type TerminalTaskStatus =
+  | "starting"
+  | "running"
+  | "exited"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type TerminalReadinessStatus =
+  | "none"
+  | "waiting"
+  | "ready"
+  | "failed"
+  | "timed_out";
+
+export interface TimelineTerminalTask {
+  taskId: string;
+  executionBackend?: "local_process" | "local_pty" | "sandboxed_pty";
+  sandboxProfile?: "unconfined" | "workspace_write" | "build_offline" | "build_networked";
+  generation: number;
+  status: TerminalTaskStatus;
+  exitCode?: number;
+  failureReason?: string;
+  readiness: TerminalReadinessStatus;
+  readinessKind?: "none" | "output_contains" | "output_regex";
+  readinessFailureReason?: string;
+  readyAtMs?: number;
+  totalOutputBytes: number;
+  emittedAtMs: number;
+}
+
+export interface TerminalTaskCancelSummary {
+  commandId: string;
+  clientId: string;
+  sessionId: string;
+  runId: string;
+  correlationId?: string;
+  terminalTask: TimelineTerminalTask;
+  replayed: boolean;
+}
+
 export interface TimelineEvent {
   workspaceId: string;
   sessionId: string;
@@ -1474,7 +1558,16 @@ export interface TimelineEvent {
   assistantKind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer";
   toolInput?: string;
   approval?: TimelineApproval;
+  approvalRequestId?: string;
+  toolExecution?: TimelineToolExecution;
   task?: TimelineTask;
+  terminalTask?: TimelineTerminalTask;
+}
+
+export interface TimelineToolExecution {
+  callId: string;
+  toolName: string;
+  status: "started" | "completed" | "failed" | "cancelled" | "interrupted";
 }
 
 export type ApprovalAction = "approve_once" | "approve_session" | "deny";
@@ -1492,4 +1585,27 @@ export interface RunStreamStatus {
   runId: string;
   state: RunStreamState;
   message?: string;
+}
+
+export type ApprovalLifecycleSnapshotState =
+  | "resolving"
+  | "decision_accepted"
+  | "resolved"
+  | "execution_started"
+  | "delivery_uncertain"
+  | "terminal";
+
+export interface RunApprovalLifecycleSnapshot {
+  event: TimelineEvent;
+  state: ApprovalLifecycleSnapshotState;
+}
+
+/** Canonical server-owned approval state used after a live event gap. */
+export interface RunApprovalSnapshot {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  registryRevision: number;
+  pendingApprovals: TimelineEvent[];
+  approvalLifecycles: RunApprovalLifecycleSnapshot[];
 }

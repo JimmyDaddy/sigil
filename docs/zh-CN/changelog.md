@@ -8,6 +8,14 @@
 
 ## 尚未发布 - main
 
+- Shell 权限现在通过同一份不可变结构化计划贯穿策略、审批、审计和执行。复合验证命令会逐个
+  分析子命令；危险参数、重定向、动态语法、受保护目标和缺失的沙箱能力继续 fail closed。
+  精确绑定隔离能力的会话授权可以减少重复审批，但不会扩大到无关命令。
+- Desktop 与 TUI 的审批决定现在会在精确 command receipt 到达时立即收敛，不再只等待稍后的
+  实时事件。已接受、正在解析、开始执行、过期、stale、状态待确认和终态相互区分，旧 receipt
+  不能覆盖新状态。
+- 有限命令只使用前台 Shell 路径；常驻和交互任务使用带 readiness 与事件驱动 wait 的明确
+  terminal task。runtime 不再周期性查询 terminal 状态，模型也无需轮询没有变化的日志。
 - Release tag 现在只构建一次 TUI/npm 字节，并在 draft 中冻结绑定 commit 的 candidate
   manifest；最终发布复用已准入 tarball，不再重新编译。Release doctor 与 Desktop 上传命令
   会绑定版本、tag/main/CI、updater 公钥、签名、公证和 macOS 双架构；公开后自动触发带有

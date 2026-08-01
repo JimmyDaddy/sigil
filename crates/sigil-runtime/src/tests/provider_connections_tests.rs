@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Barrier, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -1329,6 +1329,100 @@ fn persistent_catalog_cache_binds_exact_connection_fingerprint_and_remote_proven
     );
     assert!(super::catalog_cache::load_catalog_cache(root.path(), "local", "forged").is_none());
     assert!(!forged.exists());
+}
+
+#[test]
+fn concurrent_catalog_cache_publishers_share_one_secure_connection_tree() {
+    let root = tempfile::tempdir().expect("cache root");
+    let publishers = 16;
+    let barrier = Arc::new(Barrier::new(publishers));
+    let handles = (0..publishers)
+        .map(|index| {
+            let cache_root = root.path().to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let model_ref = ModelRef::new(
+                    ConnectionId::new("shared-connection").expect("connection id"),
+                    format!("model-{index}"),
+                )
+                .expect("model ref");
+                let entry = ModelCatalogEntry {
+                    model_ref,
+                    display_name: format!("Model {index}"),
+                    availability: ModelAvailability::Available,
+                    recommendation: ModelRecommendation::Standard,
+                    provenance: ModelCatalogProvenance::Remote,
+                };
+                barrier.wait();
+                super::catalog_cache::save_catalog_cache(
+                    &cache_root,
+                    "shared-connection",
+                    &format!("fingerprint-{index}"),
+                    &[entry],
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("catalog cache publisher should not panic")
+            .expect("concurrent catalog cache publisher should succeed");
+    }
+    for index in 0..publishers {
+        assert!(
+            super::catalog_cache::load_catalog_cache(
+                root.path(),
+                "shared-connection",
+                &format!("fingerprint-{index}"),
+            )
+            .is_some(),
+            "fingerprint {index} should remain readable"
+        );
+    }
+}
+
+#[test]
+fn catalog_cache_sweep_preserves_recent_atomic_publish_temporary_files() {
+    let root = tempfile::tempdir().expect("cache root");
+    let model_ref = ModelRef::new(
+        ConnectionId::new("shared-connection").expect("connection id"),
+        "model",
+    )
+    .expect("model ref");
+    let entry = ModelCatalogEntry {
+        model_ref,
+        display_name: "Model".to_owned(),
+        availability: ModelAvailability::Available,
+        recommendation: ModelRecommendation::Standard,
+        provenance: ModelCatalogProvenance::Remote,
+    };
+    super::catalog_cache::save_catalog_cache(
+        root.path(),
+        "shared-connection",
+        "published",
+        &[entry],
+    )
+    .expect("catalog tree should exist");
+    let temporary = root
+        .path()
+        .join("provider-models/v1/shared-connection")
+        .join(".published.json.0123456789abcdef0123456789abcdef.tmp");
+    std::fs::write(&temporary, b"in-flight").expect("temporary file should write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+            .expect("temporary file should be private");
+    }
+
+    super::catalog_cache::sweep_catalog_cache(root.path()).expect("cache sweep should succeed");
+
+    assert!(
+        temporary.exists(),
+        "an active atomic publisher must not lose its temporary file to a concurrent sweep"
+    );
 }
 
 #[test]

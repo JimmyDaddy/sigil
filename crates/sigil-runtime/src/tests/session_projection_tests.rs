@@ -583,10 +583,11 @@ fn projection_revision_change_rebuilds_without_decoding_retired_row_values() -> 
         "chat",
     )?;
     projection.rebuild()?;
+    assert_eq!(SESSION_CATALOG_PROJECTION_REVISION, 5);
     let connection = Connection::open(projection.database_path())?;
     connection.execute(
-        "UPDATE session_catalog_workspace_v1 SET projection_revision = 1",
-        [],
+        "UPDATE session_catalog_workspace_v1 SET projection_revision = ?1",
+        [SESSION_CATALOG_PROJECTION_REVISION - 1],
     )?;
     connection.execute(
         "UPDATE session_catalog_entry_v1 SET source_state = 'unsupported_legacy'",

@@ -1,6 +1,7 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::{Result, anyhow};
@@ -8,8 +9,10 @@ use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize, de};
 
 use crate::tool::{
-    NetworkEffect, ToolAccess, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    NetworkEffect, ToolAccess, ToolCategory, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope,
 };
+use crate::{NetworkContainment, ToolAnalysisStatus, ToolPermissionEffect, ToolPermissionPlanV2};
 
 const WORKSPACE_RUNTIME_STATE_PATHS: &[&str] = &[
     ".sigil/sessions",
@@ -65,6 +68,68 @@ pub enum ToolApprovalSessionGrantScope {
     ExactSubjects,
     /// Same tool and read-only network operation; destination controls still run per call.
     NetworkReadTool,
+}
+
+/// Stable, provider-neutral reason why a bounded session-local grant is unavailable.
+///
+/// The code is intentionally closed and contains no provider payload or unbounded diagnostic
+/// detail. Product surfaces map it to localized copy instead of deriving policy semantics from
+/// the tool call.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalSessionGrantUnavailableReasonCode {
+    AnalysisIncomplete,
+    SemanticScopeUnavailable,
+    NonGrantableEffect,
+    ContainmentBindingUnavailable,
+    PolicyDecisionNotGrantable,
+    NoReusableApprovalFacet,
+    NetworkScopeNotGrantable,
+    ConfirmationRequired,
+    SnapshotRequired,
+    SubjectScopeUnavailable,
+    RiskNotGrantable,
+    ExternalMutation,
+    OperationNotGrantable,
+}
+
+/// Typed reason carried by the shared approval contract when session authority cannot be granted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolApprovalSessionGrantUnavailableReason {
+    pub code: ToolApprovalSessionGrantUnavailableReasonCode,
+}
+
+/// Invariant-preserving result of the shared session-grant availability calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub struct ToolApprovalSessionGrantAvailability {
+    available: bool,
+    unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
+}
+
+impl ToolApprovalSessionGrantAvailability {
+    const fn available() -> Self {
+        Self {
+            available: true,
+            unavailable_reason: None,
+        }
+    }
+
+    const fn unavailable(code: ToolApprovalSessionGrantUnavailableReasonCode) -> Self {
+        Self {
+            available: false,
+            unavailable_reason: Some(ToolApprovalSessionGrantUnavailableReason { code }),
+        }
+    }
+
+    pub const fn is_available(self) -> bool {
+        self.available
+    }
+
+    pub const fn unavailable_reason(self) -> Option<ToolApprovalSessionGrantUnavailableReason> {
+        self.unavailable_reason
+    }
 }
 
 impl ToolApprovalSessionGrantScope {
@@ -393,12 +458,48 @@ pub enum ToolOperation {
     ExecuteUnknownCommand,
     ExecuteDestructiveCommand,
     SendTerminalInput,
+    ResizeTerminalTask,
+    CancelTerminalTask,
     NetworkRequest,
     SpawnAgent,
     MessageAgent,
     CloseAgent,
     LoadSkill,
     InvokePlugin,
+}
+
+impl ToolOperation {
+    /// Returns the stable label used by permission plans and diagnostics.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Search => "search",
+            Self::CreateFile => "create_file",
+            Self::EditFile => "edit_file",
+            Self::OverwriteFile => "overwrite_file",
+            Self::DeleteFile => "delete_file",
+            Self::RenamePath => "rename_path",
+            Self::CreateDirectory => "create_directory",
+            Self::DeleteDirectory => "delete_directory",
+            Self::RecursiveDelete => "recursive_delete",
+            Self::ApplyChangeSet => "apply_change_set",
+            Self::ExecuteReadOnlyCommand => "execute_read_only_command",
+            Self::ExecuteWorkspaceCheckCommand => "execute_workspace_check_command",
+            Self::ExecuteMutatingCommand => "execute_mutating_command",
+            Self::ExecuteUnknownCommand => "execute_unknown_command",
+            Self::ExecuteDestructiveCommand => "execute_destructive_command",
+            Self::SendTerminalInput => "send_terminal_input",
+            Self::ResizeTerminalTask => "resize_terminal_task",
+            Self::CancelTerminalTask => "cancel_terminal_task",
+            Self::NetworkRequest => "network_request",
+            Self::SpawnAgent => "spawn_agent",
+            Self::MessageAgent => "message_agent",
+            Self::CloseAgent => "close_agent",
+            Self::LoadSkill => "load_skill",
+            Self::InvokePlugin => "invoke_plugin",
+        }
+    }
 }
 
 /// Product safety category for one path subject.
@@ -425,6 +526,13 @@ pub enum PathRiskOverlay {
     SensitiveName,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardSafetyPathTarget {
+    FilesystemRoot,
+    UserHome,
+    SystemRoot,
+}
+
 /// Product safety classification for one path subject.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathTrustAnalysis {
@@ -441,6 +549,28 @@ pub enum PermissionRisk {
     High,
     Destructive,
     Protected,
+}
+
+/// Policy source that contributed one explainable V2 decision reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecisionSource {
+    HardSafety,
+    ManagedRule,
+    DelegatedRule,
+    UserRule,
+    SessionGrant,
+    SandboxSubstitution,
+    PermissionModeDefault,
+    ToolDefault,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PermissionDecisionReason {
+    pub source: PermissionDecisionSource,
+    pub code: String,
+    pub detail: String,
 }
 
 /// Extra confirmation a policy decision may require before the tool can execute.
@@ -497,6 +627,7 @@ pub struct PermissionDecision {
     pub confirmation: Option<PermissionConfirmation>,
     pub snapshot_required: bool,
     pub command_permission_matches: Vec<CommandPermissionMatch>,
+    pub reasons: Vec<PermissionDecisionReason>,
     base_local_policy_decision: ApprovalMode,
     external_directory_policy_decision: ApprovalMode,
 }
@@ -662,7 +793,20 @@ impl PermissionDecision {
                 .then_some(PermissionConfirmation::TypePath)
         });
         let snapshot_required = matches!(risk, PermissionRisk::Destructive);
-        Self {
+        let mut reasons = vec![PermissionDecisionReason {
+            source: PermissionDecisionSource::PermissionModeDefault,
+            code: "permission_mode_default".to_owned(),
+            detail: format!("{} produced {}", policy_mode.as_str(), mode.as_str()),
+        }];
+        if risk == PermissionRisk::Protected {
+            reasons.push(PermissionDecisionReason {
+                source: PermissionDecisionSource::HardSafety,
+                code: "protected_target".to_owned(),
+                detail: "protected targets cannot be authorized by ordinary permission modes"
+                    .to_owned(),
+            });
+        }
+        let mut decision = Self {
             mode,
             access,
             network_effect,
@@ -678,9 +822,12 @@ impl PermissionDecision {
             confirmation,
             snapshot_required,
             command_permission_matches: Vec::new(),
+            reasons,
             base_local_policy_decision,
             external_directory_policy_decision,
-        }
+        };
+        decision.enforce_critical_path_hard_safety();
+        decision
     }
 
     pub(crate) fn recompute_mode(&mut self) {
@@ -725,6 +872,76 @@ impl PermissionDecision {
         }
         self.command_permission_matches
             .extend(constraint.command_permission_matches);
+        self.reasons.extend(constraint.reasons);
+        self.recompute_mode();
+    }
+
+    fn restrict_for_incomplete_analysis(&mut self, analysis: &ToolAnalysisStatus) {
+        if analysis.is_complete() {
+            return;
+        }
+        self.base_local_policy_decision =
+            combine_modes(vec![self.base_local_policy_decision, ApprovalMode::Ask]);
+        self.local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            self.external_directory_policy_decision,
+        ]);
+        self.reasons.push(PermissionDecisionReason {
+            source: PermissionDecisionSource::HardSafety,
+            code: "deterministic_analysis_incomplete".to_owned(),
+            detail: "incomplete shell analysis requires an exact interactive decision".to_owned(),
+        });
+        self.recompute_mode();
+    }
+
+    /// Applies the monotone safety floor derived from the plan's declared effects.
+    ///
+    /// `access` and `operation` are useful routing labels, but they are not authoritative safety
+    /// facts. A producer that under-declares either label must therefore not be able to lower the
+    /// risk or approval action implied by effects such as deletion, dynamic execution, remote
+    /// mutation, or credential access.
+    fn restrict_for_permission_effects(&mut self, effects: &BTreeSet<ToolPermissionEffect>) {
+        let floor = permission_effect_policy_floor(effects, self.access, self.operation);
+        self.risk = self.risk.max(floor.risk);
+        self.base_local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            floor.local_policy_decision,
+        ]);
+        self.local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            self.external_directory_policy_decision,
+        ]);
+        self.snapshot_required |= floor.snapshot_required;
+        if self.risk == PermissionRisk::Protected {
+            self.base_local_policy_decision = ApprovalMode::Deny;
+            self.local_policy_decision = ApprovalMode::Deny;
+        } else if self.confirmation.is_none() {
+            self.confirmation = confirmation_for_risk(self.risk, &self.subject_zones);
+        }
+        self.reasons.push(PermissionDecisionReason {
+            source: PermissionDecisionSource::HardSafety,
+            code: "permission_effect_floor".to_owned(),
+            detail: format!(
+                "declared effects require at least {} risk and {} local policy",
+                permission_risk_label(floor.risk),
+                floor.local_policy_decision.as_str()
+            ),
+        });
+        self.recompute_mode();
+    }
+
+    fn allow_contained_workspace_validation_default(&mut self) {
+        self.base_local_policy_decision = ApprovalMode::Allow;
+        self.local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            self.external_directory_policy_decision,
+        ]);
+        self.reasons.push(PermissionDecisionReason {
+            source: PermissionDecisionSource::SandboxSubstitution,
+            code: "contained_workspace_validation_default".to_owned(),
+            detail: "auto-edit allowed complete workspace validation under proven containment"
+                .to_owned(),
+        });
         self.recompute_mode();
     }
 
@@ -739,6 +956,40 @@ impl PermissionDecision {
             self.base_local_policy_decision,
             self.external_directory_policy_decision,
         ]);
+        self.recompute_mode();
+    }
+
+    fn enforce_critical_path_hard_safety(&mut self) {
+        let Some(target) = self.subjects.iter().find_map(|subject| {
+            let target = classify_hard_safety_path_target(subject)?;
+            hard_safety_target_blocks_operation(target, self.access, self.operation)
+                .then_some(target)
+        }) else {
+            return;
+        };
+
+        self.risk = PermissionRisk::Protected;
+        self.base_local_policy_decision = ApprovalMode::Deny;
+        self.local_policy_decision = ApprovalMode::Deny;
+        self.external_directory_required = false;
+        self.confirmation = None;
+        self.snapshot_required = false;
+        self.reasons.push(PermissionDecisionReason {
+            source: PermissionDecisionSource::HardSafety,
+            code: "critical_path_circuit_breaker".to_owned(),
+            detail: match target {
+                HardSafetyPathTarget::FilesystemRoot => {
+                    "filesystem-root mutation cannot be authorized by permission modes, approvals, or grants"
+                }
+                HardSafetyPathTarget::UserHome => {
+                    "destructive user-home mutation cannot be authorized by permission modes, approvals, or grants"
+                }
+                HardSafetyPathTarget::SystemRoot => {
+                    "system-path mutation cannot be authorized by permission modes, approvals, or grants"
+                }
+            }
+            .to_owned(),
+        });
         self.recompute_mode();
     }
 }
@@ -819,6 +1070,23 @@ impl<'a> PermissionPolicyChain<'a> {
                 tool_default_mode,
             )?;
             decision.restrict_with(constraint);
+        }
+        Ok(decision)
+    }
+
+    /// Resolves a V2 plan and applies analysis safety after all delegated policies are combined.
+    pub fn decide_plan(
+        &self,
+        spec: &ToolSpec,
+        plan: &ToolPermissionPlanV2,
+    ) -> Result<PermissionDecision> {
+        let mut policies = self.policies.iter();
+        let primary = policies
+            .next()
+            .expect("permission policy chain always contains the primary policy");
+        let mut decision = primary.decide_plan(spec, plan)?;
+        for policy in policies {
+            decision.restrict_with(policy.decide_plan(spec, plan)?);
         }
         Ok(decision)
     }
@@ -1064,6 +1332,68 @@ impl<'a> PermissionPolicy<'a> {
         Ok(decision)
     }
 
+    fn decide_plan(
+        &self,
+        spec: &ToolSpec,
+        plan: &ToolPermissionPlanV2,
+    ) -> Result<PermissionDecision> {
+        let mut decision = self.decide_with_operation_network_effect_and_default(
+            spec,
+            &plan.tool_name,
+            plan.access,
+            plan.operation,
+            plan.network_effect(),
+            plan.subjects.clone(),
+            plan.tool_default_mode,
+        )?;
+        decision.restrict_for_permission_effects(&plan.effects);
+        if !plan.analysis.is_complete() {
+            decision.restrict_for_incomplete_analysis(&plan.analysis);
+            return Ok(decision);
+        }
+        if spec.category != ToolCategory::Shell {
+            return Ok(decision);
+        }
+        if plan.analysis.is_complete()
+            && self.config.mode == PermissionMode::AutoEdit
+            && plan.operation == ToolOperation::ExecuteWorkspaceCheckCommand
+            && plan
+                .effects
+                .contains(&ToolPermissionEffect::ExecuteWorkspaceCode)
+            && !plan.has_non_grantable_effect()
+            && plan.containment.network == NetworkContainment::Deny
+            && plan
+                .analysis_bindings
+                .get("containment_proven")
+                .is_some_and(|value| value == "true")
+            && decision.base_local_policy_decision == ApprovalMode::Ask
+            && decision.external_directory_policy_decision == ApprovalMode::Allow
+            && decision.network_policy_decision == ApprovalMode::Allow
+            && decision.source_policy_decision == ApprovalMode::Allow
+            && decision.confirmation.is_none()
+            && !decision.snapshot_required
+            && decision.command_permission_matches.is_empty()
+            && !self.has_explicit_tool_policy(&plan.tool_name, &plan.subjects)?
+        {
+            decision.allow_contained_workspace_validation_default();
+        } else {
+            decision.restrict_for_incomplete_analysis(&plan.analysis);
+        }
+        Ok(decision)
+    }
+
+    fn has_explicit_tool_policy(&self, tool_name: &str, subjects: &[ToolSubject]) -> Result<bool> {
+        if subjects.is_empty() {
+            return Ok(self.explicit_tool_policy_mode(tool_name, None)?.is_some());
+        }
+        subjects.iter().try_fold(false, |found, subject| {
+            Ok(found
+                || self
+                    .explicit_tool_policy_mode(tool_name, Some(subject))?
+                    .is_some())
+        })
+    }
+
     fn classify_subject_trust_analyses(&self, subjects: &[ToolSubject]) -> Vec<PathTrustAnalysis> {
         subjects
             .iter()
@@ -1203,6 +1533,8 @@ pub fn infer_tool_operation(tool_name: &str, access: ToolAccess) -> ToolOperatio
         "delete_file" => ToolOperation::DeleteFile,
         "apply_changeset" => ToolOperation::ApplyChangeSet,
         "terminal_input" => ToolOperation::SendTerminalInput,
+        "terminal_resize" => ToolOperation::ResizeTerminalTask,
+        "terminal_cancel" => ToolOperation::CancelTerminalTask,
         "spawn_agent" | "spawn_agents" | "request_task_discovery" => ToolOperation::SpawnAgent,
         "message_agent" => ToolOperation::MessageAgent,
         "close_agent" => ToolOperation::CloseAgent,
@@ -1436,6 +1768,163 @@ fn normalize_policy_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn classify_hard_safety_path_target(subject: &ToolSubject) -> Option<HardSafetyPathTarget> {
+    if subject.kind != ToolSubjectKind::Path {
+        return None;
+    }
+    let path = normalize_policy_path(subject.canonical_path.as_deref()?);
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if path_is_filesystem_root(&path) {
+        return Some(HardSafetyPathTarget::FilesystemRoot);
+    }
+    if platform_critical_system_roots()
+        .iter()
+        .any(|root| path.starts_with(root))
+    {
+        return Some(HardSafetyPathTarget::SystemRoot);
+    }
+    if subject.scope == ToolSubjectScope::External
+        && canonical_user_home_root().is_some_and(|home| path.starts_with(home))
+    {
+        return Some(HardSafetyPathTarget::UserHome);
+    }
+    None
+}
+
+fn hard_safety_target_blocks_operation(
+    target: HardSafetyPathTarget,
+    access: ToolAccess,
+    operation: ToolOperation,
+) -> bool {
+    match target {
+        HardSafetyPathTarget::FilesystemRoot | HardSafetyPathTarget::SystemRoot => {
+            path_operation_is_mutating(access, operation)
+        }
+        HardSafetyPathTarget::UserHome => path_operation_is_destructive(operation),
+    }
+}
+
+fn path_operation_is_mutating(access: ToolAccess, operation: ToolOperation) -> bool {
+    access != ToolAccess::Read
+        && matches!(
+            operation,
+            ToolOperation::CreateFile
+                | ToolOperation::EditFile
+                | ToolOperation::OverwriteFile
+                | ToolOperation::DeleteFile
+                | ToolOperation::RenamePath
+                | ToolOperation::CreateDirectory
+                | ToolOperation::DeleteDirectory
+                | ToolOperation::RecursiveDelete
+                | ToolOperation::ApplyChangeSet
+                | ToolOperation::ExecuteMutatingCommand
+                | ToolOperation::ExecuteUnknownCommand
+                | ToolOperation::ExecuteDestructiveCommand
+        )
+}
+
+fn path_operation_is_destructive(operation: ToolOperation) -> bool {
+    matches!(
+        operation,
+        ToolOperation::OverwriteFile
+            | ToolOperation::DeleteFile
+            | ToolOperation::RenamePath
+            | ToolOperation::DeleteDirectory
+            | ToolOperation::RecursiveDelete
+            | ToolOperation::ApplyChangeSet
+            | ToolOperation::ExecuteMutatingCommand
+            | ToolOperation::ExecuteDestructiveCommand
+    )
+}
+
+fn path_is_filesystem_root(path: &Path) -> bool {
+    path.has_root() && path.parent().is_none()
+}
+
+fn canonical_user_home_root() -> Option<PathBuf> {
+    static USER_HOME_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    USER_HOME_ROOT
+        .get_or_init(|| {
+            home_dir()
+                .ok()
+                .map(|path| canonicalize_hard_safety_root(&path))
+        })
+        .clone()
+}
+
+fn canonicalize_hard_safety_root(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .map(|path| normalize_policy_path(&path))
+        .unwrap_or_else(|_| normalize_policy_path(path))
+}
+
+fn platform_critical_system_roots() -> &'static [PathBuf] {
+    static SYSTEM_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    SYSTEM_ROOTS.get_or_init(|| {
+        let mut roots = Vec::new();
+        #[cfg(target_os = "macos")]
+        roots.extend([
+            PathBuf::from("/System"),
+            PathBuf::from("/Library"),
+            PathBuf::from("/Applications"),
+            PathBuf::from("/usr"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/private/etc"),
+            PathBuf::from("/private/var/db"),
+        ]);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        roots.extend([
+            PathBuf::from("/boot"),
+            PathBuf::from("/dev"),
+            PathBuf::from("/etc"),
+            PathBuf::from("/proc"),
+            PathBuf::from("/sys"),
+            PathBuf::from("/usr"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/lib"),
+            PathBuf::from("/lib64"),
+            PathBuf::from("/run"),
+            PathBuf::from("/var/lib"),
+            PathBuf::from("/var/log"),
+            PathBuf::from("/var/run"),
+            PathBuf::from("/var/spool"),
+        ]);
+        #[cfg(windows)]
+        {
+            roots.extend([
+                PathBuf::from(r"C:\Windows"),
+                PathBuf::from(r"C:\Program Files"),
+                PathBuf::from(r"C:\Program Files (x86)"),
+                PathBuf::from(r"C:\ProgramData"),
+            ]);
+            for variable in [
+                "SystemRoot",
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "ProgramData",
+            ] {
+                if let Some(path) = std::env::var_os(variable).map(PathBuf::from) {
+                    roots.push(path);
+                }
+            }
+        }
+        roots
+            .into_iter()
+            .map(|path| canonicalize_hard_safety_root(&path))
+            .filter(|path| !path.as_os_str().is_empty())
+            .fold(Vec::new(), |mut roots, root| {
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+                roots
+            })
+    })
+}
+
 /// Derives a conservative risk label from access, operation, and path zones.
 pub fn derive_permission_risk(
     access: ToolAccess,
@@ -1492,6 +1981,13 @@ pub fn derive_permission_risk_with_network_effect(
         return PermissionRisk::Medium;
     }
 
+    if matches!(
+        operation,
+        ToolOperation::ResizeTerminalTask | ToolOperation::CancelTerminalTask
+    ) {
+        return PermissionRisk::Medium;
+    }
+
     let local_risk = match access {
         ToolAccess::Read => PermissionRisk::Low,
         ToolAccess::Write => PermissionRisk::Medium,
@@ -1501,6 +1997,134 @@ pub fn derive_permission_risk_with_network_effect(
         local_risk.max(PermissionRisk::High)
     } else {
         local_risk
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PermissionEffectPolicyFloor {
+    risk: PermissionRisk,
+    local_policy_decision: ApprovalMode,
+    snapshot_required: bool,
+}
+
+impl PermissionEffectPolicyFloor {
+    const fn new(
+        risk: PermissionRisk,
+        local_policy_decision: ApprovalMode,
+        snapshot_required: bool,
+    ) -> Self {
+        Self {
+            risk,
+            local_policy_decision,
+            snapshot_required,
+        }
+    }
+
+    fn combine(self, constraint: Self) -> Self {
+        Self {
+            risk: self.risk.max(constraint.risk),
+            local_policy_decision: combine_modes(vec![
+                self.local_policy_decision,
+                constraint.local_policy_decision,
+            ]),
+            snapshot_required: self.snapshot_required || constraint.snapshot_required,
+        }
+    }
+}
+
+/// Derives a closed, monotone safety floor from exact permission-plan effects.
+///
+/// Every `ToolPermissionEffect` is matched explicitly so adding a new effect cannot silently fall
+/// back to a permissive default. The access label only participates in coherence checks for the
+/// otherwise auto-grantable write and bounded-execution effects.
+fn permission_effect_policy_floor(
+    effects: &BTreeSet<ToolPermissionEffect>,
+    access: ToolAccess,
+    operation: ToolOperation,
+) -> PermissionEffectPolicyFloor {
+    effects.iter().fold(
+        PermissionEffectPolicyFloor::new(PermissionRisk::Low, ApprovalMode::Allow, false),
+        |floor, effect| floor.combine(permission_effect_floor(*effect, access, operation)),
+    )
+}
+
+fn permission_effect_floor(
+    effect: ToolPermissionEffect,
+    access: ToolAccess,
+    operation: ToolOperation,
+) -> PermissionEffectPolicyFloor {
+    use ToolPermissionEffect as Effect;
+
+    match effect {
+        Effect::FileRead | Effect::AgentLifecycle => {
+            PermissionEffectPolicyFloor::new(PermissionRisk::Low, ApprovalMode::Allow, false)
+        }
+        Effect::FileWrite => PermissionEffectPolicyFloor::new(
+            PermissionRisk::Medium,
+            if access == ToolAccess::Read {
+                ApprovalMode::Ask
+            } else {
+                ApprovalMode::Allow
+            },
+            false,
+        ),
+        Effect::FileDelete => {
+            PermissionEffectPolicyFloor::new(PermissionRisk::Destructive, ApprovalMode::Ask, true)
+        }
+        Effect::ExecuteTrustedBinary if operation == ToolOperation::ExecuteReadOnlyCommand => {
+            PermissionEffectPolicyFloor::new(PermissionRisk::Low, ApprovalMode::Allow, false)
+        }
+        Effect::ExecuteTrustedBinary | Effect::ExecuteWorkspaceCode => {
+            PermissionEffectPolicyFloor::new(
+                PermissionRisk::Medium,
+                if access == ToolAccess::Execute
+                    || operation == ToolOperation::ExecuteWorkspaceCheckCommand
+                {
+                    ApprovalMode::Allow
+                } else {
+                    ApprovalMode::Ask
+                },
+                false,
+            )
+        }
+        Effect::ProcessControl
+            if matches!(
+                operation,
+                ToolOperation::ResizeTerminalTask | ToolOperation::CancelTerminalTask
+            ) =>
+        {
+            // These operations are generation-bound to a Sigil-owned terminal task. They cannot
+            // select an arbitrary OS process, and the terminal manager revalidates exact session
+            // ownership before applying the control action.
+            PermissionEffectPolicyFloor::new(PermissionRisk::Medium, ApprovalMode::Allow, false)
+        }
+        Effect::ExecuteDynamicCode
+        | Effect::NetworkMutate
+        | Effect::NetworkUnknown
+        | Effect::ProcessControl
+        | Effect::PrivilegeEscalation
+        | Effect::PersistenceChange
+        | Effect::RemoteMutation
+        | Effect::ExternalApplicationControl
+        | Effect::Unknown => {
+            PermissionEffectPolicyFloor::new(PermissionRisk::High, ApprovalMode::Ask, false)
+        }
+        Effect::NetworkRead => {
+            PermissionEffectPolicyFloor::new(PermissionRisk::High, ApprovalMode::Allow, false)
+        }
+        Effect::CredentialAccess => {
+            PermissionEffectPolicyFloor::new(PermissionRisk::Protected, ApprovalMode::Deny, false)
+        }
+    }
+}
+
+const fn permission_risk_label(risk: PermissionRisk) -> &'static str {
+    match risk {
+        PermissionRisk::Low => "low",
+        PermissionRisk::Medium => "medium",
+        PermissionRisk::High => "high",
+        PermissionRisk::Destructive => "destructive",
+        PermissionRisk::Protected => "protected",
     }
 }
 
@@ -1524,7 +2148,45 @@ pub fn tool_approval_session_grant_available(decision: &PermissionDecision) -> b
         decision.network_policy_decision,
         decision.source_policy_decision,
     )
-    .is_some()
+    .is_ok()
+}
+
+/// Returns true only when a complete V2 plan can be safely widened to bounded session authority.
+pub fn tool_approval_session_grant_available_for_plan(
+    decision: &PermissionDecision,
+    plan: &ToolPermissionPlanV2,
+) -> bool {
+    tool_approval_session_grant_availability_for_plan(decision, plan).is_available()
+}
+
+/// Explains whether a complete V2 plan can become bounded session authority.
+///
+/// `available == true` is represented only by `unavailable_reason == None`; every unavailable
+/// result contains one stable reason code selected in deterministic policy-evaluation order.
+pub fn tool_approval_session_grant_availability_for_plan(
+    decision: &PermissionDecision,
+    plan: &ToolPermissionPlanV2,
+) -> ToolApprovalSessionGrantAvailability {
+    use ToolApprovalSessionGrantUnavailableReasonCode as Reason;
+
+    if !plan.analysis.is_complete() {
+        return ToolApprovalSessionGrantAvailability::unavailable(Reason::AnalysisIncomplete);
+    }
+    if plan.semantic_scope.is_none() {
+        return ToolApprovalSessionGrantAvailability::unavailable(Reason::SemanticScopeUnavailable);
+    }
+    if plan.has_non_grantable_effect() {
+        return ToolApprovalSessionGrantAvailability::unavailable(Reason::NonGrantableEffect);
+    }
+    if plan.session_grant_containment_binding().is_none() {
+        return ToolApprovalSessionGrantAvailability::unavailable(
+            Reason::ContainmentBindingUnavailable,
+        );
+    }
+    match tool_approval_session_grant_shape_result(decision) {
+        Ok(_) => ToolApprovalSessionGrantAvailability::available(),
+        Err(code) => ToolApprovalSessionGrantAvailability::unavailable(code),
+    }
 }
 
 /// Returns true when an approval can safely become a bounded session-local grant.
@@ -1555,12 +2217,19 @@ pub fn tool_approval_session_grant_available_for_facets(
         network_policy_decision,
         source_policy_decision,
     )
-    .is_some()
+    .is_ok()
 }
 
 pub(crate) fn tool_approval_session_grant_shape(
     decision: &PermissionDecision,
 ) -> Option<ToolApprovalSessionGrantShape> {
+    tool_approval_session_grant_shape_result(decision).ok()
+}
+
+fn tool_approval_session_grant_shape_result(
+    decision: &PermissionDecision,
+) -> std::result::Result<ToolApprovalSessionGrantShape, ToolApprovalSessionGrantUnavailableReasonCode>
+{
     tool_approval_session_grant_shape_for_facets(
         decision.access,
         decision.network_effect,
@@ -1589,12 +2258,15 @@ fn tool_approval_session_grant_shape_for_facets(
     local_policy_decision: ApprovalMode,
     network_policy_decision: ApprovalMode,
     source_policy_decision: ApprovalMode,
-) -> Option<ToolApprovalSessionGrantShape> {
+) -> std::result::Result<ToolApprovalSessionGrantShape, ToolApprovalSessionGrantUnavailableReasonCode>
+{
+    use ToolApprovalSessionGrantUnavailableReasonCode as Reason;
+
     if source_policy_decision != ApprovalMode::Allow
         || matches!(local_policy_decision, ApprovalMode::Deny)
         || matches!(network_policy_decision, ApprovalMode::Deny)
     {
-        return None;
+        return Err(Reason::PolicyDecisionNotGrantable);
     }
 
     let mut facets = Vec::new();
@@ -1605,10 +2277,10 @@ fn tool_approval_session_grant_shape_for_facets(
         facets.push(ToolApprovalSessionGrantFacet::Network);
     }
     if facets.is_empty() {
-        return None;
+        return Err(Reason::NoReusableApprovalFacet);
     }
 
-    let network_read_scope = network_read_session_grant_scope(
+    let network_read_scope = network_read_session_grant_scope_result(
         access,
         network_effect,
         operation,
@@ -1619,31 +2291,32 @@ fn tool_approval_session_grant_shape_for_facets(
     );
     if network_policy_decision == ApprovalMode::Ask {
         let scope = network_read_scope?;
-        return Some(ToolApprovalSessionGrantShape { facets, scope });
+        return Ok(ToolApprovalSessionGrantShape { facets, scope });
     }
-    if let Some(scope) = network_read_scope {
-        return Some(ToolApprovalSessionGrantShape { facets, scope });
+    if let Ok(scope) = network_read_scope {
+        return Ok(ToolApprovalSessionGrantShape { facets, scope });
     }
 
     let network_risk_is_consistent = network_effect.is_none() || risk >= PermissionRisk::High;
-    (network_policy_decision == ApprovalMode::Allow
-        && network_risk_is_consistent
-        && tool_approval_session_grant_available_for_parts(
-            access,
-            operation,
-            risk,
-            subjects,
-            zones,
-            confirmation,
-            snapshot_required,
-        ))
-    .then_some(ToolApprovalSessionGrantShape {
+    if network_policy_decision != ApprovalMode::Allow || !network_risk_is_consistent {
+        return Err(Reason::NetworkScopeNotGrantable);
+    }
+    tool_approval_session_grant_parts_result(
+        access,
+        operation,
+        risk,
+        subjects,
+        zones,
+        confirmation,
+        snapshot_required,
+    )?;
+    Ok(ToolApprovalSessionGrantShape {
         facets,
         scope: ToolApprovalSessionGrantScope::ExactSubjects,
     })
 }
 
-fn network_read_session_grant_scope(
+fn network_read_session_grant_scope_result(
     access: ToolAccess,
     network_effect: Option<NetworkEffect>,
     operation: ToolOperation,
@@ -1651,26 +2324,36 @@ fn network_read_session_grant_scope(
     subjects: &[ToolSubject],
     confirmation: Option<&PermissionConfirmation>,
     snapshot_required: bool,
-) -> Option<ToolApprovalSessionGrantScope> {
+) -> std::result::Result<ToolApprovalSessionGrantScope, ToolApprovalSessionGrantUnavailableReasonCode>
+{
+    use ToolApprovalSessionGrantUnavailableReasonCode as Reason;
+
     if access != ToolAccess::Read
         || network_effect != Some(NetworkEffect::Read)
         || operation != ToolOperation::NetworkRequest
         || risk != PermissionRisk::High
-        || confirmation.is_some()
-        || snapshot_required
-        || subjects.is_empty()
     {
-        return None;
+        return Err(Reason::NetworkScopeNotGrantable);
+    }
+    if confirmation.is_some() {
+        return Err(Reason::ConfirmationRequired);
+    }
+    if snapshot_required {
+        return Err(Reason::SnapshotRequired);
+    }
+    if subjects.is_empty() {
+        return Err(Reason::SubjectScopeUnavailable);
     }
     if subjects.iter().all(|subject| {
         subject.kind == ToolSubjectKind::NetworkEndpoint && !subject.normalized.trim().is_empty()
     }) {
-        return Some(ToolApprovalSessionGrantScope::NetworkReadTool);
+        return Ok(ToolApprovalSessionGrantScope::NetworkReadTool);
     }
     subjects
         .iter()
         .all(stable_network_read_subject)
         .then_some(ToolApprovalSessionGrantScope::ExactSubjects)
+        .ok_or(Reason::SubjectScopeUnavailable)
 }
 
 fn stable_network_read_subject(subject: &ToolSubject) -> bool {
@@ -1710,18 +2393,43 @@ pub fn tool_approval_session_grant_available_for_parts(
     confirmation: Option<&PermissionConfirmation>,
     snapshot_required: bool,
 ) -> bool {
-    if confirmation.is_some() || snapshot_required || subjects.is_empty() {
-        return false;
+    tool_approval_session_grant_parts_result(
+        access,
+        operation,
+        risk,
+        subjects,
+        zones,
+        confirmation,
+        snapshot_required,
+    )
+    .is_ok()
+}
+
+fn tool_approval_session_grant_parts_result(
+    access: ToolAccess,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: &[ToolSubject],
+    zones: &[PathTrustZone],
+    confirmation: Option<&PermissionConfirmation>,
+    snapshot_required: bool,
+) -> std::result::Result<(), ToolApprovalSessionGrantUnavailableReasonCode> {
+    use ToolApprovalSessionGrantUnavailableReasonCode as Reason;
+
+    if confirmation.is_some() {
+        return Err(Reason::ConfirmationRequired);
     }
-    let exact_command_grant_available =
-        exact_command_session_grant_available(access, operation, risk, subjects, zones);
-    if !matches!(risk, PermissionRisk::Low | PermissionRisk::Medium)
-        && !exact_command_grant_available
-    {
-        return false;
+    if snapshot_required {
+        return Err(Reason::SnapshotRequired);
+    }
+    if subjects.is_empty() {
+        return Err(Reason::SubjectScopeUnavailable);
+    }
+    if !matches!(risk, PermissionRisk::Low | PermissionRisk::Medium) {
+        return Err(Reason::RiskNotGrantable);
     }
     if zones.contains(&PathTrustZone::External) && access != ToolAccess::Read {
-        return false;
+        return Err(Reason::ExternalMutation);
     }
     if !matches!(
         operation,
@@ -1733,56 +2441,19 @@ pub fn tool_approval_session_grant_available_for_parts(
             | ToolOperation::CreateDirectory
             | ToolOperation::ExecuteReadOnlyCommand
             | ToolOperation::ExecuteWorkspaceCheckCommand
-            | ToolOperation::ExecuteUnknownCommand
     ) {
-        return false;
+        return Err(Reason::OperationNotGrantable);
     }
-    subjects.iter().all(|subject| {
-        subject_has_stable_session_grant_scope(subject, operation, exact_command_grant_available)
-    })
-}
-
-fn exact_command_session_grant_available(
-    access: ToolAccess,
-    operation: ToolOperation,
-    risk: PermissionRisk,
-    subjects: &[ToolSubject],
-    zones: &[PathTrustZone],
-) -> bool {
-    let mut command_subjects = subjects
+    if !subjects
         .iter()
-        .filter(|subject| subject.kind == ToolSubjectKind::Command);
-    access == ToolAccess::Execute
-        && operation == ToolOperation::ExecuteUnknownCommand
-        && risk == PermissionRisk::High
-        && zones
-            .iter()
-            .all(|zone| !matches!(zone, PathTrustZone::External))
-        && command_subjects
-            .next()
-            .is_some_and(command_subject_is_stable_and_exact)
-        && command_subjects.all(command_subject_is_stable_and_exact)
-}
-
-fn command_subject_is_stable_and_exact(subject: &ToolSubject) -> bool {
-    if subject.kind != ToolSubjectKind::Command {
-        return false;
+        .all(|subject| subject_has_stable_session_grant_scope(subject, operation))
+    {
+        return Err(Reason::SubjectScopeUnavailable);
     }
-    let normalized = subject.normalized.trim();
-    !normalized.is_empty()
-        && normalized
-            == subject
-                .original
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
+    Ok(())
 }
 
-fn subject_has_stable_session_grant_scope(
-    subject: &ToolSubject,
-    operation: ToolOperation,
-    exact_command_grant_available: bool,
-) -> bool {
+fn subject_has_stable_session_grant_scope(subject: &ToolSubject, operation: ToolOperation) -> bool {
     match subject.kind {
         ToolSubjectKind::Path => match subject.scope {
             ToolSubjectScope::Workspace => !subject.normalized.trim().is_empty(),
@@ -1793,11 +2464,10 @@ fn subject_has_stable_session_grant_scope(
             ToolSubjectScope::Unknown => false,
         },
         ToolSubjectKind::Command => {
-            (matches!(
+            matches!(
                 operation,
                 ToolOperation::ExecuteReadOnlyCommand | ToolOperation::ExecuteWorkspaceCheckCommand
-            ) || exact_command_grant_available)
-                && !subject.normalized.trim().is_empty()
+            ) && !subject.normalized.trim().is_empty()
         }
         ToolSubjectKind::McpTrustClass => !subject.original.trim().is_empty(),
         _ => false,
@@ -1820,14 +2490,11 @@ fn apply_operation_risk_overlay(
 }
 
 fn apply_policy_risk_overlay(
-    policy_mode: PermissionMode,
+    _policy_mode: PermissionMode,
     mode: ApprovalMode,
     operation: ToolOperation,
     risk: PermissionRisk,
 ) -> ApprovalMode {
-    if policy_mode == PermissionMode::DangerFullAccess {
-        return mode;
-    }
     apply_operation_risk_overlay(mode, operation, risk)
 }
 

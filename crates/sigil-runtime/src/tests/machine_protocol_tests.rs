@@ -25,7 +25,7 @@ fn event_record_serializes_with_stable_v1_envelope() {
             "record_type": "event",
             "protocol_version": 1,
             "event": {
-                "schema_version": 1,
+                "schema_version": sigil_kernel::PUBLIC_RUN_EVENT_SCHEMA_VERSION,
                 "session_id": "session-1",
                 "run_id": "run-1",
                 "sequence": 1,

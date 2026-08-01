@@ -194,6 +194,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
 
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     approval_app.approval.pending = Some(PendingApproval {
+        approval_request_id: "approval-layout".to_owned(),
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -208,7 +209,12 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
             network_effect: None,
             preview: ToolPreviewCapability::Optional,
         },
+        effects: std::collections::BTreeSet::new(),
         subjects: Vec::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
         network_effect: None,
         local_policy_decision: sigil_kernel::ApprovalMode::Ask,
         network_policy_decision: sigil_kernel::ApprovalMode::Allow,
@@ -220,7 +226,11 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         snapshot_required: false,
         command_permission_matches: Vec::new(),
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         preview: None,
+        presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
     let approval = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &approval_app);
     let modal = approval
@@ -352,6 +362,7 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
 fn layout_snapshot_hits_approval_file_rows_and_actions() {
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     approval_app.approval.pending = Some(PendingApproval {
+        approval_request_id: "approval-layout-files".to_owned(),
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -366,7 +377,12 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
             network_effect: None,
             preview: ToolPreviewCapability::Optional,
         },
+        effects: std::collections::BTreeSet::new(),
         subjects: Vec::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
         network_effect: None,
         local_policy_decision: sigil_kernel::ApprovalMode::Ask,
         network_policy_decision: sigil_kernel::ApprovalMode::Allow,
@@ -378,6 +394,9 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         snapshot_required: false,
         command_permission_matches: Vec::new(),
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         preview: Some(sigil_kernel::ToolPreview {
             title: "Update files".to_owned(),
             summary: "summary".to_owned(),
@@ -394,6 +413,7 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
                 },
             ],
         }),
+        presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
     let approval = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &approval_app);
     let hit_areas = approval
@@ -469,13 +489,17 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
         }],
         selected_action: ApprovalAction::Deny,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        ..ApprovalModalView::default()
     };
 
     let area = approval_modal_area(Rect::new(0, 0, 90, 24), &view);
     assert!(area.width <= 84);
     assert!(area.width >= 74);
     assert!(area.x > 0);
-    assert!(area.y > 0);
+    assert_eq!(area.y, 1);
 }
 
 #[test]
@@ -643,6 +667,7 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
         sigil_kernel::ModelMessage::assistant(Some("visible".to_owned()), Vec::new()),
     ))))?;
     app.approval.pending = Some(PendingApproval {
+        approval_request_id: "approval-tight".to_owned(),
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -657,7 +682,12 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
             network_effect: None,
             preview: ToolPreviewCapability::Optional,
         },
+        effects: std::collections::BTreeSet::new(),
         subjects: Vec::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
         network_effect: None,
         local_policy_decision: sigil_kernel::ApprovalMode::Ask,
         network_policy_decision: sigil_kernel::ApprovalMode::Allow,
@@ -669,7 +699,11 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
         snapshot_required: false,
         command_permission_matches: Vec::new(),
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         preview: None,
+        presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
 
     let rows = visible_timeline_rows(Rect::new(0, 0, 80, 2), &app)
@@ -711,6 +745,10 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         }],
         selected_action: ApprovalAction::AllowOnce,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        ..ApprovalModalView::default()
     };
 
     assert_eq!(approval_header_line_count(&view), 5);
@@ -754,6 +792,6 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
 
     view.metadata_collapsed = false;
     view.preview_summary = "line one\nline two\nline three".to_owned();
-    assert_eq!(approval_header_line_count(&view), 7);
+    assert_eq!(approval_header_line_count(&view), 11);
     assert!(approval_modal_hit_areas(Rect::new(0, 0, 4, 4), &view).is_some());
 }

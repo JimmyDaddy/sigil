@@ -13,6 +13,11 @@ const AGENT_RUN_CANARY = "DESKTOP_E2E_AGENT_DONE";
 const PLAN_RUN_CANARY = "DESKTOP_E2E_PLAN_DONE";
 const AUTO_ORCHESTRATION_PROMPT = "DESKTOP_E2E_AUTO_ORCHESTRATION";
 const AUTO_ORCHESTRATION_FINAL_CANARY = "DESKTOP_E2E_AUTO_ORCHESTRATION_DONE";
+const TERMINAL_LIFECYCLE_PROMPT = "DESKTOP_E2E_TERMINAL_LIFECYCLE";
+const TERMINAL_LIFECYCLE_READY_CANARY = "DESKTOP_E2E_TERMINAL_READY";
+const TERMINAL_LIFECYCLE_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_FOREGROUND_DONE";
+const TERMINAL_SUCCESSOR_PROMPT = "DESKTOP_E2E_TERMINAL_SUCCESSOR";
+const TERMINAL_SUCCESSOR_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_SUCCESSOR_DONE";
 const AUTO_READ_STEP_IDS = ["desktop_inspect_kernel", "desktop_inspect_runtime"] as const;
 const AUTO_HANDOFF_ARGS = JSON.stringify({
   reason_codes: ["parallel_research", "multi_stage_change"],
@@ -163,6 +168,37 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         recordRequest("queued_followup");
         sendText(response, QUEUED_RUN_CANARY);
       } else if (
+        typeof lastUserText === "string"
+        && lastUserText.includes(TERMINAL_SUCCESSOR_PROMPT)
+      ) {
+        recordRequest("terminal_successor");
+        sendText(response, TERMINAL_SUCCESSOR_FINAL_CANARY);
+      } else if (
+        lastMessage?.role === "tool"
+        && typeof lastMessage.content === "string"
+        && lastMessage.content.includes("ordinary conversation routing accepted")
+        && requestText.includes(TERMINAL_LIFECYCLE_PROMPT)
+      ) {
+        recordRequest("terminal_lifecycle_initial");
+        sendNamedToolCall(
+          response,
+          "desktop-e2e-terminal-start",
+          "terminal_start",
+          JSON.stringify({
+            task_id: "desktop-e2e-terminal-task",
+            command: `printf '${TERMINAL_LIFECYCLE_READY_CANARY}\\n'; sleep 12; printf 'DESKTOP_E2E_TERMINAL_EXIT\\n'`,
+            mode: "background",
+            readiness: {
+              kind: "output_contains",
+              value: TERMINAL_LIFECYCLE_READY_CANARY,
+              timeout_secs: 5,
+            },
+          }),
+        );
+      } else if (lastMessage?.role === "tool" && requestText.includes(TERMINAL_LIFECYCLE_PROMPT)) {
+        recordRequest("terminal_lifecycle_after_start");
+        sendText(response, TERMINAL_LIFECYCLE_FINAL_CANARY);
+      } else if (
         lastMessage?.role === "tool"
         && typeof lastMessage.content === "string"
         && lastMessage.content.includes("ordinary conversation routing accepted")
@@ -226,7 +262,7 @@ function sendToolCall(response: ServerResponse): void {
     APPROVAL_CALL_ID,
     "bash",
     JSON.stringify({
-      command: "head -1 README.md 2>&1 | xxd | head -1",
+      command: "printf 'desktop approval accepted\\n' > desktop-e2e-approved.txt",
     }),
   );
 }
@@ -283,5 +319,10 @@ export const desktopProviderCanaries = {
   queuedPrompt: QUEUED_PROMPT,
   queuedRun: QUEUED_RUN_CANARY,
   skillRun: SKILL_RUN_CANARY,
+  terminalLifecycleFinal: TERMINAL_LIFECYCLE_FINAL_CANARY,
+  terminalLifecyclePrompt: TERMINAL_LIFECYCLE_PROMPT,
+  terminalLifecycleReady: TERMINAL_LIFECYCLE_READY_CANARY,
+  terminalSuccessorFinal: TERMINAL_SUCCESSOR_FINAL_CANARY,
+  terminalSuccessorPrompt: TERMINAL_SUCCESSOR_PROMPT,
   title: TITLE_CANARY,
 } as const;

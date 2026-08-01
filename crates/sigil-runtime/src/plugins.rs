@@ -8,16 +8,17 @@ use std::{
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend,
-    ExecutionCoverageLabel, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
-    ExecutionStreamCapture, ExecutionTerminationCause, ExtensionProcessNetworkAdmission,
-    MAX_PLUGIN_HOOK_ARTIFACT_REFS, MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig,
-    MutationEventRecorder, NetworkEffect, PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef,
-    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
-    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef,
-    PluginManifest, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState,
-    SecretRedactor, SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope,
-    WorkspaceMutationScan, validate_extension_process_network_admission,
+    ApprovalMode, DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    ExecutionBackend, ExecutionCoverageLabel, ExecutionReceipt, ExecutionRequest,
+    ExecutionSandboxProfile, ExecutionStreamCapture, ExecutionTerminationCause,
+    ExtensionProcessNetworkAdmission, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
+    MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig, MutationEventRecorder, NetworkEffect,
+    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookOutputArtifactRef,
+    PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef, PluginManifest,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState, SecretRedactor,
+    SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope, WorkspaceMutationScan,
+    validate_extension_process_network_admission,
     validate_extension_process_network_receipt_with_policy, validate_plugin_id,
 };
 use uuid::Uuid;
@@ -216,6 +217,50 @@ pub struct PluginHookExecutionOutcome {
     pub mutation_event_id: Option<String>,
 }
 
+/// Stable fail-closed reason for a plugin hook that cannot enter the non-interactive runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginHookExecutionAdmissionErrorCode {
+    ApprovalRequired,
+    ApprovalDenied,
+}
+
+impl PluginHookExecutionAdmissionErrorCode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "plugin_hook_approval_required",
+            Self::ApprovalDenied => "plugin_hook_approval_denied",
+        }
+    }
+}
+
+/// Typed execution-admission error that never exposes a command or absolute path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginHookExecutionAdmissionError {
+    pub code: PluginHookExecutionAdmissionErrorCode,
+    pub plugin_id: String,
+    pub hook_id: String,
+}
+
+impl std::fmt::Display for PluginHookExecutionAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            PluginHookExecutionAdmissionErrorCode::ApprovalRequired => write!(
+                formatter,
+                "plugin {} hook {} requires an interactive approval route",
+                self.plugin_id, self.hook_id
+            ),
+            PluginHookExecutionAdmissionErrorCode::ApprovalDenied => write!(
+                formatter,
+                "plugin {} hook {} is denied by its trusted manifest",
+                self.plugin_id, self.hook_id
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PluginHookExecutionAdmissionError {}
+
 /// Runs trusted plugin hook commands through the configured non-interactive execution backend.
 pub struct PluginHookExecutionRunner {
     backend: Arc<dyn ExecutionBackend>,
@@ -277,6 +322,26 @@ impl PluginHookExecutionRunner {
             );
         }
         registration.hook.validate()?;
+        let hook_id = registration.hook.stable_id();
+        match registration.hook.approval {
+            ApprovalMode::Allow => {}
+            ApprovalMode::Ask => {
+                return Err(PluginHookExecutionAdmissionError {
+                    code: PluginHookExecutionAdmissionErrorCode::ApprovalRequired,
+                    plugin_id: registration.plugin_id,
+                    hook_id,
+                }
+                .into());
+            }
+            ApprovalMode::Deny => {
+                return Err(PluginHookExecutionAdmissionError {
+                    code: PluginHookExecutionAdmissionErrorCode::ApprovalDenied,
+                    plugin_id: registration.plugin_id,
+                    hook_id,
+                }
+                .into());
+            }
+        }
         let plugin_root = registration.plugin_root.canonicalize().with_context(|| {
             format!(
                 "failed to resolve plugin root {}",
@@ -288,7 +353,6 @@ impl PluginHookExecutionRunner {
         }
         let command = registration.hook.command_vector();
         let execution_id = format!("plugin_hook_{}", Uuid::new_v4());
-        let hook_id = registration.hook.stable_id();
         let declared_effect = registration.hook.declared_effect;
         let tool_name = plugin_hook_tool_name(&registration.plugin_id, &hook_id);
         let backend = self.backend.kind();

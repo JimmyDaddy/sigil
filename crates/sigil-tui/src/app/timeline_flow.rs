@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    AgentView, AppAction, AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase,
-    ThinkingBlockMode, TimelineEntry, TimelineRole, TimelineTextSelection,
+    AgentView, AppAction, AppState, ApprovalPresentationState, EventEntry, LiveActivitySummary,
+    PaneFocus, RunPhase, ThinkingBlockMode, TimelineEntry, TimelineRole, TimelineTextSelection,
     agent_flow::agent_thread_sidebar_detail,
     formatting::{
         line_has_visible_content, sidebar_width_for_terminal, truncate_session_view_text,
@@ -485,7 +485,7 @@ impl AppState {
 
     pub fn handle_mouse_scroll(&mut self, upward: bool) {
         let delta = self.terminal_scroll_sensitivity();
-        if self.approval.pending.is_some() {
+        if self.approval.has_actionable_pending() {
             if upward {
                 self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
             } else {
@@ -505,7 +505,7 @@ impl AppState {
         match self.active_pane {
             PaneFocus::Composer => self.scroll_timeline(delta),
             PaneFocus::Activity => {
-                if self.approval.pending.is_some() {
+                if self.approval.has_actionable_pending() {
                     self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
                 } else {
                     self.activity_scroll_back = self.activity_scroll_back.saturating_add(delta);
@@ -518,7 +518,7 @@ impl AppState {
         match self.active_pane {
             PaneFocus::Composer => self.unscroll_timeline(delta),
             PaneFocus::Activity => {
-                if self.approval.pending.is_some() {
+                if self.approval.has_actionable_pending() {
                     self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
                 } else {
                     self.activity_scroll_back = self.activity_scroll_back.saturating_sub(delta);
@@ -1110,9 +1110,21 @@ impl AppState {
 
     pub(crate) fn live_activity_summary(&self) -> Option<LiveActivitySummary> {
         if let Some(pending) = &self.approval.pending {
+            let detail = match &pending.presentation_state {
+                ApprovalPresentationState::Pending => {
+                    format!("waiting for decision on {}", pending.call.name)
+                }
+                ApprovalPresentationState::DecisionAccepted { .. } => {
+                    format!("decision accepted for {}; resuming run", pending.call.name)
+                }
+                ApprovalPresentationState::DeliveryUncertain { .. } => format!(
+                    "approval state uncertain for {}; awaiting authority",
+                    pending.call.name
+                ),
+            };
             return Some(LiveActivitySummary {
                 label: "approval".to_owned(),
-                detail: format!("waiting for decision on {}", pending.call.name),
+                detail,
             });
         }
         if let Some(summary) = self.active_child_agent_activity_summary() {

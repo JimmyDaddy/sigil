@@ -2,8 +2,8 @@ use super::*;
 use crate::app::modal_flow::ModelCatalogState;
 use crate::app::tests::common::adaptive_test_compaction_preview;
 use crate::runner::{
-    ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview,
-    V2ContinuityPreview,
+    TerminalTaskControlIdentity, ToolOutputShrinkPreview, V2CompactionAdmission,
+    V2CompactionPreviewState, V2CompactionReview, V2ContinuityPreview,
 };
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
@@ -1469,6 +1469,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.runtime.is_busy = true;
     app.approval.pending = Some(PendingApproval {
+        approval_request_id: "approval-1".to_owned(),
         call: ToolCall {
             id: "call-1".to_owned(),
             name: "write_file".to_owned(),
@@ -1483,7 +1484,12 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
+        effects: std::collections::BTreeSet::new(),
         subjects: Vec::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
         network_effect: None,
         local_policy_decision: sigil_kernel::ApprovalMode::Ask,
         network_policy_decision: sigil_kernel::ApprovalMode::Allow,
@@ -1495,7 +1501,11 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         snapshot_required: false,
         command_permission_matches: Vec::new(),
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         preview: None,
+        presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
     app.modal_state = Some(ModalState::KeyboardHelp);
     app.timeline_state.streaming_reasoning_index = Some(0);
@@ -1572,6 +1582,132 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     assert!(app.modal_state.is_none());
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("timeout"));
+    Ok(())
+}
+
+#[test]
+fn exact_approval_receipt_hides_actions_and_projects_resuming_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.runtime.is_busy = true;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    app.handle_worker_message(WorkerMessage::ApprovalCommandReceipt(
+        crate::runner::WorkerApprovalCommandReceipt {
+            command_id: "command-approve".to_owned(),
+            approval_request_id: "approval-call-1".to_owned(),
+            call_id: "call-1".to_owned(),
+            decision: crate::runner::WorkerApprovalDecision::ApproveOnce,
+            route_state: crate::runner::WorkerApprovalRouteState::DecisionAccepted,
+            replayed: false,
+        },
+    ))?;
+
+    let pending = app.approval.pending.as_ref().expect("accepted tombstone");
+    assert!(matches!(
+        pending.presentation_state,
+        crate::app::ApprovalPresentationState::DecisionAccepted { .. }
+    ));
+    assert!(app.approval_modal_view().is_none());
+    assert_eq!(
+        app.live_activity_summary().map(|summary| summary.detail),
+        Some("decision accepted for write_file; resuming run".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_resolution_clears_an_accepted_approval_tombstone_idempotently() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    app.handle_worker_message(WorkerMessage::ApprovalCommandReceipt(
+        crate::runner::WorkerApprovalCommandReceipt {
+            command_id: "command-approve".to_owned(),
+            approval_request_id: "approval-call-1".to_owned(),
+            call_id: "call-1".to_owned(),
+            decision: crate::runner::WorkerApprovalDecision::ApproveOnce,
+            route_state: crate::runner::WorkerApprovalRouteState::DecisionAccepted,
+            replayed: false,
+        },
+    ))?;
+
+    let resolved = RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
+        approved: true,
+        reason: None,
+    };
+    app.handle(resolved.clone())?;
+    assert!(app.approval.pending.is_none());
+
+    app.handle(resolved)?;
+    assert!(app.approval.pending.is_none());
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    Ok(())
+}
+
+#[test]
+fn stale_approval_receipt_and_resolution_do_not_close_newer_request() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    app.handle_worker_message(WorkerMessage::ApprovalCommandReceipt(
+        crate::runner::WorkerApprovalCommandReceipt {
+            command_id: "command-old".to_owned(),
+            approval_request_id: "approval-old".to_owned(),
+            call_id: "call-1".to_owned(),
+            decision: crate::runner::WorkerApprovalDecision::ApproveOnce,
+            route_state: crate::runner::WorkerApprovalRouteState::DecisionAccepted,
+            replayed: true,
+        },
+    ))?;
+    assert!(app.approval.pending.as_ref().is_some_and(|pending| {
+        pending.approval_request_id == "approval-call-1"
+            && matches!(
+                pending.presentation_state,
+                crate::app::ApprovalPresentationState::Pending
+            )
+    }));
+
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approval_request_id: "approval-old".to_owned(),
+        approved: true,
+        reason: None,
+    })?;
+    assert!(app.approval.pending.is_some());
+    Ok(())
+}
+
+#[test]
+fn uncertain_approval_delivery_is_non_actionable_until_authority_resolves() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    app.handle_worker_message(WorkerMessage::ApprovalCommandReceipt(
+        crate::runner::WorkerApprovalCommandReceipt {
+            command_id: "command-uncertain".to_owned(),
+            approval_request_id: "approval-call-1".to_owned(),
+            call_id: "call-1".to_owned(),
+            decision: crate::runner::WorkerApprovalDecision::ApproveOnce,
+            route_state: crate::runner::WorkerApprovalRouteState::DeliveryUncertain,
+            replayed: false,
+        },
+    ))?;
+
+    assert!(matches!(
+        app.approval
+            .pending
+            .as_ref()
+            .expect("uncertain tombstone")
+            .presentation_state,
+        crate::app::ApprovalPresentationState::DeliveryUncertain { .. }
+    ));
+    assert!(app.approval_modal_view().is_none());
+    assert!(
+        app.live_activity_summary()
+            .is_some_and(|summary| summary.detail.contains("approval state uncertain"))
+    );
     Ok(())
 }
 
@@ -1956,6 +2092,16 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::ToolApprovalRequested {
+            approval_identity: test_approval_identity("call-write"),
+            effects: std::collections::BTreeSet::new(),
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: sigil_kernel::ExecutionContainmentRequest::default(),
+            safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+            decision_reasons: Vec::new(),
+            session_grant_available: false,
+            session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            }),
             call: ToolCall {
                 id: "call-write".to_owned(),
                 name: "write_file".to_owned(),
@@ -1992,6 +2138,7 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::ToolApprovalResolved {
             call_id: "call-write".to_owned(),
+            approval_request_id: "approval-call-write".to_owned(),
             approved: false,
             reason: Some("scope".to_owned()),
         }),
@@ -2126,6 +2273,16 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
     assert_eq!(app.last_notice(), Some("waiting for agent @explore"));
 
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-spawn"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: spawn_call.clone(),
         spec: ToolSpec {
             name: "spawn_agent".to_owned(),
@@ -2153,6 +2310,7 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
 
     app.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-spawn".to_owned(),
+        approval_request_id: "approval-call-spawn".to_owned(),
         approved: true,
         reason: None,
     })?;
@@ -2761,19 +2919,26 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
     assert!(matches!(
         app.into_worker_command(AppAction::ApprovalDecision {
             call_id: "call-1".to_owned(),
+            approval_request_id: "approval-1".to_owned(),
             approved: true,
         }),
         WorkerCommand::ApprovalCommand(command)
             if command.client_id == "sigil-tui"
                 && matches!(
                     command.payload,
-                    crate::runner::WorkerApprovalCommand::Decision { ref call_id, approved }
-                        if call_id == "call-1" && approved
+                    crate::runner::WorkerApprovalCommand::Decision {
+                        ref call_id,
+                        ref approval_request_id,
+                        approved,
+                    } if call_id == "call-1"
+                        && approval_request_id == "approval-1"
+                        && approved
                 )
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::ApprovalDecisionWithArgs {
             call_id: "call-spawn".to_owned(),
+            approval_request_id: "approval-spawn".to_owned(),
             args_json: r#"{"mode":"background"}"#.to_owned(),
         }),
         WorkerCommand::ApprovalCommand(command)
@@ -2782,8 +2947,11 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
                     command.payload,
                     crate::runner::WorkerApprovalCommand::DecisionWithArgs {
                         ref call_id,
+                        ref approval_request_id,
                         ref args_json,
-                    } if call_id == "call-spawn" && args_json.contains("background")
+                    } if call_id == "call-spawn"
+                        && approval_request_id == "approval-spawn"
+                        && args_json.contains("background")
                 )
     ));
     assert!(matches!(
@@ -2796,9 +2964,17 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::CancelTerminalTask {
-            task_id: "terminal-1".to_owned(),
+            identity: TerminalTaskControlIdentity {
+                session_scope_id: "session-scope-1".to_owned(),
+                run_id: "foreground-run-1".to_owned(),
+                task_id: "terminal-1".to_owned(),
+                expected_generation: 7,
+            },
         }),
-        WorkerCommand::CancelTerminalTask { task_id } if task_id == "terminal-1"
+        WorkerCommand::CancelTerminalTask { identity }
+            if identity.task_id == "terminal-1"
+                && identity.run_id == "foreground-run-1"
+                && identity.expected_generation == 7
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::CloseAgent {
@@ -2916,6 +3092,12 @@ fn terminal_task_updated_syncs_session_and_pushes_tool_card() -> Result<()> {
         running.clone(),
     ))];
     app.handle_worker_message(WorkerMessage::TerminalTaskUpdated {
+        identity: TerminalTaskControlIdentity {
+            session_scope_id: "session-scope-1".to_owned(),
+            run_id: "foreground-run-1".to_owned(),
+            task_id: "terminal-1".to_owned(),
+            expected_generation: 1,
+        },
         entry: running,
         entries: running_entries,
     })?;
@@ -2925,7 +3107,16 @@ fn terminal_task_updated_syncs_session_and_pushes_tool_card() -> Result<()> {
         entry.clone(),
     ))];
 
-    app.handle_worker_message(WorkerMessage::TerminalTaskUpdated { entry, entries })?;
+    app.handle_worker_message(WorkerMessage::TerminalTaskUpdated {
+        identity: TerminalTaskControlIdentity {
+            session_scope_id: "session-scope-1".to_owned(),
+            run_id: "foreground-run-1".to_owned(),
+            task_id: "terminal-1".to_owned(),
+            expected_generation: 1,
+        },
+        entry,
+        entries,
+    })?;
 
     assert!(app.pending_terminal_cancel_confirmation.is_none());
     assert_eq!(
@@ -3891,12 +4082,14 @@ fn worker_terminal_entry(
     status: sigil_kernel::TerminalTaskStatus,
 ) -> Result<sigil_kernel::TerminalTaskEntry> {
     Ok(sigil_kernel::TerminalTaskEntry {
+        schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
         handle: sigil_kernel::TerminalTaskHandle {
             task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
-            command: "cargo test".to_owned(),
-            cwd: Path::new(".").to_path_buf(),
-            shell: "sh".to_owned(),
-            log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "sh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: format!("terminal-log:{task_id}"),
             created_at_ms: 10,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -3904,7 +4097,9 @@ fn worker_terminal_entry(
             enforcement_backend_capabilities: None,
             sandbox_profile: None,
         },
+        generation: 1,
         status,
+        readiness: sigil_kernel::TerminalReadinessStatus::None,
         output_preview: Some("cancelled output".to_owned()),
         output_hash: Some("hash".to_owned()),
         output_truncated: false,

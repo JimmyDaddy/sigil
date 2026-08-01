@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import type { TimelineApproval, TimelineEvent } from "../../types";
+import type { ApprovalDecisionSummary, TimelineApproval, TimelineEvent } from "../../types";
 import {
   createLiveEventState,
   liveEventReducer,
   reduceLiveTimelineEvent,
   selectDeltaBuffers,
   selectDeltaText,
+  selectLatestApprovalPresentation,
   selectLatestPendingApproval,
   selectSemanticLiveItems,
   selectTaskEvents,
+  selectTerminalTasks,
   selectTerminalSignals,
   semanticLiveItemFromTimelineEvent,
 } from "./liveEventReducer";
@@ -17,6 +19,73 @@ import {
 const SESSION_ID = "session-1";
 
 describe("live event reducer", () => {
+  it("keeps bounded terminal task cards generation-monotonic across foreground settlement", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, terminalEvent("terminal-active", 1, "running", 10));
+    state = liveEventReducer(state, {
+      type: "run_discarded",
+      sessionId: SESSION_ID,
+      runId: "run-1",
+    });
+    state = reduceLiveTimelineEvent(state, terminalEvent("terminal-active", 1, "exited", 11));
+
+    expect(selectTerminalTasks(state)).toMatchObject([
+      { runId: "run-1", task: { taskId: "terminal-active", generation: 1, status: "running" } },
+    ]);
+
+    for (let index = 0; index < 8; index += 1) {
+      state = reduceLiveTimelineEvent(
+        state,
+        terminalEvent(`terminal-done-${index}`, 1, "exited", 20 + index),
+      );
+    }
+    expect(selectTerminalTasks(state)).toHaveLength(9);
+    expect(selectTerminalTasks(state).some(({ task }) => task.taskId === "terminal-active")).toBe(true);
+
+    state = reduceLiveTimelineEvent(state, terminalEvent("terminal-active", 2, "cancelled", 40));
+    expect(selectTerminalTasks(state).find(({ task }) => task.taskId === "terminal-active")).toMatchObject({
+      runId: "run-1",
+      task: { generation: 2, status: "cancelled" },
+    });
+  });
+
+  it("never evicts active terminals to satisfy the completed-history budget", () => {
+    let state = createLiveEventState(SESSION_ID);
+    for (let index = 0; index < 12; index += 1) {
+      state = reduceLiveTimelineEvent(
+        state,
+        terminalEvent(`terminal-active-${index}`, 1, "running", 10 + index),
+      );
+    }
+    for (let index = 0; index < 12; index += 1) {
+      state = reduceLiveTimelineEvent(
+        state,
+        terminalEvent(`terminal-done-${index}`, 1, "exited", 100 + index),
+      );
+    }
+
+    const retained = selectTerminalTasks(state);
+    expect(retained.filter(({ task }) => task.status === "running")).toHaveLength(12);
+    expect(retained.filter(({ task }) => task.status === "exited")).toHaveLength(8);
+  });
+
+  it("keeps reused task identifiers isolated by their owning run", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(
+      state,
+      terminalEvent("shared-task", 2, "exited", 10, "run-1"),
+    );
+    state = reduceLiveTimelineEvent(
+      state,
+      terminalEvent("shared-task", 1, "running", 20, "run-2"),
+    );
+
+    expect(selectTerminalTasks(state)).toMatchObject([
+      { runId: "run-1", task: { taskId: "shared-task", generation: 2, status: "exited" } },
+      { runId: "run-2", task: { taskId: "shared-task", generation: 1, status: "running" } },
+    ]);
+  });
+
   it("keeps typed task slots monotonic after canonical run settlement", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({
@@ -377,6 +446,7 @@ describe("live event reducer", () => {
     expect(selectLatestPendingApproval(state)?.approval).toEqual(approval);
     state = reduceLiveTimelineEvent(state, event({
       kind: "approval_resolved",
+      approvalRequestId: approval.approvalRequestId,
       runSequence: "11",
       provisionalId: "approval-1",
       itemId: approval.callId,
@@ -391,11 +461,183 @@ describe("live event reducer", () => {
     });
   });
 
+  it("turns only the exact accepted receipt into a non-actionable tombstone", () => {
+    const approval = exactApproval();
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "approval_requested",
+      runSequence: "10",
+      provisionalId: "approval-1",
+      itemId: approval.callId,
+      toolName: approval.toolName,
+      approval,
+    }));
+
+    state = liveEventReducer(state, {
+      type: "approval_receipt_received",
+      sessionId: SESSION_ID,
+      receipt: approvalReceipt({ approvalRequestId: "older-request" }),
+    });
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(approval);
+
+    state = liveEventReducer(state, {
+      type: "approval_receipt_received",
+      sessionId: SESSION_ID,
+      receipt: approvalReceipt(),
+    });
+    expect(selectLatestPendingApproval(state)).toBeUndefined();
+    expect(selectLatestApprovalPresentation(state)).toMatchObject({
+      phase: "accepted",
+      event: { approval },
+    });
+    expect([...state.approvalLifecycles.values()][0]).toMatchObject({
+      approvalRequestId: approval.approvalRequestId,
+      phase: "accepted",
+      registryRevision: 11,
+      decision: "approved",
+    });
+  });
+
+  it("atomically rebuilds and clears pending approvals from a monotonic run snapshot", () => {
+    const approval = exactApproval();
+    const pending = event({
+      kind: "approval_requested",
+      runSequence: "10",
+      itemId: approval.callId,
+      toolName: approval.toolName,
+      approval,
+    });
+    let state = createLiveEventState(SESSION_ID);
+    state = liveEventReducer(state, {
+      type: "approval_snapshot_received",
+      sessionId: SESSION_ID,
+      snapshot: {
+        workspaceId: "workspace-1",
+        sessionId: SESSION_ID,
+        runId: "run-1",
+        registryRevision: 12,
+        pendingApprovals: [pending],
+        approvalLifecycles: [],
+      },
+    });
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(approval);
+
+    state = liveEventReducer(state, {
+      type: "approval_snapshot_received",
+      sessionId: SESSION_ID,
+      snapshot: {
+        workspaceId: "workspace-1",
+        sessionId: SESSION_ID,
+        runId: "run-1",
+        registryRevision: 13,
+        pendingApprovals: [],
+        approvalLifecycles: [],
+      },
+    });
+    expect(selectLatestPendingApproval(state)).toBeUndefined();
+
+    state = liveEventReducer(state, {
+      type: "approval_snapshot_received",
+      sessionId: SESSION_ID,
+      snapshot: {
+        workspaceId: "workspace-1",
+        sessionId: SESSION_ID,
+        runId: "run-1",
+        registryRevision: 12,
+        pendingApprovals: [pending],
+        approvalLifecycles: [],
+      },
+    });
+    expect(selectLatestPendingApproval(state)).toBeUndefined();
+  });
+
+  it("recovers accepted approval identity and closes it only on exact typed execution", () => {
+    const approval = exactApproval();
+    const pending = event({
+      kind: "approval_requested",
+      runSequence: "10",
+      itemId: approval.callId,
+      toolName: approval.toolName,
+      approval,
+    });
+    let state = liveEventReducer(createLiveEventState(SESSION_ID), {
+      type: "approval_snapshot_received",
+      sessionId: SESSION_ID,
+      snapshot: {
+        workspaceId: "workspace-1",
+        sessionId: SESSION_ID,
+        runId: "run-1",
+        registryRevision: 13,
+        pendingApprovals: [],
+        approvalLifecycles: [{ event: pending, state: "decision_accepted" }],
+      },
+    });
+
+    expect(selectLatestApprovalPresentation(state)).toMatchObject({
+      phase: "accepted",
+      event: { approval },
+    });
+
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "approval_resolved",
+      runSequence: "14",
+      itemId: approval.callId,
+      approvalRequestId: "approval-other",
+      status: "approved",
+    }));
+    expect([...state.approvalLifecycles.values()][0]?.phase).toBe("accepted");
+
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "control",
+      runSequence: "15",
+      itemId: "tool_execution",
+      toolExecution: {
+        callId: approval.callId,
+        toolName: approval.toolName,
+        status: "started",
+      },
+    }));
+    expect(selectLatestApprovalPresentation(state)).toBeUndefined();
+    expect([...state.approvalLifecycles.values()][0]?.phase).toBe("execution_started");
+  });
+
+  it("does not let an old receipt close a newer request for the same call", () => {
+    const oldApproval = exactApproval();
+    const newApproval = { ...oldApproval, approvalRequestId: "approval-2" };
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "approval_requested",
+      runSequence: "10",
+      itemId: oldApproval.callId,
+      approval: oldApproval,
+    }));
+    state = liveEventReducer(state, {
+      type: "approval_receipt_received",
+      sessionId: SESSION_ID,
+      receipt: approvalReceipt(),
+    });
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "approval_requested",
+      runSequence: "12",
+      itemId: newApproval.callId,
+      approval: newApproval,
+    }));
+    state = liveEventReducer(state, {
+      type: "approval_receipt_received",
+      sessionId: SESSION_ID,
+      receipt: approvalReceipt({ routeState: "terminal", registryRevision: 99 }),
+    });
+
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(newApproval);
+    expect(selectLatestApprovalPresentation(state)?.phase).toBe("pending");
+  });
+
   it("keeps a resolved high-water tombstone so an older request cannot revive", () => {
     const approval = exactApproval();
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({
       kind: "approval_resolved",
+      approvalRequestId: approval.approvalRequestId,
       runSequence: "9007199254740993",
       provisionalId: "approval-resolved",
       itemId: approval.callId,
@@ -436,6 +678,7 @@ describe("live event reducer", () => {
     }));
     state = reduceLiveTimelineEvent(state, event({
       kind: "approval_resolved",
+      approvalRequestId: approval.approvalRequestId,
       runSequence: "9007199254740992",
       provisionalId: "approval-resolved",
       itemId: approval.callId,
@@ -465,6 +708,7 @@ describe("live event reducer", () => {
     }));
     state = reduceLiveTimelineEvent(state, event({
       kind: "approval_resolved",
+      approvalRequestId: approval.approvalRequestId,
       runSequence: "12",
       provisionalId: "approval-resolved",
       itemId: approval.callId,
@@ -520,6 +764,7 @@ describe("live event reducer", () => {
     let state = createLiveEventState(SESSION_ID);
     state = reduceLiveTimelineEvent(state, event({
       kind: "approval_resolved",
+      approvalRequestId: approval.approvalRequestId,
       runSequence: "12",
       provisionalId: `approval-${first}`,
       itemId: approval.callId,
@@ -528,6 +773,7 @@ describe("live event reducer", () => {
     }));
     state = reduceLiveTimelineEvent(state, event({
       kind: "approval_resolved",
+      approvalRequestId: approval.approvalRequestId,
       runSequence: "12",
       provisionalId: `approval-${second}`,
       itemId: approval.callId,
@@ -549,6 +795,7 @@ describe("live event reducer", () => {
     for (const provisionalId of ["approval-first", "approval-replay"]) {
       state = reduceLiveTimelineEvent(state, event({
         kind: "approval_resolved",
+        approvalRequestId: approval.approvalRequestId,
         runSequence: "12",
         provisionalId,
         itemId: approval.callId,
@@ -618,6 +865,33 @@ function event(overrides: Partial<TimelineEvent>): TimelineEvent {
   };
 }
 
+function terminalEvent(
+  taskId: string,
+  generation: number,
+  status: "running" | "exited" | "cancelled",
+  emittedAtMs: number,
+  runId = "run-1",
+): TimelineEvent {
+  return event({
+    runId,
+    kind: "terminal_lifecycle",
+    runSequence: String(emittedAtMs),
+    itemId: taskId,
+    status,
+    terminalTask: {
+      taskId,
+      generation,
+      status,
+      exitCode: status === "exited" ? 0 : undefined,
+      readiness: "ready",
+      readinessKind: "output_contains",
+      readyAtMs: 5,
+      totalOutputBytes: 16,
+      emittedAtMs,
+    },
+  });
+}
+
 function exactApproval(): TimelineApproval {
   return {
     callId: "call-1",
@@ -628,5 +902,24 @@ function exactApproval(): TimelineApproval {
     expiresAtMs: 4_102_444_800_000,
     snapshotRequired: false,
     previewTitle: "Review command",
+  };
+}
+
+function approvalReceipt(
+  overrides: Partial<ApprovalDecisionSummary> = {},
+): ApprovalDecisionSummary {
+  return {
+    commandId: "approval-command-1",
+    clientId: "desktop-test",
+    sessionId: SESSION_ID,
+    runId: "run-1",
+    callId: "call-1",
+    approvalRequestId: "approval-1",
+    expectedStreamSequence: 10,
+    decision: "approved",
+    routeState: "decision_accepted",
+    registryRevision: 11,
+    replayed: false,
+    ...overrides,
   };
 }

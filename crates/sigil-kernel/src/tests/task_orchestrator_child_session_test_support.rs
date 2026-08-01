@@ -348,6 +348,9 @@ where
             | ToolApproval::ApproveForSession
             | ToolApproval::ApproveWithArgs { .. } => TaskRouteStatus::Resolved,
             ToolApproval::Deny { .. } => TaskRouteStatus::Rejected,
+            ToolApproval::Expired { .. } => TaskRouteStatus::Expired,
+            ToolApproval::Cancelled { .. } => TaskRouteStatus::Cancelled,
+            ToolApproval::Stale { .. } => TaskRouteStatus::Stale,
         };
         append_approval_route(
             self.parent_session,

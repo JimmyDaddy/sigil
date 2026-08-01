@@ -7,6 +7,7 @@ use crate::{
     HttpConversationRecoveryView, HttpIntentDropCommandReceipt, HttpPermissionMode,
     HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStatus,
     HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationAcceptanceView,
+    HttpTerminalLifecycleView, HttpTerminalTaskCancelCommandReceipt,
     command_store::{
         HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpDurableCommandStore, HttpStoredCommandClaim,
         HttpStoredCommandCompletion, HttpStoredCommandIdentity, HttpStoredCommandKey,
@@ -14,7 +15,7 @@ use crate::{
 };
 use sigil_kernel::{
     IntegrationPlanId, IntegrationPromotionStatus, TaskId, TaskIntegrationReviewRequest,
-    VerificationVerdict,
+    TerminalReadinessStatus, TerminalTaskStatus, VerificationVerdict,
 };
 
 fn identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
@@ -53,6 +54,34 @@ fn intent_drop_identity(command_id: &str, fingerprint: char) -> HttpStoredComman
     identity
 }
 
+fn terminal_cancel_identity(command_id: &str, fingerprint: char) -> HttpStoredCommandIdentity {
+    let mut identity = identity(command_id, fingerprint);
+    identity.kind = "terminal_cancel".to_owned();
+    identity
+}
+
+fn terminal_cancel_receipt(command_id: &str) -> HttpTerminalTaskCancelCommandReceipt {
+    HttpTerminalTaskCancelCommandReceipt {
+        command_id: command_id.to_owned(),
+        client_id: "client-1".to_owned(),
+        session_id: "session-1".to_owned(),
+        expected_stream_sequence: Some(3),
+        correlation_id: Some("correlation-1".to_owned()),
+        run_id: "run-1".to_owned(),
+        terminal_task: HttpTerminalLifecycleView {
+            task_id: "terminal-1".to_owned(),
+            execution_backend: None,
+            sandbox_profile: None,
+            generation: 4,
+            status: TerminalTaskStatus::Cancelled,
+            readiness: TerminalReadinessStatus::None,
+            total_output_bytes: 16,
+            emitted_at_ms: 20,
+        },
+        replayed: false,
+    }
+}
+
 fn receipt(command_id: &str) -> HttpRunStartCommandReceipt {
     HttpRunStartCommandReceipt {
         command_id: command_id.to_owned(),
@@ -66,7 +95,9 @@ fn receipt(command_id: &str) -> HttpRunStartCommandReceipt {
             permission_mode: HttpPermissionMode::ReadOnly,
             reasoning_effort: None,
             prompt_preview: HTTP_DURABLE_COMMAND_PROMPT_OMISSION.to_owned(),
-            pending_approval_call_ids: Vec::new(),
+            pending_approvals: Vec::new(),
+            approval_lifecycles: Vec::new(),
+            terminal_tasks: Vec::new(),
             stream_sequence: 1,
         },
         foreground_owner: None,
@@ -298,6 +329,34 @@ fn durable_command_store_round_trips_queue_completion_without_prompt_material() 
     assert!(matches!(
         store.reserve(queue_identity("queue-command-1", 'd')),
         Ok(HttpStoredCommandClaim::Conflict)
+    ));
+}
+
+#[test]
+fn durable_command_store_round_trips_terminal_cancel_completion() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let stored = terminal_cancel_identity("terminal-cancel-command-1", 'e');
+    let expected = terminal_cancel_receipt("terminal-cancel-command-1");
+    {
+        let store = HttpDurableCommandStore::open(&path, 8).expect("store should open");
+        assert!(matches!(
+            store.reserve(stored.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(
+                &stored,
+                HttpStoredCommandCompletion::TerminalCancel(expected.clone()),
+            )
+            .expect("terminal cancellation completion should persist");
+    }
+
+    let store = HttpDurableCommandStore::open(&path, 8).expect("store should reopen");
+    assert!(matches!(
+        store.reserve(stored),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if *completion == HttpStoredCommandCompletion::TerminalCancel(expected)
     ));
 }
 

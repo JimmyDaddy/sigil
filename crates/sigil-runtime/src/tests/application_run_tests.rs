@@ -934,7 +934,7 @@ fn run_context_uses_durable_identity_and_only_proven_usage() -> Result<()> {
 }
 
 #[test]
-fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabilities() -> Result<()>
+fn run_model_selection_switches_the_existing_session_and_rejects_stale_capabilities() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -948,10 +948,10 @@ fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabili
         &binding.session_log_path,
         &binding.session_scope_id,
     )?;
-    let store = JsonlSessionStore::new(&binding.session_log_path)?;
-    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
     let mut request =
         ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "run-model");
+    request.session_path = Some(binding.session_log_path.clone());
+    request.model_connection_id = Some(sigil_kernel::ConnectionId::new("deepseek-default")?);
     request.model_name = Some("deepseek-v4-pro".to_owned());
     request.model_selection_binding = Some(context.model_selection_binding.clone());
     let pro_option = context
@@ -962,53 +962,54 @@ fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabili
     request.reasoning_effort = pro_option.default_reasoning_effort.clone();
     request.reasoning_effort_binding = pro_option.reasoning_effort_binding.clone();
 
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let (selected_provider, selected_route) = admit_application_model_selection(
+        &request,
+        &root_config,
+        &session,
+        &temp.path().join("cache"),
+    )?
+    .expect("explicit model selection should resolve a route");
+    assert_eq!(selected_provider, "deepseek");
+    assert_eq!(selected_route.model_ref.model_id, "deepseek-v4-pro");
+    admit_application_reasoning_effort(&request, "deepseek", "deepseek-v4-pro")?;
+
+    let mut stale_effort = request.clone();
+    stale_effort.reasoning_effort_binding = Some("stale-effort".to_owned());
     assert!(matches!(
-        admit_application_model_selection(
-            &request,
-            &root_config,
-            &session,
-            &temp.path().join("cache"),
+        prepare_application_run_blocking(
+            stale_effort,
+            Arc::new(ApplicationSessionLeaseManager::new()),
+            false,
         ),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
-
-    let connection_id = sigil_kernel::ConnectionId::new("deepseek-default")?;
-    let pro_path = temp.path().join("state/sessions/model-switch-pro.jsonl");
-    let pro_binding = bind_application_session_with_model_ref(
+    let unchanged = application_run_context_view(
         &config_path,
         temp.path(),
-        Some(&pro_path),
-        Some(&connection_id),
-        Some("deepseek-v4-pro"),
+        &binding.session_log_path,
+        &binding.session_scope_id,
     )?;
-    let pro_context = application_run_context_view(
-        &config_path,
-        temp.path(),
-        &pro_binding.session_log_path,
-        &pro_binding.session_scope_id,
-    )?;
-    request.model_selection_binding = Some(pro_context.model_selection_binding.clone());
-    let pro_store = JsonlSessionStore::new(&pro_binding.session_log_path)?;
-    let pro_session = Session::load_from_store("deepseek", "deepseek-v4-pro", pro_store)?;
-    admit_application_model_selection(
-        &request,
-        &root_config,
-        &pro_session,
-        &temp.path().join("cache"),
-    )?;
-    let mut selected_config = RootConfig::load(&config_path)?;
-    selected_config.agent.runtime_provider = "deepseek".to_owned();
-    selected_config.agent.model = "deepseek-v4-pro".to_owned();
-    admit_application_reasoning_effort(&request, &selected_config)?;
+    assert_eq!(unchanged.model_name, "deepseek-v4-flash");
 
-    assert_ne!(pro_session.session_scope_id(), binding.session_scope_id);
-    assert_eq!(pro_session.session_scope_id(), pro_binding.session_scope_id);
-    assert_eq!(pro_session.model_name(), "deepseek-v4-pro");
+    let prepared = prepare_application_run_blocking(
+        request.clone(),
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    )?;
+    assert_eq!(
+        prepared.session.session_scope_id(),
+        binding.session_scope_id
+    );
+    assert_eq!(prepared.session.model_name(), "deepseek-v4-pro");
+    drop(prepared);
+
     let selected_context = application_run_context_view(
         &config_path,
         temp.path(),
-        &pro_binding.session_log_path,
-        &pro_binding.session_scope_id,
+        &binding.session_log_path,
+        &binding.session_scope_id,
     )?;
     assert_eq!(selected_context.model_name, "deepseek-v4-pro");
     assert_eq!(
@@ -1022,6 +1023,8 @@ fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabili
     );
     let mut stale = request;
     stale.model_name = Some("deepseek-v4-flash".to_owned());
+    let pro_store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let pro_session = Session::load_from_store("deepseek", "deepseek-v4-pro", pro_store)?;
     assert!(matches!(
         admit_application_model_selection(
             &stale,
@@ -1031,6 +1034,82 @@ fn run_model_selection_requires_a_fresh_exact_session_and_rejects_stale_capabili
         ),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
+    Ok(())
+}
+
+#[test]
+fn run_model_selection_switches_provider_connections_without_replacing_the_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-default"
+model = "local-model"
+
+[connections.local-default]
+label = "Local default"
+provider = "custom"
+protocol = "responses"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
+
+[connections.deepseek-team]
+label = "DeepSeek team"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/cross-provider.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(context.model_ref.connection_id.as_str(), "local-default");
+    assert!(context.model_options.iter().any(|option| {
+        option.model_ref.connection_id.as_str() == "deepseek-team"
+            && option.model_ref.model_id == "deepseek-v4-flash"
+    }));
+
+    let mut request =
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "run-cross");
+    request.session_path = Some(binding.session_log_path.clone());
+    request.model_connection_id = Some(sigil_kernel::ConnectionId::new("deepseek-team")?);
+    request.model_name = Some("deepseek-v4-flash".to_owned());
+    request.model_selection_binding = Some(context.model_selection_binding);
+
+    let prepared = prepare_application_run_blocking(
+        request,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    )?;
+    assert_eq!(
+        prepared.session.session_scope_id(),
+        binding.session_scope_id
+    );
+    assert_eq!(prepared.session.provider_name(), "deepseek");
+    assert_eq!(prepared.session.model_name(), "deepseek-v4-flash");
+    drop(prepared);
+
+    let switched = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(switched.model_ref.connection_id.as_str(), "deepseek-team");
+    assert_eq!(switched.provider_name, "deepseek");
+    assert_eq!(switched.model_name, "deepseek-v4-flash");
     Ok(())
 }
 
@@ -1293,17 +1372,20 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         ApplicationRunRequest::non_interactive("sigil.toml", ".", "hello", "run-effort");
     request.reasoning_effort = Some(ReasoningEffort::High);
     request.reasoning_effort_binding = Some(binding);
-    assert!(admit_application_reasoning_effort(&request, &config).is_ok());
+    assert!(
+        admit_application_reasoning_effort(&request, &provider_name, &route.model_ref.model_id,)
+            .is_ok()
+    );
 
     request.reasoning_effort_binding = Some("stale".to_owned());
     assert!(matches!(
-        admit_application_reasoning_effort(&request, &config),
+        admit_application_reasoning_effort(&request, &provider_name, &route.model_ref.model_id,),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
 
     request.reasoning_effort = None;
     assert!(matches!(
-        admit_application_reasoning_effort(&request, &config),
+        admit_application_reasoning_effort(&request, &provider_name, &route.model_ref.model_id,),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
     Ok(())

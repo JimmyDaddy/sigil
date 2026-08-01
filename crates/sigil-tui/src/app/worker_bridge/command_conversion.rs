@@ -109,21 +109,35 @@ impl AppState {
                 WorkerCommand::ContinueTask { task_id, guidance }
             }
             AppAction::PauseTask { request } => WorkerCommand::PauseTask { request },
-            AppAction::ApprovalDecision { call_id, approved } => {
-                self.approval_worker_command(WorkerApprovalCommand::Decision { call_id, approved })
-            }
-            AppAction::ApprovalSessionDecision { call_id } => {
-                self.approval_worker_command(WorkerApprovalCommand::DecisionForSession { call_id })
-            }
-            AppAction::ApprovalDecisionWithArgs { call_id, args_json } => self
-                .approval_worker_command(WorkerApprovalCommand::DecisionWithArgs {
-                    call_id,
-                    args_json,
-                }),
+            AppAction::ApprovalDecision {
+                call_id,
+                approval_request_id,
+                approved,
+            } => self.approval_worker_command(WorkerApprovalCommand::Decision {
+                call_id,
+                approval_request_id,
+                approved,
+            }),
+            AppAction::ApprovalSessionDecision {
+                call_id,
+                approval_request_id,
+            } => self.approval_worker_command(WorkerApprovalCommand::DecisionForSession {
+                call_id,
+                approval_request_id,
+            }),
+            AppAction::ApprovalDecisionWithArgs {
+                call_id,
+                approval_request_id,
+                args_json,
+            } => self.approval_worker_command(WorkerApprovalCommand::DecisionWithArgs {
+                call_id,
+                approval_request_id,
+                args_json,
+            }),
             AppAction::BackgroundActiveAgent => WorkerCommand::BackgroundActiveAgent,
             AppAction::CancelRun => WorkerCommand::CancelRun,
-            AppAction::CancelTerminalTask { task_id } => {
-                WorkerCommand::CancelTerminalTask { task_id }
+            AppAction::CancelTerminalTask { identity } => {
+                WorkerCommand::CancelTerminalTask { identity }
             }
             AppAction::CloseAgent { thread_id, reason } => {
                 WorkerCommand::CloseAgent { thread_id, reason }
@@ -281,7 +295,6 @@ impl AppState {
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
-            | AppAction::StartNewModelSession { .. }
             | AppAction::SetDefaultModel { .. }
             | AppAction::CopyToClipboard { .. }
             | AppAction::CopySecretToClipboard { .. }
@@ -309,24 +322,41 @@ impl AppState {
 
 fn stable_approval_command_id(session_id: &str, payload: &WorkerApprovalCommand) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"sigil-tui-approval-command-v1\0");
+    hasher.update(b"sigil-tui-approval-command-v2\0");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     match payload {
-        WorkerApprovalCommand::Decision { call_id, approved } => {
+        WorkerApprovalCommand::Decision {
+            call_id,
+            approval_request_id,
+            approved,
+        } => {
             hasher.update(b"decision\0");
             hasher.update(call_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(approval_request_id.as_bytes());
             hasher.update(b"\0");
             let decision_label: &[u8] = if *approved { b"approve" } else { b"deny" };
             hasher.update(decision_label);
         }
-        WorkerApprovalCommand::DecisionForSession { call_id } => {
+        WorkerApprovalCommand::DecisionForSession {
+            call_id,
+            approval_request_id,
+        } => {
             hasher.update(b"decision_for_session\0");
             hasher.update(call_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(approval_request_id.as_bytes());
         }
-        WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
+        WorkerApprovalCommand::DecisionWithArgs {
+            call_id,
+            approval_request_id,
+            args_json,
+        } => {
             hasher.update(b"decision_with_args\0");
             hasher.update(call_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(approval_request_id.as_bytes());
             hasher.update(b"\0");
             hasher.update(args_json.as_bytes());
         }

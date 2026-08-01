@@ -27,9 +27,16 @@ pub struct ApplicationTaskContinuationRequest {
 pub struct PreparedApplicationTaskContinuation {
     execution: ApplicationTaskContinuationExecution,
     control: ApplicationRunControl,
+    terminal_control: ApplicationTerminalTaskControl,
 }
 
 impl PreparedApplicationTaskContinuation {
+    /// Returns the typed persistent-terminal owner retained beyond the foreground Task turn.
+    #[must_use]
+    pub fn terminal_control(&self) -> ApplicationTerminalTaskControl {
+        self.terminal_control.clone()
+    }
+
     /// Separates Task execution from the root cancellation authority retained by the adapter.
     #[must_use]
     pub fn into_parts(self) -> (ApplicationTaskContinuationExecution, ApplicationRunControl) {
@@ -234,6 +241,12 @@ pub async fn prepare_application_task_continuation(
         .enforce(&mut session, current_unix_time_ms())
         .map_err(ApplicationRunPrepareError::execution)?;
     orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
+    let terminal_lifecycle_sink = Arc::new(crate::ApplicationTerminalLifecycleRouter::new(
+        mutation_recorder.clone(),
+        session.session_scope_id(),
+        &run_id,
+        services.terminal_lifecycle_handler.clone(),
+    )) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider_capabilities,
@@ -246,6 +259,7 @@ pub async fn prepare_application_task_continuation(
         &redactor,
         None,
         None,
+        terminal_lifecycle_sink,
     )
     .await
     .map_err(ApplicationRunPrepareError::execution)?;
@@ -272,6 +286,8 @@ pub async fn prepare_application_task_continuation(
         ),
         role_provider_builder: Arc::clone(role_provider_builder),
     };
+    let terminal_control =
+        ApplicationTerminalTaskControl::new(workspace_root.clone(), surface.terminal_control);
     Ok(PreparedApplicationTaskContinuation {
         execution: ApplicationTaskContinuationExecution {
             task: task.clone(),
@@ -303,6 +319,7 @@ pub async fn prepare_application_task_continuation(
             events,
             _session_lease: session_lease,
         },
+        terminal_control,
     })
 }
 

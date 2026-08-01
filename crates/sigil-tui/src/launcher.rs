@@ -796,12 +796,6 @@ where
             root_config.save_if_unchanged(&app.config_path, &expected_root_config)?;
             app.apply_saved_default_model(*root_config);
         }
-        AppAction::StartNewModelSession { runtime_config } => {
-            if let Some(runtime) = worker.take() {
-                let _ = runtime.worker_tx.send(AppState::shutdown_command());
-            }
-            *worker = Some(spawn_worker_fn(*runtime_config, app)?);
-        }
         AppAction::CopyToClipboard { text } => {
             if app.terminal_osc52_clipboard_enabled() {
                 copy_text_to_terminal_clipboard(&text)?;

@@ -98,7 +98,7 @@ impl<'de> Deserialize<'de> for ModelRef {
     }
 }
 
-/// Secret-free route identity frozen when a session is created.
+/// Secret-free route identity selected for one session run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedModelRoute {
     pub model_ref: ModelRef,

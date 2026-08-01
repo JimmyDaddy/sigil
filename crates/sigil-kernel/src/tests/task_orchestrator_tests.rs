@@ -26,22 +26,23 @@ use crate::{
     MutationPrepared, MutationSubject, MutationSyncClass, PermissionConfig, Provider,
     ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent,
     SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus,
-    TaskGuidancePromotedEntry, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskParticipantResultEntry, TaskParticipantRetryError, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
+    SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TERMINAL_TASK_SCHEMA_VERSION,
+    TaskChildSessionStatus, TaskGuidancePromotedEntry, TaskId, TaskIsolationMode,
+    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryError,
+    TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskPlanStatus,
     TaskPlannerWorktreeAvailability, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolCall, ToolCategory, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
-    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceSnapshotId,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired,
-    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
-    project_conversation_prompt_for_persistence, stable_workspace_id, task_participant_attempt_id,
-    task_participant_input_hash, task_participant_session_ref, write_file_with_mutation,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, TaskVerificationRerunRequest,
+    TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
+    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceSnapshotId, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
+    WriteLeaseReleaseStatus, WriteLeaseScope, project_conversation_prompt_for_persistence,
+    stable_workspace_id, task_participant_attempt_id, task_participant_input_hash,
+    task_participant_session_ref, write_file_with_mutation,
 };
 
 use super::{
@@ -2657,12 +2658,22 @@ impl Tool for ApprovalRequiredTool {
         }
     }
 
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<crate::ApprovalMode>> {
-        Ok(Some(crate::ApprovalMode::Ask))
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        crate::declared_tool_permission_plan(
+            &self.spec(),
+            args,
+            crate::DeclaredToolPermissionFacts {
+                access: ToolAccess::Write,
+                operation: crate::ToolOperation::OverwriteFile,
+                network_effect: None,
+                subjects: Vec::new(),
+                tool_default_mode: Some(crate::ApprovalMode::Ask),
+            },
+        )
     }
 
     async fn preview(&self, _ctx: ToolContext, _args: Value) -> Result<Option<crate::ToolPreview>> {
@@ -8329,18 +8340,21 @@ fn test_execution_profile(
 }
 
 fn terminal_task_entry(
-    root: &std::path::Path,
+    _root: &std::path::Path,
     task_id: &str,
     status: TerminalTaskStatus,
     updated_at_ms: u64,
 ) -> Result<TerminalTaskEntry> {
     Ok(TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: updated_at_ms,
         handle: TerminalTaskHandle {
             task_id: TerminalTaskId::new(task_id)?,
-            command: "sleep 60".to_owned(),
-            cwd: root.to_path_buf(),
-            shell: "zsh".to_owned(),
-            log_path: root.join(format!("{task_id}.log")),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: format!("terminal-log:{task_id}"),
             created_at_ms: 1,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -8349,6 +8363,7 @@ fn terminal_task_entry(
             sandbox_profile: None,
         },
         status,
+        readiness: TerminalReadinessStatus::None,
         output_preview: None,
         output_hash: None,
         output_truncated: false,

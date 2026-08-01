@@ -1535,6 +1535,7 @@ fn tool_result_uses_live_approval_preview_snapshot_for_diff_card() -> Result<()>
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
         approved: true,
         reason: None,
     })?;
@@ -1616,6 +1617,7 @@ fn approval_preview_snapshot_caches_diff_for_approved_tool_result() -> Result<()
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
         approved: true,
         reason: None,
     })?;
@@ -1717,6 +1719,7 @@ fn error_tool_result_does_not_render_cached_preview_as_applied_diff() -> Result<
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
         approved: false,
         reason: Some("denied".to_owned()),
     })?;

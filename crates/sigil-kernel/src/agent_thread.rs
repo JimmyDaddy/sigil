@@ -1130,6 +1130,7 @@ pub enum AgentRouteStatus {
     Requested,
     Resolved,
     Rejected,
+    Expired,
     Cancelled,
     Stale,
     Closed,
@@ -1141,7 +1142,12 @@ impl AgentRouteStatus {
     fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Resolved | Self::Rejected | Self::Cancelled | Self::Stale | Self::Closed
+            Self::Resolved
+                | Self::Rejected
+                | Self::Expired
+                | Self::Cancelled
+                | Self::Stale
+                | Self::Closed
         )
     }
 }

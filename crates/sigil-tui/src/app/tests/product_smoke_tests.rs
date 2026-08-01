@@ -14,6 +14,14 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-cargo-check"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: true,
+        session_grant_unavailable_reason: None,
         call: ToolCall {
             id: "call-cargo-check".to_owned(),
             name: "bash".to_owned(),
@@ -67,7 +75,7 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         action,
-        Some(AppAction::ApprovalSessionDecision { call_id }) if call_id == "call-cargo-check"
+        Some(AppAction::ApprovalSessionDecision { call_id, .. }) if call_id == "call-cargo-check"
     ));
     Ok(())
 }

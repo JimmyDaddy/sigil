@@ -686,6 +686,20 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       });
     } catch {
       if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      const refreshed = await loadHistory(activeWorkspaceId);
+      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      const refreshedEntry = refreshed?.entries.find(
+        (candidate) => candidate.sessionRef === entry.sessionRef
+          && candidate.sessionId === entry.sessionId,
+      );
+      if (refreshed !== undefined
+        && (refreshedEntry === undefined || refreshedEntry.sourceState !== "ready")) {
+        setSessionActionState("error");
+        setSessionMessage(t("historyChangedRefreshed"));
+        setFailedSessionEntry(undefined);
+        setConversationNavigation(undefined);
+        return;
+      }
       setSessionActionState("error");
       setSessionMessage(t("conversationOpenFailed"));
       setFailedSessionEntry(entry);
@@ -1168,7 +1182,6 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   if (activeWorkspaceId !== undefined) void loadHistory(activeWorkspaceId);
                 }}
                 onNewSession={async () => (await createSession()) !== undefined}
-                onCreateSessionForModel={createSession}
                 onOpenWorkspacePicker={() => void pickWorkspace()}
                 onOpenSessionPicker={(query) => {
                   navigate("conversation");

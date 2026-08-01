@@ -34,7 +34,7 @@ Give Sigil a larger goal and it can turn that goal into visible steps, run indep
 
 ![Sigil approval review preview](../../site/assets/screenshots/approval-review.svg)
 
-Check the action, affected files, and diff before allowing a risky tool call.
+Check the exact action, detected effects and targets, requested execution limits, and any diff before deciding. Risk explains potential impact; it is not itself the approval rule. After an exact command receipt is accepted, both Desktop and TUI leave the waiting state immediately.
 
 ## Configuration Panel
 

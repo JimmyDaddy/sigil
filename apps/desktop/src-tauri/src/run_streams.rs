@@ -6,8 +6,8 @@ use std::{
 
 use serde::Serialize;
 use sigil_desktop::{
-    DesktopHttpClient, DesktopRunSnapshot, DesktopRunStatus, DesktopTimelineEvent,
-    DesktopTimelineEventKind,
+    DesktopApprovalLifecycleState, DesktopHttpClient, DesktopRunSnapshot, DesktopRunStatus,
+    DesktopTimelineEvent, DesktopTimelineEventKind, DesktopTimelineTerminalTask,
 };
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 
 pub(crate) const DESKTOP_RUN_EVENT_NAME: &str = "sigil-run-event";
 pub(crate) const DESKTOP_RUN_STREAM_STATUS_NAME: &str = "sigil-run-stream-status";
+pub(crate) const DESKTOP_RUN_APPROVAL_SNAPSHOT_NAME: &str = "sigil-run-approval-snapshot";
 
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MIN_HEALTHY_STREAM_LIFETIME: Duration = Duration::from_secs(10);
@@ -56,13 +57,21 @@ struct RunProjection {
     events: VecDeque<DesktopTimelineEvent>,
     event_text_bytes: usize,
     pending_approvals: BTreeMap<String, DesktopTimelineEvent>,
+    terminal_tasks: BTreeMap<String, DesktopTimelineEvent>,
     has_gap: bool,
     last_sequence: u64,
     last_replay_id: Option<String>,
+    last_registry_revision: u64,
     stream_state: DesktopRunStreamState,
     stream_message: Option<&'static str>,
     run_status: DesktopRunStatus,
     task_pause_observed: bool,
+}
+
+struct RunSnapshotReconciliation {
+    approval_snapshot: DesktopRunApprovalSnapshot,
+    terminal_events: Vec<DesktopTimelineEvent>,
+    settled: bool,
 }
 
 pub(crate) struct DesktopRunProjectionSnapshot {
@@ -70,6 +79,24 @@ pub(crate) struct DesktopRunProjectionSnapshot {
     pub(crate) has_gap: bool,
     pub(crate) stream_state: DesktopRunStreamState,
     pub(crate) stream_message: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRunApprovalSnapshot {
+    pub(crate) workspace_id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) registry_revision: u64,
+    pub(crate) pending_approvals: Vec<DesktopTimelineEvent>,
+    pub(crate) approval_lifecycles: Vec<DesktopRunApprovalLifecycleSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRunApprovalLifecycleSnapshot {
+    pub(crate) event: DesktopTimelineEvent,
+    pub(crate) state: DesktopApprovalLifecycleState,
 }
 
 /// Owns every background SSE follower so workspace close and app exit cannot detach work.
@@ -145,7 +172,7 @@ impl DesktopRunStreamOwner {
         streams.retain(|candidate_key, stream| {
             candidate_key == &key
                 || stream.workspace_id != workspace_id
-                || !stream.projection.run_status.is_terminal()
+                || !stream.projection.is_settled()
         });
         let stream = streams
             .entry(key.clone())
@@ -159,12 +186,15 @@ impl DesktopRunStreamOwner {
         stream.renderer_session_id.clone_from(&renderer_session_id);
         stream.durable_session_id.clone_from(&durable_session_id);
         stream.projection.run_status = run.status;
+        stream
+            .projection
+            .reconcile_run_snapshot(&run, &workspace_id, &renderer_session_id);
 
         let follower_finished = stream
             .task
             .as_ref()
             .is_none_or(|task| task.inner().is_finished());
-        if run.status.is_terminal() {
+        if stream.projection.is_settled() {
             stream.projection.stream_state = DesktopRunStreamState::Terminal;
         } else if follower_finished {
             if let Some(previous) = stream.task.take() {
@@ -241,13 +271,88 @@ impl DesktopRunStreamOwner {
         }
     }
 
-    async fn record_event(&self, event: DesktopTimelineEvent) {
+    async fn record_event(&self, event: DesktopTimelineEvent) -> bool {
         let key = stream_key(&event.workspace_id, &event.run_id);
         let mut streams = self.streams.lock().await;
         let Some(stream) = streams.get_mut(&key) else {
-            return;
+            return false;
         };
         stream.projection.push(event);
+        stream.projection.is_settled()
+    }
+
+    async fn reconcile_run_snapshot(
+        &self,
+        workspace_id: &str,
+        renderer_session_id: &str,
+        run: &DesktopRunSnapshot,
+    ) -> Option<RunSnapshotReconciliation> {
+        let key = stream_key(workspace_id, &run.id);
+        let mut streams = self.streams.lock().await;
+        let stream = streams.get_mut(&key)?;
+        let previous_terminal_generations = stream
+            .projection
+            .terminal_tasks
+            .iter()
+            .filter_map(|(task_id, event)| {
+                event
+                    .terminal_task
+                    .as_ref()
+                    .map(|task| (task_id.clone(), task.generation))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if !stream
+            .projection
+            .reconcile_run_snapshot(run, workspace_id, renderer_session_id)
+        {
+            return None;
+        }
+        let terminal_events = stream
+            .projection
+            .terminal_tasks
+            .iter()
+            .filter(|(task_id, event)| {
+                let generation = event
+                    .terminal_task
+                    .as_ref()
+                    .map_or(0, |task| task.generation);
+                previous_terminal_generations
+                    .get(*task_id)
+                    .is_none_or(|previous| *previous < generation)
+            })
+            .map(|(_, event)| event.clone())
+            .collect();
+        Some(RunSnapshotReconciliation {
+            approval_snapshot: DesktopRunApprovalSnapshot {
+                workspace_id: workspace_id.to_owned(),
+                session_id: renderer_session_id.to_owned(),
+                run_id: run.id.clone(),
+                registry_revision: run.stream_sequence,
+                pending_approvals: stream
+                    .projection
+                    .pending_approvals
+                    .values()
+                    .cloned()
+                    .collect(),
+                approval_lifecycles: run
+                    .approval_lifecycles
+                    .clone()
+                    .into_iter()
+                    .filter_map(|lifecycle| {
+                        lifecycle
+                            .approval
+                            .into_timeline(workspace_id, renderer_session_id, &run.id)
+                            .ok()
+                            .map(|event| DesktopRunApprovalLifecycleSnapshot {
+                                event,
+                                state: lifecycle.state,
+                            })
+                    })
+                    .collect(),
+            },
+            terminal_events,
+            settled: stream.projection.is_settled(),
+        })
     }
 }
 
@@ -257,9 +362,11 @@ impl RunProjection {
             events: VecDeque::new(),
             event_text_bytes: 0,
             pending_approvals: BTreeMap::new(),
+            terminal_tasks: BTreeMap::new(),
             has_gap,
             last_sequence: 0,
             last_replay_id: None,
+            last_registry_revision: 0,
             stream_state: if run_status.is_terminal() {
                 DesktopRunStreamState::Terminal
             } else {
@@ -269,6 +376,54 @@ impl RunProjection {
             run_status,
             task_pause_observed: run_status == DesktopRunStatus::Paused,
         }
+    }
+
+    fn reconcile_run_snapshot(
+        &mut self,
+        run: &DesktopRunSnapshot,
+        workspace_id: &str,
+        renderer_session_id: &str,
+    ) -> bool {
+        if run.stream_sequence < self.last_registry_revision {
+            return false;
+        }
+        if run.pending_approvals.len() > MAX_PENDING_APPROVALS {
+            self.has_gap = true;
+            return false;
+        }
+        let mut canonical = BTreeMap::new();
+        for pending in run.pending_approvals.iter().cloned() {
+            let Ok(event) = pending.into_timeline(workspace_id, renderer_session_id, &run.id)
+            else {
+                self.has_gap = true;
+                return false;
+            };
+            let Some(call_id) = event.item_id.clone() else {
+                self.has_gap = true;
+                return false;
+            };
+            canonical.insert(call_id, event);
+        }
+        let mut canonical_terminal_tasks = BTreeMap::new();
+        for task in &run.terminal_tasks {
+            let Ok(task) = DesktopTimelineTerminalTask::try_from(task) else {
+                self.has_gap = true;
+                return false;
+            };
+            let event = terminal_snapshot_timeline(
+                workspace_id,
+                renderer_session_id,
+                &run.id,
+                run.stream_sequence,
+                task,
+            );
+            canonical_terminal_tasks.insert(event.item_id.clone().unwrap_or_default(), event);
+        }
+        self.pending_approvals = canonical;
+        self.terminal_tasks = canonical_terminal_tasks;
+        self.last_registry_revision = run.stream_sequence;
+        self.run_status = run.status;
+        true
     }
 
     fn push(&mut self, event: DesktopTimelineEvent) {
@@ -284,6 +439,21 @@ impl RunProjection {
             self.last_replay_id = Some(replay_id.clone());
         }
         match event.kind {
+            DesktopTimelineEventKind::TerminalLifecycle => {
+                if let Some(task) = event.terminal_task.as_ref() {
+                    let replace = self
+                        .terminal_tasks
+                        .get(&task.task_id)
+                        .and_then(|current| current.terminal_task.as_ref())
+                        .is_none_or(|current| current.generation < task.generation);
+                    if replace {
+                        self.terminal_tasks
+                            .insert(task.task_id.clone(), event.clone());
+                    }
+                } else {
+                    self.has_gap = true;
+                }
+            }
             DesktopTimelineEventKind::ApprovalRequested => {
                 if let Some(item_id) = event.item_id.as_ref() {
                     self.pending_approvals
@@ -354,6 +524,14 @@ impl RunProjection {
                 events.push(pending.clone());
             }
         }
+        for terminal in self.terminal_tasks.values() {
+            if !events
+                .iter()
+                .any(|event| event_identity(event) == event_identity(terminal))
+            {
+                events.push(terminal.clone());
+            }
+        }
         events.sort_by_key(|event| event.sequence);
         DesktopRunProjectionSnapshot {
             events,
@@ -361,6 +539,18 @@ impl RunProjection {
             stream_state: self.stream_state,
             stream_message: self.stream_message,
         }
+    }
+
+    fn is_settled(&self) -> bool {
+        self.run_status.is_terminal()
+            && self.terminal_tasks.values().all(|event| {
+                event.terminal_task.as_ref().is_none_or(|task| {
+                    matches!(
+                        task.status.as_str(),
+                        "exited" | "failed" | "cancelled" | "interrupted"
+                    )
+                })
+            })
     }
 }
 
@@ -459,6 +649,50 @@ async fn follow_run(
             let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next_event()).await;
             let protocol_event = match next {
                 Ok(Ok(Some(event))) => event,
+                Ok(Err(sigil_desktop::DesktopClientError::EventStreamGap)) => {
+                    // A gap is a wake to rebuild from server-owned durable truth. Discard the
+                    // incremental cursor and replay the canonical bounded run stream; projection
+                    // identity de-duplication makes already-seen events idempotent.
+                    if let Ok(snapshot) = client.run(&run_id).await
+                        && let Some(reconciliation) = owner
+                            .reconcile_run_snapshot(&workspace_id, &renderer_session_id, &snapshot)
+                            .await
+                    {
+                        let _ = app.emit(
+                            DESKTOP_RUN_APPROVAL_SNAPSHOT_NAME,
+                            reconciliation.approval_snapshot,
+                        );
+                        for event in reconciliation.terminal_events {
+                            let _ = app.emit(DESKTOP_RUN_EVENT_NAME, event);
+                        }
+                        if reconciliation.settled {
+                            publish_status(
+                                &owner,
+                                &app,
+                                &workspace_id,
+                                &renderer_session_id,
+                                &run_id,
+                                DesktopRunStreamState::Terminal,
+                                Some("Run and background terminal tasks reconciled from the server snapshot."),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                    cursor = None;
+                    last_sequence = 0;
+                    publish_status(
+                        &owner,
+                        &app,
+                        &workspace_id,
+                        &renderer_session_id,
+                        &run_id,
+                        DesktopRunStreamState::Reconnecting,
+                        Some("Refreshing run state after a live event gap…"),
+                    )
+                    .await;
+                    break;
+                }
                 Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
             };
             if protocol_event.run_event.sequence <= last_sequence {
@@ -477,15 +711,14 @@ async fn follow_run(
                 Err(_) => break,
             };
             last_sequence = timeline.sequence;
-            let terminal = timeline_is_terminal(&timeline);
-            owner.record_event(timeline.clone()).await;
+            let settled = owner.record_event(timeline.clone()).await;
             if app.emit(DESKTOP_RUN_EVENT_NAME, timeline).is_err() {
                 return;
             }
             if let Some(replay_id) = durable_cursor {
                 cursor = Some(replay_id);
             }
-            if terminal {
+            if settled {
                 publish_status(
                     &owner,
                     &app,
@@ -550,7 +783,20 @@ async fn terminal_snapshot(
     let Ok(snapshot) = client.run(run_id).await else {
         return false;
     };
-    if !snapshot.status.is_terminal() {
+    let Some(reconciliation) = owner
+        .reconcile_run_snapshot(workspace_id, renderer_session_id, &snapshot)
+        .await
+    else {
+        return false;
+    };
+    let _ = app.emit(
+        DESKTOP_RUN_APPROVAL_SNAPSHOT_NAME,
+        reconciliation.approval_snapshot,
+    );
+    for event in reconciliation.terminal_events {
+        let _ = app.emit(DESKTOP_RUN_EVENT_NAME, event);
+    }
+    if !snapshot.status.is_terminal() || !reconciliation.settled {
         return false;
     }
     let Some((kind, status)) = terminal_timeline_projection(snapshot.status) else {
@@ -573,7 +819,10 @@ async fn terminal_snapshot(
         assistant_kind: None,
         tool_input: None,
         approval: None,
+        approval_request_id: None,
+        tool_execution: None,
         task: None,
+        terminal_task: None,
     };
     owner.record_event(timeline.clone()).await;
     let _ = app.emit(DESKTOP_RUN_EVENT_NAME, timeline);
@@ -588,6 +837,37 @@ async fn terminal_snapshot(
     )
     .await;
     true
+}
+
+fn terminal_snapshot_timeline(
+    workspace_id: &str,
+    renderer_session_id: &str,
+    run_id: &str,
+    sequence: u64,
+    task: DesktopTimelineTerminalTask,
+) -> DesktopTimelineEvent {
+    DesktopTimelineEvent {
+        workspace_id: workspace_id.to_owned(),
+        session_id: renderer_session_id.to_owned(),
+        run_id: run_id.to_owned(),
+        sequence,
+        run_sequence: sequence.to_string(),
+        replayable: false,
+        replay_id: None,
+        provisional_id: None,
+        kind: DesktopTimelineEventKind::TerminalLifecycle,
+        text: None,
+        item_id: Some(task.task_id.clone()),
+        tool_name: None,
+        status: Some(task.status.clone()),
+        assistant_kind: None,
+        tool_input: None,
+        approval: None,
+        approval_request_id: None,
+        tool_execution: None,
+        task: None,
+        terminal_task: Some(task),
+    }
 }
 
 async fn publish_status(
@@ -625,15 +905,6 @@ fn emit_status(
     );
 }
 
-fn timeline_is_terminal(event: &DesktopTimelineEvent) -> bool {
-    matches!(
-        event.kind,
-        DesktopTimelineEventKind::RunFinished
-            | DesktopTimelineEventKind::RunFailed
-            | DesktopTimelineEventKind::RunCancelled
-    )
-}
-
 fn reconnect_delay(attempt: u8) -> Duration {
     Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt.min(3)))
 }
@@ -654,8 +925,8 @@ fn stream_key(workspace_id: &str, run_id: &str) -> String {
     format!("{workspace_id}:{run_id}")
 }
 
-fn event_identity(event: &DesktopTimelineEvent) -> (u64, DesktopTimelineEventKind) {
-    (event.sequence, event.kind)
+fn event_identity(event: &DesktopTimelineEvent) -> (u64, DesktopTimelineEventKind, Option<&str>) {
+    (event.sequence, event.kind, event.item_id.as_deref())
 }
 
 fn event_text_bytes(event: &DesktopTimelineEvent) -> usize {

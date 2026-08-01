@@ -81,7 +81,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         render_info_rail_with_theme(frame, shell.info_rail, &view_model.info_rail, &theme);
     }
 
-    if app.approval.pending.is_some() {
+    if app.approval.has_actionable_pending() {
         render_approval_modal(frame, app);
     }
 

@@ -304,10 +304,11 @@ pub(super) fn format_terminal_task_block_redacted(
             "task_id": entry.handle.task_id.as_str(),
             "status": entry.status.as_str(),
             "status_detail": &entry.status,
-            "command": &entry.handle.command,
-            "cwd": &entry.handle.cwd,
-            "shell": &entry.handle.shell,
-            "log_path": &entry.handle.log_path,
+            "command_sha256": &entry.handle.command_sha256,
+            "cwd_label": &entry.handle.cwd_label,
+            "shell_label": &entry.handle.shell_label,
+            "shell_sha256": &entry.handle.shell_sha256,
+            "log_ref": &entry.handle.log_ref,
             "created_at_ms": entry.handle.created_at_ms,
             "updated_at_ms": entry.updated_at_ms,
             "output_hash": &entry.output_hash,
@@ -324,9 +325,10 @@ pub(super) fn format_terminal_task_block_redacted(
         "ok"
     };
     let summary = format!(
-        "{} · {}",
+        "{} · terminal {} · cwd {}",
         terminal_task_summary_status(&entry.status),
-        redactor.redact_text(&entry.handle.command)
+        entry.handle.task_id.as_str(),
+        redactor.redact_text(&entry.handle.cwd_label)
     );
     let object = serde_json::json!({
         "tool_name": "terminal_task",

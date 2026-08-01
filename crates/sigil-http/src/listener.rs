@@ -2,7 +2,6 @@ use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use sigil_kernel::PublicRunEventKind;
 use sigil_runtime::{
     LocalSessionCatalogState, LocalSessionMutationError, SessionCatalogProjectionEntry,
     SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
@@ -36,7 +35,8 @@ use crate::{
         HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
         HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
         HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpTaskIntegrationReviewRequest,
-        HttpTaskPauseRequest, HttpToolArtifactReadRequest, HttpVerificationRerunRequest,
+        HttpTaskPauseRequest, HttpTerminalTaskCancelRequest, HttpToolArtifactReadRequest,
+        HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -45,7 +45,7 @@ use crate::{
     },
     sse::{
         HTTP_RUN_EVENT_SSE_NAME, HttpLiveEventBus, HttpLiveEventRecvError, HttpProtocolEvent,
-        HttpSseEvent,
+        HttpRunStreamReceive, HttpSseEvent,
     },
     support::{HttpProviderSetupFailure, HttpSupportContext},
 };
@@ -1219,6 +1219,28 @@ fn route_http_request(
         && let Some(run_id) = request
             .path
             .strip_prefix("/runs/")
+            .and_then(|suffix| suffix.strip_suffix("/terminal-cancel"))
+            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpTerminalTaskCancelRequest>>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "bad_request",
+                "invalid terminal cancellation command body",
+            );
+        };
+        return match registry.cancel_terminal_task_command(run_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(run_id) = request
+            .path
+            .strip_prefix("/runs/")
             .and_then(|suffix| suffix.strip_suffix("/task-pause"))
             .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
     {
@@ -1332,7 +1354,8 @@ async fn stream_run_events(
         .await;
     };
     let mut subscriber = event_bus.subscribe();
-    let (session, run) = match registry.admit_run_event_stream(session_id, run_id, owner_revision) {
+    let (session, _run) = match registry.admit_run_event_stream(session_id, run_id, owner_revision)
+    {
         Ok(admission) => admission,
         Err(error) => return write_http_response(stream, registry_error_response(error)).await,
     };
@@ -1355,14 +1378,23 @@ async fn stream_run_events(
     for event in events {
         last_sequence = last_sequence.max(event.run_event.sequence);
         write_protocol_event(stream, &event).await?;
-        if protocol_event_is_terminal(&event) {
+    }
+    let stream_accepts_events = event_bus
+        .run_stream_accepts_events(&session.durable_session_scope_id, run_id)
+        .map_err(|error| HttpListenerError::Response {
+            message: error.to_string(),
+        })?;
+    if !stream_accepts_events {
+        let latest_sequence = event_bus
+            .latest_run_sequence(&session.durable_session_scope_id, run_id)
+            .map_err(|error| HttpListenerError::Response {
+                message: error.to_string(),
+            })?
+            .unwrap_or(0);
+        if latest_sequence > 0 && last_sequence >= latest_sequence {
             stream.shutdown().await?;
             return Ok(());
         }
-    }
-    if run.status.is_terminal() {
-        stream.shutdown().await?;
-        return Ok(());
     }
     stream.flush().await?;
 
@@ -1378,9 +1410,21 @@ async fn stream_run_events(
                 stream.write_all(b": keep-alive\n\n").await?;
                 stream.flush().await?;
             }
-            received = subscriber.recv() => {
+            received = subscriber.recv_run_stream() => {
                 let event = match received {
-                    Ok(event) => event,
+                    Ok(HttpRunStreamReceive::Event(event)) => *event,
+                    Ok(HttpRunStreamReceive::StreamClosed {
+                        session_id,
+                        run_id: closed_run_id,
+                    }) => {
+                        if session_id == session.durable_session_scope_id
+                            && closed_run_id == run_id
+                        {
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                        continue;
+                    }
                     Err(HttpLiveEventRecvError::Lagged { dropped }) => {
                         let frame = HttpSseEvent::new(
                             "stream_gap",
@@ -1406,10 +1450,6 @@ async fn stream_run_events(
                 last_sequence = event.run_event.sequence;
                 write_protocol_event(stream, &event).await?;
                 stream.flush().await?;
-                if protocol_event_is_terminal(&event) {
-                    stream.shutdown().await?;
-                    return Ok(());
-                }
             }
         }
     }
@@ -1452,15 +1492,6 @@ async fn write_protocol_event(
         })?;
     stream.write_all(frame.encode().as_bytes()).await?;
     Ok(())
-}
-
-fn protocol_event_is_terminal(event: &HttpProtocolEvent) -> bool {
-    matches!(
-        event.run_event.event,
-        PublicRunEventKind::RunFinished { .. }
-            | PublicRunEventKind::RunFailed { .. }
-            | PublicRunEventKind::RunCancelled
-    )
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
@@ -1812,7 +1843,9 @@ async fn write_http_response(
 
 fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
     let status = match &error {
-        HttpRegistryError::SessionNotFound { .. } | HttpRegistryError::RunNotFound { .. } => 404,
+        HttpRegistryError::SessionNotFound { .. }
+        | HttpRegistryError::RunNotFound { .. }
+        | HttpRegistryError::TerminalTaskNotFound { .. } => 404,
         HttpRegistryError::DurableSessionNotFound | HttpRegistryError::ToolArtifactUnavailable => {
             404
         }
@@ -1824,6 +1857,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::RunNoLongerForeground { .. }
         | HttpRegistryError::RunOwnerChanged { .. }
         | HttpRegistryError::ApprovalNotPending { .. }
+        | HttpRegistryError::ApprovalCapacityExceeded { .. }
         | HttpRegistryError::ApprovalRequestChanged { .. }
         | HttpRegistryError::ApprovalToolCallChanged { .. }
         | HttpRegistryError::ApprovalPolicyChanged { .. }
@@ -1851,11 +1885,13 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::IntentStackPermissionRequired
         | HttpRegistryError::IntentStackConflict
         | HttpRegistryError::ToolArtifactCorrupt
-        | HttpRegistryError::ToolArtifactPolicyRevoked => 409,
+        | HttpRegistryError::ToolArtifactPolicyRevoked
+        | HttpRegistryError::TerminalTaskGenerationChanged { .. } => 409,
         HttpRegistryError::EmptyPrompt
         | HttpRegistryError::MissingPermissionMode
         | HttpRegistryError::InvalidTaskContinuation
         | HttpRegistryError::InvalidTaskPauseRequest
+        | HttpRegistryError::InvalidTerminalTaskCancelRequest
         | HttpRegistryError::InvalidTaskIntegrationReview
         | HttpRegistryError::IntentStackInvalidRequest
         | HttpRegistryError::InvalidSessionOpenRequest
@@ -1888,6 +1924,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::DurableSessionUnavailable => "durable_session_unavailable",
         HttpRegistryError::RunNoLongerForeground { .. } => "run_no_longer_foreground",
         HttpRegistryError::RunOwnerChanged { .. } => "run_owner_changed",
+        HttpRegistryError::ApprovalCapacityExceeded { .. } => "approval_capacity_exceeded",
         HttpRegistryError::ConversationDisplayCursorInvalid => "invalid_display_cursor",
         HttpRegistryError::ConversationDisplayCursorStale => "display_cursor_stale",
         HttpRegistryError::ConversationDisplayUnavailable => "conversation_display_unavailable",
@@ -1911,6 +1948,13 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationRecoveryConflict => "recovery_conflict",
         HttpRegistryError::ConversationRecoveryUnavailable => "conversation_recovery_unavailable",
         HttpRegistryError::InvalidTaskPauseRequest => "invalid_task_pause_request",
+        HttpRegistryError::InvalidTerminalTaskCancelRequest => {
+            "invalid_terminal_task_cancel_request"
+        }
+        HttpRegistryError::TerminalTaskNotFound { .. } => "terminal_task_not_found",
+        HttpRegistryError::TerminalTaskGenerationChanged { .. } => {
+            "terminal_task_generation_changed"
+        }
         HttpRegistryError::InvalidTaskIntegrationReview => "invalid_task_integration_review",
         HttpRegistryError::IntentStackInvalidRequest => "invalid_intent_stack_request",
         HttpRegistryError::IntentStackStale => "intent_stack_stale",

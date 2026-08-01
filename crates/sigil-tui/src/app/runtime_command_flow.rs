@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sigil_kernel::{ConnectionId, ModelRef};
+use sigil_kernel::{ConnectionId, ControlEntry, ModelRef};
 use sigil_runtime::{
     normalize_provider_model_alias,
     provider_connections::{ConnectionReadiness, resolve_default_model_route, resolve_model_route},
@@ -38,11 +38,11 @@ impl AppState {
             return Ok(None);
         }
 
-        let Some(root_config) = self.config_snapshot.as_ref() else {
+        let Some(root_config) = self.config_snapshot.clone() else {
             return Ok(None);
         };
         let (_, default_route) =
-            resolve_default_model_route(root_config).map_err(anyhow::Error::new)?;
+            resolve_default_model_route(&root_config).map_err(anyhow::Error::new)?;
         let current_connection = self
             .runtime
             .model_route
@@ -70,7 +70,7 @@ impl AppState {
             ModelRef::new(current_connection, model_id)?
         };
         let (provider_name, route) =
-            resolve_model_route(root_config, &model_ref).map_err(anyhow::Error::new)?;
+            resolve_model_route(&root_config, &model_ref).map_err(anyhow::Error::new)?;
         let ready = self
             .runtime
             .connection_inventory
@@ -121,22 +121,33 @@ impl AppState {
             return Ok(None);
         }
 
-        let mut next_config = root_config.clone();
+        self.ensure_current_session_identity()?;
+        self.append_control_to_current_session(ControlEntry::SessionModelSelected {
+            provider_name: provider_name.clone(),
+            model_name: model_ref.model_id.clone(),
+            resolved_model_route: route.clone(),
+        })?;
+        self.runtime.provider_name = provider_name;
+        self.runtime.model_name = model_ref.model_id.clone();
+        self.runtime.model_route = Some(route);
+        let notice = format!(
+            "route -> {}/{}; continuing current session; saved default unchanged",
+            model_ref.connection_id, model_ref.model_id
+        );
+        self.last_notice = Some(notice.clone());
+        self.push_timeline(TimelineRole::Notice, notice);
+        self.push_event(
+            "model",
+            format!("{}/{}", model_ref.connection_id, model_ref.model_id),
+        );
+
+        let mut next_config = root_config;
         next_config.agent.connection = Some(model_ref.connection_id.clone());
         next_config.agent.model = model_ref.model_id.clone();
-        self.reset_for_new_session(
-            provider_name,
-            model_ref.model_id.clone(),
-            Some(route),
-            format!(
-                "route -> {}/{}; started a fresh session; saved default unchanged",
-                model_ref.connection_id, model_ref.model_id
-            ),
-        );
         self.schedule_balance_refresh();
 
-        Ok(Some(AppAction::StartNewModelSession {
-            runtime_config: Box::new(next_config),
+        Ok(Some(AppAction::RuntimeConfigUpdated {
+            root_config: Box::new(next_config),
         }))
     }
 }

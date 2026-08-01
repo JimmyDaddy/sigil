@@ -1728,8 +1728,14 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
                     projection.resolved_model_route = resolved_model_route;
                 }
             }
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name }) => {
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                provider_name,
+                model_name,
+                resolved_model_route,
+            }) => {
+                projection.provider_name = Some(provider_name);
                 projection.model_name = Some(model_name);
+                projection.resolved_model_route = Some(resolved_model_route);
             }
             SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance)) => {
                 projection.external_provenance.push(provenance);

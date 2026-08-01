@@ -31,9 +31,10 @@ use sigil_kernel::{
     SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode, Tool, ToolAccess, ToolApproval,
     ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalContext,
     ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, VerificationScope, WriteIsolationMode,
-    build_workspace_snapshot_for_event, changeset_only_child_contract_prompt,
+    ToolExecutionStatus, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, VerificationScope,
+    WriteIsolationMode, build_workspace_snapshot_for_event, changeset_only_child_contract_prompt,
     changeset_only_child_tool_registry, decode_changeset_only_child_output, saturating_elapsed,
     stable_event_uuid, stable_workspace_id,
 };

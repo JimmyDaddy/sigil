@@ -364,6 +364,7 @@ where
                     message_tx,
                 ) {
                     Ok(transition) => {
+                        state.clear_approval_command_receipts();
                         let _ = message_tx.send(WorkerMessage::SessionSwitched {
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
@@ -391,6 +392,7 @@ where
                     message_tx,
                 ) {
                     Ok(transition) => {
+                        state.clear_approval_command_receipts();
                         let _ = message_tx.send(WorkerMessage::NewSessionStarted {
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,

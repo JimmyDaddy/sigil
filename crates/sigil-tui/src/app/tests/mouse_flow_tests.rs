@@ -2114,7 +2114,8 @@ fn mouse_click_approval_action_returns_decision() -> Result<()> {
         outcome,
         AppMouseOutcome::Action(AppAction::ApprovalDecision {
             call_id,
-            approved: true
+            approved: true,
+            ..
         }) if call_id == "call-1"
     ));
     Ok(())

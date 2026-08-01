@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -14,9 +14,11 @@ use sigil_kernel::{
     ApprovalMode, EventHandler, ModelMessage, RunCancellationHandle, RunEvent,
     SequentialTaskRequest, Session, SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode,
     TaskParticipantAttemptId, TaskStepId, TaskStepMode, TaskStepSpec, Tool, ToolAccess,
-    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    WebTaskTreeBudget, child_session_ref,
+    ToolAnalysisStatus, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
+    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
+    ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope, WebTaskTreeBudget,
+    child_session_ref,
 };
 
 use crate::{
@@ -529,16 +531,57 @@ impl Tool for TaskDiscoveryTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![ToolSubject::agent(EXPLORE_PROFILE_ID.to_owned())])
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Allow))
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let probes = parse_task_discovery_probes(args, self.max_probes)?;
+        let workspace_root = ctx
+            .workspace_root
+            .canonicalize()
+            .context("failed to canonicalize planner discovery workspace")?;
+        let mut semantic_scope = ToolSemanticScope::new("agent:task_discovery", 1);
+        semantic_scope
+            .qualifiers
+            .insert("profile".to_owned(), EXPLORE_PROFILE_ID.to_owned());
+        semantic_scope
+            .qualifiers
+            .insert("probe_count".to_owned(), probes.len().to_string());
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: ToolOperation::SpawnAgent,
+            effects: BTreeSet::from([
+                ToolPermissionEffect::FileRead,
+                ToolPermissionEffect::AgentLifecycle,
+            ]),
+            subjects: vec![
+                ToolSubject::agent(EXPLORE_PROFILE_ID.to_owned()),
+                ToolSubject::path_with_scope(
+                    ".",
+                    ".",
+                    Some(workspace_root),
+                    ToolSubjectScope::Workspace,
+                ),
+            ],
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(semantic_scope),
+            tool_default_mode: Some(ApprovalMode::Allow),
+            analysis_bindings: BTreeMap::from([
+                ("planner".to_owned(), "task_discovery_v2".to_owned()),
+                (
+                    "delegated_profile".to_owned(),
+                    EXPLORE_PROFILE_ID.to_owned(),
+                ),
+            ]),
+            safe_summary: ToolPermissionSummary {
+                title: "Run read-only discovery probes".to_owned(),
+                detail: format!(
+                    "Spawn {} host-owned Explore probe{} under delegated read-only policy",
+                    probes.len(),
+                    if probes.len() == 1 { "" } else { "s" }
+                ),
+                step_count: u32::try_from(probes.len()).unwrap_or(u32::MAX),
+                workspace_code_steps: 0,
+            },
+        })
     }
 
     async fn execute(

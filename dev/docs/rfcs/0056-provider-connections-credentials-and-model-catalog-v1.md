@@ -4,6 +4,19 @@
 
 创建日期：2026-07-24
 
+### 2026-08-02 same-session model-switch amendment
+
+模型不再是 durable session 的不可变容器边界。idle 模型切换改为在同一个 session 中追加完整
+`ModelRef`、provider identity 与 secret-free `ResolvedModelRoute` 的 `SessionModelSelected` 事件；
+下一次运行使用新 route，会话 ID、历史、标题和任务状态保持不变。该 append-only 事件同时形成
+provider-native continuation/cache 的隔离边界，边界前 material 不得跨 route 复用。busy 切换仍为
+zero mutation；saved default 仍由独立操作修改。
+
+`ModelAvailability::Unverified` 继续作为 catalog admission/provenance 的内部事实，但不是会话层
+需要用户处理的告警。Desktop composer、默认模型选择器和可调用模型行按普通 route 展示它；只有
+`ConfiguredUnavailable` 才禁用并显示不可用。catalog freshness 与刷新操作归 Provider 配置流程，
+不得在会话输入区暴露一个没有就地 remediation 的“未从 Provider 确认”标签。
+
 ### 2026-07-31 current-only cutover
 
 当前实现只接受 `config_version = 2` 的 provider connection 配置、当前 credential source 和当前
@@ -134,8 +147,9 @@ V1 采用以下方案：
 9. config save 使用 copy-on-write credential rotation 与 atomic file publish。Unix parent 为
    `0700`，config/cache/credential file 为 `0600`；file mode 是受权限保护的独立 plaintext
    credential store，不得被描述为加密存储。
-10. 修改 saved default 不改变当前 session。切换 connection/model 只能在 idle 边界创建新 session；
-    active run、provider continuation 和已有 durable session 不做原地 route mutation。
+10. 修改 saved default 不改变当前 session。切换 connection/model 只能在 idle 边界向当前 session
+    追加完整 route-selection event；active run 不做 mid-turn route mutation，边界前 provider-native
+    continuation 不得跨 route 复用。
 11. V1 的“Recommended”在选择时解析为一个确定 model ID。V1 不引入跨 provider 动态 `Auto`
     router，避免不可审计的隐式 route 漂移。
 12. 本 RFC 初始评审先冻结 contract；R56.1-R56.7 完成后，R56.8 继续收敛连接管理、
@@ -510,13 +524,13 @@ DeepSeek (work)
 选择结果遵守：
 
 - busy 时拒绝，不改变 config、session 或 credential；
-- idle 时创建 fresh session，并将选择记录为 recent；
-- 默认只改变新 session route，不写 saved default；
+- idle 时在当前 session 追加 route-selection boundary，并将选择记录为 recent；
+- 默认只改变当前 session 后续运行的 route，不写 saved default；
 - `D` 或显式 footer action `Set default` 才更新下次启动默认值；
 - UI 同时显示 `current session` 与 `saved default`，两者不同时不得省略。
 
-从 `/config` 保存新的 default 也不修改当前 session。可提供第二个显式 action：
-`save and start a new session`，但它仍经过 fresh-session boundary。
+从 `/config` 保存新的 default 也不修改当前 session。切换当前 session route 与修改 saved default
+始终是两个独立 mutation。
 
 ### 6.7 Custom connection
 
@@ -1066,14 +1080,16 @@ restore 时：
 ### 10.4 Model switching
 
 - active provider stream、tool、approval、task child 或 continuation 存在时拒绝；
-- idle switch 创建 fresh session；
+- idle switch 在当前 session 追加完整 route-selection control event；
 - Desktop 与 TUI 的候选值都使用完整 `connection_id/model_id`，不得在 renderer/view state 中
   降级为裸 `model_id`；同名模型可同时属于不同 connection；
-- application run context 可以投影所有已配置 connection 的有界已知模型目录，但当前 session 的
-  capability binding 只绑定当前 connection，其他 connection 的 cache 刷新不能让当前 run 失效；
-- 不把 old provider continuation、compaction target proof、route pressure 或 usage budget 带到新 route；
-- recent model 只在 session 创建成功后记录；
-- set-default 与 start-session 是两个独立 mutation。
+- application run context 投影所有已配置 connection 的有界已知模型目录，capability binding 绑定
+  当前 route 与完整候选集合，跨 connection 选择也必须回传精确 binding；
+- route-selection event 是 continuation/cache 隔离边界，不把 old provider continuation、native
+  compaction carrier 或 route-private proof 带到新 route；portable transcript、usage history 与任务状态
+  仍属于原 session；
+- recent model 只在 route-selection event 成功提交后记录；
+- set-default 与 switch-session-route 是两个独立 mutation。
 
 ## 11. Crate and module ownership
 
@@ -1180,8 +1196,8 @@ Desktop：
 - Desktop 打开项目后先加载 secret-free inventory；没有可用 saved default 时阻止新建会话，
   进入 `Provider -> Authentication -> Model -> Save` 三步向导；
 - 设置页不依赖已有会话即可查看 connection/readiness/credential source 并添加 connection；
-- Composer 按 Provider/connection 展示精确模型 route；跨 connection 选择通过 fresh-session API
-  生效，设置页通过 typed native/HTTP mutation 原子更新共享 saved default，不保存 renderer-local
+- Composer 按 Provider/connection 展示精确模型 route；跨 connection 选择通过 same-session run API
+  从下一次运行生效，设置页通过 typed native/HTTP mutation 原子更新共享 saved default，不保存 renderer-local
   Provider/model override；
 - renderer 的模型 view 使用十分钟进程内 cache，过期结果先展示后后台刷新，API key 只以
   SHA-256 fingerprint 参与 cache identity，cache 不保存 key；
@@ -1302,7 +1318,7 @@ UI-facing error 使用 stable code + bounded message：
 
 - durable `ResolvedModelRoute`；
 - semantic drift check；
-- fresh-session model switch；
+- append-only same-session model switch；
 - restore/fork recovery；
 - recent identity migration。
 
@@ -1431,7 +1447,7 @@ configuration-wide、本地完成且不依赖 provider 网络的显式操作：
 4. offline restart 使用 exact stale cache 并显示 provenance；
 5. environment credential 运行后磁盘不存在 remote model IDs；
 6. existing session 遇到 endpoint drift fail closed；
-7. fresh session model switch 不携带 continuation；
+7. same-session model switch 不携带边界前 provider-native continuation；
 8. config/cache Unix mode 分别为 `0600`，parent 为 `0700`。
 
 真实 provider acceptance 只在用户显式提供 credential 和 budget 时运行，并复用 RFC-0028 的
@@ -1464,7 +1480,7 @@ V1 完成必须同时满足：
 9. model recent/cache/session identity 都包含 connection ID；未来若加入 favorite，也必须使用相同
    compound identity。
 10. current session 与 saved default 可同时、准确显示。
-11. busy switch 为 zero mutation；idle switch 创建 fresh session。
+11. busy switch 为 zero mutation；idle switch 保持 session id 并追加 route-selection boundary。
 12. endpoint/protocol drift 不能静默恢复旧 session。
 13. stale background result 不能更新已切换 connection 的 UI。
 14. config/cache 权限和 atomic publish 通过 Unix/Windows contract tests。
@@ -1542,8 +1558,10 @@ V1 Recommended 必须解析到 exact ModelRef。
 
 ### 17.8 Mutate the current session when `/model` changes
 
-拒绝。provider continuation、compaction proof、usage、rate-limit route 和 durable replay 都绑定旧 route。
-fresh session 是唯一安全边界。
+接受，但 mutation 只能是 append-only route-selection boundary。provider continuation、native
+compaction carrier 与 route-private proof 绑定旧 route，因此从下一次运行开始全部隔离；portable
+transcript、usage history、任务状态和 durable replay 继续属于同一个 session。覆盖原 identity 或在
+active run 中 mid-turn 切换仍然禁止。
 
 ## 18. Consequences
 

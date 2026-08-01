@@ -1,4 +1,4 @@
-<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-or-timed-out,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
+<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
 
 # 排障
 
@@ -73,9 +73,11 @@ TUI 会进入快速设置，并把最后一步明确标成**检查、替换无�
 
 非交互模式不能显示审批弹窗。请为预期操作预先配置足够但尽可能小的权限，或者改用交互模式。不要让自动化任务拥有超出实际需要的权限。
 
-## 审批被拒绝或超时
+## 审批被拒绝、过期或取消
 
-该操作没有执行。检查预览，修正请求后再重试。审批超时会按拒绝处理，Sigil 不会在后台继续执行。
+该操作没有执行。拒绝表示用户明确作出了决定；超时过期、进程取消和恢复时发现请求已陈旧是不同的
+终态，不会伪造“用户拒绝”记录。请检查审批卡片或审计原因，必要时修正请求后重试。Sigil 不会在
+后台静默继续已过期或已取消的操作。
 
 ## 鼠标或剪贴板不可用
 

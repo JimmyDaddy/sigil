@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -11,21 +11,24 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalHandler, CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX, ControlEntry,
-    ConversationInputEditedEntry, ConversationInputKind, ConversationInputPromotedEntry,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
-    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
-    ConversationInputTerminalCommand, ConversationInputTerminalExpectation,
-    ConversationInputTerminalFrontier, ConversationQueueDurableProjection,
-    ConversationQueueMutation, ConversationQueueMutationCommand, ConversationQueueRevision,
-    JsonlSessionStore, ModelMessage, ProviderPhysicalAttemptOutcome,
-    ProviderPhysicalAttemptProjection, PublicRunEvent, PublicRunEventKind, RootConfig,
-    SecretString, SessionLogEntry, SessionRef, ToolApproval, ToolApprovalUserDecision,
-    ToolArtifactAvailability, ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactRefV1,
-    ToolArtifactStore, ToolCall, ToolOutputArchivedArtifactBindingV1, ToolSpec,
-    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
-    project_user_message_for_persistence_with_nonce_and_issued_at, stable_event_uuid,
-    tool_approval_session_grant_available_for_facets,
+    ApprovalHandler, ApprovalRequestIdentityV2, CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX,
+    ControlEntry, ConversationInputEditedEntry, ConversationInputKind,
+    ConversationInputPromotedEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, ConversationInputTerminalCommand,
+    ConversationInputTerminalExpectation, ConversationInputTerminalFrontier,
+    ConversationQueueDurableProjection, ConversationQueueMutation,
+    ConversationQueueMutationCommand, ConversationQueueRevision, ExecutionContainmentRequest,
+    JsonlSessionStore, ModelMessage, PermissionDecisionReason, PermissionRisk,
+    ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection, PublicRunEvent,
+    PublicRunEventKind, RootConfig, SecretString, SessionLogEntry, SessionRef, ToolAnalysisStatus,
+    ToolApproval, ToolApprovalContext, ToolApprovalUserDecision, ToolArtifactAvailability,
+    ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactRefV1, ToolArtifactStore, ToolCall,
+    ToolOperation, ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect,
+    ToolPermissionSummary, ToolSpec, ToolSubject, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
+    project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_text,
+    stable_event_uuid,
 };
 use sigil_runtime::application_compaction::{
     PendingApplicationCompaction, PendingApplicationCompactionPreview,
@@ -47,14 +50,15 @@ use sigil_runtime::application_run::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunExecution,
     ApplicationRunInteraction, ApplicationRunRequest, ApplicationRunServices,
     ApplicationRunTerminalStatus, ApplicationTaskContinuationExecution,
-    ApplicationTaskContinuationRequest, ApplicationTranscriptRole, PreparedApplicationRun,
-    PreparedApplicationTaskContinuation, accept_application_task_integration_review,
-    application_agent_activity_view, application_run_context_view,
-    application_session_frontier_view, application_session_transcript_page,
-    application_task_integration_review_view, application_verification_view,
-    bind_application_session_with_model_ref, bind_existing_application_session,
-    prepare_application_run, prepare_application_task_continuation,
-    record_application_preparation_cancellation, rerun_application_verification,
+    ApplicationTaskContinuationRequest, ApplicationTerminalTaskControl, ApplicationTranscriptRole,
+    PreparedApplicationRun, PreparedApplicationTaskContinuation,
+    accept_application_task_integration_review, application_agent_activity_view,
+    application_run_context_view, application_session_frontier_view,
+    application_session_transcript_page, application_task_integration_review_view,
+    application_verification_view, bind_application_session_with_model_ref,
+    bind_existing_application_session, prepare_application_run,
+    prepare_application_task_continuation, record_application_preparation_cancellation,
+    rerun_application_verification,
 };
 use sigil_runtime::conversation_display::{
     ConversationDisplayProjectionError, conversation_display_page,
@@ -63,9 +67,8 @@ use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
 use crate::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpAgentActivityItem, HttpAgentActivityStatus,
-    HttpAgentActivityView, HttpAgentHandoffStatus, HttpAgentUsageSummary,
-    HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
+    HttpAgentActivityItem, HttpAgentActivityStatus, HttpAgentActivityView, HttpAgentHandoffStatus,
+    HttpAgentUsageSummary, HttpApplicationAgentCatalogEntry, HttpApplicationClientAction,
     HttpApplicationCommandCatalogEntry, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApplicationSkillBinding, HttpApplicationSkillCatalogEntry,
     HttpApprovalDecisionRecord, HttpCheckpointRestoreReceipt, HttpCheckpointRestoreReview,
@@ -81,15 +84,16 @@ use crate::{
     HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter,
     HttpIntentDropExecution, HttpIntentDropPreview, HttpIntentDropRequest,
     HttpIntentStackDriverError, HttpIntentStackView, HttpLiveEventBus, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpQueuedRunAdmission, HttpQueuedRunDriverStart,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunTerminalOutcome,
-    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpToolArtifactPage,
-    HttpToolArtifactReadDriverError, HttpToolArtifactReadRequest, HttpToolOutputShrinkReceipt,
-    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
-    HttpVerificationView,
+    HttpPendingApproval, HttpPendingApprovalDisplay, HttpPendingApprovalSubject,
+    HttpPermissionMode, HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunSnapshot,
+    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
+    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
+    HttpTaskIntegrationReviewView, HttpToolArtifactPage, HttpToolArtifactReadDriverError,
+    HttpToolArtifactReadRequest, HttpToolOutputShrinkReceipt, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -216,6 +220,13 @@ impl HttpPreparedApplicationRun {
         }
     }
 
+    fn terminal_control(&self) -> ApplicationTerminalTaskControl {
+        match self {
+            Self::Conversation(prepared) => prepared.terminal_control(),
+            Self::Task(prepared) => prepared.terminal_control(),
+        }
+    }
+
     fn into_parts(self) -> (HttpApplicationRunExecution, ApplicationRunControl) {
         match self {
             Self::Conversation(prepared) => {
@@ -270,9 +281,11 @@ pub struct HttpProductionRunDriver {
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
+    terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     pending_compactions: Arc<Mutex<BTreeMap<String, PendingHttpCompaction>>>,
     session_projection_stores: Mutex<HttpSessionProjectionStoreCache>,
+    reconciled_terminal_sessions: Mutex<BTreeSet<String>>,
 }
 
 enum PendingHttpCompaction {
@@ -406,10 +419,34 @@ impl HttpProductionRunDriver {
             registry: OnceLock::new(),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
+            terminal_owners: Arc::new(Mutex::new(BTreeMap::new())),
             exact_queue_prompts: Arc::new(Mutex::new(BTreeMap::new())),
             pending_compactions: Arc::new(Mutex::new(BTreeMap::new())),
             session_projection_stores: Mutex::new(HttpSessionProjectionStoreCache::default()),
+            reconciled_terminal_sessions: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    fn reconcile_terminal_session_once(
+        &self,
+        session_scope_id: &str,
+        session_log_path: &Path,
+    ) -> Result<(), HttpSessionOpenBindingError> {
+        let mut reconciled = self
+            .reconciled_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reconciled.contains(session_scope_id) {
+            return Ok(());
+        }
+        sigil_runtime::session_control::reconcile_terminal_tasks_after_restart(
+            session_log_path,
+            session_scope_id,
+            sigil_runtime::current_unix_time_ms(),
+        )
+        .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
+        reconciled.insert(session_scope_id.to_owned());
+        Ok(())
     }
 
     /// Builds and attaches the one process-local registry driven by this instance.
@@ -449,6 +486,53 @@ impl HttpProductionRunDriver {
             .get()
             .and_then(Weak::upgrade)
             .ok_or_else(|| HttpRunDriverError::new("production driver registry is not attached"))
+    }
+
+    fn cancel_owned_terminal_tasks(
+        &self,
+        durable_session_scope_id: Option<&str>,
+    ) -> Result<(), HttpRunDriverError> {
+        let owners = self
+            .terminal_owners
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production terminal-owner state unavailable"))?
+            .iter()
+            .filter(|(_, owner)| {
+                durable_session_scope_id
+                    .is_none_or(|expected| owner.durable_session_scope_id == expected)
+            })
+            .map(|(run_id, owner)| (run_id.clone(), owner.clone()))
+            .collect::<Vec<_>>();
+        if owners.is_empty() {
+            return Ok(());
+        }
+        let registry = self.attached_registry()?;
+        for (run_id, owner) in &owners {
+            let run = registry.get_run(run_id).map_err(registry_driver_error)?;
+            for task in run
+                .terminal_tasks
+                .iter()
+                .filter(|task| !task.status.is_terminal())
+            {
+                let terminal = self
+                    .runtime
+                    .block_on(owner.control.cancel(&task.task_id))
+                    .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+                if !terminal.status.is_terminal() {
+                    return Err(HttpRunDriverError::new(
+                        "persistent terminal cleanup did not reach a terminal state",
+                    ));
+                }
+            }
+        }
+        let mut retained = self
+            .terminal_owners
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production terminal-owner state unavailable"))?;
+        for (run_id, _) in owners {
+            retained.remove(&run_id);
+        }
+        Ok(())
     }
 
     fn reconcile_orphaned_queued_dispatches(
@@ -682,7 +766,7 @@ impl HttpProductionRunDriver {
             session: start.session,
             run: start.run,
             prompt: queued.queued.prompt.clone(),
-            model_name: None,
+            model_ref: None,
             model_selection_binding: None,
             reasoning_effort_binding,
             skill_binding: None,
@@ -748,11 +832,13 @@ impl HttpProductionRunDriver {
             start: start.clone(),
             queued,
             exact_queue_prompts: Arc::clone(&self.exact_queue_prompts),
+            terminal_owners: Arc::clone(&self.terminal_owners),
             cancel_receiver,
         };
         let task = self.runtime.spawn(supervisor.run());
         let active_runs = Arc::clone(&self.active_runs);
         let active_runs_ready = Arc::clone(&self.active_runs_ready);
+        let terminal_owners = Arc::clone(&self.terminal_owners);
         let registry = Arc::downgrade(&registry);
         let run_id = start.run.id;
         self.runtime.spawn(async move {
@@ -799,6 +885,16 @@ impl HttpProductionRunDriver {
             }
             if let Some(registry) = registry.upgrade() {
                 let _ = registry.record_run_released(&run_id);
+                let has_active_terminal = registry.get_run(&run_id).ok().is_some_and(|run| {
+                    run.terminal_tasks
+                        .iter()
+                        .any(|task| !task.status.is_terminal())
+                });
+                if !has_active_terminal && let Ok(mut owners) = terminal_owners.lock() {
+                    owners.remove(&run_id);
+                }
+            } else if let Ok(mut owners) = terminal_owners.lock() {
+                owners.remove(&run_id);
             }
         });
         Ok(())
@@ -1013,6 +1109,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         {
             return Err(HttpSessionOpenBindingError::IdentityChanged);
         }
+        self.reconcile_terminal_session_once(&binding.session_scope_id, &binding.session_log_path)?;
         Ok(HttpSessionBinding {
             session_scope_id: binding.session_scope_id,
             session_log_path: binding.session_log_path.display().to_string(),
@@ -1020,6 +1117,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn purge_session_local_state(&self, durable_session_scope_id: &str) {
+        let _ = self.cancel_owned_terminal_tasks(Some(durable_session_scope_id));
         let mut exact_prompts = self
             .exact_queue_prompts
             .lock()
@@ -1039,6 +1137,10 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         session_projection_stores
             .entries
+            .remove(durable_session_scope_id);
+        self.reconciled_terminal_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(durable_session_scope_id);
     }
 
@@ -1120,6 +1222,48 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })?
     }
 
+    fn cancel_terminal_task(
+        &self,
+        cancel: HttpRunDriverTerminalTaskCancel,
+    ) -> Result<crate::HttpTerminalLifecycleView, HttpRunDriverError> {
+        let owner = self
+            .terminal_owners
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production terminal-owner state unavailable"))?
+            .get(&cancel.run_id)
+            .cloned()
+            .ok_or_else(|| {
+                HttpRunDriverError::new(format!(
+                    "persistent terminal owner is unavailable for run {}",
+                    cancel.run_id
+                ))
+            })?;
+        if owner.session_id != cancel.session_id {
+            return Err(HttpRunDriverError::new(
+                "production terminal cancellation session mismatch",
+            ));
+        }
+        let before = self
+            .runtime
+            .block_on(owner.control.status(&cancel.task_id))
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        if before.generation != cancel.expected_generation {
+            return Err(HttpRunDriverError::new(
+                "production terminal cancellation generation changed",
+            ));
+        }
+        let terminal = self
+            .runtime
+            .block_on(owner.control.cancel(&cancel.task_id))
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        if !terminal.status.is_terminal() {
+            return Err(HttpRunDriverError::new(
+                "production terminal cancellation did not confirm cleanup",
+            ));
+        }
+        Ok(crate::HttpTerminalLifecycleView::from(&terminal))
+    }
+
     fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError> {
         if approval.call_id != approval.decision.call_id
             || approval.run_id != approval.decision.run_id
@@ -1140,7 +1284,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 "production approval session mismatch",
             ));
         }
-        run.broker.resolve(&approval.call_id, approval.decision)
+        run.broker.resolve(
+            &approval.call_id,
+            &approval.approval_request_id,
+            approval.decision,
+        )
     }
 
     fn verification_view(
@@ -1381,7 +1529,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     reasoning_effort_binding: option.reasoning_effort_binding,
                 })
                 .collect(),
-            model_selection: HttpModelSelectionPolicy::FreshSession,
+            model_selection: HttpModelSelectionPolicy::SameSession,
             model_selection_binding: view.model_selection_binding,
             default_permission_mode: view.default_permission_mode.into(),
             available_permission_modes: vec![
@@ -2196,6 +2344,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn wait_for_idle(&self, timeout: Duration) -> Result<(), HttpRunDriverError> {
+        self.cancel_owned_terminal_tasks(None)?;
         let deadline = Instant::now() + timeout;
         let mut runs = self
             .active_runs
@@ -2798,6 +2947,13 @@ struct HttpProductionActiveRun {
     cancel_sender: mpsc::UnboundedSender<HttpProductionRunControlCommand>,
 }
 
+#[derive(Clone)]
+struct HttpProductionTerminalOwner {
+    session_id: String,
+    durable_session_scope_id: String,
+    control: ApplicationTerminalTaskControl,
+}
+
 enum HttpProductionRunControlCommand {
     Cancel(HttpProductionCancellationCommand),
     Pause(HttpProductionTaskPauseCommand),
@@ -2823,6 +2979,7 @@ struct HttpRunSupervisor {
     start: HttpRunDriverStart,
     queued: Option<HttpQueuedRunPreparation>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
+    terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     cancel_receiver: mpsc::UnboundedReceiver<HttpProductionRunControlCommand>,
 }
 
@@ -2845,15 +3002,16 @@ impl HttpRunSupervisor {
             &self.start.session.durable_session_scope_id,
         )
         .map_err(|_| HttpRunDriverError::new("durable run-context projection failed"))?;
-        let model_connection_id = self
-            .start
-            .model_name
-            .is_none()
-            .then(|| run_context.model_ref.connection_id.clone());
-        let model_name = self
-            .start
-            .model_name
-            .clone()
+        let selected_model = self.start.model_ref.as_ref();
+        let model_connection_id = selected_model
+            .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
+            .transpose()
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("invalid selected connection: {error}"))
+            })?
+            .or_else(|| Some(run_context.model_ref.connection_id.clone()));
+        let model_name = selected_model
+            .map(|model_ref| model_ref.model_id.clone())
             .or_else(|| Some(run_context.model_ref.model_id.clone()));
         let request = ApplicationRunRequest {
             config_path: self.options.config_path.clone(),
@@ -2883,7 +3041,16 @@ impl HttpRunSupervisor {
             }),
             constraints: None,
         };
-        let services = self.services.clone();
+        let services = self
+            .services
+            .clone()
+            .with_terminal_lifecycle_handler(Arc::new(HttpProductionTerminalLifecycleHandler {
+                durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
+                run_id: self.start.run.id.clone(),
+                registry: Arc::downgrade(&registry),
+                event_bus: Arc::clone(&self.event_bus),
+                terminal_owners: Arc::clone(&self.terminal_owners),
+            }));
         let preparer = Arc::clone(&self.preparer);
         let queued_terminal = self
             .queued
@@ -3019,7 +3186,7 @@ impl HttpRunSupervisor {
                     },
                 );
                 let event_bus = Arc::clone(&self.event_bus);
-                tokio::task::spawn_blocking(move || event_bus.publish_run_event(event))
+                tokio::task::spawn_blocking(move || event_bus.publish_next_run_event(event))
                     .await
                     .map_err(|_| {
                         HttpRunDriverError::new(
@@ -3027,9 +3194,13 @@ impl HttpRunSupervisor {
                         )
                     })?
                     .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-                registry
-                    .record_run_terminal(&self.start.run.id, HttpRunTerminalOutcome::Failed)
-                    .map_err(registry_driver_error)?;
+                record_run_terminal_and_reconcile_stream(
+                    &registry,
+                    &self.event_bus,
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    HttpRunTerminalOutcome::Failed,
+                )?;
                 return Ok(());
             }
         };
@@ -3041,6 +3212,17 @@ impl HttpRunSupervisor {
                 "prepared application run does not match its durable HTTP session binding",
             ));
         }
+        self.terminal_owners
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production terminal-owner state unavailable"))?
+            .insert(
+                self.start.run.id.clone(),
+                HttpProductionTerminalOwner {
+                    session_id: self.start.session.id.clone(),
+                    durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
+                    control: prepared.terminal_control(),
+                },
+            );
         let (execution, control) = prepared.into_parts();
         let control = Arc::new(control);
         let event_handler = HttpProductionEventHandler {
@@ -3065,15 +3247,21 @@ impl HttpRunSupervisor {
                 let terminal_was_delivered = control
                     .terminal_was_delivered()
                     .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-                if !terminal_was_delivered {
-                    return Err(HttpRunDriverError::new(
-                        "production execution ended without a durable protocol terminal",
-                    ));
-                }
-                let terminal = http_terminal_from_application_result(&result);
-                registry
-                    .record_run_terminal(&self.start.run.id, terminal)
-                    .map_err(registry_driver_error)?;
+                let mut recovery_handler = event_handler.clone();
+                let terminal = ensure_application_execution_terminal(
+                    terminal_was_delivered,
+                    &result,
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    &mut recovery_handler,
+                )?;
+                record_run_terminal_and_reconcile_stream(
+                    &registry,
+                    &self.event_bus,
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    terminal,
+                )?;
                     break 'run;
                 }
                 command = self.cancel_receiver.recv() => {
@@ -3133,6 +3321,8 @@ impl HttpRunSupervisor {
                         if record_natural_terminal_if_delivered(
                             &control,
                             &registry,
+                            &self.event_bus,
+                            &self.start.session.durable_session_scope_id,
                             &self.start.run.id,
                             &natural_result,
                         )? {
@@ -3157,6 +3347,8 @@ impl HttpRunSupervisor {
                                 if record_natural_terminal_if_delivered(
                                     &control,
                                     &registry,
+                                    &self.event_bus,
+                                    &self.start.session.durable_session_scope_id,
                                     &self.start.run.id,
                                     &natural_result,
                                 )? {
@@ -3197,6 +3389,8 @@ impl HttpRunSupervisor {
                                     if record_natural_terminal_if_delivered(
                                         &control,
                                         &registry,
+                                        &self.event_bus,
+                                        &self.start.session.durable_session_scope_id,
                                         &self.start.run.id,
                                         &natural_result,
                                     )? {
@@ -3239,10 +3433,13 @@ impl HttpRunSupervisor {
                                 return Err(error);
                             }
                             let terminal = http_terminal_from_application_result(&natural_result);
-                            if let Err(error) = registry
-                                .record_run_terminal(&self.start.run.id, terminal)
-                            {
-                                let error = registry_driver_error(error);
+                            if let Err(error) = record_run_terminal_and_reconcile_stream(
+                                &registry,
+                                &self.event_bus,
+                                &self.start.session.durable_session_scope_id,
+                                &self.start.run.id,
+                                terminal,
+                            ) {
                                 let error = if acknowledgement_sent {
                                     error
                                 } else {
@@ -3382,10 +3579,13 @@ impl HttpRunSupervisor {
                     };
                     return Err(error);
                 }
-                if let Err(error) = registry
-                    .record_run_terminal(&self.start.run.id, terminal)
-                {
-                    let error = registry_driver_error(error);
+                if let Err(error) = record_run_terminal_and_reconcile_stream(
+                    &registry,
+                    &self.event_bus,
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    terminal,
+                ) {
                     let error = if acknowledgement_sent {
                         error
                     } else {
@@ -3444,6 +3644,8 @@ impl HttpRunSupervisor {
                     if record_natural_terminal_if_delivered(
                         &control,
                         registry,
+                        &self.event_bus,
+                        &self.start.session.durable_session_scope_id,
                         &self.start.run.id,
                         &natural_result,
                     )? {
@@ -3470,6 +3672,8 @@ impl HttpRunSupervisor {
                                 if record_natural_terminal_if_delivered(
                                     &control,
                                     registry,
+                                    &self.event_bus,
+                                    &self.start.session.durable_session_scope_id,
                                     &self.start.run.id,
                                     &natural_result,
                                 )? {
@@ -3593,8 +3797,13 @@ impl HttpRunSupervisor {
                 )
             });
         }
-        if let Err(error) = registry.record_run_terminal(&self.start.run.id, terminal) {
-            let error = registry_driver_error(error);
+        if let Err(error) = record_run_terminal_and_reconcile_stream(
+            registry,
+            &self.event_bus,
+            &self.start.session.durable_session_scope_id,
+            &self.start.run.id,
+            terminal,
+        ) {
             return Err(if acknowledgement_sent {
                 error
             } else {
@@ -3760,10 +3969,14 @@ impl HttpRunSupervisor {
                         HttpRunTerminalOutcome::Interrupted
                     }
                 };
-                registry
-                    .record_run_terminal(&self.start.run.id, terminal)
-                    .map(|_| ())
-                    .map_err(registry_driver_error)
+                record_run_terminal_and_reconcile_stream(
+                    registry,
+                    &self.event_bus,
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    terminal,
+                )
+                .map(|_| ())
             });
         match result {
             Ok(()) => {
@@ -3861,7 +4074,7 @@ impl HttpRunSupervisor {
             );
             let event_bus = Arc::clone(&self.event_bus);
             let mut publication_worker =
-                tokio::task::spawn_blocking(move || event_bus.publish_run_event(event));
+                tokio::task::spawn_blocking(move || event_bus.publish_next_run_event(event));
             match tokio::time::timeout(remaining_until(deadline), &mut publication_worker).await {
                 Ok(joined) => {
                     joined
@@ -3895,10 +4108,14 @@ impl HttpRunSupervisor {
                         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
                 }
             };
-            registry
-                .record_run_terminal(&self.start.run.id, HttpRunTerminalOutcome::Cancelled)
-                .map(|_| ())
-                .map_err(registry_driver_error)
+            record_run_terminal_and_reconcile_stream(
+                registry,
+                &self.event_bus,
+                &self.start.session.durable_session_scope_id,
+                &self.start.run.id,
+                HttpRunTerminalOutcome::Cancelled,
+            )
+            .map(|_| ())
         }
         .await;
         if acknowledgement_sent {
@@ -3929,6 +4146,81 @@ struct HttpProductionEventHandler {
     event_bus: Arc<HttpLiveEventBus>,
 }
 
+struct HttpProductionTerminalLifecycleHandler {
+    durable_session_scope_id: String,
+    run_id: String,
+    registry: Weak<HttpSessionRunRegistry>,
+    event_bus: Arc<HttpLiveEventBus>,
+    terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
+}
+
+impl std::fmt::Debug for HttpProductionTerminalLifecycleHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpProductionTerminalLifecycleHandler")
+            .field("durable_session_scope_id", &self.durable_session_scope_id)
+            .field("run_id", &self.run_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl sigil_runtime::ApplicationTerminalLifecycleHandler for HttpProductionTerminalLifecycleHandler {
+    fn handle_terminal_lifecycle(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        event: &sigil_kernel::TerminalLifecycleEvent,
+    ) -> Result<()> {
+        if session_id != self.durable_session_scope_id || run_id != self.run_id {
+            return Err(anyhow!("terminal lifecycle route identity changed"));
+        }
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| anyhow!("terminal lifecycle registry is closed"))?;
+        let Some(_sequence) = registry
+            .record_terminal_lifecycle_with_publication(
+                &self.run_id,
+                event,
+                |_registry_sequence, close_stream_after_publication| {
+                    let public_event = PublicRunEvent::new(
+                        &self.durable_session_scope_id,
+                        &self.run_id,
+                        1,
+                        PublicRunEventKind::TerminalLifecycle {
+                            event: event.clone(),
+                        },
+                    );
+                    if close_stream_after_publication {
+                        self.event_bus
+                            .publish_next_run_event_and_close_stream(public_event)
+                    } else {
+                        self.event_bus.publish_next_run_event(public_event)
+                    }
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                },
+            )
+            .map_err(|error| anyhow!(error))?
+        else {
+            return Ok(());
+        };
+        if registry.get_run(&self.run_id).ok().is_some_and(|run| {
+            !run.terminal_tasks.is_empty()
+                && run
+                    .terminal_tasks
+                    .iter()
+                    .all(|task| task.status.is_terminal())
+        }) {
+            self.terminal_owners
+                .lock()
+                .map_err(|_| anyhow!("production terminal-owner state unavailable"))?
+                .remove(&self.run_id);
+        }
+        Ok(())
+    }
+}
+
 impl ApplicationRunEventHandler for HttpProductionEventHandler {
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
         if event.run_id != self.run_id {
@@ -3941,19 +4233,74 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                 "application event belongs to another durable production session"
             ));
         }
-        let approval_request = match &event.event {
+        let keep_stream_open = if matches!(
+            &event.event,
+            PublicRunEventKind::RunFinished { .. }
+                | PublicRunEventKind::RunFailed { .. }
+                | PublicRunEventKind::RunCancelled
+        ) {
+            let registry = self
+                .registry
+                .upgrade()
+                .ok_or_else(|| anyhow!("production event registry is closed"))?;
+            registry
+                .get_run(&self.run_id)?
+                .terminal_tasks
+                .iter()
+                .any(|task| !task.status.is_terminal())
+        } else {
+            false
+        };
+        match &event.event {
+            PublicRunEventKind::ApprovalResolved {
+                call_id,
+                approval_request_id,
+                approved,
+                ..
+            } => {
+                self.registry
+                    .upgrade()
+                    .ok_or_else(|| anyhow!("production approval registry is closed"))?
+                    .record_approval_resolution(
+                        &self.run_id,
+                        call_id,
+                        approval_request_id,
+                        *approved,
+                    )?;
+            }
+            PublicRunEventKind::Control { control } if control.kind == "tool_execution" => {
+                let payload = control
+                    .payload
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("tool execution control payload is unavailable"))?;
+                let ControlEntry::ToolExecution(execution) =
+                    serde_json::from_value::<ControlEntry>(payload.clone())?
+                else {
+                    return Err(anyhow!("tool execution control payload changed kind"));
+                };
+                self.registry
+                    .upgrade()
+                    .ok_or_else(|| anyhow!("production execution registry is closed"))?
+                    .record_tool_execution_lifecycle(&self.run_id, &execution)?;
+            }
+            _ => {}
+        }
+        let mut approval_request = None;
+        let publication = match &event.event {
             PublicRunEventKind::ApprovalRequested {
+                approval_identity,
+                effects,
+                analysis,
+                containment,
+                safe_summary,
+                decision_reasons,
+                session_grant_available,
+                session_grant_unavailable_reason,
                 call,
                 spec,
                 subjects,
-                network_effect,
-                local_policy_decision,
-                network_policy_decision,
-                source_policy_decision,
                 operation,
                 risk,
-                subject_zones,
-                confirmation,
                 snapshot_required,
                 ..
             } => {
@@ -3961,56 +4308,75 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     .registry
                     .upgrade()
                     .ok_or_else(|| anyhow!("production approval registry is closed"))?;
-                let session_grant_available = match (
-                    operation,
-                    risk,
-                    local_policy_decision,
-                    network_policy_decision,
-                    source_policy_decision,
-                ) {
-                    (Some(operation), Some(risk), Some(local), Some(network), Some(source)) => {
-                        tool_approval_session_grant_available_for_facets(
-                            spec.access,
-                            *network_effect,
-                            *operation,
-                            *risk,
-                            subjects,
-                            subject_zones,
-                            confirmation.as_ref(),
-                            *snapshot_required,
-                            *local,
-                            *network,
-                            *source,
-                        )
-                    }
-                    _ => false,
-                };
-                let pending = self.broker.register(
-                    &self.run_id,
-                    call,
-                    spec,
-                    self.approval_timeout,
-                    session_grant_available,
-                )?;
+                let display = pending_approval_display(
+                    event.sequence.max(1),
+                    effects,
+                    analysis,
+                    containment,
+                    safe_summary,
+                    decision_reasons,
+                    subjects,
+                    *operation,
+                    *risk,
+                    *snapshot_required,
+                );
+                let pending = self
+                    .broker
+                    .register(
+                        &self.run_id,
+                        call,
+                        spec,
+                        approval_identity,
+                        self.approval_timeout,
+                        *session_grant_available,
+                        *session_grant_unavailable_reason,
+                        display,
+                    )
+                    .map_err(|error| anyhow!(error))?;
                 if let Err(error) =
                     registry.register_approval_request(&self.run_id, pending.clone())
                 {
-                    self.broker.cancel(&call.id);
+                    self.broker
+                        .cancel(&call.id, &approval_identity.approval_request_id);
                     return Err(anyhow!(error));
                 }
-                Some(pending)
+                approval_request = Some(pending.clone());
+                let published = self.event_bus.publish_next_run_event_with_approval(
+                    event.clone(),
+                    |event_sequence| {
+                        let mut published_pending = pending.clone();
+                        published_pending.display.event_sequence = event_sequence;
+                        Ok(published_pending)
+                    },
+                );
+                if let Ok(protocol) = &published {
+                    registry.update_approval_event_sequence(
+                        &self.run_id,
+                        &pending.call_id,
+                        &pending.approval_request_id,
+                        protocol.run_event.sequence,
+                    );
+                    if let Some(approval) = approval_request.as_mut() {
+                        approval.display.event_sequence = protocol.run_event.sequence;
+                    }
+                }
+                published
             }
-            _ => None,
+            _ if keep_stream_open => self
+                .event_bus
+                .publish_next_run_event_with_stream_continuation(event),
+            _ => self.event_bus.publish_next_run_event(event),
         };
-        if let Err(error) = self
-            .event_bus
-            .publish_run_event_with_approval(event, approval_request.clone())
-        {
+        if let Err(error) = publication {
             if let Some(approval) = approval_request {
                 let call_id = approval.call_id;
-                self.broker.cancel(&call_id);
+                self.broker.cancel(&call_id, &approval.approval_request_id);
                 if let Some(registry) = self.registry.upgrade() {
-                    let _ = registry.expire_approval_request(&self.run_id, &call_id);
+                    let _ = registry.expire_approval_request_exact(
+                        &self.run_id,
+                        &call_id,
+                        &approval.approval_request_id,
+                    );
                 }
             }
             return Err(anyhow!(error));
@@ -4026,13 +4392,33 @@ struct HttpProductionApprovalHandler {
 }
 
 impl ApprovalHandler for HttpProductionApprovalHandler {
-    fn approve_tool_call(&mut self, call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
-        let outcome = self.broker.wait_for_decision(&call.id)?;
+    fn approve_tool_call(&mut self, _call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
+        Err(anyhow!(
+            "production HTTP approval requires an exact kernel approval identity"
+        ))
+    }
+
+    fn approve_tool_call_with_context(
+        &mut self,
+        call: &ToolCall,
+        _spec: &ToolSpec,
+        context: &ToolApprovalContext,
+    ) -> Result<ToolApproval> {
+        if context.identity.run_id != self.run_id || context.identity.call_id != call.id {
+            return Err(anyhow!("production HTTP approval identity changed"));
+        }
+        let outcome = self
+            .broker
+            .wait_for_decision(&call.id, &context.identity.approval_request_id)?;
         if outcome.expired
             && let Some(registry) = self.registry.upgrade()
         {
             registry
-                .expire_approval_request(&self.run_id, &call.id)
+                .expire_approval_request_exact(
+                    &self.run_id,
+                    &call.id,
+                    &context.identity.approval_request_id,
+                )
                 .map_err(|error| anyhow!(error))?;
         }
         match outcome.decision {
@@ -4051,7 +4437,7 @@ impl ApprovalHandler for HttpProductionApprovalHandler {
                 decision: ToolApprovalUserDecision::ApprovedForSession,
                 ..
             }) => Ok(ToolApproval::ApproveForSession),
-            None => Ok(ToolApproval::Deny {
+            None => Ok(ToolApproval::Expired {
                 reason: "HTTP approval request expired before a decision arrived".to_owned(),
             }),
         }
@@ -4073,16 +4459,28 @@ impl HttpApprovalBroker {
         run_id: &str,
         call: &ToolCall,
         spec: &ToolSpec,
+        identity: &ApprovalRequestIdentityV2,
         timeout: Duration,
         session_grant_available: bool,
+        session_grant_unavailable_reason: Option<
+            sigil_kernel::ToolApprovalSessionGrantUnavailableReason,
+        >,
+        display: HttpPendingApprovalDisplay,
     ) -> Result<HttpPendingApproval> {
+        if identity.run_id != run_id || identity.call_id != call.id {
+            return Err(anyhow!("production approval registration identity changed"));
+        }
+        if session_grant_available != session_grant_unavailable_reason.is_none() {
+            return Err(anyhow!(
+                "production approval session-grant availability invariant changed"
+            ));
+        }
         let now_ms = current_unix_time_ms();
-        let timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX);
-        let expires_at_ms = now_ms.saturating_add(timeout_ms);
+        let identity_timeout = Duration::from_millis(identity.expires_at_ms.saturating_sub(now_ms));
+        let timeout = timeout.min(identity_timeout);
         let tool_call_hash = tool_call_hash(call)?;
-        let approval_request_id =
-            approval_request_id(run_id, &call.id, &tool_call_hash, expires_at_ms);
         let slot = Arc::new(HttpApprovalSlot {
+            call_id: call.id.clone(),
             deadline: Instant::now()
                 .checked_add(timeout)
                 .unwrap_or_else(Instant::now),
@@ -4093,34 +4491,46 @@ impl HttpApprovalBroker {
             .pending
             .lock()
             .map_err(|_| anyhow!("production approval broker is unavailable"))?;
-        if pending.insert(call.id.clone(), slot).is_some() {
-            return Err(anyhow!("duplicate production approval call id"));
+        if pending.values().any(|existing| existing.call_id == call.id)
+            || pending
+                .insert(identity.approval_request_id.clone(), slot)
+                .is_some()
+        {
+            return Err(anyhow!("duplicate production approval identity"));
         }
         Ok(HttpPendingApproval {
             call_id: call.id.clone(),
             tool_name: spec.name.clone(),
-            approval_request_id,
+            approval_request_id: identity.approval_request_id.clone(),
             tool_call_hash,
-            policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
-            expires_at_ms,
+            policy_version: identity.policy_version.clone(),
+            expires_at_ms: identity.expires_at_ms,
             session_grant_available,
+            session_grant_unavailable_reason,
+            display,
         })
     }
 
     fn resolve(
         &self,
         call_id: &str,
+        approval_request_id: &str,
         decision: HttpApprovalDecisionRecord,
     ) -> Result<(), HttpRunDriverError> {
         let slot = self
             .pending
             .lock()
             .map_err(|_| HttpRunDriverError::new("production approval broker is unavailable"))?
-            .get(call_id)
+            .get(approval_request_id)
             .cloned()
             .ok_or_else(|| {
                 HttpRunDriverError::new(format!("production approval is not pending: {call_id}"))
             })?;
+        if slot.call_id != call_id {
+            return Err(HttpRunDriverError::new(
+                "production approval request belongs to another tool call",
+            ));
+        }
         let mut state = slot
             .state
             .lock()
@@ -4135,14 +4545,23 @@ impl HttpApprovalBroker {
         Ok(())
     }
 
-    fn wait_for_decision(&self, call_id: &str) -> Result<HttpApprovalWaitOutcome> {
+    fn wait_for_decision(
+        &self,
+        call_id: &str,
+        approval_request_id: &str,
+    ) -> Result<HttpApprovalWaitOutcome> {
         let slot = self
             .pending
             .lock()
             .map_err(|_| anyhow!("production approval broker is unavailable"))?
-            .get(call_id)
+            .get(approval_request_id)
             .cloned()
             .ok_or_else(|| anyhow!("production approval slot is missing"))?;
+        if slot.call_id != call_id {
+            return Err(anyhow!(
+                "production approval request belongs to another tool call"
+            ));
+        }
         let mut state = slot
             .state
             .lock()
@@ -4152,7 +4571,7 @@ impl HttpApprovalBroker {
                 HttpApprovalSlotState::Resolved(decision) => {
                     let decision = decision.clone();
                     drop(state);
-                    self.remove(call_id, &slot);
+                    self.remove(approval_request_id, &slot);
                     return Ok(HttpApprovalWaitOutcome {
                         decision: Some(decision),
                         expired: false,
@@ -4160,7 +4579,7 @@ impl HttpApprovalBroker {
                 }
                 HttpApprovalSlotState::Cancelled => {
                     drop(state);
-                    self.remove(call_id, &slot);
+                    self.remove(approval_request_id, &slot);
                     return Err(anyhow!("production approval wait was cancelled"));
                 }
                 HttpApprovalSlotState::Waiting => {}
@@ -4169,7 +4588,7 @@ impl HttpApprovalBroker {
             if remaining.is_zero() {
                 *state = HttpApprovalSlotState::Cancelled;
                 drop(state);
-                self.remove(call_id, &slot);
+                self.remove(approval_request_id, &slot);
                 return Ok(HttpApprovalWaitOutcome {
                     decision: None,
                     expired: true,
@@ -4183,13 +4602,14 @@ impl HttpApprovalBroker {
         }
     }
 
-    fn cancel(&self, call_id: &str) {
+    fn cancel(&self, call_id: &str, approval_request_id: &str) {
         let slot = self
             .pending
             .lock()
             .ok()
-            .and_then(|pending| pending.get(call_id).cloned());
+            .and_then(|pending| pending.get(approval_request_id).cloned());
         if let Some(slot) = slot
+            && slot.call_id == call_id
             && let Ok(mut state) = slot.state.lock()
         {
             *state = HttpApprovalSlotState::Cancelled;
@@ -4211,18 +4631,19 @@ impl HttpApprovalBroker {
         }
     }
 
-    fn remove(&self, call_id: &str, expected: &Arc<HttpApprovalSlot>) {
+    fn remove(&self, approval_request_id: &str, expected: &Arc<HttpApprovalSlot>) {
         if let Ok(mut pending) = self.pending.lock()
             && pending
-                .get(call_id)
+                .get(approval_request_id)
                 .is_some_and(|slot| Arc::ptr_eq(slot, expected))
         {
-            pending.remove(call_id);
+            pending.remove(approval_request_id);
         }
     }
 }
 
 struct HttpApprovalSlot {
+    call_id: String,
     deadline: Instant,
     state: Mutex<HttpApprovalSlotState>,
     changed: Condvar,
@@ -4239,28 +4660,122 @@ struct HttpApprovalWaitOutcome {
     expired: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pending_approval_display(
+    event_sequence: u64,
+    effects: &BTreeSet<ToolPermissionEffect>,
+    analysis: &ToolAnalysisStatus,
+    containment: &ExecutionContainmentRequest,
+    safe_summary: &ToolPermissionSummary,
+    decision_reasons: &[PermissionDecisionReason],
+    subjects: &[ToolSubject],
+    operation: Option<ToolOperation>,
+    risk: Option<PermissionRisk>,
+    snapshot_required: bool,
+) -> HttpPendingApprovalDisplay {
+    let (analysis_status, analysis_reason_facts) = match analysis {
+        ToolAnalysisStatus::Complete => ("complete", Vec::new()),
+        ToolAnalysisStatus::Conservative { reasons } => {
+            ("conservative", reasons.iter().take(8).collect())
+        }
+        ToolAnalysisStatus::Unsupported { reason } => ("unsupported", vec![reason]),
+        ToolAnalysisStatus::Invalid { reason } => ("invalid", vec![reason]),
+    };
+    let analysis_reason_codes = analysis_reason_facts
+        .iter()
+        .map(|reason| stable_enum_label(&reason.code))
+        .collect();
+    let analysis_reasons = analysis_reason_facts
+        .iter()
+        .map(|reason| {
+            reason
+                .detail
+                .as_deref()
+                .map_or_else(|| stable_enum_label(&reason.code), bounded_approval_text)
+        })
+        .collect();
+    HttpPendingApprovalDisplay {
+        event_sequence,
+        effects: effects.iter().take(16).map(stable_enum_label).collect(),
+        subjects: subjects
+            .iter()
+            .take(16)
+            .map(|subject| HttpPendingApprovalSubject {
+                kind: subject.kind.as_str().to_owned(),
+                scope: subject.scope.as_str().to_owned(),
+                workspace_label: safe_workspace_subject_label(subject),
+            })
+            .collect(),
+        analysis_status: analysis_status.to_owned(),
+        analysis_reason_codes,
+        analysis_reasons,
+        containment: vec![
+            format!("filesystem={}", stable_enum_label(&containment.filesystem)),
+            format!("network={}", stable_enum_label(&containment.network)),
+            format!("process={}", stable_enum_label(&containment.process)),
+            format!(
+                "environment={}",
+                stable_enum_label(&containment.environment)
+            ),
+            format!("persistent_process={}", containment.persistent_process),
+        ],
+        decision_reasons: decision_reasons
+            .iter()
+            .take(8)
+            .map(|reason| {
+                if reason.detail.trim().is_empty() {
+                    bounded_approval_text(&reason.code)
+                } else {
+                    bounded_approval_text(&reason.detail)
+                }
+            })
+            .collect(),
+        safe_summary_title: bounded_approval_text(&safe_summary.title),
+        safe_summary_detail: bounded_approval_text(&safe_summary.detail),
+        operation: operation.map(|value| value.as_str().to_owned()),
+        risk: risk.map(|value| stable_enum_label(&value)),
+        snapshot_required,
+    }
+}
+
+fn safe_workspace_subject_label(subject: &ToolSubject) -> Option<String> {
+    if subject.kind != sigil_kernel::ToolSubjectKind::Path
+        || subject.scope != sigil_kernel::ToolSubjectScope::Workspace
+    {
+        return None;
+    }
+    let normalized = subject.normalized.trim().trim_start_matches("./");
+    let path = Path::new(normalized);
+    if normalized.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(bounded_approval_text(normalized))
+}
+
+fn stable_enum_label<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn bounded_approval_text(value: &str) -> String {
+    safe_persistence_text(value).chars().take(512).collect()
+}
+
 fn tool_call_hash(call: &ToolCall) -> Result<String> {
     let bytes = serde_json::to_vec(call)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
-fn approval_request_id(
-    run_id: &str,
-    call_id: &str,
-    tool_call_hash: &str,
-    expires_at_ms: u64,
-) -> String {
-    let mut hasher = Sha256::new();
-    for part in [
-        run_id.as_bytes(),
-        call_id.as_bytes(),
-        tool_call_hash.as_bytes(),
-        &expires_at_ms.to_be_bytes(),
-    ] {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    format!("http-approval-v1:{:x}", hasher.finalize())
 }
 
 fn current_unix_time_ms() -> u64 {
@@ -4298,9 +4813,40 @@ fn quarantine_cancellation_failure(
     error
 }
 
+pub(crate) fn record_run_terminal_and_reconcile_stream(
+    registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    outcome: HttpRunTerminalOutcome,
+) -> Result<HttpRunSnapshot, HttpRunDriverError> {
+    registry
+        .record_run_terminal_with_reconciliation(run_id, outcome, || {
+            let mut last_error = None;
+            for _ in 0..3 {
+                match event_bus.close_run_stream(durable_session_scope_id, run_id) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        last_error = Some(error);
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            Err(format!(
+                "terminal run stream could not be reconciled before foreground completion: {}",
+                last_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unknown durable close failure".to_owned())
+            ))
+        })
+        .map_err(registry_driver_error)
+}
+
 fn record_natural_terminal_if_delivered(
     control: &ApplicationRunControl,
     registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
     run_id: &str,
     result: &Result<ApplicationRunTerminalStatus>,
 ) -> Result<bool, HttpRunDriverError> {
@@ -4310,9 +4856,13 @@ fn record_natural_terminal_if_delivered(
     {
         return Ok(false);
     }
-    registry
-        .record_run_terminal(run_id, http_terminal_from_application_result(result))
-        .map_err(registry_driver_error)?;
+    record_run_terminal_and_reconcile_stream(
+        registry,
+        event_bus,
+        durable_session_scope_id,
+        run_id,
+        http_terminal_from_application_result(result),
+    )?;
     Ok(true)
 }
 
@@ -4327,6 +4877,40 @@ fn http_terminal_from_application_result(
         },
         Err(_) => HttpRunTerminalOutcome::Failed,
     }
+}
+
+fn ensure_application_execution_terminal<H>(
+    terminal_was_delivered: bool,
+    result: &Result<ApplicationRunTerminalStatus>,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    handler: &mut H,
+) -> Result<HttpRunTerminalOutcome, HttpRunDriverError>
+where
+    H: ApplicationRunEventHandler,
+{
+    if terminal_was_delivered {
+        return Ok(http_terminal_from_application_result(result));
+    }
+
+    let message = if result.is_ok() {
+        "run execution completed before its terminal status was published"
+    } else {
+        "run execution failed before its terminal status was published"
+    };
+    handler
+        .handle_public_event(PublicRunEvent::new(
+            durable_session_scope_id,
+            run_id,
+            1,
+            PublicRunEventKind::RunFailed {
+                error: message.to_owned(),
+            },
+        ))
+        .map_err(|_| {
+            HttpRunDriverError::new("production execution fallback terminal publication failed")
+        })?;
+    Ok(HttpRunTerminalOutcome::Failed)
 }
 
 fn registry_driver_error(error: crate::HttpRegistryError) -> HttpRunDriverError {

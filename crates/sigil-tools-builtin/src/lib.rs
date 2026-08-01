@@ -28,12 +28,15 @@ pub use registry::{
     BuiltinToolPaths, register_builtin_tools, register_builtin_tools_with_paths,
     register_builtin_tools_with_paths_and_execution_backend,
     register_builtin_tools_with_paths_execution_backend_and_execution_config,
+    register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
+    register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory,
 };
 pub use terminal_process::{
     MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,
     TerminalPtySize, TerminalReadResult, TerminalResizeResult, TerminalStartRequest,
     TerminalTaskArtifacts, TerminalTaskPermissionContext,
 };
+pub use terminal_tools::TerminalTaskControlHandle;
 
 /// Offline, secret-free summary of the built-in terminal runtime selected for this process.
 #[derive(Debug, Clone, PartialEq, Eq)]

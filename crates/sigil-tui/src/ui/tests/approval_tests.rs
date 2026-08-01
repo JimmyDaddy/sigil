@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -12,6 +15,19 @@ use sigil_kernel::{
 use crate::app::AppState;
 
 use super::*;
+
+fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
+    sigil_kernel::ApprovalRequestIdentityV2 {
+        session_id: "session-approval-ui".to_owned(),
+        run_id: "run-approval-ui".to_owned(),
+        call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
+        plan_hash: "plan-approval-ui".to_owned(),
+        policy_version: "policy-approval-ui".to_owned(),
+        execution_binding_hash: "binding-approval-ui".to_owned(),
+        expires_at_ms: u64::MAX,
+    }
+}
 
 #[test]
 fn render_approval_file_row_includes_diagnostic_summary() {
@@ -94,6 +110,10 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
         diff_lines: Vec::new(),
         selected_action: ApprovalAction::Deny,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        ..ApprovalModalView::default()
     };
 
     let text = plain_line_text(&approval_diff_status_line(&view));
@@ -124,6 +144,10 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
         diff_lines: Vec::new(),
         selected_action: ApprovalAction::AllowOnce,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        ..ApprovalModalView::default()
     };
 
     let hidden = approval_header_lines(
@@ -160,6 +184,84 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
     assert!(markdown_text.contains("bold line"));
     assert!(markdown_text.contains("code line"));
     assert!(markdown_text.contains("third line"));
+}
+
+#[test]
+fn approval_header_explains_why_session_grant_is_unavailable() {
+    let view = ApprovalModalView {
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(
+            sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::RiskNotGrantable,
+            },
+        ),
+        ..ApprovalModalView::default()
+    };
+
+    let text = approval_header_lines(&view, 120)
+        .iter()
+        .map(plain_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("session grant"));
+    assert!(text.contains("risk level does not allow reusable authority"));
+}
+
+#[test]
+fn approval_header_exposes_bounded_permission_plan_details() {
+    let mut view = modal_view("shell execute");
+    view.effects = BTreeSet::from([sigil_kernel::ToolPermissionEffect::ExecuteWorkspaceCode]);
+    view.subjects = vec![sigil_kernel::ToolSubject::command(
+        "cargo test",
+        "cargo test",
+    )];
+    view.containment.network = sigil_kernel::NetworkContainment::Deny;
+    view.safe_summary = sigil_kernel::ToolPermissionSummary {
+        title: "Run workspace tests".to_owned(),
+        detail: "Execute one workspace command without network access".to_owned(),
+        step_count: 1,
+        workspace_code_steps: 1,
+    };
+    view.decision_reasons = vec![sigil_kernel::PermissionDecisionReason {
+        source: sigil_kernel::PermissionDecisionSource::PermissionModeDefault,
+        code: "execute_workspace_code_requires_approval".to_owned(),
+        detail: "Workspace code must be reviewed".to_owned(),
+    }];
+
+    let text = approval_header_lines(&view, 180)
+        .iter()
+        .map(plain_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("execute_workspace_code"));
+    assert!(text.contains("network deny"));
+    assert!(text.contains("execute_workspace_code_requires_approval"));
+    assert!(text.contains("Run workspace tests"));
+}
+
+#[test]
+fn approval_header_exposes_recovery_for_unsupported_shell_syntax() {
+    let view = ApprovalModalView {
+        analysis: sigil_kernel::ToolAnalysisStatus::Unsupported {
+            reason: sigil_kernel::ToolAnalysisReason::new(
+                sigil_kernel::ToolAnalysisReasonCode::UnsupportedSyntax,
+                Some("PowerShell syntax is not supported by the active analyzer".to_owned()),
+            ),
+        },
+        ..modal_view("shell execute")
+    };
+
+    let text = approval_header_lines(&view, 180)
+        .iter()
+        .map(plain_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("unsupported shell dialect"));
+    assert!(text.contains("/doctor"));
+    assert!(text.contains("/config"));
 }
 
 #[test]
@@ -242,6 +344,10 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
         diff_lines: Vec::new(),
         selected_action: ApprovalAction::AllowOnce,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        ..ApprovalModalView::default()
     };
     let multiple = ApprovalModalView {
         file_rows: vec![
@@ -393,7 +499,7 @@ fn approval_header_lines_handle_empty_and_multiline_summaries() {
     );
 
     assert_eq!(plain_line_text(&empty[3]), "No preview summary provided.");
-    assert_eq!(multiline.len(), 7);
+    assert_eq!(multiline.len(), 12);
     assert!(plain_line_text(&multiline[3]).contains("line one"));
     assert!(plain_line_text(&multiline[4]).contains("line two"));
     assert!(plain_line_text(&multiline[5]).contains("line three"));
@@ -588,6 +694,16 @@ fn approval_diff_line_kind_maps_every_variant() {
 fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-approval"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -650,6 +766,16 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-themed-approval"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-themed-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -710,6 +836,16 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
 fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-remote"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-remote".to_owned(),
             name: "remote_tool".to_owned(),
@@ -786,6 +922,10 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         }],
         selected_action: ApprovalAction::Deny,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        ..ApprovalModalView::default()
     }
 }
 

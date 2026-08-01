@@ -1,4 +1,9 @@
-import type { TimelineEvent } from "../../types";
+import type {
+  ApprovalDecisionSummary,
+  RunApprovalSnapshot,
+  TimelineEvent,
+  TimelineTerminalTask,
+} from "../../types";
 import type {
   ConversationTerminalStatus,
   LiveConversationDisplayItem,
@@ -27,13 +32,29 @@ export interface LiveTerminalSignal {
   status: ConversationTerminalStatus;
 }
 
-export type ApprovalLifecyclePhase = "pending" | "resolved" | "closed";
+export interface LiveTerminalTask {
+  runId: string;
+  task: TimelineTerminalTask;
+}
+
+export type ApprovalLifecyclePhase =
+  | "pending"
+  | "resolving"
+  | "accepted"
+  | "delivery_uncertain"
+  | "resolved"
+  | "execution_started"
+  | "terminal"
+  | "closed";
 
 export interface ApprovalLifecycle {
   runId: string;
   callId: string;
+  approvalRequestId?: string;
   runSequence: string;
   phase: ApprovalLifecyclePhase;
+  registryRevision?: number;
+  decision?: ApprovalDecisionSummary["decision"];
   /** Exact semantic result retained by a resolved tombstone for replay validation. */
   resolutionFingerprint?: string;
 }
@@ -47,8 +68,12 @@ export interface LiveEventState {
   controlEvents: ReadonlyMap<string, TimelineEvent>;
   /** Exact per-call high-water marks, including resolved and fail-closed tombstones. */
   approvalLifecycles: ReadonlyMap<string, ApprovalLifecycle>;
+  /** Registry revision of the latest canonical approval snapshot for each run. */
+  approvalSnapshotRevisions: ReadonlyMap<string, number>;
   /** Latest typed task event for each exact task/entity slot. */
   taskEvents: ReadonlyMap<string, TimelineEvent>;
+  /** Latest generation for each bounded persistent terminal task. */
+  terminalTasks: ReadonlyMap<string, LiveTerminalTask>;
   /** Latest root Task selected by a durable task-start event. */
   latestTaskId?: string;
   /** Run currently allowed to advance the selected durable Task. */
@@ -60,6 +85,14 @@ export type LiveEventAction =
   | { type: "session_selected"; sessionId: string }
   | { type: "anchor_received"; sessionId: string; anchor?: LiveProvisionalAnchor }
   | { type: "event_received"; sessionId: string; event: TimelineEvent }
+  | { type: "approval_snapshot_received"; sessionId: string; snapshot: RunApprovalSnapshot }
+  | { type: "approval_receipt_received"; sessionId: string; receipt: ApprovalDecisionSummary }
+  | {
+      type: "terminal_task_received";
+      sessionId: string;
+      runId: string;
+      task: TimelineTerminalTask;
+    }
   | { type: "run_discarded"; sessionId: string; runId: string };
 
 export function createLiveEventState(sessionId: string): LiveEventState {
@@ -69,7 +102,9 @@ export function createLiveEventState(sessionId: string): LiveEventState {
     deltaBuffers: new Map(),
     controlEvents: new Map(),
     approvalLifecycles: new Map(),
+    approvalSnapshotRevisions: new Map(),
     taskEvents: new Map(),
+    terminalTasks: new Map(),
     terminalSignals: new Map(),
   };
 }
@@ -90,9 +125,117 @@ export function liveEventReducer(
       return receiveAnchor(state, action.anchor);
     case "event_received":
       return receiveTimelineEvent(state, action.event);
+    case "approval_snapshot_received":
+      return receiveApprovalSnapshot(state, action.snapshot);
+    case "approval_receipt_received":
+      return receiveApprovalReceipt(state, action.receipt);
+    case "terminal_task_received":
+      return receiveTerminalTask(state, action.runId, action.task);
     case "run_discarded":
       return discardRun(state, action.runId);
   }
+}
+
+function receiveApprovalSnapshot(
+  state: LiveEventState,
+  snapshot: RunApprovalSnapshot,
+): LiveEventState {
+  const priorRevision = state.approvalSnapshotRevisions.get(snapshot.runId) ?? 0;
+  if (snapshot.registryRevision < priorRevision) return state;
+
+  const canonical = new Map<string, {
+    event: TimelineEvent;
+    phase: ApprovalLifecyclePhase;
+  }>();
+  for (const event of snapshot.pendingApprovals) {
+    const callId = event.approval?.callId ?? event.itemId;
+    if (
+      event.sessionId !== state.sessionId
+      || event.runId !== snapshot.runId
+      || event.kind !== "approval_requested"
+      || event.approval === undefined
+      || callId === undefined
+    ) continue;
+    canonical.set(approvalLifecycleKey(snapshot.runId, callId), { event, phase: "pending" });
+  }
+  for (const lifecycle of snapshot.approvalLifecycles) {
+    const event = lifecycle.event;
+    const callId = event.approval?.callId ?? event.itemId;
+    if (
+      event.sessionId !== state.sessionId
+      || event.runId !== snapshot.runId
+      || event.kind !== "approval_requested"
+      || event.approval === undefined
+      || callId === undefined
+    ) continue;
+    canonical.set(approvalLifecycleKey(snapshot.runId, callId), {
+      event,
+      phase: approvalSnapshotPhase(lifecycle.state),
+    });
+  }
+
+  const controlEvents = new Map(state.controlEvents);
+  const approvalLifecycles = new Map(state.approvalLifecycles);
+  for (const [key, lifecycle] of approvalLifecycles) {
+    if (lifecycle.runId !== snapshot.runId || canonical.has(key)) continue;
+    if (
+      lifecycle.phase === "pending"
+      || lifecycle.phase === "resolving"
+      || lifecycle.phase === "accepted"
+      || lifecycle.phase === "resolved"
+      || lifecycle.phase === "delivery_uncertain"
+      || lifecycle.phase === "execution_started"
+    ) {
+      approvalLifecycles.set(key, { ...lifecycle, phase: "closed" });
+      controlEvents.delete(key);
+    }
+  }
+  for (const [key, { event, phase }] of canonical) {
+    const callId = event.approval?.callId ?? event.itemId;
+    if (callId === undefined) continue;
+    if (approvalPhaseIsPresentable(phase)) {
+      controlEvents.set(key, event);
+    } else {
+      controlEvents.delete(key);
+    }
+    approvalLifecycles.set(key, {
+      runId: snapshot.runId,
+      callId,
+      approvalRequestId: event.approval?.approvalRequestId,
+      runSequence: String(snapshot.registryRevision),
+      phase,
+      registryRevision: snapshot.registryRevision,
+    });
+  }
+  const approvalSnapshotRevisions = new Map(state.approvalSnapshotRevisions);
+  approvalSnapshotRevisions.set(snapshot.runId, snapshot.registryRevision);
+  return {
+    ...state,
+    controlEvents,
+    approvalLifecycles,
+    approvalSnapshotRevisions,
+  };
+}
+
+function approvalSnapshotPhase(
+  state: RunApprovalSnapshot["approvalLifecycles"][number]["state"],
+): ApprovalLifecyclePhase {
+  switch (state) {
+    case "resolving": return "resolving";
+    case "decision_accepted": return "accepted";
+    case "resolved": return "resolved";
+    case "execution_started": return "execution_started";
+    case "delivery_uncertain": return "delivery_uncertain";
+    case "terminal": return "terminal";
+  }
+}
+
+function approvalPhaseIsPresentable(phase: ApprovalLifecyclePhase): boolean {
+  return phase === "pending"
+    || phase === "resolving"
+    || phase === "accepted"
+    || phase === "resolved"
+    || phase === "delivery_uncertain";
 }
 
 export function reduceLiveTimelineEvent(
@@ -122,12 +265,40 @@ export function selectDeltaText(buffer: LiveDeltaBuffer): string {
 }
 
 export function selectPendingApprovalEvents(state: LiveEventState): TimelineEvent[] {
-  return [...state.controlEvents.values()].sort(compareTimelineEvents);
+  return [...state.controlEvents.entries()]
+    .filter(([key]) => state.approvalLifecycles.get(key)?.phase === "pending")
+    .map(([, event]) => event)
+    .sort(compareTimelineEvents);
 }
 
 export function selectLatestPendingApproval(state: LiveEventState): TimelineEvent | undefined {
   const pending = selectPendingApprovalEvents(state);
   return pending[pending.length - 1];
+}
+
+export interface ApprovalPresentation {
+  event: TimelineEvent;
+  phase: "pending" | "accepted" | "delivery_uncertain";
+}
+
+export function selectLatestApprovalPresentation(
+  state: LiveEventState,
+): ApprovalPresentation | undefined {
+  const presentations = [...state.controlEvents.entries()]
+    .flatMap(([key, event]) => {
+      const phase = state.approvalLifecycles.get(key)?.phase;
+      const presentationPhase = phase === "resolving" || phase === "resolved"
+        ? "accepted"
+        : phase;
+      return presentationPhase === "pending"
+        || presentationPhase === "accepted"
+        || presentationPhase === "delivery_uncertain"
+        ? [{ event, phase: presentationPhase }]
+        : [];
+    })
+    .sort((left, right) => compareTimelineEvents(left.event, right.event));
+  const pending = presentations.filter((presentation) => presentation.phase === "pending");
+  return pending[pending.length - 1] ?? presentations[presentations.length - 1];
 }
 
 export function selectTerminalSignals(state: LiveEventState): LiveTerminalSignal[] {
@@ -145,6 +316,13 @@ export function selectTaskEvents(state: LiveEventState): TimelineEvent[] {
       || event.task.taskId === state.latestTaskId
     ))
     .sort(compareTimelineEvents);
+}
+
+export function selectTerminalTasks(state: LiveEventState): LiveTerminalTask[] {
+  return [...state.terminalTasks.values()].sort((left, right) => {
+    const emitted = left.task.emittedAtMs - right.task.emittedAtMs;
+    return emitted !== 0 ? emitted : left.task.taskId.localeCompare(right.task.taskId);
+  });
 }
 
 export function semanticLiveItemFromTimelineEvent(
@@ -281,7 +459,7 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   if (event.sessionId !== state.sessionId || !isDecimalSequence(event.runSequence)) return state;
 
   const controlUpdate = updateControlEvents(state, event);
-  let next = updateTaskEvents(controlUpdate.state, event);
+  let next = updateTerminalTasks(updateTaskEvents(controlUpdate.state, event), event);
   const terminalSignal = terminalSignalFromTimelineEvent(event);
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(next, terminalSignal);
@@ -308,6 +486,48 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   return item === undefined || !controlUpdate.applySemantic
     ? next
     : receiveSemanticItem(next, item);
+}
+
+const MAX_TERMINAL_TASK_HISTORY_CARDS = 8;
+
+function updateTerminalTasks(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  if (event.kind !== "terminal_lifecycle") return state;
+  const task = event.terminalTask;
+  if (task === undefined || event.itemId !== task.taskId) return state;
+  return receiveTerminalTask(state, event.runId, task);
+}
+
+function receiveTerminalTask(
+  state: LiveEventState,
+  runId: string,
+  task: TimelineTerminalTask,
+): LiveEventState {
+  const key = terminalTaskKey(runId, task.taskId);
+  const current = state.terminalTasks.get(key);
+  if (current !== undefined && current.task.generation >= task.generation) return state;
+
+  const terminalTasks = new Map(state.terminalTasks);
+  terminalTasks.set(key, { runId, task });
+  while (
+    [...terminalTasks.values()].filter(({ task: currentTask }) => (
+      !terminalTaskIsActive(currentTask)
+    )).length > MAX_TERMINAL_TASK_HISTORY_CARDS
+  ) {
+    const candidate = [...terminalTasks.values()]
+      .filter(({ task: currentTask }) => !terminalTaskIsActive(currentTask))
+      .sort((left, right) => left.task.emittedAtMs - right.task.emittedAtMs)[0];
+    if (candidate === undefined) break;
+    terminalTasks.delete(terminalTaskKey(candidate.runId, candidate.task.taskId));
+  }
+  return { ...state, terminalTasks };
+}
+
+function terminalTaskKey(runId: string, taskId: string): string {
+  return `${runId}\u0000${taskId}`;
+}
+
+function terminalTaskIsActive(task: TimelineTerminalTask): boolean {
+  return task.status === "starting" || task.status === "running";
 }
 
 function updateTaskEvents(state: LiveEventState, event: TimelineEvent): LiveEventState {
@@ -414,6 +634,44 @@ function receiveTerminalSignal(
   return { ...state, terminalSignals };
 }
 
+function receiveApprovalReceipt(
+  state: LiveEventState,
+  receipt: ApprovalDecisionSummary,
+): LiveEventState {
+  const key = approvalLifecycleKey(receipt.runId, receipt.callId);
+  const current = state.approvalLifecycles.get(key);
+  const pendingEvent = state.controlEvents.get(key);
+  if (
+    current === undefined
+    || pendingEvent?.approval === undefined
+    || current.approvalRequestId !== receipt.approvalRequestId
+    || pendingEvent.approval.approvalRequestId !== receipt.approvalRequestId
+    || current.phase === "resolved"
+    || current.phase === "execution_started"
+    || current.phase === "terminal"
+    || current.phase === "closed"
+    || (
+      current.registryRevision !== undefined
+      && receipt.registryRevision < current.registryRevision
+    )
+  ) return state;
+
+  if (receipt.routeState === "terminal") {
+    return replaceApprovalLifecycle(state, key, {
+      ...current,
+      phase: "closed",
+      registryRevision: receipt.registryRevision,
+      decision: receipt.decision,
+    });
+  }
+  return replaceApprovalLifecycle(state, key, {
+    ...current,
+    phase: receipt.routeState === "delivery_uncertain" ? "delivery_uncertain" : "accepted",
+    registryRevision: receipt.registryRevision,
+    decision: receipt.decision,
+  }, pendingEvent);
+}
+
 interface ApprovalControlUpdate {
   state: LiveEventState;
   applySemantic: boolean;
@@ -423,6 +681,9 @@ function updateControlEvents(
   state: LiveEventState,
   event: TimelineEvent,
 ): ApprovalControlUpdate {
+  if (event.kind === "control" && event.toolExecution !== undefined) {
+    return updateToolExecutionControl(state, event);
+  }
   if (event.kind !== "approval_requested" && event.kind !== "approval_resolved") {
     return { state, applySemantic: true };
   }
@@ -430,6 +691,13 @@ function updateControlEvents(
   if (callId === undefined) return { state, applySemantic: false };
   const key = approvalLifecycleKey(event.runId, callId);
   const current = state.approvalLifecycles.get(key);
+  if (
+    event.kind === "approval_resolved"
+    && current?.approvalRequestId !== undefined
+    && current.approvalRequestId !== event.approvalRequestId
+  ) {
+    return { state, applySemantic: false };
+  }
   if (current !== undefined) {
     const sequence = compareRunSequence(event.runSequence, current.runSequence);
     if (sequence < 0) return { state, applySemantic: false };
@@ -455,12 +723,38 @@ function updateControlEvents(
     state: replaceApprovalLifecycle(state, key, {
       runId: event.runId,
       callId,
+      approvalRequestId: event.approval?.approvalRequestId ?? event.approvalRequestId,
       runSequence: event.runSequence,
       phase,
       resolutionFingerprint: event.kind === "approval_resolved"
         ? approvalResolutionFingerprint(event)
         : undefined,
     }, phase === "pending" ? event : undefined),
+    applySemantic: true,
+  };
+}
+
+function updateToolExecutionControl(
+  state: LiveEventState,
+  event: TimelineEvent,
+): ApprovalControlUpdate {
+  const execution = event.toolExecution;
+  if (execution === undefined) return { state, applySemantic: false };
+  const key = approvalLifecycleKey(event.runId, execution.callId);
+  const current = state.approvalLifecycles.get(key);
+  if (current === undefined) return { state, applySemantic: true };
+  if (compareRunSequence(event.runSequence, current.runSequence) < 0) {
+    return { state, applySemantic: false };
+  }
+  const phase: ApprovalLifecyclePhase = execution.status === "started"
+    ? "execution_started"
+    : "terminal";
+  return {
+    state: replaceApprovalLifecycle(state, key, {
+      ...current,
+      runSequence: event.runSequence,
+      phase,
+    }),
     applySemantic: true,
   };
 }
@@ -495,6 +789,12 @@ function updateSameSequenceApproval(
   }
 
   if (event.kind === "approval_resolved") {
+    if (
+      current.approvalRequestId !== undefined
+      && current.approvalRequestId !== event.approvalRequestId
+    ) {
+      return { state, applySemantic: false };
+    }
     return {
       state: replaceApprovalLifecycle(state, key, {
         ...current,
@@ -524,6 +824,7 @@ function approvalResolutionFingerprint(event: TimelineEvent): string {
   return JSON.stringify({
     status: event.status ?? null,
     toolName: event.approval?.toolName ?? event.toolName ?? null,
+    approvalRequestId: event.approvalRequestId ?? null,
   });
 }
 

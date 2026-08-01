@@ -73,6 +73,9 @@ fn spawn_sse_server(answer: &'static str) -> (String, thread::JoinHandle<()>) {
             }
         };
         stream
+            .set_nonblocking(false)
+            .expect("accepted provider stream should be blocking");
+        stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("test request timeout should configure");
         read_http_request(&mut stream);
@@ -92,12 +95,28 @@ fn spawn_sse_server(answer: &'static str) -> (String, thread::JoinHandle<()>) {
 
 fn read_http_request(stream: &mut std::net::TcpStream) {
     const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut request = Vec::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
-        let read = stream
-            .read(&mut buffer)
-            .expect("provider request should read");
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "provider request body did not arrive before the deadline"
+                );
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => panic!("provider request should read: {error}"),
+        };
         assert!(read > 0, "provider request ended before its body arrived");
         request.extend_from_slice(&buffer[..read]);
         assert!(

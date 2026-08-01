@@ -57,6 +57,7 @@ pub(super) struct TerminalWorker {
     pub(super) cancel_rx: mpsc::Receiver<CancelCommand>,
     pub(super) preview_limit_bytes: usize,
     pub(super) cancel_grace: Duration,
+    pub(super) lifecycle: TerminalLifecycleOwner,
 }
 
 pub(super) struct PtyWorker {
@@ -73,6 +74,7 @@ pub(super) struct PtyWorker {
     pub(super) child_exit_rx: mpsc::UnboundedReceiver<TerminalTaskStatus>,
     pub(super) preview_limit_bytes: usize,
     pub(super) cancel_grace: Duration,
+    pub(super) lifecycle: TerminalLifecycleOwner,
 }
 
 struct CaptureTaskState {
@@ -141,6 +143,7 @@ pub(super) fn spawn_pty_runtime(
     plan: &TerminalTaskStartPlan,
     size: TerminalPtySize,
     artifact_limits: TerminalArtifactLimits,
+    lifecycle: TerminalLifecycleOwner,
 ) -> Result<PtyRuntime> {
     let pty_system = native_pty_system();
     let portable_pty::PtyPair { master, slave } = pty_system
@@ -186,10 +189,11 @@ pub(super) fn spawn_pty_runtime(
             );
         }
     };
+    lifecycle.mark_running();
     let killer = Arc::new(StdMutex::new(child.clone_killer()));
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
-    let capture_ledger = Arc::new(TerminalCaptureLedger::default());
+    let capture_ledger = Arc::new(TerminalCaptureLedger::with_lifecycle(lifecycle));
     let (child_exit_tx, child_exit_rx) = mpsc::unbounded_channel();
     let read_thread = spawn_pty_read_thread(
         reader,
@@ -268,7 +272,7 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
 
     match event {
         WorkerEvent::ProcessExited(status) => {
-            let _ = finalize_terminal_task_after_process_exit(
+            let entry = finalize_terminal_task_after_process_exit(
                 &worker.summary,
                 &worker.artifacts,
                 status,
@@ -280,6 +284,9 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
                 worker.cancel_grace,
             )
             .await;
+            worker
+                .lifecycle
+                .mark_terminal(entry.status.clone(), entry.output_total_bytes);
         }
         WorkerEvent::Cancel(cancel) => {
             let (status, cleanup) = cancel_child_with_cleanup(
@@ -300,6 +307,9 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
                 None,
             )
             .await;
+            worker
+                .lifecycle
+                .mark_terminal(entry.status.clone(), entry.output_total_bytes);
             let _ = cancel.respond_to.send(entry);
         }
         WorkerEvent::CaptureFailed(failure) => {
@@ -310,7 +320,7 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
             )
             .await;
             let status = TerminalTaskStatus::Failed { reason: failure };
-            let _ = finalize_terminal_task_with_override(
+            let entry = finalize_terminal_task_with_override(
                 &worker.summary,
                 &worker.artifacts,
                 status,
@@ -322,6 +332,9 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
                 Some(TerminalOutputTerminationReason::OutputCaptureFailed),
             )
             .await;
+            worker
+                .lifecycle
+                .mark_terminal(entry.status.clone(), entry.output_total_bytes);
         }
     }
 }
@@ -465,7 +478,7 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
                 .capture_error
                 .as_ref()
                 .map(|_| TerminalOutputTerminationReason::OutputCaptureFailed);
-            let _ = finalize_terminal_summary(
+            let entry = finalize_terminal_summary(
                 &worker.summary,
                 &worker.artifacts,
                 outcome.status,
@@ -475,11 +488,14 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
                 TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
             )
             .await;
+            worker
+                .lifecycle
+                .mark_terminal(entry.status.clone(), entry.output_total_bytes);
         }
         PtyWorkerEvent::CaptureFailed(failure) => {
             worker.io_control.close();
             let (outcome, cleanup) = terminate_pty_after_capture_failure(&mut worker).await;
-            let _ = finalize_terminal_summary(
+            let entry = finalize_terminal_summary(
                 &worker.summary,
                 &worker.artifacts,
                 TerminalTaskStatus::Failed {
@@ -494,6 +510,9 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
                 ),
             )
             .await;
+            worker
+                .lifecycle
+                .mark_terminal(entry.status.clone(), entry.output_total_bytes);
         }
         PtyWorkerEvent::ChildExited(status) => {
             worker.io_control.close();
@@ -525,7 +544,7 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
             .capture_error
             .as_ref()
             .map(|_| TerminalOutputTerminationReason::OutputCaptureFailed);
-        let _ = finalize_terminal_summary(
+        let entry = finalize_terminal_summary(
             &worker.summary,
             &worker.artifacts,
             outcome.status,
@@ -535,6 +554,9 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
             TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
         )
         .await;
+        worker
+            .lifecycle
+            .mark_terminal(entry.status.clone(), entry.output_total_bytes);
         return;
     }
 
@@ -560,7 +582,7 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
         &cleanup,
         drain_converged,
     );
-    let _ = finalize_terminal_summary(
+    let entry = finalize_terminal_summary(
         &worker.summary,
         &worker.artifacts,
         final_status,
@@ -573,6 +595,9 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
         ),
     )
     .await;
+    worker
+        .lifecycle
+        .mark_terminal(entry.status.clone(), entry.output_total_bytes);
 }
 
 pub(super) fn pty_status_after_cleanup_drain(
@@ -1181,7 +1206,7 @@ pub(super) async fn cancel_pty_task(
         } else {
             TerminalTaskStatus::Interrupted
         };
-        Ok(finalize_terminal_summary(
+        let entry = finalize_terminal_summary(
             summary,
             &artifacts,
             status,
@@ -1190,7 +1215,9 @@ pub(super) async fn cancel_pty_task(
             Some(cleanup),
             TerminalCaptureEvidence::from_ledger(&capture_ledger, None),
         )
-        .await)
+        .await;
+        capture_ledger.mark_terminal(&entry);
+        Ok(entry)
     }
 }
 

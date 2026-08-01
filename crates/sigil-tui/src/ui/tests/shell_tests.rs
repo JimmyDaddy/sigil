@@ -2351,6 +2351,16 @@ fn docs_compaction_preview_app() -> anyhow::Result<AppState> {
 
 fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-1"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-1".to_owned(),
             name: "write_file".to_owned(),
@@ -2401,6 +2411,19 @@ fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
             }],
         }),
     })
+}
+
+fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
+    sigil_kernel::ApprovalRequestIdentityV2 {
+        session_id: "session-shell-ui".to_owned(),
+        run_id: "run-shell-ui".to_owned(),
+        call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
+        plan_hash: "plan-shell-ui".to_owned(),
+        policy_version: "policy-shell-ui".to_owned(),
+        execution_binding_hash: "binding-shell-ui".to_owned(),
+        expires_at_ms: u64::MAX,
+    }
 }
 
 const DOC_SCREENSHOT_COLUMNS: u16 = 160;

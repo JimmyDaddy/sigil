@@ -151,8 +151,7 @@ where
                     .into_registry()
                 });
                 let task_result_tx = state.run.result_tx.clone();
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let provider_logical_run_id = format!("foreground-run-{run_id}");
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(session_ref) => session_ref,
@@ -474,8 +473,7 @@ where
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
                 let task_result_tx = state.run.result_tx.clone();
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
                     Err(error) => {
@@ -551,61 +549,30 @@ where
                     image_attachment_resolver,
                 });
             }
-            RunPlanCommand::ApprovalDecision { call_id, approved } => {
-                if let Some(active_run) = &state.run.active {
-                    let approval = if approved {
-                        ToolApproval::Approve
-                    } else {
-                        ToolApproval::Deny {
-                            reason: "denied in TUI".to_owned(),
-                        }
-                    };
-                    let _ = active_run
-                        .approval_tx
-                        .send(ApprovalSignal::Decision { call_id, approval });
-                } else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "received stray approval decision without pending approval".to_owned(),
-                    ));
-                }
-            }
-            RunPlanCommand::ApprovalDecisionWithArgs { call_id, args_json } => {
-                if let Some(active_run) = &state.run.active {
-                    let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
-                        call_id,
-                        approval: ToolApproval::ApproveWithArgs { args_json },
-                    });
-                } else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "received stray approval decision without pending approval".to_owned(),
-                    ));
-                }
-            }
-            RunPlanCommand::ApprovalSessionDecision { call_id } => {
-                if let Some(active_run) = &state.run.active {
-                    let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
-                        call_id,
-                        approval: ToolApproval::ApproveForSession,
-                    });
-                } else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "received stray approval decision without pending approval".to_owned(),
-                    ));
-                }
-            }
             RunPlanCommand::ApprovalCommand(command) => {
-                if state
-                    .processed_worker_command_ids
-                    .contains(&command.command_id)
+                if let Some(receipt) = state
+                    .approval_command_receipts
+                    .get(&command.command_id)
+                    .cloned()
                 {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "duplicate command {} ignored",
-                        command.command_id
-                    )));
+                    let _ = message_tx.send(WorkerMessage::ApprovalCommandReceipt(
+                        WorkerApprovalCommandReceipt {
+                            replayed: true,
+                            ..receipt
+                        },
+                    ));
                     continue;
                 }
-                let signal = match command.payload {
-                    WorkerApprovalCommand::Decision { call_id, approved } => {
+
+                let command_id = command.command_id;
+                let envelope_matches = command.protocol_version == WORKER_COMMAND_PROTOCOL_VERSION
+                    && command.session_id == state.session.log_path.display().to_string();
+                let (call_id, approval_request_id, decision, approval) = match command.payload {
+                    WorkerApprovalCommand::Decision {
+                        call_id,
+                        approval_request_id,
+                        approved,
+                    } => {
                         let approval = if approved {
                             ToolApproval::Approve
                         } else {
@@ -613,36 +580,94 @@ where
                                 reason: "denied in TUI".to_owned(),
                             }
                         };
-                        ApprovalSignal::Decision { call_id, approval }
+                        let decision = if approved {
+                            WorkerApprovalDecision::ApproveOnce
+                        } else {
+                            WorkerApprovalDecision::Deny
+                        };
+                        (call_id, approval_request_id, decision, approval)
                     }
-                    WorkerApprovalCommand::DecisionForSession { call_id } => {
-                        ApprovalSignal::Decision {
-                            call_id,
-                            approval: ToolApproval::ApproveForSession,
-                        }
-                    }
-                    WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
-                        ApprovalSignal::Decision {
-                            call_id,
-                            approval: ToolApproval::ApproveWithArgs { args_json },
-                        }
-                    }
+                    WorkerApprovalCommand::DecisionForSession {
+                        call_id,
+                        approval_request_id,
+                    } => (
+                        call_id,
+                        approval_request_id,
+                        WorkerApprovalDecision::ApproveForSession,
+                        ToolApproval::ApproveForSession,
+                    ),
+                    WorkerApprovalCommand::DecisionWithArgs {
+                        call_id,
+                        approval_request_id,
+                        args_json,
+                    } => (
+                        call_id,
+                        approval_request_id,
+                        WorkerApprovalDecision::ApproveWithArgs,
+                        ToolApproval::ApproveWithArgs { args_json },
+                    ),
                 };
-                if let Some(active_run) = &state.run.active {
-                    if active_run.approval_tx.send(signal).is_ok() {
-                        state
-                            .processed_worker_command_ids
-                            .insert(command.command_id);
+
+                let receipt = if !envelope_matches {
+                    WorkerApprovalCommandReceipt {
+                        command_id: command_id.clone(),
+                        approval_request_id,
+                        call_id,
+                        decision,
+                        route_state: WorkerApprovalRouteState::Rejected,
+                        replayed: false,
+                    }
+                } else if let Some(active_run) = &state.run.active {
+                    let (acknowledgement_tx, acknowledgement_rx) = mpsc::sync_channel(1);
+                    let signal = ApprovalSignal::Decision {
+                        call_id: call_id.clone(),
+                        approval_request_id: approval_request_id.clone(),
+                        approval,
+                        acknowledgement_tx,
+                    };
+                    let route_state = if active_run.approval_tx.send(signal).is_err() {
+                        WorkerApprovalRouteState::Rejected
                     } else {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(
-                            "approval channel closed".to_owned(),
-                        ));
+                        match acknowledgement_rx.recv_timeout(Duration::from_secs(1)) {
+                            Ok(acknowledgement)
+                                if acknowledgement.accepted
+                                    && acknowledgement.call_id == call_id
+                                    && acknowledgement.approval_request_id
+                                        == approval_request_id =>
+                            {
+                                WorkerApprovalRouteState::DecisionAccepted
+                            }
+                            Ok(_) => WorkerApprovalRouteState::Rejected,
+                            Err(_) => WorkerApprovalRouteState::DeliveryUncertain,
+                        }
+                    };
+                    WorkerApprovalCommandReceipt {
+                        command_id: command_id.clone(),
+                        approval_request_id,
+                        call_id,
+                        decision,
+                        route_state,
+                        replayed: false,
                     }
                 } else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "received stray approval command without pending approval".to_owned(),
-                    ));
+                    WorkerApprovalCommandReceipt {
+                        command_id: command_id.clone(),
+                        approval_request_id,
+                        call_id,
+                        decision,
+                        route_state: WorkerApprovalRouteState::Rejected,
+                        replayed: false,
+                    }
+                };
+
+                // A rejected route proves that the decision was not delivered. Do not consume the
+                // idempotency key: the UI may safely retry the same exact command after a local
+                // worker rebind. Accepted and uncertain routes may have reached the kernel, so
+                // those receipts must remain replayable instead of delivering the decision twice.
+                if receipt.route_state != WorkerApprovalRouteState::Rejected {
+                    state.remember_approval_command_receipt(receipt.clone());
                 }
+                let _ = message_tx.send(WorkerMessage::ApprovalCommandReceipt(receipt));
             }
             RunPlanCommand::PauseTask { request } => {
                 let Some(active_run) = state.run.active.as_ref() else {

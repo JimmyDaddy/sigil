@@ -37,6 +37,8 @@ pub struct DesktopServerCapabilities {
     pub approval: bool,
     /// Active runs can be cooperatively cancelled.
     pub cancellation: bool,
+    /// Persistent terminal tasks can be stopped through an exact generation-bound command.
+    pub terminal_task_cancel: bool,
     /// Active durable Tasks can be paused with an exact plan and scope binding.
     pub task_pause: bool,
     /// Task verification recommendation and exact rerun are available.
@@ -69,6 +71,7 @@ impl DesktopServerCapabilities {
             && self.live_events
             && self.approval
             && self.cancellation
+            && self.terminal_task_cancel
             && self.task_pause
             && self.verification
             && self.task_integration

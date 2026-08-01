@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::McpToolAnnotations;
 
 fn tool(schema: Value) -> McpRemoteTool {
     McpRemoteTool {
@@ -9,6 +10,7 @@ fn tool(schema: Value) -> McpRemoteTool {
         input_schema: schema,
         output_schema: None,
         task_support: None,
+        annotations: McpToolAnnotations::default(),
     }
 }
 
@@ -51,6 +53,39 @@ fn remote_tool_reads_task_support_from_current_execution_shape() {
     }))
     .expect("tool");
     assert_eq!(parsed.task_support.as_deref(), Some("forbidden"));
+}
+
+#[test]
+fn remote_tool_preserves_annotation_presence_and_values() {
+    let parsed: McpRemoteTool = serde_json::from_value(json!({
+        "name": "mutate",
+        "inputSchema": {"type":"object","properties":{}},
+        "annotations": {
+            "title": "Mutate remote record",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        }
+    }))
+    .expect("tool");
+    assert_eq!(
+        parsed.annotations,
+        McpToolAnnotations {
+            title: Some("Mutate remote record".to_owned()),
+            read_only_hint: Some(false),
+            destructive_hint: Some(true),
+            idempotent_hint: Some(false),
+            open_world_hint: Some(true),
+        }
+    );
+
+    let missing: McpRemoteTool = serde_json::from_value(json!({
+        "name": "unknown",
+        "inputSchema": {"type":"object","properties":{}}
+    }))
+    .expect("tool");
+    assert_eq!(missing.annotations.read_only_hint, None);
 }
 
 #[test]

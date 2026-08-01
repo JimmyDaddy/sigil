@@ -12,11 +12,12 @@ use crate::dto::{
     HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpIntentDropExecution,
     HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackView, HttpPermissionMode,
-    HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot, HttpSessionBinding,
-    HttpSessionSnapshot, HttpSessionTranscriptPage, HttpTaskContinuationRequest,
-    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
-    HttpTaskIntegrationReviewView, HttpTaskPauseRequest, HttpToolArtifactPage,
-    HttpToolArtifactReadRequest, HttpVerificationRerunRequest, HttpVerificationView,
+    HttpProviderModelRef, HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot,
+    HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
+    HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTaskPauseRequest,
+    HttpTerminalLifecycleView, HttpToolArtifactPage, HttpToolArtifactReadRequest,
+    HttpVerificationRerunRequest, HttpVerificationView,
 };
 
 /// Start context delivered to the HTTP run driver.
@@ -29,7 +30,7 @@ pub struct HttpRunDriverStart {
     /// Full prompt body. The preview is carried separately on the run snapshot.
     pub prompt: String,
     /// Optional model selected from the exact run-context capability set.
-    pub model_name: Option<String>,
+    pub model_ref: Option<HttpProviderModelRef>,
     /// Opaque model-selection binding supplied with an explicit selection.
     pub model_selection_binding: Option<String>,
     /// Opaque exact provider/model effort binding.
@@ -64,6 +65,15 @@ pub struct HttpRunDriverTaskPause {
     pub request: HttpTaskPauseRequest,
 }
 
+/// Exact persistent-terminal cancellation routed to the original process owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRunDriverTerminalTaskCancel {
+    pub session_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub expected_generation: u64,
+}
+
 /// Approval context delivered to the HTTP run driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRunDriverApproval {
@@ -73,6 +83,8 @@ pub struct HttpRunDriverApproval {
     pub run_id: String,
     /// Tool call id receiving the decision.
     pub call_id: String,
+    /// Exact kernel-owned approval request receiving the decision.
+    pub approval_request_id: String,
     /// Decision record routed to the driver.
     pub decision: HttpApprovalDecisionRecord,
 }
@@ -203,6 +215,16 @@ pub trait HttpRunDriver: Send + Sync {
     /// binding or route the pause to its cancellation owner.
     fn pause_task(&self, _pause: HttpRunDriverTaskPause) -> Result<(), HttpRunDriverError> {
         Err(HttpRunDriverError::new("Task pause is unavailable"))
+    }
+
+    /// Cancels one persistent terminal task without cancelling its completed foreground turn.
+    fn cancel_terminal_task(
+        &self,
+        _cancel: HttpRunDriverTerminalTaskCancel,
+    ) -> Result<HttpTerminalLifecycleView, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "persistent terminal cancellation is unavailable",
+        ))
     }
 
     /// Routes a user approval decision to a registered run.

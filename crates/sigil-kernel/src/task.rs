@@ -497,6 +497,7 @@ pub enum TaskRouteStatus {
     Requested,
     Resolved,
     Rejected,
+    Expired,
     Cancelled,
     Stale,
 }

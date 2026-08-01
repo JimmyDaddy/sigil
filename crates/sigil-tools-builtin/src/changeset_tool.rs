@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -15,9 +15,10 @@ use sigil_kernel::{
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, FileType,
     MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    delete_file_with_mutation_in_batch, write_file_with_mutation_in_batch,
+    ToolAnalysisStatus, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation,
+    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta, ToolSemanticScope,
+    ToolSpec, delete_file_with_mutation_in_batch, write_file_with_mutation_in_batch,
 };
 
 use crate::{
@@ -373,15 +374,55 @@ impl Tool for ApplyChangeSetTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let args = parse_apply_changeset_args(args)?;
-        if args.files.is_empty() {
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let parsed = parse_apply_changeset_args(args)?;
+        if parsed.files.is_empty() {
             bail!("apply_changeset requires at least one file");
         }
-        args.files
+        let subjects = parsed
+            .files
             .iter()
             .map(|file| tool_path_subject(&ctx.workspace_root, &file.path))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let has_delete = parsed
+            .files
+            .iter()
+            .any(|file| file.action == ChangeSetFileAction::Delete);
+        let mut effects = BTreeSet::from([ToolPermissionEffect::FileWrite]);
+        if has_delete {
+            effects.insert(ToolPermissionEffect::FileDelete);
+        }
+        let mut semantic_scope = ToolSemanticScope::new("workspace:apply_changeset", 1);
+        semantic_scope
+            .qualifiers
+            .insert("includes_delete".to_owned(), has_delete.to_string());
+        semantic_scope
+            .qualifiers
+            .insert("file_count".to_owned(), parsed.files.len().to_string());
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Write,
+            operation: ToolOperation::ApplyChangeSet,
+            effects,
+            subjects,
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(semantic_scope),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([(
+                "planner".to_owned(),
+                "apply_changeset_v2".to_owned(),
+            )]),
+            safe_summary: ToolPermissionSummary {
+                title: "Apply workspace change set".to_owned(),
+                detail: if has_delete {
+                    format!("{} file operations including deletion", parsed.files.len())
+                } else {
+                    format!("{} create or update file operations", parsed.files.len())
+                },
+                step_count: u32::try_from(parsed.files.len()).unwrap_or(u32::MAX),
+                workspace_code_steps: u32::try_from(parsed.files.len()).unwrap_or(u32::MAX),
+            },
+        })
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {

@@ -4,14 +4,13 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 
 /// Policy identity bound to every V1 HTTP approval request.
-pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::session::TOOL_ARTIFACT_MAX_BYTES;
 use sigil_kernel::{
     IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
     PublicIntentStackStateV1, PublicTaskPhase, TaskIntegrationReviewRequest, TaskPauseRequest,
-    TaskVerificationRerunRequest, ToolApprovalUserDecision, ToolArtifactPageEncoding,
-    ToolArtifactPageV1, ToolArtifactRefV1, ToolArtifactSelectorV1, VerificationProductView,
-    stable_event_hash,
+    TaskVerificationRerunRequest, ToolApprovalSessionGrantUnavailableReason,
+    ToolApprovalUserDecision, ToolArtifactPageEncoding, ToolArtifactPageV1, ToolArtifactRefV1,
+    ToolArtifactSelectorV1, VerificationProductView, stable_event_hash,
 };
 use sigil_runtime::application_compaction::{
     ApplicationCompactionAdmission, ApplicationCompactionDetailsView,
@@ -74,6 +73,8 @@ pub struct HttpServerCapabilities {
     pub cancellation: bool,
     /// Active durable Tasks support exact plan- and scope-bound pause.
     pub task_pause: bool,
+    /// Persistent terminal tasks support exact generation-bound cancellation.
+    pub terminal_task_cancel: bool,
     /// Durable task verification can be inspected and one exact recommended check rerun.
     pub verification: bool,
     /// Durable Task integration can be reviewed and one exact preview accepted.
@@ -109,6 +110,7 @@ impl HttpServerCapabilities {
             approval: true,
             cancellation: true,
             task_pause: true,
+            terminal_task_cancel: true,
             verification: true,
             task_integration: true,
             intent_stack: true,
@@ -787,6 +789,9 @@ pub struct HttpSessionContinuityView {
     /// Current process-local foreground owner, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_owner: Option<HttpForegroundRunOwner>,
+    /// Recent runs with bounded terminal-owner snapshots, newest run last.
+    #[serde(default)]
+    pub retained_terminal_runs: Vec<HttpRunSnapshot>,
     /// Bounded recovery actions allowed for the current owner state.
     #[serde(default)]
     pub recovery_actions: Vec<HttpContinuityRecoveryAction>,
@@ -1763,9 +1768,9 @@ pub struct HttpSessionBinding {
 pub struct HttpRunStartRequest {
     /// User prompt for the run.
     pub prompt: String,
-    /// Optional model selected for this run in the existing durable session.
+    /// Optional exact connection/model selected for this and subsequent session runs.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
+    pub model_ref: Option<HttpProviderModelRef>,
     /// Opaque run-context binding required with an explicit model selection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_binding: Option<String>,
@@ -1812,6 +1817,23 @@ pub struct HttpRunCancelRequest {
     pub reason: Option<String>,
 }
 
+/// Exact stale-safe request for cancelling one persistent terminal task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpTerminalTaskCancelRequest {
+    /// Exact task id rendered from the latest bounded lifecycle projection.
+    pub task_id: String,
+    /// Exact owner generation rendered with the cancel action.
+    pub expected_generation: u64,
+}
+
+impl HttpTerminalTaskCancelRequest {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        sigil_kernel::TerminalTaskId::new(&self.task_id)?;
+        Ok(())
+    }
+}
+
 /// Permission mode accepted by the HTTP run start endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1836,8 +1858,8 @@ pub enum HttpReasoningEffort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpModelSelectionPolicy {
-    /// A different model requires creation of a fresh durable session.
-    FreshSession,
+    /// A different model is selected at an append-only boundary in the same durable session.
+    SameSession,
 }
 
 /// Evidence source used to resolve a session context window.
@@ -2018,7 +2040,7 @@ pub struct HttpRunContextView {
     pub model_name: String,
     /// Exact connection-scoped catalog and effort capabilities for each selectable model.
     pub model_options: Vec<HttpApplicationModelOption>,
-    /// Session boundary required to change the model.
+    /// Durable-session behavior used when the model changes.
     pub model_selection: HttpModelSelectionPolicy,
     /// Opaque binding proving the exact current and available model set.
     pub model_selection_binding: String,
@@ -2195,11 +2217,93 @@ pub struct HttpRunSnapshot {
     pub reasoning_effort: Option<HttpReasoningEffort>,
     /// Bounded prompt preview for adapter clients.
     pub prompt_preview: String,
-    /// Pending approval call ids in deterministic order.
+    /// Canonical pending approvals in deterministic call-id order.
+    ///
+    /// This bounded projection is the recovery source of truth after an SSE gap. It intentionally
+    /// excludes raw tool arguments, absolute paths, command text, and preview bodies.
     #[serde(default)]
-    pub pending_approval_call_ids: Vec<String>,
+    pub pending_approvals: Vec<HttpPendingApproval>,
+    /// Canonical non-pending approval lifecycle states used to recover exact UI state after an
+    /// event gap or renderer reload.
+    #[serde(default)]
+    pub approval_lifecycles: Vec<HttpApprovalLifecycleView>,
+    /// Latest bounded terminal owner snapshots for this run, ordered by task id.
+    #[serde(default)]
+    pub terminal_tasks: Vec<HttpTerminalLifecycleView>,
     /// Registry-owned state sequence for stale-client command guards.
     pub stream_sequence: u64,
+}
+
+/// Canonical non-pending state for one exact approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpApprovalLifecycleState {
+    /// The command has reserved the request and is delivering it to the active run.
+    Resolving,
+    /// The active run accepted the exact decision, but durable resolution has not arrived yet.
+    DecisionAccepted,
+    /// The exact approval resolved and an approved tool has not started execution yet.
+    Resolved,
+    /// The exact tool execution has started.
+    ExecutionStarted,
+    /// Delivery may have occurred, but the server cannot prove the resulting execution state.
+    DeliveryUncertain,
+    /// The approval or its resulting execution reached a terminal state.
+    Terminal,
+}
+
+/// Bounded request identity and lifecycle state safe for local application recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpApprovalLifecycleView {
+    pub approval: HttpPendingApproval,
+    pub state: HttpApprovalLifecycleState,
+}
+
+/// Typed bounded projection of one owned terminal task generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpTerminalLifecycleView {
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<sigil_kernel::TerminalExecutionBackendKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_profile: Option<sigil_kernel::ExecutionSandboxProfile>,
+    pub generation: u64,
+    pub status: sigil_kernel::TerminalTaskStatus,
+    pub readiness: sigil_kernel::TerminalReadinessStatus,
+    pub total_output_bytes: u64,
+    pub emitted_at_ms: u64,
+}
+
+impl From<&sigil_kernel::TerminalLifecycleEvent> for HttpTerminalLifecycleView {
+    fn from(event: &sigil_kernel::TerminalLifecycleEvent) -> Self {
+        Self {
+            task_id: event.task_id.as_str().to_owned(),
+            execution_backend: event.execution_backend,
+            sandbox_profile: event.sandbox_profile,
+            generation: event.generation,
+            status: event.status.clone(),
+            readiness: event.readiness.clone(),
+            total_output_bytes: event.total_output_bytes,
+            emitted_at_ms: event.emitted_at_ms,
+        }
+    }
+}
+
+impl From<&sigil_kernel::TerminalTaskEntry> for HttpTerminalLifecycleView {
+    fn from(entry: &sigil_kernel::TerminalTaskEntry) -> Self {
+        Self {
+            task_id: entry.handle.task_id.as_str().to_owned(),
+            execution_backend: entry.handle.execution_backend,
+            sandbox_profile: entry.handle.sandbox_profile,
+            generation: entry.generation,
+            status: entry.status.clone(),
+            readiness: entry.readiness.clone(),
+            total_output_bytes: entry.output_total_bytes,
+            emitted_at_ms: entry.updated_at_ms,
+        }
+    }
 }
 
 /// Schema version for the bounded conversation queue application view.
@@ -2893,8 +2997,50 @@ pub struct HttpPendingApproval {
     /// Expiry timestamp in Unix milliseconds.
     pub expires_at_ms: u64,
     /// Whether this exact approval may create a bounded session-local grant.
-    #[serde(default)]
     pub session_grant_available: bool,
+    /// Stable reason when this request cannot create bounded session-local authority.
+    pub session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
+    /// Bounded, credential-free facts used to reconstruct the approval surface after an SSE gap.
+    pub display: HttpPendingApprovalDisplay,
+}
+
+/// Bounded approval facts safe for run snapshots and local UI recovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpPendingApprovalDisplay {
+    /// Sequence of the durable approval request event.
+    pub event_sequence: u64,
+    #[serde(default)]
+    pub effects: Vec<String>,
+    #[serde(default)]
+    pub subjects: Vec<HttpPendingApprovalSubject>,
+    pub analysis_status: String,
+    #[serde(default)]
+    pub analysis_reason_codes: Vec<String>,
+    #[serde(default)]
+    pub analysis_reasons: Vec<String>,
+    #[serde(default)]
+    pub containment: Vec<String>,
+    #[serde(default)]
+    pub decision_reasons: Vec<String>,
+    pub safe_summary_title: String,
+    pub safe_summary_detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default)]
+    pub snapshot_required: bool,
+}
+
+/// One path-safe approval subject. External identities are represented only by kind and scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpPendingApprovalSubject {
+    pub kind: String,
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_label: Option<String>,
 }
 
 /// HTTP approval decision payload.
@@ -2955,6 +3101,18 @@ pub struct HttpApprovalDecisionRecord {
     pub reason: Option<String>,
 }
 
+/// Server-owned routing state returned after an approval command is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpApprovalRouteState {
+    /// The exact decision reached the active run and execution may now resume.
+    DecisionAccepted,
+    /// Delivery may have occurred, but the server could not confirm the final route state.
+    DeliveryUncertain,
+    /// The owning run became terminal while the decision was being routed.
+    Terminal,
+}
+
 /// Receipt for an envelope-routed approval command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2969,6 +3127,8 @@ pub struct HttpApprovalCommandReceipt {
     pub run_id: String,
     /// Tool call id receiving the approval.
     pub call_id: String,
+    /// Exact approval request consumed by this command.
+    pub approval_request_id: String,
     /// Optional optimistic state guard supplied by the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_stream_sequence: Option<u64>,
@@ -2977,6 +3137,10 @@ pub struct HttpApprovalCommandReceipt {
     pub correlation_id: Option<String>,
     /// Decision routed to the run driver.
     pub decision: HttpApprovalDecisionRecord,
+    /// Server-owned route state after attempting delivery to the active run.
+    pub route_state: HttpApprovalRouteState,
+    /// Registry revision containing the route transition represented by this receipt.
+    pub registry_revision: u64,
     /// Whether this response was replayed from a prior command id.
     pub replayed: bool,
 }
@@ -3073,6 +3237,29 @@ pub struct HttpTaskPauseCommandReceipt {
 }
 
 impl HttpTaskPauseCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+/// Receipt for an exact persistent-terminal cancellation command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpTerminalTaskCancelCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stream_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub run_id: String,
+    pub terminal_task: HttpTerminalLifecycleView,
+    pub replayed: bool,
+}
+
+impl HttpTerminalTaskCancelCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self

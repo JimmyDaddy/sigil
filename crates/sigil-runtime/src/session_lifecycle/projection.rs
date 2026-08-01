@@ -34,9 +34,12 @@ pub use query::{
 
 pub const SESSION_CATALOG_SCHEMA_VERSION: u16 = 3;
 pub const SESSION_CATALOG_APPLICATION_ID: i32 = 0x5347_494c;
-const SESSION_CATALOG_PROJECTION_REVISION: u16 = 3;
+// Increment whenever unchanged durable sources must be revalidated against a new strict parser.
+const SESSION_CATALOG_PROJECTION_REVISION: u16 = 5;
 const SESSION_CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECONCILE_RETRIES: usize = 2;
+const MAX_RECOVERY_LEASE_RETRIES: usize = 20;
+const RECOVERY_LEASE_RETRY_DELAY: Duration = Duration::from_millis(5);
 const SESSION_CATALOG_TITLE_MAX_BYTES: usize = 160;
 const SESSION_CATALOG_IDENTITY_MAX_BYTES: usize = 128;
 
@@ -763,13 +766,27 @@ impl SessionCatalogProjectionService {
         &self,
     ) -> Result<SessionCatalogRecoveryLease, SessionCatalogProjectionError> {
         let lease = open_recovery_lease_file(&self.database_path)?;
-        lease.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => SessionCatalogProjectionError::RecoveryBusy,
-            std::fs::TryLockError::Error(error) => SessionCatalogProjectionError::Recovery {
-                message: format!("failed to acquire exclusive recovery lease: {error}"),
-            },
-        })?;
-        Ok(SessionCatalogRecoveryLease { _file: lease })
+        for retry in 0..=MAX_RECOVERY_LEASE_RETRIES {
+            match lease.try_lock() {
+                Ok(()) => return Ok(SessionCatalogRecoveryLease { _file: lease }),
+                Err(std::fs::TryLockError::WouldBlock) if retry < MAX_RECOVERY_LEASE_RETRIES => {
+                    // A just-closed query may release its process lease a few scheduler ticks
+                    // after SQLite teardown. Recovery is explicit and rare, so absorb only this
+                    // short hand-off window while still failing closed for a genuinely active
+                    // connection.
+                    std::thread::sleep(RECOVERY_LEASE_RETRY_DELAY);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(SessionCatalogProjectionError::RecoveryBusy);
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(SessionCatalogProjectionError::Recovery {
+                        message: format!("failed to acquire exclusive recovery lease: {error}"),
+                    });
+                }
+            }
+        }
+        unreachable!("bounded recovery lease loop always returns")
     }
 
     fn reconcile_internal(

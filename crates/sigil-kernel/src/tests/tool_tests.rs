@@ -6,15 +6,16 @@ use serde_json::json;
 
 use crate::{
     AgentInvocationGrant, AgentInvocationGrantBinding, AgentInvocationGrantSource, AgentProfileId,
-    AgentRole, ApprovalMode, DelegationAuthority, DurableEventType, ExecutionCoverageLabel,
-    ExecutionCoverageSummary, JsonlSessionStore, MessageRole, MutationEventRecorder, NetworkPolicy,
-    PermissionConfig, PermissionMode, RunCancellationOwner, SessionStreamRecord, TaskIsolationMode,
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit,
-    ToolErrorKind, ToolLifecycleOwner, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    AgentRole, ApprovalMode, DeclaredToolPermissionFacts, DelegationAuthority, DurableEventType,
+    ExecutionCoverageLabel, ExecutionCoverageSummary, JsonlSessionStore, MessageRole,
+    MutationEventRecorder, NetworkPolicy, PermissionConfig, PermissionMode, RunCancellationOwner,
+    SessionStreamRecord, TaskIsolationMode, Tool, ToolAccess, ToolCategory, ToolContext,
+    ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner,
+    ToolOperation, ToolPermissionPlanDraft, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
     ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus,
     ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind,
     ToolSubjectScope, VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationScan, provider::ToolCall,
+    WorkspaceMutationScan, declared_tool_permission_plan, provider::ToolCall,
 };
 
 #[test]
@@ -169,12 +170,22 @@ impl Tool for RegistryFixtureTool {
         }
     }
 
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Ask))
+        args: &serde_json::Value,
+    ) -> Result<ToolPermissionPlanDraft> {
+        declared_tool_permission_plan(
+            &self.spec(),
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Execute,
+                operation: ToolOperation::ExecuteUnknownCommand,
+                network_effect: None,
+                subjects: Vec::new(),
+                tool_default_mode: Some(ApprovalMode::Ask),
+            },
+        )
     }
 
     fn egress_audit(
@@ -460,9 +471,7 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
 
     let result = registry.execute(ctx.clone(), call.clone()).await?;
     let preview = registry.preview(ctx.clone(), call.clone()).await?;
-    let access = registry.permission_access(&ctx, &call)?;
-    let operation = registry.permission_operation(&ctx, &call)?;
-    let default_mode = registry.permission_default_mode(&ctx, &call)?;
+    let permission_plan = registry.permission_plan(&ctx, &call)?;
     let egress = registry.egress_audit(&ctx, &call)?;
 
     assert_eq!(result.content, "executed");
@@ -470,9 +479,12 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
         preview.expect("preview should exist").title,
         "Fixture preview"
     );
-    assert_eq!(access, ToolAccess::Execute);
-    assert_eq!(operation, crate::ToolOperation::ExecuteUnknownCommand);
-    assert_eq!(default_mode, Some(ApprovalMode::Ask));
+    assert_eq!(permission_plan.access, ToolAccess::Execute);
+    assert_eq!(
+        permission_plan.operation,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert_eq!(permission_plan.tool_default_mode, Some(ApprovalMode::Ask));
     assert!(matches!(
         egress,
         Some(ToolEgressAudit { redacted: true, .. })
@@ -824,8 +836,8 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     .join();
 
     let drained = registry.drain_by_name_prefix("mcp__poisoned__");
-    let operation = registry
-        .permission_operation(
+    let permission_plan = registry
+        .permission_plan(
             &ToolContext::new(std::env::temp_dir(), 5),
             &ToolCall {
                 id: "call-read".to_owned(),
@@ -833,10 +845,10 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
                 args_json: "{}".to_owned(),
             },
         )
-        .expect("poisoned registry lock should recover for permission operation");
+        .expect("poisoned registry lock should recover for permission planning");
 
     assert_eq!(drained.len(), 1);
-    assert_eq!(operation, crate::ToolOperation::Read);
+    assert_eq!(permission_plan.operation, ToolOperation::Read);
     assert!(registry.spec_for("mcp__poisoned__echo").is_none());
     assert!(registry.spec_for("read_file").is_some());
 }
@@ -938,10 +950,7 @@ async fn scoped_tool_registry_gates_all_tool_paths() -> Result<()> {
             .await
             .is_err()
     );
-    assert!(scoped.permission_access(&ctx, &blocked_call).is_err());
-    assert!(scoped.permission_operation(&ctx, &blocked_call).is_err());
-    assert!(scoped.permission_subjects(&ctx, &blocked_call).is_err());
-    assert!(scoped.permission_default_mode(&ctx, &blocked_call).is_err());
+    assert!(scoped.permission_plan(&ctx, &blocked_call).is_err());
     assert!(scoped.egress_audit(&ctx, &blocked_call).is_err());
     Ok(())
 }
@@ -1397,9 +1406,24 @@ async fn tool_registry_surfaces_errors_and_default_trait_hooks() -> Result<()> {
     };
 
     assert!(registry.preview(ctx.clone(), call.clone()).await?.is_none());
-    assert_eq!(registry.permission_access(&ctx, &call)?, ToolAccess::Read);
-    assert_eq!(registry.permission_default_mode(&ctx, &call)?, None);
     assert!(registry.egress_audit(&ctx, &call)?.is_none());
+    let plan = registry.permission_plan(&ctx, &call)?;
+    assert_eq!(plan.access, ToolAccess::Read);
+    assert_eq!(plan.tool_default_mode, None);
+    assert!(plan.analysis.is_complete());
+    assert_eq!(
+        plan.analysis_bindings.get("planner").map(String::as_str),
+        Some("tool_declared_v2")
+    );
+    let changed_plan = registry.permission_plan(
+        &ctx,
+        &crate::ToolCall {
+            args_json: json!({"value": 1}).to_string(),
+            ..call.clone()
+        },
+    )?;
+    assert_ne!(plan.plan_hash, changed_plan.plan_hash);
+    assert_ne!(plan.semantic_scope, changed_plan.semantic_scope);
 
     let result = registry.execute(ctx.clone(), call.clone()).await?;
     assert_eq!(result.content, "ok");
@@ -1475,14 +1499,8 @@ async fn tool_registry_surfaces_unknown_and_invalid_args_for_all_public_hooks() 
 
     for error in [
         registry
-            .permission_subjects(&ctx, &invalid)
-            .expect_err("invalid args should fail permission subjects"),
-        registry
-            .permission_access(&ctx, &invalid)
-            .expect_err("invalid args should fail permission access"),
-        registry
-            .permission_default_mode(&ctx, &invalid)
-            .expect_err("invalid args should fail permission default mode"),
+            .permission_plan(&ctx, &invalid)
+            .expect_err("invalid args should fail permission planning"),
         registry
             .egress_audit(&ctx, &invalid)
             .expect_err("invalid args should fail egress audit"),
@@ -1509,14 +1527,8 @@ async fn tool_registry_surfaces_unknown_and_invalid_args_for_all_public_hooks() 
     }
     for error in [
         registry
-            .permission_subjects(&ctx, &unknown)
-            .expect_err("unknown tool should fail permission subjects"),
-        registry
-            .permission_access(&ctx, &unknown)
-            .expect_err("unknown tool should fail permission access"),
-        registry
-            .permission_default_mode(&ctx, &unknown)
-            .expect_err("unknown tool should fail permission default mode"),
+            .permission_plan(&ctx, &unknown)
+            .expect_err("unknown tool should fail permission planning"),
         registry
             .egress_audit(&ctx, &unknown)
             .expect_err("unknown tool should fail egress audit"),
@@ -1541,4 +1553,26 @@ fn tool_context_debug_redacts_mutation_recorder_details() {
     );
     assert_eq!(ctx.timeout_secs, 45);
     assert!(ctx.mutation_recorder.is_none());
+}
+
+#[test]
+fn tool_contract_exposes_only_the_single_permission_plan_path() {
+    let source = include_str!("../tool.rs");
+    for legacy in [
+        "fn permission_subjects(",
+        "fn permission_access(",
+        "fn permission_network_effect(",
+        "fn permission_operation(",
+        "fn permission_default_mode(",
+        ".permission_subjects(",
+        ".permission_access(",
+        ".permission_network_effect(",
+        ".permission_operation(",
+        ".permission_default_mode(",
+    ] {
+        assert!(
+            !source.contains(legacy),
+            "kernel Tool/registry API must not retain legacy permission path {legacy}"
+        );
+    }
 }

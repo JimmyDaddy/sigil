@@ -724,51 +724,64 @@ fn collect_session_facts(
             continue;
         };
         match control {
-            ControlEntry::ToolApproval(approval) => {
-                if !call_belongs_to_current_run(&approval.call_id) {
+            ControlEntry::ToolPermissionDecisionV2(decision) => {
+                if !call_belongs_to_current_run(&decision.call_id) {
                     continue;
                 }
-                record_approval_mode(&mut local_policy_facets, approval.local_policy_decision);
-                record_approval_mode(&mut network_policy_facets, approval.network_policy_decision);
-                record_approval_mode(&mut source_policy_facets, approval.source_policy_decision);
-                let effect = approval
+                record_approval_mode(&mut local_policy_facets, decision.local_policy_decision);
+                record_approval_mode(&mut network_policy_facets, decision.network_policy_decision);
+                record_approval_mode(&mut source_policy_facets, decision.source_policy_decision);
+                let effect = decision
                     .network_effect
                     .map(NetworkEffect::as_str)
                     .unwrap_or("none");
                 *network_effects.entry(effect.to_owned()).or_default() += 1;
+                if decision.policy_decision == ApprovalMode::Allow {
+                    approvals_policy_allow += 1;
+                } else if decision.policy_decision == ApprovalMode::Deny {
+                    approvals_policy_deny += 1;
+                }
+                if decision.allow_source == Some(ToolApprovalAllowSource::SessionGrant) {
+                    approval_session_grant_reuses += 1;
+                    approval_grant_reuses.push(json!({
+                        "call_id": decision.call_id.as_str(),
+                        "tool_name": decision.tool_name.as_str(),
+                        "grant_id": decision.grant_id.as_deref(),
+                        "network_effect": decision.network_effect,
+                        "local_policy_decision": decision.local_policy_decision,
+                        "network_policy_decision": decision.network_policy_decision,
+                        "source_policy_decision": decision.source_policy_decision,
+                        "operation": decision.operation,
+                        "risk": decision.risk,
+                        "subjects": decision
+                            .subjects
+                            .iter()
+                            .map(|subject| {
+                                subject
+                                    .relative_label
+                                    .as_deref()
+                                    .unwrap_or(subject.identity_sha256.as_str())
+                            })
+                            .collect::<Vec<_>>(),
+                    }));
+                }
+            }
+            ControlEntry::ToolApproval(approval) => {
+                if !call_belongs_to_current_run(&approval.call_id) {
+                    continue;
+                }
                 match approval.action {
-                    ToolApprovalAuditAction::PolicyEvaluated => {
-                        if approval.policy_decision == ApprovalMode::Allow {
-                            approvals_policy_allow += 1;
-                        } else if approval.policy_decision == ApprovalMode::Deny {
-                            approvals_policy_deny += 1;
-                        }
-                        if approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant) {
-                            approval_session_grant_reuses += 1;
-                            approval_grant_reuses.push(json!({
-                                "call_id": approval.call_id.as_str(),
-                                "tool_name": approval.tool_name.as_str(),
-                                "grant_call_id": approval.grant_call_id.as_deref(),
-                                "network_effect": approval.network_effect,
-                                "local_policy_decision": approval.local_policy_decision,
-                                "network_policy_decision": approval.network_policy_decision,
-                                "source_policy_decision": approval.source_policy_decision,
-                                "operation": approval.operation,
-                                "risk": approval.risk,
-                                "subjects": approval
-                                    .subjects
-                                    .iter()
-                                    .map(|subject| subject.normalized.as_str())
-                                    .collect::<Vec<_>>(),
-                            }));
-                        }
-                    }
                     ToolApprovalAuditAction::Requested => {
                         approvals_requested += 1;
                         let key = approval
                             .subjects
                             .iter()
-                            .map(|subject| subject.normalized.as_str())
+                            .map(|subject| {
+                                subject
+                                    .relative_label
+                                    .as_deref()
+                                    .unwrap_or(subject.identity_sha256.as_str())
+                            })
                             .collect::<Vec<_>>()
                             .join("|");
                         if !key.is_empty() {
@@ -790,11 +803,12 @@ fn collect_session_facts(
                             None => {}
                         }
                     }
+                    ToolApprovalAuditAction::DecisionAccepted => {}
                     ToolApprovalAuditAction::PreviewFailed => {}
                 }
             }
             ControlEntry::ToolApprovalSessionGrant(grant)
-                if call_belongs_to_current_run(&grant.call_id) =>
+                if call_belongs_to_current_run(&grant.source_call_id) =>
             {
                 approval_session_grants += 1;
             }

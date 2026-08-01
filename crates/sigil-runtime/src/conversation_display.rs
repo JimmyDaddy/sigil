@@ -1410,15 +1410,13 @@ fn project_control(
                 },
             )])
         }
-        ControlEntry::ToolApproval(approval)
-            if approval.action != ToolApprovalAuditAction::PolicyEvaluated =>
-        {
+        ControlEntry::ToolApproval(approval) => {
             let raw_call_id = approval.call_id.clone();
             let (status, decision) = match approval.action {
                 ToolApprovalAuditAction::Requested => {
                     (ConversationDisplayStatusV1::WaitingForApproval, None)
                 }
-                ToolApprovalAuditAction::Resolved => {
+                ToolApprovalAuditAction::DecisionAccepted | ToolApprovalAuditAction::Resolved => {
                     let decision = approval.user_decision.map(map_approval_decision);
                     let status = match decision {
                         Some(ConversationDisplayApprovalDecisionV1::Denied) => {
@@ -1432,7 +1430,6 @@ fn project_control(
                 ToolApprovalAuditAction::PreviewFailed => {
                     (ConversationDisplayStatusV1::Failed, None)
                 }
-                ToolApprovalAuditAction::PolicyEvaluated => unreachable!(),
             };
             let run_id = active_run_id(active_run);
             let mut item = new_item(
@@ -1467,9 +1464,12 @@ fn project_control(
             if !reconciles.is_empty() {
                 item.reconciles = Some(reconciles);
             }
-            if approval.action == ToolApprovalAuditAction::Requested {
-                approval_items.insert(raw_call_id, item.display_id.clone());
-            }
+            // Approval V2 records both the accepted command receipt and the kernel-owned
+            // terminal resolution. Keep a single reconciliation chain for every durable phase;
+            // otherwise DecisionAccepted and Resolved would both claim the original request (and
+            // live slot) as independent successors, which the Desktop continuity contract must
+            // reject as an ambiguous branch.
+            approval_items.insert(raw_call_id, item.display_id.clone());
             Ok(vec![item])
         }
         _ => Ok(Vec::new()),

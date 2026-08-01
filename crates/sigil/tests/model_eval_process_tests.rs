@@ -205,6 +205,7 @@ fn spawn_scripted_deepseek_server(
                     Err(error) => return Err(error.into()),
                 }
             };
+            stream.set_nonblocking(false)?;
             let request = read_http_request(&mut stream)?;
             requests.lock().expect("request capture lock").push(request);
             let body = if response_index == 0 {
@@ -237,10 +238,27 @@ fn spawn_scripted_deepseek_server(
 
 fn read_http_request(stream: &mut TcpStream) -> Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
-        let count = stream.read(&mut chunk)?;
+        let count = match stream.read(&mut chunk) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    bail!("timed out reading model eval provider request");
+                }
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if count == 0 {
             break;
         }

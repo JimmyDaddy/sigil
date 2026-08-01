@@ -23,10 +23,11 @@ use tool_card_lifecycle::{
 };
 
 use super::{
-    ActiveTaskRuntimeStatus, AppState, RunPhase, TimelineRole,
+    ActiveTaskRuntimeStatus, AppState, ApprovalPresentationState, PaneFocus, RunPhase,
+    TimelineRole,
     formatting::{format_terminal_task_block_redacted, summarize_error},
 };
-use crate::runner::{WorkerCommand, WorkerMessage};
+use crate::runner::{WorkerApprovalRouteState, WorkerCommand, WorkerMessage};
 use message_labels::{
     queued_prompt_summary_noun, summarize_queued_prompt, task_run_finish_notice,
     task_run_status_label,
@@ -143,6 +144,61 @@ impl AppState {
             WorkerMessage::WorkerReady => {
                 self.record_started_model_route();
                 self.push_event("worker", "ready");
+            }
+            WorkerMessage::ApprovalCommandReceipt(receipt) => {
+                let exact_pending = self.approval.pending.as_mut().filter(|pending| {
+                    pending.call.id == receipt.call_id
+                        && pending.approval_request_id == receipt.approval_request_id
+                });
+                if let Some(pending) = exact_pending {
+                    match receipt.route_state {
+                        WorkerApprovalRouteState::DecisionAccepted => {
+                            pending.presentation_state =
+                                ApprovalPresentationState::DecisionAccepted {
+                                    command_id: receipt.command_id.clone(),
+                                };
+                            self.active_pane = PaneFocus::Composer;
+                            self.last_notice =
+                                Some("approval decision accepted; resuming run".to_owned());
+                        }
+                        WorkerApprovalRouteState::DeliveryUncertain => {
+                            pending.presentation_state =
+                                ApprovalPresentationState::DeliveryUncertain {
+                                    command_id: receipt.command_id.clone(),
+                                };
+                            self.active_pane = PaneFocus::Composer;
+                            self.last_notice = Some(
+                                "approval delivery is uncertain; awaiting authoritative state"
+                                    .to_owned(),
+                            );
+                        }
+                        WorkerApprovalRouteState::Rejected => {
+                            pending.presentation_state = ApprovalPresentationState::Pending;
+                            self.last_notice = Some(
+                                "approval command was rejected; review the current request"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    self.push_event(
+                        "approval:receipt",
+                        format!(
+                            "{} {} {:?}{}",
+                            receipt.call_id,
+                            receipt.approval_request_id,
+                            receipt.route_state,
+                            if receipt.replayed { " replayed" } else { "" }
+                        ),
+                    );
+                } else {
+                    self.push_event(
+                        "approval:receipt-ignored",
+                        format!(
+                            "{} {} {:?}",
+                            receipt.call_id, receipt.approval_request_id, receipt.route_state
+                        ),
+                    );
+                }
             }
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
@@ -463,9 +519,20 @@ impl AppState {
                 self.last_notice = Some(format!("run interrupted: {reason}"));
                 self.schedule_balance_refresh();
             }
-            WorkerMessage::TerminalTaskUpdated { entry, entries } => {
+            WorkerMessage::TerminalTaskUpdated {
+                identity,
+                entry,
+                entries,
+            } => {
                 self.pending_terminal_cancel_confirmation = None;
                 self.sync_current_session_state(entries);
+                if entry.status.is_active() {
+                    self.terminal_task_control_identities
+                        .insert(identity.task_id.clone(), identity);
+                } else {
+                    self.terminal_task_control_identities
+                        .remove(entry.handle.task_id.as_str());
+                }
                 self.last_notice = Some(format!(
                     "terminal task {} {}",
                     entry.handle.task_id.as_str(),

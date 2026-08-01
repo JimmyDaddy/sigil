@@ -92,6 +92,12 @@ Runtime/server 提供有界、provider-neutral 的 `ConversationDisplayItemV1`�
 6. Provider 内容归一化、截断、空文本和失败/cancelled terminal 不改变 identity 规则。
 7. Renderer 只能按 identity/order 合并，不得比较 prompt/final 文本去重。
 
+HTTP protocol journal 是可重建的 adapter replay projection，不是会话事实源。当前 namespace
+中的 journal 若无法通过 bounded decode、schema、SafePersist canonicality 或容量校验，server 必须先将该文件隔离，
+再以空 replay window 启动；不得修改 session JSONL，也不得因此阻断 workspace、catalog 或 settings。lease、ownership
+和普通 filesystem I/O 失败不属于可安全重建的内容错误，仍须 fail closed。旧 namespace 不读取、不迁移，也不参与
+启动。
+
 ### 3.3 Canonical page and frontier
 
 `ConversationDisplayPageV1` 除 items 外必须返回：
@@ -290,5 +296,7 @@ R52.1/R52.3/R52.5/R52.6 -> R52.7 -> R52.8 -> R52.9
 
 - R52.1-R52.7 已交付 actionable recovery、canonical display、fresh continuity admission、durable follow-up queue、compact/checkpoint/fork route 与 attention/accessibility polish。
 - R52.8 真实 `sigil serve` dogfood 覆盖 restart/reopen、model/effort binding、single-final ordering、queue restart dispatch、checkpoint restore 与 bearer boundary；`f0014d23` 修复重启队列的 fresh effort binding。
-- 原生收尾发现并由 `ae7a4593` 修复 protocol journal schema 2→3 缺少迁移的问题；真实 424-event journal 原地迁移后，release sidecar 和 macOS 应用成功自动重开 `turbods` 并投影 30 条会话。
+- 早期 `ae7a4593` 曾验证 protocol journal schema 2→3 原地迁移；该兼容策略现已被替换：旧 namespace
+  不读取、不迁移，当前 namespace 的无效 replay projection 会隔离后重建，canonical conversation 继续只从 durable
+  session evidence 投影。
 - Desktop 138 tests/type/UI/contract/build、full workspace fmt/check/test/strict Clippy、`sigil-http` 154 tests、900/1280 catalog scroll/AX gate 与两轮 contract/UI audit 通过；截至关闭未发现剩余 R52 P1/P2。

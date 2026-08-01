@@ -13,11 +13,13 @@ use sigil_kernel::{
     JsonlSessionStore, NetworkEffect, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction,
     RunStatus, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry,
     TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval, ToolArtifactDescriptorV1,
-    ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory,
-    ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolSpec,
-    VerificationPolicy, VerificationPolicyChangedEntry, VerificationProductAction,
-    VerificationVerdict, VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
+    TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval,
+    ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
+    ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore,
+    ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta,
+    ToolResultRecordedV2, ToolSpec, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationProductAction, VerificationVerdict, VisibleCompletionState,
+    build_workspace_snapshot, stable_workspace_id,
 };
 
 use super::*;
@@ -39,6 +41,12 @@ fn call() -> ToolCall {
     }
 }
 
+fn unavailable_session_grant_reason() -> Option<ToolApprovalSessionGrantUnavailableReason> {
+    Some(ToolApprovalSessionGrantUnavailableReason {
+        code: ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+    })
+}
+
 fn spec(access: ToolAccess, network_effect: Option<NetworkEffect>) -> ToolSpec {
     ToolSpec {
         name: "read_file".to_owned(),
@@ -48,6 +56,30 @@ fn spec(access: ToolAccess, network_effect: Option<NetworkEffect>) -> ToolSpec {
         access,
         network_effect,
         preview: ToolPreviewCapability::None,
+    }
+}
+
+fn approval_identity() -> ApprovalRequestIdentityV2 {
+    ApprovalRequestIdentityV2 {
+        session_id: "durable-session-1".to_owned(),
+        run_id: "run-1".to_owned(),
+        call_id: "call-1".to_owned(),
+        approval_request_id: "kernel-approval-v2:request-1".to_owned(),
+        plan_hash: "a".repeat(64),
+        policy_version: "permission-policy-v2".to_owned(),
+        execution_binding_hash: "b".repeat(64),
+        expires_at_ms: current_unix_time_ms().saturating_add(60_000),
+    }
+}
+
+fn approval_context() -> ToolApprovalContext {
+    let identity = approval_identity();
+    ToolApprovalContext {
+        requested_at_ms: current_unix_time_ms(),
+        expires_at_ms: identity.expires_at_ms,
+        identity,
+        permission_signature: "permission-signature".to_owned(),
+        policy_fingerprint: "policy-fingerprint".to_owned(),
     }
 }
 
@@ -233,7 +265,7 @@ enabled = true
             HttpRunStartRequest {
                 prompt: String::new(),
                 permission_mode: Some(HttpPermissionMode::Manual),
-                model_name: None,
+                model_ref: None,
                 model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
@@ -681,7 +713,9 @@ fn production_queued_preparation(
                 permission_mode: admission.permission_mode,
                 reasoning_effort: admission.reasoning_effort,
                 prompt_preview: admission.prompt_preview.clone(),
-                pending_approval_call_ids: Vec::new(),
+                pending_approvals: Vec::new(),
+                approval_lifecycles: Vec::new(),
+                terminal_tasks: Vec::new(),
                 stream_sequence: 0,
             },
             admission,
@@ -1223,7 +1257,9 @@ async fn production_queue_restart_rebinds_persisted_reasoning_effort_before_disp
                 permission_mode: admission.permission_mode,
                 reasoning_effort: admission.reasoning_effort,
                 prompt_preview: admission.prompt_preview.clone(),
-                pending_approval_call_ids: Vec::new(),
+                pending_approvals: Vec::new(),
+                approval_lifecycles: Vec::new(),
+                terminal_tasks: Vec::new(),
                 stream_sequence: 0,
             },
             admission,
@@ -1379,7 +1415,9 @@ async fn production_queue_unpromoted_terminal_consumes_only_the_admitted_item() 
                 permission_mode: admission.permission_mode,
                 reasoning_effort: admission.reasoning_effort,
                 prompt_preview: admission.prompt_preview.clone(),
-                pending_approval_call_ids: Vec::new(),
+                pending_approvals: Vec::new(),
+                approval_lifecycles: Vec::new(),
+                terminal_tasks: Vec::new(),
                 stream_sequence: 0,
             },
             admission,
@@ -1699,7 +1737,9 @@ async fn production_queue_cancel_before_promotion_is_terminal_without_replay() {
                 permission_mode: admission.permission_mode,
                 reasoning_effort: admission.reasoning_effort,
                 prompt_preview: admission.prompt_preview.clone(),
-                pending_approval_call_ids: Vec::new(),
+                pending_approvals: Vec::new(),
+                approval_lifecycles: Vec::new(),
+                terminal_tasks: Vec::new(),
                 stream_sequence: 0,
             },
             admission,
@@ -1773,7 +1813,9 @@ async fn production_queue_promotion_evicts_exact_material_and_terminal_uses_atte
                 permission_mode: admission.permission_mode,
                 reasoning_effort: admission.reasoning_effort,
                 prompt_preview: admission.prompt_preview.clone(),
-                pending_approval_call_ids: Vec::new(),
+                pending_approvals: Vec::new(),
+                approval_lifecycles: Vec::new(),
+                terminal_tasks: Vec::new(),
                 stream_sequence: 0,
             },
             admission,
@@ -2100,17 +2142,21 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
             "run-1",
             &call(),
             &spec(ToolAccess::Read, None),
+            &approval_identity(),
             Duration::from_secs(1),
             false,
+            unavailable_session_grant_reason(),
+            crate::HttpPendingApprovalDisplay::default(),
         )
         .expect("approval should register");
-    assert_eq!(pending.policy_version, HTTP_APPROVAL_POLICY_VERSION);
-    assert!(pending.approval_request_id.starts_with("http-approval-v1:"));
+    assert_eq!(pending.policy_version, "permission-policy-v2");
+    assert_eq!(pending.approval_request_id, "kernel-approval-v2:request-1");
     assert_eq!(pending.tool_call_hash.len(), 64);
 
     broker
         .resolve(
             "call-1",
+            &pending.approval_request_id,
             HttpApprovalDecisionRecord {
                 run_id: "run-1".to_owned(),
                 call_id: "call-1".to_owned(),
@@ -2120,7 +2166,7 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
         )
         .expect("decision should resolve");
     let outcome = broker
-        .wait_for_decision("call-1")
+        .wait_for_decision("call-1", &pending.approval_request_id)
         .expect("resolved wait should finish");
 
     assert!(!outcome.expired);
@@ -2136,18 +2182,21 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
 #[test]
 fn approval_broker_expires_and_cleans_up_without_fabricating_a_decision() {
     let broker = HttpApprovalBroker::default();
-    broker
+    let pending = broker
         .register(
             "run-1",
             &call(),
             &spec(ToolAccess::Read, None),
+            &approval_identity(),
             Duration::ZERO,
             false,
+            unavailable_session_grant_reason(),
+            crate::HttpPendingApprovalDisplay::default(),
         )
         .expect("approval should register");
 
     let outcome = broker
-        .wait_for_decision("call-1")
+        .wait_for_decision("call-1", &pending.approval_request_id)
         .expect("expiry should be a typed denial path");
 
     assert!(outcome.expired);
@@ -2164,18 +2213,22 @@ fn approval_broker_expires_and_cleans_up_without_fabricating_a_decision() {
 #[test]
 fn approval_handler_only_resolves_explicit_broker_decisions() {
     let broker = Arc::new(HttpApprovalBroker::default());
-    broker
+    let pending = broker
         .register(
             "run-1",
             &call(),
             &spec(ToolAccess::Write, None),
+            &approval_identity(),
             Duration::from_secs(1),
             false,
+            unavailable_session_grant_reason(),
+            crate::HttpPendingApprovalDisplay::default(),
         )
         .expect("approval should register");
     broker
         .resolve(
             "call-1",
+            &pending.approval_request_id,
             HttpApprovalDecisionRecord {
                 run_id: "run-1".to_owned(),
                 call_id: "call-1".to_owned(),
@@ -2192,7 +2245,11 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
 
     assert!(matches!(
         handler
-            .approve_tool_call(&call(), &spec(ToolAccess::Write, None))
+            .approve_tool_call_with_context(
+                &call(),
+                &spec(ToolAccess::Write, None),
+                &approval_context(),
+            )
             .expect("explicit decision should resolve"),
         ToolApproval::Approve
     ));
@@ -2207,14 +2264,18 @@ fn approval_handler_preserves_bounded_session_decisions() {
             "run-1",
             &call(),
             &spec(ToolAccess::Read, None),
+            &approval_identity(),
             Duration::from_secs(1),
             true,
+            None,
+            crate::HttpPendingApprovalDisplay::default(),
         )
         .expect("approval should register");
     assert!(pending.session_grant_available);
     broker
         .resolve(
             "call-1",
+            &pending.approval_request_id,
             HttpApprovalDecisionRecord {
                 run_id: "run-1".to_owned(),
                 call_id: "call-1".to_owned(),
@@ -2231,7 +2292,11 @@ fn approval_handler_preserves_bounded_session_decisions() {
 
     assert!(matches!(
         handler
-            .approve_tool_call(&call(), &spec(ToolAccess::Read, None))
+            .approve_tool_call_with_context(
+                &call(),
+                &spec(ToolAccess::Read, None),
+                &approval_context(),
+            )
             .expect("session decision should reach the kernel"),
         ToolApproval::ApproveForSession
     ));
@@ -2688,7 +2753,7 @@ async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_r
             HttpRunStartRequest {
                 prompt: "wait in preparation".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
-                model_name: None,
+                model_ref: None,
                 model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
@@ -2752,20 +2817,34 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
     let bus = HttpLiveEventBus::new(8);
     let call = call();
     let spec = spec(ToolAccess::Write, None);
+    let identity = approval_identity();
     let pending = HttpPendingApproval {
         call_id: call.id.clone(),
         tool_name: spec.name.clone(),
-        approval_request_id: format!("http-approval-v1:{}", "a".repeat(64)),
+        approval_request_id: identity.approval_request_id.clone(),
         tool_call_hash: "b".repeat(64),
-        policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
-        expires_at_ms: 10,
+        policy_version: identity.policy_version.clone(),
+        expires_at_ms: identity.expires_at_ms,
         session_grant_available: false,
+        session_grant_unavailable_reason: unavailable_session_grant_reason(),
+        display: crate::HttpPendingApprovalDisplay {
+            event_sequence: 1,
+            ..Default::default()
+        },
     };
     let event = PublicRunEvent::new(
         "durable-session-1",
         "run-1",
         1,
         PublicRunEventKind::ApprovalRequested {
+            approval_identity: identity,
+            session_grant_available: false,
+            session_grant_unavailable_reason: unavailable_session_grant_reason(),
+            effects: Default::default(),
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            safe_summary: Default::default(),
+            decision_reasons: Vec::new(),
             call,
             spec,
             subjects: Vec::new(),
@@ -2790,10 +2869,7 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
     assert_eq!(published.approval_request, Some(pending));
     assert!(matches!(
         published.view(),
-        crate::HttpProtocolEventView::Durable(crate::HttpDurableEventView {
-            approval_request: Some(_),
-            ..
-        })
+        crate::HttpProtocolEventView::Durable(view) if view.approval_request.is_some()
     ));
 }
 
@@ -2802,11 +2878,20 @@ fn approval_protocol_event_rejects_guard_for_another_call() {
     let bus = HttpLiveEventBus::new(8);
     let call = call();
     let spec = spec(ToolAccess::Write, None);
+    let identity = approval_identity();
     let event = PublicRunEvent::new(
         "durable-session-1",
         "run-1",
         1,
         PublicRunEventKind::ApprovalRequested {
+            approval_identity: identity.clone(),
+            session_grant_available: false,
+            session_grant_unavailable_reason: unavailable_session_grant_reason(),
+            effects: Default::default(),
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            safe_summary: Default::default(),
+            decision_reasons: Vec::new(),
             call,
             spec,
             subjects: Vec::new(),
@@ -2826,11 +2911,16 @@ fn approval_protocol_event_rejects_guard_for_another_call() {
     let wrong = HttpPendingApproval {
         call_id: "call-other".to_owned(),
         tool_name: "read_file".to_owned(),
-        approval_request_id: format!("http-approval-v1:{}", "a".repeat(64)),
+        approval_request_id: identity.approval_request_id,
         tool_call_hash: "b".repeat(64),
-        policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
-        expires_at_ms: 10,
+        policy_version: identity.policy_version,
+        expires_at_ms: identity.expires_at_ms,
         session_grant_available: false,
+        session_grant_unavailable_reason: unavailable_session_grant_reason(),
+        display: crate::HttpPendingApprovalDisplay {
+            event_sequence: 1,
+            ..Default::default()
+        },
     };
 
     assert!(matches!(
@@ -2879,7 +2969,7 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
                 permission_mode: Some(HttpPermissionMode::Manual),
-                model_name: None,
+                model_ref: None,
                 model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
@@ -2929,6 +3019,44 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
     assert!(matches!(
         replay.last().map(|event| &event.run_event.event),
         Some(PublicRunEventKind::RunFailed { .. })
+    ));
+}
+
+#[test]
+fn production_execution_without_a_public_terminal_is_closed_as_failed() {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let result = Err(anyhow!("private provider transport detail"));
+    let mut recorder = Recorder::default();
+    let terminal = ensure_application_execution_terminal(
+        false,
+        &result,
+        "durable-session-1",
+        "run-1",
+        &mut recorder,
+    )
+    .expect("missing terminal should be recovered");
+
+    assert_eq!(terminal, HttpRunTerminalOutcome::Failed);
+    assert!(matches!(
+        recorder.0.as_slice(),
+        [PublicRunEvent {
+            session_id,
+            run_id,
+            event: PublicRunEventKind::RunFailed { error },
+            ..
+        }] if session_id == "durable-session-1"
+            && run_id == "run-1"
+            && error == "run execution failed before its terminal status was published"
+            && !error.contains("private provider")
     ));
 }
 

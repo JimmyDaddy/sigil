@@ -1,7 +1,8 @@
 use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, EgressDisclosurePresenter,
     ExternalEvidenceLevel, ExternalSourceRecord, RootConfig, SourceCacheStatus, SourceFreshness,
-    ToolRegistry, ToolRestartPolicy,
+    ToolAnalysisStatus, ToolCall, ToolContext, ToolOperation, ToolPermissionEffect, ToolRegistry,
+    ToolRestartPolicy,
 };
 
 use crate::ProxyEnvironment;
@@ -115,6 +116,47 @@ fn public_websearch_description_discourages_unnecessary_fetch_fanout() {
 }
 
 #[test]
+fn websearch_permission_plan_declares_only_network_read_and_keeps_query_out_of_scope() {
+    let config = current_root("");
+    let mut registry = ToolRegistry::new();
+    register_web_search_tool(&mut registry, &config, 64, Arc::new(AcceptingPresenter));
+    let context = ToolContext::new(std::env::current_dir().expect("current dir"), 5);
+    let plan = |id: &str, query: &str| {
+        registry
+            .permission_plan(
+                &context,
+                &ToolCall {
+                    id: id.to_owned(),
+                    name: "websearch".to_owned(),
+                    args_json: serde_json::json!({ "query": query, "max_results": 5 }).to_string(),
+                },
+            )
+            .expect("websearch plan should resolve")
+    };
+    let first = plan("search-1", "structured permission plans");
+    let second = plan("search-2", "event driven terminal lifecycle");
+
+    assert_eq!(first.operation, ToolOperation::NetworkRequest);
+    assert_eq!(first.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(
+        first.effects,
+        std::collections::BTreeSet::from([ToolPermissionEffect::NetworkRead])
+    );
+    assert_eq!(first.semantic_scope, second.semantic_scope);
+    assert_ne!(first.plan_hash, second.plan_hash);
+    assert_eq!(
+        first.analysis_bindings.get("planner").map(String::as_str),
+        Some("websearch_v2")
+    );
+    assert!(
+        !first
+            .safe_summary
+            .detail
+            .contains("structured permission plans")
+    );
+}
+
+#[test]
 fn configured_websearch_query_disclosure_uses_the_remote_mcp_origin() {
     let config = current_root(
         r#"[web]
@@ -146,6 +188,39 @@ startup = "lazy"
         "https://search.example.test/"
     );
     assert_eq!(destination.route, EgressNetworkRoute::Direct);
+
+    let mut registry = ToolRegistry::new();
+    register_web_search_tool(&mut registry, &config, 64, Arc::new(AcceptingPresenter));
+    let call = ToolCall {
+        id: "configured-search-plan".to_owned(),
+        name: "websearch".to_owned(),
+        args_json: json!({ "query": "runtime permission plan" }).to_string(),
+    };
+    let context = ToolContext::new(std::env::current_dir().expect("current dir"), 5);
+    let plan = registry
+        .permission_plan(&context, &call)
+        .expect("configured search plan");
+    assert_eq!(
+        plan.tool_default_mode,
+        Some(sigil_kernel::ApprovalMode::Ask)
+    );
+    assert!(
+        plan.subjects
+            .iter()
+            .any(|subject| { subject.normalized.starts_with("mcp__search__search") })
+    );
+    assert!(
+        plan.subjects
+            .iter()
+            .any(|subject| subject.normalized == "mcp_trust_class:self_hosted")
+    );
+    assert_eq!(
+        plan.semantic_scope
+            .as_ref()
+            .and_then(|scope| scope.qualifiers.get("route"))
+            .map(String::as_str),
+        Some("configured_mcp")
+    );
 }
 
 #[test]

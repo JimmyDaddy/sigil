@@ -509,6 +509,8 @@ pub struct DesktopSessionContinuityView {
     #[serde(default)]
     pub foreground_owner: Option<DesktopForegroundRunOwner>,
     #[serde(default)]
+    pub retained_terminal_runs: Vec<DesktopRunSnapshot>,
+    #[serde(default)]
     pub recovery_actions: Vec<DesktopContinuityRecoveryAction>,
 }
 
@@ -519,6 +521,7 @@ impl fmt::Debug for DesktopSessionContinuityView {
             .field("durable_session_scope_id", &"<redacted>")
             .field("durable_frontier", &self.durable_frontier)
             .field("foreground_owner", &self.foreground_owner)
+            .field("retained_terminal_runs", &self.retained_terminal_runs.len())
             .field("recovery_actions", &self.recovery_actions)
             .finish()
     }
@@ -1098,7 +1101,7 @@ pub enum DesktopPermissionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopModelSelectionPolicy {
-    FreshSession,
+    SameSession,
 }
 
 /// Evidence source used to resolve a session context window.
@@ -1323,7 +1326,7 @@ pub struct DesktopRunStartRequest {
     pub prompt: String,
     pub permission_mode: DesktopPermissionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
+    pub model_ref: Option<DesktopProviderModelRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_binding: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1355,6 +1358,14 @@ pub struct DesktopRunCancelRequest {
     pub reason: Option<String>,
 }
 
+/// Exact generation-bound request for stopping one persistent terminal task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTerminalTaskCancelRequest {
+    pub task_id: String,
+    pub expected_generation: u64,
+}
+
 /// Exact durable Task pause payload constructed by the native client boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1381,6 +1392,26 @@ pub enum DesktopRunStatus {
     Interrupted,
 }
 
+/// Canonical non-pending approval lifecycle state returned by the workspace server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopApprovalLifecycleState {
+    Resolving,
+    DecisionAccepted,
+    Resolved,
+    ExecutionStarted,
+    DeliveryUncertain,
+    Terminal,
+}
+
+/// Exact bounded approval identity used to recover renderer state after an event gap.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopApprovalLifecycleView {
+    pub approval: DesktopPendingApproval,
+    pub state: DesktopApprovalLifecycleState,
+}
+
 impl DesktopRunStatus {
     /// Returns whether command routing has reached a terminal state.
     #[must_use]
@@ -1404,8 +1435,112 @@ pub struct DesktopRunSnapshot {
     pub reasoning_effort: Option<DesktopReasoningEffort>,
     pub prompt_preview: String,
     #[serde(default)]
-    pub pending_approval_call_ids: Vec<String>,
+    pub pending_approvals: Vec<DesktopPendingApproval>,
+    #[serde(default)]
+    pub approval_lifecycles: Vec<DesktopApprovalLifecycleView>,
+    #[serde(default)]
+    pub terminal_tasks: Vec<DesktopTerminalLifecycleView>,
     pub stream_sequence: u64,
+}
+
+/// Typed bounded terminal owner snapshot returned with a run.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTerminalLifecycleView {
+    pub task_id: String,
+    #[serde(default)]
+    pub execution_backend: Option<DesktopTerminalExecutionBackendKind>,
+    #[serde(default)]
+    pub sandbox_profile: Option<DesktopExecutionSandboxProfile>,
+    pub generation: u64,
+    pub status: DesktopTerminalTaskStatus,
+    pub readiness: DesktopTerminalReadinessStatus,
+    pub total_output_bytes: u64,
+    pub emitted_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTerminalExecutionBackendKind {
+    LocalProcess,
+    LocalPty,
+    SandboxedPty,
+}
+
+impl DesktopTerminalExecutionBackendKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalProcess => "local_process",
+            Self::LocalPty => "local_pty",
+            Self::SandboxedPty => "sandboxed_pty",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopExecutionSandboxProfile {
+    Unconfined,
+    WorkspaceWrite,
+    BuildOffline,
+    BuildNetworked,
+}
+
+impl DesktopExecutionSandboxProfile {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unconfined => "unconfined",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::BuildOffline => "build_offline",
+            Self::BuildNetworked => "build_networked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DesktopTerminalTaskStatus {
+    Starting,
+    Running,
+    Exited {
+        #[serde(default)]
+        exit_code: Option<i32>,
+    },
+    Failed {
+        reason: String,
+    },
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTerminalReadinessKind {
+    None,
+    OutputContains,
+    OutputRegex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DesktopTerminalReadinessStatus {
+    None,
+    Waiting {
+        kind: DesktopTerminalReadinessKind,
+    },
+    Ready {
+        kind: DesktopTerminalReadinessKind,
+        ready_at_ms: u64,
+    },
+    Failed {
+        kind: DesktopTerminalReadinessKind,
+        reason: String,
+    },
+    TimedOut {
+        kind: DesktopTerminalReadinessKind,
+    },
 }
 
 /// Opaque compare-and-swap generation for one exact durable queue projection.
@@ -1976,6 +2111,47 @@ pub struct DesktopTaskPauseCommandReceipt {
     pub replayed: bool,
 }
 
+/// Receipt from stopping one exact persistent terminal task.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopTerminalTaskCancelCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub expected_stream_sequence: Option<u64>,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub run_id: String,
+    pub terminal_task: DesktopTerminalLifecycleView,
+    pub replayed: bool,
+}
+
+/// Renderer-safe mirror of the shared session-grant unavailability reason code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionGrantUnavailableReasonCode {
+    AnalysisIncomplete,
+    SemanticScopeUnavailable,
+    NonGrantableEffect,
+    ContainmentBindingUnavailable,
+    PolicyDecisionNotGrantable,
+    NoReusableApprovalFacet,
+    NetworkScopeNotGrantable,
+    ConfirmationRequired,
+    SnapshotRequired,
+    SubjectScopeUnavailable,
+    RiskNotGrantable,
+    ExternalMutation,
+    OperationNotGrantable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionGrantUnavailableReason {
+    pub code: DesktopSessionGrantUnavailableReasonCode,
+}
+
 /// Guard material attached to a durable approval request event.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1986,8 +2162,46 @@ pub struct DesktopPendingApproval {
     pub tool_call_hash: String,
     pub policy_version: String,
     pub expires_at_ms: u64,
-    #[serde(default)]
     pub session_grant_available: bool,
+    pub session_grant_unavailable_reason: Option<DesktopSessionGrantUnavailableReason>,
+    pub display: DesktopPendingApprovalDisplay,
+}
+
+/// Bounded, credential-free facts used to rebuild one pending approval from a run snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPendingApprovalDisplay {
+    pub event_sequence: u64,
+    #[serde(default)]
+    pub effects: Vec<String>,
+    #[serde(default)]
+    pub subjects: Vec<DesktopPendingApprovalSubject>,
+    pub analysis_status: String,
+    #[serde(default)]
+    pub analysis_reason_codes: Vec<String>,
+    #[serde(default)]
+    pub analysis_reasons: Vec<String>,
+    #[serde(default)]
+    pub containment: Vec<String>,
+    #[serde(default)]
+    pub decision_reasons: Vec<String>,
+    pub safe_summary_title: String,
+    pub safe_summary_detail: String,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub risk: Option<String>,
+    #[serde(default)]
+    pub snapshot_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPendingApprovalSubject {
+    pub kind: String,
+    pub scope: String,
+    #[serde(default)]
+    pub workspace_label: Option<String>,
 }
 
 /// Explicit user decision for one pending tool call.
@@ -2019,6 +2233,15 @@ pub struct DesktopApprovalDecisionRecord {
     pub reason: Option<String>,
 }
 
+/// Server-owned routing state for one exact approval command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopApprovalRouteState {
+    DecisionAccepted,
+    DeliveryUncertain,
+    Terminal,
+}
+
 /// Exact approval guard echoed back to the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -2041,11 +2264,14 @@ pub struct DesktopApprovalCommandReceipt {
     pub session_id: String,
     pub run_id: String,
     pub call_id: String,
+    pub approval_request_id: String,
     #[serde(default)]
     pub expected_stream_sequence: Option<u64>,
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub decision: DesktopApprovalDecisionRecord,
+    pub route_state: DesktopApprovalRouteState,
+    pub registry_revision: u64,
     pub replayed: bool,
 }
 

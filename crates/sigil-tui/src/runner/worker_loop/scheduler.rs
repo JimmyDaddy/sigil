@@ -45,20 +45,38 @@ fn record_worker_advancement() {
     WORKER_REACTOR_ADVANCEMENT_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub(in crate::runner) struct WorkerLoopTerminalRuntime {
+    lifecycle_router: ChannelTerminalLifecycleRouter,
+    control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+}
+
+impl WorkerLoopTerminalRuntime {
+    pub(in crate::runner) fn new(
+        lifecycle_router: ChannelTerminalLifecycleRouter,
+        control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+    ) -> Self {
+        Self {
+            lifecycle_router,
+            control,
+        }
+    }
+}
+
 pub(in crate::runner) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
     mut agent: Arc<Agent<P>>,
     root_config: RootConfig,
-    provider_capabilities: ProviderCapabilities,
     workspace_root: PathBuf,
     session_log_path: PathBuf,
     options: AgentRunOptions,
     event_inbox: WorkerEventInbox,
     message_tx: mpsc::Sender<WorkerMessage>,
     mcp_handlers: WorkerLoopMcpHandlers,
+    terminal_runtime: WorkerLoopTerminalRuntime,
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    let provider_capabilities = agent.provider_capabilities();
     let (event_tx, event_rx, urgent_command_rx) = event_inbox;
     let WorkerLoopMcpHandlers {
         elicitation_handler,
@@ -66,6 +84,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
         role_provider_builder,
         context_resolver,
     } = mcp_handlers;
+    let WorkerLoopTerminalRuntime {
+        lifecycle_router: terminal_lifecycle_router,
+        control: terminal_control,
+    } = terminal_runtime;
     let initial_exact_conversation_prompts = ExactConversationPromptStore::new();
     let attachment_paths = sigil_runtime::resolve_sigil_paths(
         &root_config.storage,
@@ -208,6 +230,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
         background_agent_runs,
         event_tx,
         wake_coalescer,
+        terminal_lifecycle_router,
+        terminal_control,
     );
     if let Err(error) = register_worker_active_projection_observer(&mut state) {
         let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -1094,6 +1118,13 @@ mod reactor_tests {
     fn worker_scheduler_has_no_general_fifty_millisecond_poll() {
         let forbidden = ["Duration::from_millis(", "50", ")"].concat();
         assert!(!include_str!("scheduler.rs").contains(&forbidden));
+    }
+
+    #[test]
+    fn terminal_lifecycle_has_no_steady_state_timer_or_status_probe() {
+        assert!(!include_str!("state.rs").contains("next_terminal_task_refresh_at"));
+        assert!(!include_str!("advancement.rs").contains("refresh_terminal_task_statuses"));
+        assert!(!include_str!("../worker_loop.rs").contains("TERMINAL_TASK_REFRESH_INTERVAL"));
     }
 
     #[test]

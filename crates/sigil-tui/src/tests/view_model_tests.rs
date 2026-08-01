@@ -19,6 +19,19 @@ use sigil_kernel::{
 use super::*;
 use crate::runner::WorkerMessage;
 
+fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
+    sigil_kernel::ApprovalRequestIdentityV2 {
+        session_id: "session-view-model".to_owned(),
+        run_id: "run-view-model".to_owned(),
+        call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
+        plan_hash: "plan-view-model".to_owned(),
+        policy_version: "policy-view-model".to_owned(),
+        execution_binding_hash: "binding-view-model".to_owned(),
+        expires_at_ms: u64::MAX,
+    }
+}
+
 fn test_config() -> RootConfig {
     RootConfig {
         config_version: 2,
@@ -1218,6 +1231,16 @@ fn footer_hints_show_agent_background_shortcut_while_waiting() -> anyhow::Result
 fn footer_hints_track_approval_state() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-approval"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "read_file".to_owned(),
@@ -1319,6 +1342,16 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.runtime.is_busy = true;
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-approval"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),

@@ -23,17 +23,18 @@ use sigil_kernel::{
     AgentRunOptions, AgentRunOutcome, AgentRunPurpose, AgentThreadId, AgentThreadStatus,
     AgentToolDelegate, AgentTrustState, ApprovalHandler, ApprovalMode, AutoApproveHandler,
     CommandPermissionConfig, CompactionConfig, CompletionRequest, ControlEntry,
-    ConversationPurposeContext, ConversationTurnRef, DelegationAuthority, EventHandler,
-    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode, NetworkPolicy,
-    PermissionConfig, PermissionEvaluationContext, PermissionMode, PermissionPolicyChain,
-    PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunEvent, Session, SessionConfig,
-    SessionLogEntry, SessionRef, TaskId, TaskIsolationMode, TaskRoutingPolicy, TaskStepId, Tool,
-    ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolExecutionEntry,
-    ToolExecutionStatus, ToolMutationTracking, ToolOperation, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
-    stable_workspace_id,
+    ConversationPurposeContext, ConversationTurnRef, DeclaredToolPermissionFacts,
+    DelegationAuthority, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig,
+    MessageRole, MultiAgentMode, NetworkPolicy, PermissionConfig, PermissionEvaluationContext,
+    PermissionMode, PermissionPolicyChain, PermissionRisk, Provider, ProviderCapabilities,
+    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
+    RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskIsolationMode,
+    TaskRoutingPolicy, TaskStepId, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolExecutionEntry, ToolExecutionStatus, ToolMutationTracking, ToolOperation,
+    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    declared_tool_permission_plan, stable_workspace_id,
 };
 
 use super::{
@@ -267,12 +268,23 @@ impl Tool for ApprovalRequiredReadTool {
         contract_test_spec("read_file", ToolAccess::Read)
     }
 
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Ask))
+        args: &serde_json::Value,
+    ) -> Result<ToolPermissionPlanDraft> {
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect: None,
+                subjects: Vec::new(),
+                tool_default_mode: Some(ApprovalMode::Ask),
+            },
+        )
     }
 
     async fn execute(
@@ -2034,6 +2046,63 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
 }
 
 #[test]
+fn agent_tools_publish_explicit_v2_effect_facts() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let context = ToolContext::new(std::env::current_dir()?, 5);
+
+    let request = ToolCall {
+        id: "request-agent-plan".to_owned(),
+        name: REQUEST_AGENT_DELEGATION_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "members": [{
+                "request_key": "review",
+                "profile_id": "explore",
+                "objective": "Review the bounded target",
+                "prompt": "Inspect only the requested files"
+            }],
+            "completion_mode": "join_before_final"
+        })
+        .to_string(),
+    };
+    let request_plan = registry.permission_plan(&context, &request)?;
+    assert_eq!(request_plan.operation, ToolOperation::SpawnAgent);
+    assert!(request_plan.analysis.is_complete());
+    assert!(
+        request_plan
+            .effects
+            .contains(&ToolPermissionEffect::AgentLifecycle)
+    );
+    assert!(
+        request_plan
+            .effects
+            .contains(&ToolPermissionEffect::Unknown)
+    );
+    assert_eq!(
+        request_plan
+            .analysis_bindings
+            .get("planner")
+            .map(String::as_str),
+        Some("agent_thread_v2")
+    );
+
+    let list = ToolCall {
+        id: "list-agent-plan".to_owned(),
+        name: LIST_AGENTS_TOOL_NAME.to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let list_plan = registry.permission_plan(&context, &list)?;
+    assert_eq!(list_plan.operation, ToolOperation::Read);
+    assert_eq!(
+        list_plan.effects,
+        std::collections::BTreeSet::from([ToolPermissionEffect::AgentLifecycle])
+    );
+    assert!(list_plan.analysis.is_complete());
+    Ok(())
+}
+
+#[test]
 fn host_join_batch_accepts_only_owned_join_before_final_spawn_calls() {
     let spawn = |call_id: &str, mode: &str| ToolCall {
         id: call_id.to_owned(),
@@ -2170,11 +2239,10 @@ fn spawn_agent_description_reflects_multi_agent_mode() -> Result<()> {
         })
         .to_string(),
     };
-    assert_eq!(
-        disabled
-            .permission_default_mode(&ToolContext::new(std::env::temp_dir(), 30), &disabled_call,)?,
-        Some(ApprovalMode::Deny)
-    );
+    let disabled_plan =
+        disabled.permission_plan(&ToolContext::new(std::env::temp_dir(), 30), &disabled_call)?;
+    assert_eq!(disabled_plan.tool_default_mode, Some(ApprovalMode::Deny));
+    assert_eq!(disabled_plan.operation, ToolOperation::SpawnAgent);
     Ok(())
 }
 
@@ -2289,10 +2357,9 @@ fn natural_language_delegation_is_a_model_owned_typed_proposal_not_prompt_scanni
 
     let call = delegation_proposal_call("call-proposal-surface", "inspect the runtime");
     let context = ToolContext::new(std::env::temp_dir(), 30);
-    assert_eq!(
-        registry.permission_default_mode(&context, &call)?,
-        Some(ApprovalMode::Ask)
-    );
+    let proposal_plan = registry.permission_plan(&context, &call)?;
+    assert_eq!(proposal_plan.tool_default_mode, Some(ApprovalMode::Ask));
+    assert_eq!(proposal_plan.operation, ToolOperation::SpawnAgent);
     let preview = futures::executor::block_on(registry.preview(context, call))?
         .expect("delegation proposal preview");
     assert!(preview.title.contains("Delegate to 1 agent"));
@@ -2709,7 +2776,8 @@ async fn proactive_explore_uses_resolved_tool_contract_not_safe_name() -> Result
     };
     assert_eq!(
         registry
-            .permission_default_mode(&ToolContext::new(std::env::temp_dir(), 30), &surface_call,)?,
+            .permission_plan(&ToolContext::new(std::env::temp_dir(), 30), &surface_call,)?
+            .tool_default_mode,
         Some(ApprovalMode::Allow),
         "the runtime admission must remain authoritative even if an older surface proof was safe"
     );
@@ -2885,10 +2953,18 @@ fn agent_tool_permission_defaults_allow_safe_coordination_tools() -> Result<()> 
         .to_string(),
     };
 
+    let safe_spawn_plan = registry.permission_plan(&ctx, &safe_spawn)?;
+    let repeated_safe_spawn_plan = registry.permission_plan(&ctx, &safe_spawn)?;
     assert_eq!(
-        registry.permission_default_mode(&ctx, &safe_spawn)?,
+        safe_spawn_plan.tool_default_mode,
         Some(sigil_kernel::ApprovalMode::Allow)
     );
+    assert_eq!(safe_spawn_plan.operation, ToolOperation::SpawnAgent);
+    assert_eq!(
+        safe_spawn_plan.plan_hash,
+        repeated_safe_spawn_plan.plan_hash
+    );
+    assert_eq!(safe_spawn_plan.subjects, repeated_safe_spawn_plan.subjects);
 
     for name in [
         WAIT_AGENT_TOOL_NAME,
@@ -2902,7 +2978,7 @@ fn agent_tool_permission_defaults_allow_safe_coordination_tools() -> Result<()> 
             args_json: json!({ "thread_id": "agent_chat_example" }).to_string(),
         };
         assert_eq!(
-            registry.permission_default_mode(&ctx, &call)?,
+            registry.permission_plan(&ctx, &call)?.tool_default_mode,
             Some(sigil_kernel::ApprovalMode::Allow),
             "{name} should default to allow"
         );
@@ -5236,6 +5312,123 @@ fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Resu
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn test_permission_decision_control(
+    call_id: &str,
+    tool_name: &str,
+    access: ToolAccess,
+    network_effect: Option<sigil_kernel::NetworkEffect>,
+    local_policy_decision: ApprovalMode,
+    network_policy_decision: ApprovalMode,
+    source_policy_decision: ApprovalMode,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    policy_decision: ApprovalMode,
+    allow_source: Option<ToolApprovalAllowSource>,
+    grant_id: Option<&str>,
+) -> ControlEntry {
+    ControlEntry::ToolPermissionDecisionV2(Box::new(sigil_kernel::ToolPermissionDecisionV2Entry {
+        schema_version: sigil_kernel::TOOL_PERMISSION_DECISION_SCHEMA_VERSION,
+        call_id: call_id.to_owned(),
+        tool_name: tool_name.to_owned(),
+        plan_hash: sigil_kernel::stable_event_hash(format!("permission-plan:{call_id}")),
+        policy_version: "policy-test".to_owned(),
+        policy_decision,
+        access,
+        network_effect,
+        local_policy_decision,
+        network_policy_decision,
+        source_policy_decision,
+        operation,
+        risk,
+        subjects: Vec::new(),
+        subject_zones: Vec::new(),
+        external_directory_required: false,
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        decision_reasons: Vec::new(),
+        allow_source,
+        grant_id: grant_id.map(str::to_owned),
+        prepared_digest: None,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_approval_control(
+    action: ToolApprovalAuditAction,
+    call_id: &str,
+    tool_name: &str,
+    access: ToolAccess,
+    network_effect: Option<sigil_kernel::NetworkEffect>,
+    local_policy_decision: ApprovalMode,
+    network_policy_decision: ApprovalMode,
+    source_policy_decision: ApprovalMode,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    policy_decision: ApprovalMode,
+    user_decision: Option<ToolApprovalUserDecision>,
+) -> ControlEntry {
+    let plan_hash = sigil_kernel::stable_event_hash(format!("approval-plan:{call_id}"));
+    let approval_request_id = format!("approval-{call_id}");
+    let decision_receipt = (action == ToolApprovalAuditAction::DecisionAccepted).then(|| {
+        sigil_kernel::ToolApprovalDecisionReceiptV2 {
+            approval_request_id: approval_request_id.clone(),
+            decision: user_decision.expect("accepted approval fixture has a decision"),
+            accepted_at_ms: 1_000,
+        }
+    });
+    let terminal_status =
+        (action == ToolApprovalAuditAction::Resolved).then_some(match user_decision {
+            Some(ToolApprovalUserDecision::Approved) => {
+                sigil_kernel::ToolApprovalTerminalStatusV2::Approved
+            }
+            Some(ToolApprovalUserDecision::ApprovedForSession) => {
+                sigil_kernel::ToolApprovalTerminalStatusV2::ApprovedForSession
+            }
+            Some(ToolApprovalUserDecision::Denied) | None => {
+                sigil_kernel::ToolApprovalTerminalStatusV2::Denied
+            }
+        });
+    ControlEntry::ToolApproval(sigil_kernel::ToolApprovalEntry {
+        schema_version: sigil_kernel::TOOL_APPROVAL_AUDIT_SCHEMA_VERSION,
+        identity: sigil_kernel::ApprovalRequestIdentityV2 {
+            session_id: "session-test".to_owned(),
+            run_id: "run-test".to_owned(),
+            call_id: call_id.to_owned(),
+            approval_request_id,
+            plan_hash: plan_hash.clone(),
+            policy_version: "policy-test".to_owned(),
+            execution_binding_hash: plan_hash.clone(),
+            expires_at_ms: u64::MAX,
+        },
+        plan_hash,
+        action,
+        call_id: call_id.to_owned(),
+        tool_name: tool_name.to_owned(),
+        access,
+        network_effect,
+        local_policy_decision,
+        network_policy_decision,
+        source_policy_decision,
+        operation,
+        risk,
+        subjects: Vec::new(),
+        subject_zones: Vec::new(),
+        policy_decision,
+        external_directory_required: false,
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        decision_reasons: Vec::new(),
+        user_decision,
+        reason: None,
+        preview_hash: None,
+        decision_receipt,
+        terminal_status,
+    })
+}
+
 #[test]
 fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -> Result<()> {
     let config = root_config();
@@ -5252,11 +5445,13 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         metadata: ToolResultMeta {
             exit_code: Some(0),
             details: json!({
-                "shell": {
-                    "command": "cargo check 2>&1",
-                    "command_family": "cargo_check",
-                    "verdict": "passed"
-                }
+                "call": {
+                    "command_sha256": sigil_kernel::stable_event_hash("cargo check 2>&1"),
+                    "summary": "workspace check command"
+                },
+                "shell_label": "sh",
+                "shell_sha256": sigil_kernel::stable_event_hash("sh"),
+                "status": "completed"
             }),
             ..ToolResultMeta::default()
         },
@@ -5274,11 +5469,15 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
             exit_code: Some(0),
             truncated: true,
             details: json!({
-                "shell_analysis": {
-                    "command": "./scripts/check-touched.sh --tier quick",
-                    "command_family": "check_touched",
-                    "verdict": "passed"
-                }
+                "call": {
+                    "command_sha256": sigil_kernel::stable_event_hash(
+                        "./scripts/check-touched.sh --tier quick"
+                    ),
+                    "summary": "touched-files gate"
+                },
+                "shell_label": "sh",
+                "shell_sha256": sigil_kernel::stable_event_hash("sh"),
+                "status": "completed"
             }),
             ..ToolResultMeta::default()
         },
@@ -5302,38 +5501,17 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         .expect("recorded facts should produce final-answer context");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     assert_eq!(payload["type"], "run_facts_summary");
+    assert_eq!(payload["session_facts"]["commands"], json!([]));
+    assert_eq!(payload["session_facts"]["gates"], json!([]));
     assert_eq!(
-        payload["session_facts"]["commands"][0]["command"],
-        "cargo check 2>&1"
+        payload["session_facts"]["files_changed"][0],
+        "crates/sigil-tui/src/app/key_router.rs"
     );
-    assert_eq!(
-        payload["session_facts"]["commands"][0]["output_truncated"],
-        false
-    );
-    assert_eq!(
-        payload["session_facts"]["commands"][0]["rerun_not_needed"],
-        true
-    );
-    assert_eq!(
-        payload["session_facts"]["commands"][1]["command"],
-        "./scripts/check-touched.sh --tier quick"
-    );
-    assert_eq!(
-        payload["session_facts"]["commands"][1]["command_family"],
-        "check_touched"
-    );
-    assert_eq!(
-        payload["session_facts"]["commands"][1]["output_truncated"],
-        true
-    );
-    assert_eq!(
-        payload["session_facts"]["commands"][1]["rerun_not_needed"],
-        true
-    );
-    assert_eq!(payload["session_facts"]["gates"][0]["verdict"], "passed");
-    assert_eq!(
-        payload["session_facts"]["gates"][1]["command_family"],
-        "check_touched"
+    assert!(!context.prompt.contains("cargo check 2>&1"));
+    assert!(
+        !context
+            .prompt
+            .contains("./scripts/check-touched.sh --tier quick")
     );
     assert!(!payload["session_facts"]["readiness"].is_null());
     assert!(!payload["session_facts"]["readiness"]["visible_state"].is_null());
@@ -5347,31 +5525,19 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::PolicyEvaluated,
-            call_id: "call-read".to_owned(),
-            tool_name: "read_file".to_owned(),
-            access: ToolAccess::Read,
-            network_effect: None,
-            local_policy_decision: ApprovalMode::Allow,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::Read),
-            risk: Some(PermissionRisk::Low),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Allow,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: None,
-            grant_call_id: None,
-            user_decision: None,
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_permission_decision_control(
+        "call-read",
+        "read_file",
+        ToolAccess::Read,
+        None,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::Read,
+        PermissionRisk::Low,
+        ApprovalMode::Allow,
+        None,
+        None,
     ))?;
     session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
         call_id: "call-read".to_owned(),
@@ -5384,11 +5550,9 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
             truncated: true,
             details: json!({
                 "call": {
-                    "path": "README.md",
-                    "summary": "path=README.md"
-                },
-                "returned_lines": 20,
-                "total_lines": 100
+                    "path_sha256": sigil_kernel::stable_event_hash("README.md"),
+                    "summary": "workspace file read"
+                }
             }),
             ..ToolResultMeta::default()
         },
@@ -5405,11 +5569,9 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
         metadata: ToolResultMeta {
             details: json!({
                 "call": {
-                    "pattern": "src/**/*.rs",
-                    "summary": "pattern=src/**/*.rs"
-                },
-                "returned_paths": 3,
-                "total_paths": 3
+                    "pattern_sha256": sigil_kernel::stable_event_hash("src/**/*.rs"),
+                    "summary": "workspace path search"
+                }
             }),
             ..ToolResultMeta::default()
         },
@@ -5445,15 +5607,17 @@ fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<(
         status: ToolExecutionStatus::Completed,
         duration_ms: Some(10),
         subjects: Vec::new(),
-        changed_files: Vec::new(),
+        changed_files: vec!["Cargo.toml".to_owned()],
         metadata: ToolResultMeta {
             exit_code: Some(0),
             details: json!({
-                "shell": {
-                    "command": "cargo check",
-                    "command_family": "cargo_check",
-                    "verdict": "passed"
-                }
+                "call": {
+                    "command_sha256": sigil_kernel::stable_event_hash("cargo check"),
+                    "summary": "workspace check command"
+                },
+                "shell_label": "sh",
+                "shell_sha256": sigil_kernel::stable_event_hash("sh"),
+                "status": "completed"
             }),
             ..ToolResultMeta::default()
         },
@@ -5483,31 +5647,19 @@ fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::PolicyEvaluated,
-            call_id: "call-network-read".to_owned(),
-            tool_name: "mcp__docs__resources_read".to_owned(),
-            access: ToolAccess::Read,
-            network_effect: Some(sigil_kernel::NetworkEffect::Read),
-            local_policy_decision: ApprovalMode::Allow,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::NetworkRequest),
-            risk: Some(PermissionRisk::High),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Allow,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: None,
-            grant_call_id: None,
-            user_decision: None,
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_permission_decision_control(
+        "call-network-read",
+        "mcp__docs__resources_read",
+        ToolAccess::Read,
+        Some(sigil_kernel::NetworkEffect::Read),
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::NetworkRequest,
+        PermissionRisk::High,
+        ApprovalMode::Allow,
+        None,
+        None,
     ))?;
 
     let temp = tempfile::tempdir()?;
@@ -5534,31 +5686,19 @@ fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() ->
     let path = temp.path().join("parent.jsonl");
     let store = JsonlSessionStore::new(&path)?;
     let mut session = Session::new("parent", "model").with_store(store);
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::PolicyEvaluated,
-            call_id: "call-network-read-locked".to_owned(),
-            tool_name: "websearch".to_owned(),
-            access: ToolAccess::Read,
-            network_effect: Some(sigil_kernel::NetworkEffect::Read),
-            local_policy_decision: ApprovalMode::Allow,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::NetworkRequest),
-            risk: Some(PermissionRisk::High),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Allow,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: None,
-            grant_call_id: None,
-            user_decision: None,
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_permission_decision_control(
+        "call-network-read-locked",
+        "websearch",
+        ToolAccess::Read,
+        Some(sigil_kernel::NetworkEffect::Read),
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::NetworkRequest,
+        PermissionRisk::High,
+        ApprovalMode::Allow,
+        None,
+        None,
     ))?;
     let locked_file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
     lock_test_file_exclusive_with_retry(&locked_file)?;
@@ -5610,125 +5750,85 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::PolicyEvaluated,
-            call_id: "call-policy".to_owned(),
-            tool_name: "bash".to_owned(),
-            access: ToolAccess::Read,
-            network_effect: Some(sigil_kernel::NetworkEffect::Read),
-            local_policy_decision: ApprovalMode::Allow,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::ExecuteReadOnlyCommand),
-            risk: Some(PermissionRisk::Low),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Allow,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: None,
-            grant_call_id: None,
-            user_decision: None,
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_permission_decision_control(
+        "call-policy",
+        "bash",
+        ToolAccess::Read,
+        Some(sigil_kernel::NetworkEffect::Read),
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::ExecuteReadOnlyCommand,
+        PermissionRisk::Low,
+        ApprovalMode::Allow,
+        None,
+        None,
     ))?;
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::Requested,
-            call_id: "call-user".to_owned(),
-            tool_name: "bash".to_owned(),
-            access: ToolAccess::Execute,
-            network_effect: None,
-            local_policy_decision: ApprovalMode::Ask,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::ExecuteUnknownCommand),
-            risk: Some(PermissionRisk::Medium),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Ask,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: None,
-            grant_call_id: None,
-            user_decision: None,
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_approval_control(
+        ToolApprovalAuditAction::Requested,
+        "call-user",
+        "bash",
+        ToolAccess::Execute,
+        None,
+        ApprovalMode::Ask,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::ExecuteUnknownCommand,
+        PermissionRisk::Medium,
+        ApprovalMode::Ask,
+        None,
     ))?;
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::Resolved,
-            call_id: "call-user".to_owned(),
-            tool_name: "bash".to_owned(),
-            access: ToolAccess::Execute,
-            network_effect: None,
-            local_policy_decision: ApprovalMode::Ask,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::ExecuteUnknownCommand),
-            risk: Some(PermissionRisk::Medium),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Ask,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: None,
-            grant_call_id: None,
-            user_decision: Some(ToolApprovalUserDecision::ApprovedForSession),
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_approval_control(
+        ToolApprovalAuditAction::Resolved,
+        "call-user",
+        "bash",
+        ToolAccess::Execute,
+        None,
+        ApprovalMode::Ask,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::ExecuteUnknownCommand,
+        PermissionRisk::Medium,
+        ApprovalMode::Ask,
+        Some(ToolApprovalUserDecision::ApprovedForSession),
     ))?;
     session.append_control(ControlEntry::ToolApprovalSessionGrant(
         sigil_kernel::ToolApprovalSessionGrantEntry {
-            call_id: "call-user".to_owned(),
+            schema_version: sigil_kernel::TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION,
+            grant_id: "grant-call-user".to_owned(),
+            source_call_id: "call-user".to_owned(),
+            source_approval_request_id: "approval-call-user".to_owned(),
             tool_name: "bash".to_owned(),
-            access: ToolAccess::Execute,
-            network_effect: None,
-            operation: ToolOperation::ExecuteUnknownCommand,
-            risk: PermissionRisk::Medium,
+            semantic_scope: sigil_kernel::ToolSemanticScope::new("shell", 1),
+            effect_ceiling: std::collections::BTreeSet::new(),
+            risk_ceiling: PermissionRisk::Medium,
             subjects: Vec::new(),
-            subject_zones: Vec::new(),
             facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Local],
             scope: sigil_kernel::ToolApprovalSessionGrantScope::ExactSubjects,
+            containment_binding: sigil_kernel::ExecutionContainmentBindingV2 {
+                requested: sigil_kernel::ExecutionContainmentRequest::default(),
+                backend_identity_hash: "0".repeat(64),
+                backend_profile_hash: "1".repeat(64),
+                environment_binding_hash: "2".repeat(64),
+            },
+            policy_version: "policy-test".to_owned(),
             expires: sigil_kernel::ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 1,
         },
     ))?;
-    session.append_control(ControlEntry::ToolApproval(
-        sigil_kernel::ToolApprovalEntry {
-            action: ToolApprovalAuditAction::PolicyEvaluated,
-            call_id: "call-user-reuse".to_owned(),
-            tool_name: "bash".to_owned(),
-            access: ToolAccess::Execute,
-            network_effect: None,
-            local_policy_decision: ApprovalMode::Allow,
-            network_policy_decision: ApprovalMode::Allow,
-            source_policy_decision: ApprovalMode::Allow,
-            operation: Some(ToolOperation::ExecuteUnknownCommand),
-            risk: Some(PermissionRisk::Medium),
-            subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            policy_decision: ApprovalMode::Allow,
-            external_directory_required: false,
-            confirmation: None,
-            snapshot_required: false,
-            command_permission_matches: Vec::new(),
-            allow_source: Some(ToolApprovalAllowSource::SessionGrant),
-            grant_call_id: Some("call-user".to_owned()),
-            user_decision: None,
-            reason: None,
-            preview_hash: None,
-        },
+    session.append_control(test_permission_decision_control(
+        "call-user-reuse",
+        "bash",
+        ToolAccess::Execute,
+        None,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ApprovalMode::Allow,
+        ToolOperation::ExecuteUnknownCommand,
+        PermissionRisk::Medium,
+        ApprovalMode::Allow,
+        Some(ToolApprovalAllowSource::SessionGrant),
+        Some("grant-call-user"),
     ))?;
 
     let temp = tempfile::tempdir()?;
@@ -5752,13 +5852,13 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
     assert_eq!(approvals["user_allow_session"], 1);
     assert_eq!(approvals["session_grants"], 1);
     assert_eq!(approvals["session_grant_reuses"], 1);
-    assert_eq!(approvals["grant_reuses"][0]["grant_call_id"], "call-user");
+    assert_eq!(approvals["grant_reuses"][0]["grant_id"], "grant-call-user");
     assert_eq!(approvals["facets"]["local_policy"]["allow"], 2);
-    assert_eq!(approvals["facets"]["local_policy"]["ask"], 2);
-    assert_eq!(approvals["facets"]["network_policy"]["allow"], 4);
-    assert_eq!(approvals["facets"]["source_policy"]["allow"], 4);
+    assert_eq!(approvals["facets"]["local_policy"]["ask"], 0);
+    assert_eq!(approvals["facets"]["network_policy"]["allow"], 2);
+    assert_eq!(approvals["facets"]["source_policy"]["allow"], 2);
     assert_eq!(approvals["facets"]["network_effect"]["read"], 1);
-    assert_eq!(approvals["facets"]["network_effect"]["none"], 3);
+    assert_eq!(approvals["facets"]["network_effect"]["none"], 1);
     assert_eq!(
         approvals["grant_reuses"][0]["network_policy_decision"],
         "allow"

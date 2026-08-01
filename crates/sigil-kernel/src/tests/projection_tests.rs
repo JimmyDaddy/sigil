@@ -336,38 +336,28 @@ fn sample_agent_result_entry() -> Result<AgentThreadResultRecordedEntry> {
 fn sample_tool_subject(scope: ToolSubjectScope) -> ToolSubjectAudit {
     ToolSubjectAudit {
         kind: ToolSubjectKind::Path,
-        original: "src/lib.rs".to_owned(),
-        normalized: "src/lib.rs".to_owned(),
-        canonical_path: Some("/workspace/src/lib.rs".to_owned()),
         scope,
+        identity_sha256: "0".repeat(64),
+        relative_label: (scope == ToolSubjectScope::Workspace).then(|| "src/lib.rs".to_owned()),
+        canonical_path_sha256: Some("1".repeat(64)),
     }
 }
 
 fn sample_tool_approval_entry(action: ToolApprovalAuditAction) -> ToolApprovalEntry {
-    ToolApprovalEntry {
-        action,
-        call_id: "call_1".to_owned(),
-        tool_name: "write_file".to_owned(),
-        access: ToolAccess::Write,
-        network_effect: Some(crate::NetworkEffect::Read),
-        local_policy_decision: ApprovalMode::Ask,
-        network_policy_decision: ApprovalMode::Ask,
-        source_policy_decision: ApprovalMode::Allow,
-        operation: Some(ToolOperation::EditFile),
-        risk: Some(PermissionRisk::Medium),
-        subjects: vec![sample_tool_subject(ToolSubjectScope::External)],
-        subject_zones: vec![PathTrustZone::External],
-        policy_decision: ApprovalMode::Ask,
-        external_directory_required: true,
-        confirmation: None,
-        snapshot_required: true,
-        command_permission_matches: Vec::new(),
-        allow_source: None,
-        grant_call_id: None,
-        user_decision: Some(ToolApprovalUserDecision::Approved),
-        reason: Some("approved in test".to_owned()),
-        preview_hash: Some("sha256:preview".to_owned()),
-    }
+    let mut entry = ToolApprovalEntry::test_fixture(action, "call_1", "write_file");
+    entry.access = ToolAccess::Write;
+    entry.network_effect = Some(crate::NetworkEffect::Read);
+    entry.network_policy_decision = ApprovalMode::Ask;
+    entry.operation = ToolOperation::EditFile;
+    entry.risk = PermissionRisk::Medium;
+    entry.subjects = vec![sample_tool_subject(ToolSubjectScope::External)];
+    entry.subject_zones = vec![PathTrustZone::External];
+    entry.external_directory_required = true;
+    entry.snapshot_required = true;
+    entry.user_decision = Some(ToolApprovalUserDecision::Approved);
+    entry.reason = Some("approved in test".to_owned());
+    entry.preview_hash = Some(crate::stable_event_hash(b"preview"));
+    entry
 }
 
 fn sample_tool_execution_entry(status: ToolExecutionStatus) -> ToolExecutionEntry {
@@ -400,7 +390,7 @@ fn sample_tool_execution_entry(status: ToolExecutionStatus) -> ToolExecutionEntr
             retryable: false,
             details: serde_json::Value::Null,
         }),
-        model_content_hash: Some("sha256:model-content".to_owned()),
+        model_content_hash: Some(crate::stable_event_hash(b"model-content")),
     }
 }
 
@@ -435,6 +425,18 @@ fn session_list_projection_rebuilds_v2_stream_metadata() -> Result<()> {
         model_name: "deepseek-v4-pro".to_owned(),
         resolved_model_route: None,
     }))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::SessionModelSelected {
+            provider_name: "openai".to_owned(),
+            model_name: "gpt-5".to_owned(),
+            resolved_model_route: crate::ResolvedModelRoute::new(
+                crate::ModelRef::new(crate::ConnectionId::new("openai-team")?, "gpt-5")?,
+                "openai",
+                "responses",
+                "sha256:openai-team",
+            )?,
+        },
+    ))?;
     store.append(&SessionLogEntry::User(crate::ModelMessage::user(
         "Investigate session projection",
     )))?;
@@ -458,15 +460,15 @@ fn session_list_projection_rebuilds_v2_stream_metadata() -> Result<()> {
         .latest_session()
         .expect("session projection should contain one entry");
 
-    assert_eq!(entry.provider_name.as_deref(), Some("deepseek"));
-    assert_eq!(entry.model_name.as_deref(), Some("deepseek-v4-pro"));
+    assert_eq!(entry.provider_name.as_deref(), Some("openai"));
+    assert_eq!(entry.model_name.as_deref(), Some("gpt-5"));
     assert_eq!(
         entry.title.as_deref(),
         Some("Investigate session projection")
     );
     assert_eq!(entry.user_message_count, 1);
     assert_eq!(entry.assistant_message_count, 1);
-    assert_eq!(entry.control_entry_count, 4);
+    assert_eq!(entry.control_entry_count, 5);
     assert_eq!(
         entry.latest_usage.as_ref().map(|usage| usage.prompt_tokens),
         Some(11)
@@ -752,7 +754,7 @@ fn dispatch_trace_projection_rebuilds_tool_agent_usage_and_readiness() -> Result
     assert!(tool_trace.observation_truncated);
     assert_eq!(
         tool_trace.model_content_hash.as_deref(),
-        Some("sha256:model-content")
+        Some(crate::stable_event_hash(b"model-content").as_str())
     );
     assert_eq!(tool_trace.external_subject_count, 1);
     assert_eq!(agent_trace.kind, DispatchTraceKind::Agent);

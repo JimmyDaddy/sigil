@@ -19,28 +19,31 @@ use crate::{
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
     ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
     DurableDomainEvent, DurableEventPayloadStorage, DurableEventType, EventClass, EventSyncClass,
-    EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, McpElicitationDecision,
-    McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
-    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
-    ProviderContinuationState, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
-    ReadinessEvaluatedEntry, ReadinessEvaluation, ReasoningEffort, ReceiptStatus, RedactionState,
-    ReducerDisposition, RequiredAction, ResponseHandle, RunEvent, RunStatus,
-    SandboxProfileRequirement, SessionLogEntry, SessionRef, SkillDescriptor, SkillIndexSnapshot,
-    SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent, StoredEventDecode,
+    EvidenceReceipt, EvidenceScope, ExecutionContainmentRequest, MAX_EVENT_BYTES,
+    MAX_PAYLOAD_DEPTH, McpElicitationDecision, McpElicitationEntry, MemoryLoadReport,
+    MemorySnapshot, ModelMessage, PUBLIC_RUN_EVENT_SCHEMA_VERSION, PluginCapability,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, PrefixSnapshot,
+    ProjectionApplyDecision, ProjectionCursor, ProviderContinuationState, PublicControlEvent,
+    PublicRunEvent, PublicRunEventKind, ReadinessEvaluatedEntry, ReadinessEvaluation,
+    ReasoningEffort, ReceiptStatus, RedactionState, ReducerDisposition, RequiredAction,
+    ResponseHandle, RunEvent, RunStatus, STORED_EVENT_SCHEMA_VERSION, SandboxProfileRequirement,
+    SessionLogEntry, SessionRef, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
+    SkillSource, SkillTrustState, StoredEvent, StoredEventDecode, TERMINAL_TASK_SCHEMA_VERSION,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
     TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
     TaskStepEntry, TaskStepId, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
-    ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionId,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
-    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent,
-    TypedStoredEventDecode, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
-    VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
-    VerificationReceiptLinkRecorded, VerificationRecordedEntry, VerificationScope,
-    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
+    TaskSubagentElicitationRouteEntry, TerminalReadinessStatus, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolAnalysisStatus,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalSessionGrantUnavailableReason,
+    ToolApprovalSessionGrantUnavailableReasonCode, ToolCall, ToolCategory, ToolEffect,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionId, ToolExecutionStatus,
+    ToolPermissionEffect, ToolPermissionSummary, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolPreviewSnapshot, ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, TypedDomainEvent, TypedStoredEventDecode, UsageStats, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus,
+    VerificationFailureLocatorRecorded, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationReceipt, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
+    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
     WorkspaceMutationDetectionReason, WorkspaceRootSnapshot, WorkspaceTrust,
     WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, decode_stored_event,
     decode_typed_stored_event, is_transient_run_event, projection_apply_decision,
@@ -106,28 +109,10 @@ fn stored_event_checksum_normalizes_numeric_integer_forms() {
 }
 
 #[test]
-fn stored_event_checksum_accepts_usage_snapshot_float_fixture() {
+fn stored_event_rejects_legacy_schema_fixture() {
     let line = r#"{"schema_version":1,"event_type":"session_entry_recorded","event_version":1,"event_class":"non_critical","event_id":"2564cd0d-285c-5d88-9395-7fd7858fc242","session_id":"35181898-105b-554f-985d-209212d5f4b3","stream_sequence":64,"record_checksum":"sha256:jcs-v1:3f454890559a65234d6bf2315970303276284990bde7a7147789a113acc1c039","payload":{"session_log_entry":{"control":{"usage_snapshot":{"cache_hit_tokens":7296,"cache_miss_tokens":13325,"cache_savings":0.0031473119999999998,"completion_tokens":1015,"input_cost":0.005822823,"output_cost":0.0008830499999999999,"prompt_tokens":20621,"system_fingerprint":"fp_9954b31ca7_prod0820_fp8_kvcache_20260402"}}}}}"#;
-    let event_without_verification = StoredEvent::from_value(
-        serde_json::from_str(line).expect("usage snapshot fixture should parse"),
-    )
-    .expect("usage snapshot fixture envelope should deserialize");
-
-    assert_eq!(
-        event_without_verification
-            .compute_record_checksum()
-            .expect("fixture checksum should compute"),
-        event_without_verification.record_checksum
-    );
-    let parsed =
-        StoredEvent::from_json_str(line).expect("usage snapshot fixture checksum should verify");
-
-    assert_eq!(parsed.stream_sequence, 64);
-    assert_eq!(parsed.event_class, EventClass::NonCritical);
-    assert_eq!(
-        parsed.record_checksum,
-        "sha256:jcs-v1:3f454890559a65234d6bf2315970303276284990bde7a7147789a113acc1c039"
-    );
+    let error = StoredEvent::from_json_str(line).expect_err("legacy schema must fail closed");
+    assert!(error.to_string().contains("schema_version"));
 }
 
 #[test]
@@ -245,7 +230,7 @@ fn stored_event_unknown_class_rules_fail_closed_when_required() {
     assert!(error.to_string().contains("unknown critical event"));
 
     let missing_class = json!({
-        "schema_version": 1,
+        "schema_version": STORED_EVENT_SCHEMA_VERSION,
         "event_type": "new_event",
         "event_version": 1,
         "event_id": "event-missing-class",
@@ -292,7 +277,7 @@ fn typed_stored_event_decode_handles_unknown_boundaries() {
 #[test]
 fn stored_event_rejects_missing_event_type_and_unknown_critical_on_wire() {
     let missing_event_type = json!({
-        "schema_version": 1,
+        "schema_version": STORED_EVENT_SCHEMA_VERSION,
         "event_class": "critical",
         "event_version": 1,
         "event_id": "event-missing-type",
@@ -1202,6 +1187,25 @@ fn public_run_event_projects_approval_requested_details() {
         "run-1",
         9,
         RunEvent::ToolApprovalRequested {
+            approval_identity: ToolApprovalEntry::test_fixture(
+                ToolApprovalAuditAction::Requested,
+                "call-2",
+                "read_file",
+            )
+            .identity,
+            effects: std::collections::BTreeSet::from([ToolPermissionEffect::FileRead]),
+            analysis: ToolAnalysisStatus::Complete,
+            containment: ExecutionContainmentRequest::default(),
+            safe_summary: ToolPermissionSummary {
+                title: "Read file".to_owned(),
+                detail: "README.md".to_owned(),
+                ..ToolPermissionSummary::default()
+            },
+            decision_reasons: Vec::new(),
+            session_grant_available: false,
+            session_grant_unavailable_reason: Some(ToolApprovalSessionGrantUnavailableReason {
+                code: ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            }),
             call,
             spec,
             subjects: vec![ToolSubject::path("README.md", "README.md")],
@@ -1253,6 +1257,7 @@ fn public_run_event_projects_all_internal_run_event_variants() {
         (
             RunEvent::ToolApprovalResolved {
                 call_id: "call-approval".to_owned(),
+                approval_request_id: "approval-call-approval".to_owned(),
                 approved: true,
                 reason: Some("ok".to_owned()),
             },
@@ -1431,30 +1436,11 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             "usage_snapshot",
         ),
         (
-            ControlEntry::ToolApproval(ToolApprovalEntry {
-                action: ToolApprovalAuditAction::Requested,
-                call_id: "call-approval".to_owned(),
-                tool_name: "read_file".to_owned(),
-                access: ToolAccess::Read,
-                network_effect: None,
-                local_policy_decision: ApprovalMode::Ask,
-                network_policy_decision: ApprovalMode::Allow,
-                source_policy_decision: ApprovalMode::Allow,
-                subjects: Vec::new(),
-                operation: None,
-                risk: None,
-                subject_zones: Vec::new(),
-                confirmation: None,
-                snapshot_required: false,
-                command_permission_matches: Vec::new(),
-                policy_decision: ApprovalMode::Ask,
-                external_directory_required: false,
-                allow_source: None,
-                grant_call_id: None,
-                user_decision: None,
-                reason: None,
-                preview_hash: None,
-            }),
+            ControlEntry::ToolApproval(ToolApprovalEntry::test_fixture(
+                ToolApprovalAuditAction::Requested,
+                "call-approval",
+                "read_file",
+            )),
             "tool_approval",
         ),
         (
@@ -1568,12 +1554,15 @@ fn public_control_event_kinds_cover_control_entry_variants() {
         ),
         (
             ControlEntry::TerminalTask(TerminalTaskEntry {
+                schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+                generation: 1,
                 handle: TerminalTaskHandle {
                     task_id: TerminalTaskId::new("terminal-1").expect("valid terminal task id"),
-                    command: "cargo test".to_owned(),
-                    cwd: ".".into(),
-                    shell: "zsh".to_owned(),
-                    log_path: ".sigil/terminal/terminal-1/output.log".into(),
+                    command_sha256: "0".repeat(64),
+                    cwd_label: ".".to_owned(),
+                    shell_label: "zsh".to_owned(),
+                    shell_sha256: "1".repeat(64),
+                    log_ref: "terminal-log:terminal-1".to_owned(),
                     created_at_ms: 100,
                     execution_backend: None,
                     execution_backend_capabilities: None,
@@ -1582,6 +1571,7 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                     sandbox_profile: None,
                 },
                 status: TerminalTaskStatus::Running,
+                readiness: TerminalReadinessStatus::None,
                 output_preview: Some("running".to_owned()),
                 output_hash: Some("sha256:abc".to_owned()),
                 output_truncated: false,
@@ -2032,7 +2022,7 @@ fn tool_preview_snapshot() -> ToolPreviewSnapshot {
             }],
         },
         Default::default(),
-        Some("preview-hash".to_owned()),
+        Some("a".repeat(64)),
     )
 }
 
@@ -2069,12 +2059,15 @@ fn stored_control_event(
 
 fn sample_terminal_task_entry() -> TerminalTaskEntry {
     TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: 1,
         handle: TerminalTaskHandle {
             task_id: TerminalTaskId::new("terminal-1").expect("valid terminal task id"),
-            command: "cargo test".to_owned(),
-            cwd: ".".into(),
-            shell: "zsh".to_owned(),
-            log_path: ".sigil/terminal/terminal-1/output.log".into(),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:terminal-1".to_owned(),
             created_at_ms: 100,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -2083,6 +2076,7 @@ fn sample_terminal_task_entry() -> TerminalTaskEntry {
             sandbox_profile: None,
         },
         status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::None,
         output_preview: Some("running".to_owned()),
         output_hash: Some("sha256:abc".to_owned()),
         output_truncated: false,

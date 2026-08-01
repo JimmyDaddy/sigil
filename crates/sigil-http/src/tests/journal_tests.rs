@@ -1,12 +1,33 @@
 use std::sync::Arc;
 
-use sigil_kernel::{MAX_EVENT_BYTES, PublicRunEvent, PublicRunEventKind, PublicTaskPlanStep};
+use sigil_kernel::{
+    ApprovalRequestIdentityV2, MAX_EVENT_BYTES, PublicRunEvent, PublicRunEventKind,
+    PublicTaskPlanStep, TerminalLifecycleEvent, TerminalReadinessStatus, TerminalTaskId,
+    TerminalTaskStatus, ToolApprovalSessionGrantUnavailableReason,
+    ToolApprovalSessionGrantUnavailableReasonCode,
+};
 
 use super::*;
-use crate::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpLiveEventBus, HttpPendingApproval, HttpProtocolEvent,
-    HttpProtocolReplayError,
-};
+use crate::{HttpLiveEventBus, HttpPendingApproval, HttpProtocolEvent, HttpProtocolReplayError};
+
+fn approval_identity() -> ApprovalRequestIdentityV2 {
+    ApprovalRequestIdentityV2 {
+        session_id: "session-1".to_owned(),
+        run_id: "run-1".to_owned(),
+        call_id: "call-1".to_owned(),
+        approval_request_id: "kernel-approval-v2:request-1".to_owned(),
+        plan_hash: "a".repeat(64),
+        policy_version: "permission-policy-v2".to_owned(),
+        execution_binding_hash: "c".repeat(64),
+        expires_at_ms: 10,
+    }
+}
+
+fn unavailable_session_grant_reason() -> Option<ToolApprovalSessionGrantUnavailableReason> {
+    Some(ToolApprovalSessionGrantUnavailableReason {
+        code: ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+    })
+}
 
 fn durable_event(sequence: u64) -> HttpProtocolEvent {
     HttpProtocolEvent::from_run_event(PublicRunEvent::new(
@@ -50,6 +71,27 @@ fn terminal_event(session_id: &str, run_id: &str) -> HttpProtocolEvent {
     .expect("terminal event should have a durable cursor")
 }
 
+fn terminal_lifecycle_event(sequence: u64, status: TerminalTaskStatus) -> HttpProtocolEvent {
+    HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        sequence,
+        PublicRunEventKind::TerminalLifecycle {
+            event: TerminalLifecycleEvent {
+                task_id: TerminalTaskId::new("terminal-1").expect("terminal task id"),
+                execution_backend: None,
+                sandbox_profile: None,
+                generation: sequence,
+                status,
+                readiness: TerminalReadinessStatus::None,
+                total_output_bytes: 0,
+                emitted_at_ms: sequence,
+            },
+        },
+    ))
+    .expect("terminal lifecycle event should have a durable cursor")
+}
+
 fn approval_event() -> HttpProtocolEvent {
     let call = sigil_kernel::ToolCall {
         id: "call-1".to_owned(),
@@ -61,6 +103,14 @@ fn approval_event() -> HttpProtocolEvent {
         "run-1",
         1,
         PublicRunEventKind::ApprovalRequested {
+            approval_identity: approval_identity(),
+            session_grant_available: false,
+            session_grant_unavailable_reason: unavailable_session_grant_reason(),
+            effects: Default::default(),
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            safe_summary: Default::default(),
+            decision_reasons: Vec::new(),
             call,
             spec: sigil_kernel::ToolSpec {
                 name: "write_file".to_owned(),
@@ -89,11 +139,16 @@ fn approval_event() -> HttpProtocolEvent {
     event.approval_request = Some(HttpPendingApproval {
         call_id: "call-1".to_owned(),
         tool_name: "write_file".to_owned(),
-        approval_request_id: format!("http-approval-v1:{}", "a".repeat(64)),
+        approval_request_id: approval_identity().approval_request_id,
         tool_call_hash: "b".repeat(64),
-        policy_version: HTTP_APPROVAL_POLICY_VERSION.to_owned(),
+        policy_version: approval_identity().policy_version,
         expires_at_ms: 10,
         session_grant_available: false,
+        session_grant_unavailable_reason: unavailable_session_grant_reason(),
+        display: crate::HttpPendingApprovalDisplay {
+            event_sequence: 1,
+            ..Default::default()
+        },
     });
     event
 }
@@ -304,6 +359,71 @@ fn restart_seals_and_rotates_orphaned_nonterminal_streams() {
             )
             .expect("new streams should rotate orphaned watermarks");
     }
+}
+
+#[test]
+fn durable_journal_atomically_closes_a_retained_foreground_terminal_stream() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal should initialize");
+    journal
+        .append(
+            HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+                "session-1",
+                "run-1",
+                1,
+                PublicRunEventKind::RunStarted {
+                    prompt: "start terminal task".to_owned(),
+                },
+            ))
+            .expect("run start should project"),
+        )
+        .expect("run start should persist");
+    journal
+        .append_with_stream_continuation(
+            HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+                "session-1",
+                "run-1",
+                2,
+                PublicRunEventKind::RunFinished {
+                    final_text: "terminal remains active".to_owned(),
+                },
+            ))
+            .expect("foreground terminal should project"),
+            true,
+        )
+        .expect("foreground terminal should retain the stream");
+    journal
+        .append_and_close_stream(terminal_lifecycle_event(
+            3,
+            TerminalTaskStatus::Exited { exit_code: Some(0) },
+        ))
+        .expect("final lifecycle and close should commit together");
+    assert!(matches!(
+        journal.append(durable_event_for("session-1", "run-1", 4)),
+        Err(HttpProtocolJournalError::StreamAlreadyTerminal { .. })
+    ));
+    assert_eq!(
+        journal
+            .replay_run_after("session-1", "run-1", None)
+            .expect("retained stream should replay")
+            .len(),
+        3
+    );
+    drop(journal);
+
+    let reopened =
+        HttpDurableProtocolJournal::open(&path, 8).expect("closed stream should recover safely");
+    assert_eq!(
+        reopened
+            .latest_run_sequence("session-1", "run-1")
+            .expect("latest sequence should read"),
+        Some(3)
+    );
+    assert!(matches!(
+        reopened.append(durable_event_for("session-1", "run-1", 4)),
+        Err(HttpProtocolJournalError::StreamAlreadyTerminal { .. })
+    ));
 }
 
 #[test]
@@ -597,6 +717,28 @@ fn durable_approval_projection_sanitizes_subjects_and_file_diffs() {
     let path = temp.path().join("journal.json");
     let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal should initialize");
     let event = PublicRunEventKind::ApprovalRequested {
+        approval_identity: approval_identity(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: unavailable_session_grant_reason(),
+        effects: Default::default(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Conservative {
+            reasons: vec![sigil_kernel::ToolAnalysisReason::new(
+                sigil_kernel::ToolAnalysisReasonCode::UnsupportedSyntax,
+                Some("token=private-analysis-secret".to_owned()),
+            )],
+        },
+        containment: Default::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary {
+            title: "write token=private-plan-title-secret".to_owned(),
+            detail: "detail token=private-plan-detail-secret".to_owned(),
+            step_count: 1,
+            workspace_code_steps: 0,
+        },
+        decision_reasons: vec![sigil_kernel::PermissionDecisionReason {
+            source: sigil_kernel::PermissionDecisionSource::UserRule,
+            code: "token=private-reason-code-secret".to_owned(),
+            detail: "token=private-reason-detail-secret".to_owned(),
+        }],
         call: sigil_kernel::ToolCall {
             id: "call-1".to_owned(),
             name: "write_file".to_owned(),
@@ -671,6 +813,11 @@ fn durable_approval_projection_sanitizes_subjects_and_file_diffs() {
         "private-path-secret",
         "private-diff-path-secret",
         "private-diff-secret",
+        "private-analysis-secret",
+        "private-plan-title-secret",
+        "private-plan-detail-secret",
+        "private-reason-code-secret",
+        "private-reason-detail-secret",
     ] {
         assert!(!persisted.contains(secret), "journal leaked {secret}");
     }
@@ -718,7 +865,7 @@ fn durable_journal_rejects_invalid_capacity_and_oversized_input_files() {
         .expect("oversized fixture should write");
     assert!(matches!(
         HttpDurableProtocolJournal::open(oversized, 8),
-        Err(HttpProtocolJournalError::Io { .. })
+        Err(HttpProtocolJournalError::JournalTooLarge { .. })
     ));
 }
 
@@ -738,6 +885,7 @@ fn protocol_persistence_rejects_a_candidate_above_the_total_file_boundary() {
                     },
                 ))
                 .expect("event should project"),
+                false,
             )
             .expect("individual event should remain below its boundary");
     }

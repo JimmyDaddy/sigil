@@ -40,7 +40,7 @@ impl AppState {
     }
 
     pub(super) fn request_changed_files_diagnostics(&mut self) -> Option<AppAction> {
-        if self.approval.pending.is_some() {
+        if self.approval.has_actionable_pending() {
             self.last_notice =
                 Some("finish the pending approval before checking changes".to_owned());
             return None;
@@ -68,12 +68,6 @@ impl AppState {
             self.last_notice = Some("focus a terminal task first".to_owned());
             return None;
         };
-        if self.runtime.is_busy {
-            self.pending_terminal_cancel_confirmation = None;
-            self.last_notice =
-                Some("wait for the active run before cancelling terminal task".to_owned());
-            return None;
-        }
         let projection =
             TerminalTaskProjection::from_entries(&self.session_browser.current_entries);
         let Some(task) = projection.tasks.values().find(|task| {
@@ -83,6 +77,20 @@ impl AppState {
             self.last_notice = Some(format!("terminal task {task_id} is not running"));
             return None;
         };
+        let Some(identity) = self.terminal_task_control_identities.get(&task_id).cloned() else {
+            self.pending_terminal_cancel_confirmation = None;
+            self.last_notice = Some(format!(
+                "terminal task {task_id} no longer has a live owner route"
+            ));
+            return None;
+        };
+        if identity.expected_generation != task.generation {
+            self.pending_terminal_cancel_confirmation = None;
+            self.last_notice = Some(format!(
+                "terminal task {task_id} changed; review its latest state before cancelling"
+            ));
+            return None;
+        }
         if self
             .pending_terminal_cancel_confirmation
             .as_deref()
@@ -94,7 +102,7 @@ impl AppState {
                 super::TimelineRole::Notice,
                 format!("Cancel requested for terminal task {task_id}."),
             );
-            return Some(AppAction::CancelTerminalTask { task_id });
+            return Some(AppAction::CancelTerminalTask { identity });
         }
 
         self.pending_terminal_cancel_confirmation = Some(task_id.clone());
@@ -140,7 +148,7 @@ impl AppState {
             return false;
         }
         if command == UiCommand::CycleAgentView {
-            if self.approval.pending.is_some() {
+            if self.approval.has_actionable_pending() {
                 self.last_notice =
                     Some("finish the pending approval before switching agents".to_owned());
                 return false;
@@ -148,14 +156,14 @@ impl AppState {
             return self.cycle_agent_view(false);
         }
         if command == UiCommand::CycleAgentViewPrevious {
-            if self.approval.pending.is_some() {
+            if self.approval.has_actionable_pending() {
                 self.last_notice =
                     Some("finish the pending approval before switching agents".to_owned());
                 return false;
             }
             return self.cycle_agent_view(true);
         }
-        if self.approval.pending.is_some() || !self.composer.input.is_empty() {
+        if self.approval.has_actionable_pending() || !self.composer.input.is_empty() {
             return false;
         }
 

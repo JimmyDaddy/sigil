@@ -241,24 +241,33 @@ impl AppState {
         self.approval
             .pending
             .as_ref()
+            .filter(|pending| pending.actions_available())
             .map(|pending| AppAction::ApprovalDecision {
                 call_id: pending.call.id.clone(),
+                approval_request_id: pending.approval_request_id.clone(),
                 approved,
             })
     }
 
     fn approval_background_decision(&self) -> Option<AppAction> {
         let pending = self.approval.pending.as_ref()?;
+        if !pending.actions_available() {
+            return None;
+        }
         let args_json =
             spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json)?;
         Some(AppAction::ApprovalDecisionWithArgs {
             call_id: pending.call.id.clone(),
+            approval_request_id: pending.approval_request_id.clone(),
             args_json,
         })
     }
 
     fn approval_selected_decision(&self) -> Option<AppAction> {
         let pending = self.approval.pending.as_ref()?;
+        if !pending.actions_available() {
+            return None;
+        }
         let selected = self
             .approval
             .selected_action
@@ -266,13 +275,16 @@ impl AppState {
         Some(match selected {
             ApprovalAction::AllowOnce => AppAction::ApprovalDecision {
                 call_id: pending.call.id.clone(),
+                approval_request_id: pending.approval_request_id.clone(),
                 approved: true,
             },
             ApprovalAction::AllowSession => AppAction::ApprovalSessionDecision {
                 call_id: pending.call.id.clone(),
+                approval_request_id: pending.approval_request_id.clone(),
             },
             ApprovalAction::Deny => AppAction::ApprovalDecision {
                 call_id: pending.call.id.clone(),
+                approval_request_id: pending.approval_request_id.clone(),
                 approved: false,
             },
         })
@@ -306,7 +318,7 @@ impl AppState {
 }
 
 pub(crate) fn resolve_input_context(app: &AppState, key: KeyEvent) -> InputContext {
-    if app.approval.pending.is_some() {
+    if app.approval.has_actionable_pending() {
         return InputContext::ApprovalModal;
     }
     if app.composer.queue_panel_focused {

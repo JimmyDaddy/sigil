@@ -113,26 +113,33 @@ impl Tool for McpResourceTool {
         Some(self.client.lifecycle_owner())
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![
-            ToolSubject::mcp_tool(self.spec.name.clone()),
-            self.client.identity().trust_subject(
-                self.tool_name.server_name.clone(),
-                self.trust.trust_class.as_str(),
-            ),
-        ])
-    }
-
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(self.trust.approval_default))
-    }
-
-    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
-        Ok(ToolOperation::NetworkRequest)
+    ) -> Result<ToolPermissionPlanDraft> {
+        let annotations = McpToolAnnotations {
+            title: None,
+            read_only_hint: Some(true),
+            destructive_hint: Some(false),
+            idempotent_hint: Some(true),
+            open_world_hint: Some(true),
+        };
+        let (subjects, binding) = stdio_mcp_permission_inputs(
+            &self.client,
+            &self.spec.name,
+            &self.tool_name,
+            &self.trust,
+        )?;
+        mcp_tool_permission_plan(
+            &self.spec.name,
+            &self.tool_name.original_name,
+            &annotations,
+            &self.trust,
+            McpPermissionTransport::Stdio,
+            subjects,
+            &binding,
+        )
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {

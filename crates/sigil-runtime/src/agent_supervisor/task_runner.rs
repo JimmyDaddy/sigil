@@ -1594,9 +1594,7 @@ pub(super) fn bind_child_integration_facts(
             SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
                 if completed_calls.contains_key(&approval.call_id) =>
             {
-                approval
-                    .operation
-                    .map(|operation| (approval.call_id.clone(), operation))
+                Some((approval.call_id.clone(), approval.operation))
             }
             _ => None,
         })
@@ -3354,6 +3352,11 @@ where
                 (TaskRouteStatus::Resolved, AgentRouteStatus::Resolved)
             }
             ToolApproval::Deny { .. } => (TaskRouteStatus::Rejected, AgentRouteStatus::Rejected),
+            ToolApproval::Expired { .. } => (TaskRouteStatus::Expired, AgentRouteStatus::Expired),
+            ToolApproval::Cancelled { .. } => {
+                (TaskRouteStatus::Cancelled, AgentRouteStatus::Cancelled)
+            }
+            ToolApproval::Stale { .. } => (TaskRouteStatus::Stale, AgentRouteStatus::Stale),
         };
         self.controls.extend([
             task_approval_route_control(
@@ -3475,6 +3478,11 @@ where
                 (TaskRouteStatus::Resolved, AgentRouteStatus::Resolved)
             }
             ToolApproval::Deny { .. } => (TaskRouteStatus::Rejected, AgentRouteStatus::Rejected),
+            ToolApproval::Expired { .. } => (TaskRouteStatus::Expired, AgentRouteStatus::Expired),
+            ToolApproval::Cancelled { .. } => {
+                (TaskRouteStatus::Cancelled, AgentRouteStatus::Cancelled)
+            }
+            ToolApproval::Stale { .. } => (TaskRouteStatus::Stale, AgentRouteStatus::Stale),
         };
         append_task_approval_route(
             self.parent_session,

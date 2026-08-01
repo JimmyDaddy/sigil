@@ -572,6 +572,9 @@
       },
       "ApprovalCommandReceipt": {
         "properties": {
+          "approval_request_id": {
+            "type": "string"
+          },
           "call_id": {
             "type": "string"
           },
@@ -597,8 +600,15 @@
               "null"
             ]
           },
+          "registry_revision": {
+            "format": "uint64",
+            "type": "integer"
+          },
           "replayed": {
             "type": "boolean"
+          },
+          "route_state": {
+            "$ref": "#/components/schemas/ApprovalRouteState"
           },
           "run_id": {
             "type": "string"
@@ -613,7 +623,10 @@
           "session_id",
           "run_id",
           "call_id",
+          "approval_request_id",
           "decision",
+          "route_state",
+          "registry_revision",
           "replayed"
         ],
         "type": "object"
@@ -652,6 +665,7 @@
           "decision": {
             "enum": [
               "approved",
+              "approved_for_session",
               "denied"
             ],
             "type": "string"
@@ -747,6 +761,19 @@
           "risk": {
             "type": "string"
           },
+          "session_grant_available": {
+            "type": "boolean"
+          },
+          "session_grant_unavailable_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionGrantUnavailableReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "snapshot_required": {
             "type": "boolean"
           },
@@ -776,6 +803,8 @@
         "required": [
           "type",
           "call",
+          "session_grant_available",
+          "session_grant_unavailable_reason",
           "snapshot_required"
         ],
         "type": "object"
@@ -807,6 +836,14 @@
           "reason"
         ],
         "type": "object"
+      },
+      "ApprovalRouteState": {
+        "enum": [
+          "decision_accepted",
+          "delivery_uncertain",
+          "terminal"
+        ],
+        "type": "string"
       },
       "AssistantMessageEvent": {
         "additionalProperties": true,
@@ -4245,6 +4282,9 @@
           "call_id": {
             "type": "string"
           },
+          "display": {
+            "$ref": "#/components/schemas/PendingApprovalDisplay"
+          },
           "expires_at_ms": {
             "format": "uint64",
             "type": "integer"
@@ -4254,6 +4294,16 @@
           },
           "session_grant_available": {
             "type": "boolean"
+          },
+          "session_grant_unavailable_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionGrantUnavailableReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "tool_call_hash": {
             "type": "string"
@@ -4269,7 +4319,143 @@
           "tool_call_hash",
           "policy_version",
           "expires_at_ms",
-          "session_grant_available"
+          "session_grant_available",
+          "session_grant_unavailable_reason",
+          "display"
+        ],
+        "type": "object"
+      },
+      "PendingApprovalDisplay": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_reason_codes": {
+            "items": {
+              "enum": [
+                "unknown_program",
+                "dynamic_command",
+                "unsupported_syntax",
+                "invalid_syntax",
+                "analysis_limit_exceeded",
+                "unresolved_path",
+                "unresolved_executable",
+                "unproven_containment"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "analysis_reasons": {
+            "items": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "analysis_status": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "containment": {
+            "items": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "decision_reasons": {
+            "items": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "event_sequence": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "operation": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "risk": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "safe_summary_detail": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "safe_summary_title": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "snapshot_required": {
+            "type": "boolean"
+          },
+          "subjects": {
+            "items": {
+              "$ref": "#/components/schemas/PendingApprovalSubject"
+            },
+            "maxItems": 16,
+            "type": "array"
+          }
+        },
+        "required": [
+          "event_sequence",
+          "effects",
+          "subjects",
+          "analysis_status",
+          "analysis_reason_codes",
+          "analysis_reasons",
+          "containment",
+          "decision_reasons",
+          "safe_summary_title",
+          "safe_summary_detail",
+          "snapshot_required"
+        ],
+        "type": "object"
+      },
+      "PendingApprovalSubject": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "scope": {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "workspace_label": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "scope"
         ],
         "type": "object"
       },
@@ -4769,7 +4955,7 @@
             "type": "string"
           },
           "schema_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "sequence": {
@@ -4855,6 +5041,9 @@
           },
           {
             "$ref": "#/components/schemas/ToolProgressEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TerminalLifecycleEvent"
           },
           {
             "$ref": "#/components/schemas/UsageEvent"
@@ -5246,7 +5435,7 @@
           },
           "model_selection": {
             "enum": [
-              "fresh_session"
+              "same_session"
             ],
             "type": "string"
           },
@@ -5317,10 +5506,11 @@
           "id": {
             "type": "string"
           },
-          "pending_approval_call_ids": {
+          "pending_approvals": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/PendingApproval"
             },
+            "maxItems": 8,
             "type": "array"
           },
           "permission_mode": {
@@ -5348,6 +5538,12 @@
           "stream_sequence": {
             "format": "uint64",
             "type": "integer"
+          },
+          "terminal_tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TerminalLifecycle"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -5356,7 +5552,8 @@
           "status",
           "permission_mode",
           "prompt_preview",
-          "pending_approval_call_ids",
+          "pending_approvals",
+          "terminal_tasks",
           "stream_sequence"
         ],
         "type": "object"
@@ -5441,10 +5638,14 @@
               }
             ]
           },
-          "model_name": {
-            "type": [
-              "string",
-              "null"
+          "model_ref": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProviderModelRef"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "model_selection_binding": {
@@ -5589,6 +5790,9 @@
           "task_pause": {
             "type": "boolean"
           },
+          "terminal_task_cancel": {
+            "type": "boolean"
+          },
           "typed_tool_artifact_retrieval": {
             "type": "boolean"
           },
@@ -5608,6 +5812,7 @@
           "approval",
           "cancellation",
           "task_pause",
+          "terminal_task_cancel",
           "verification",
           "task_integration",
           "intent_stack",
@@ -6090,11 +6295,19 @@
             "maxItems": 5,
             "type": "array",
             "uniqueItems": true
+          },
+          "retained_terminal_runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunSnapshot"
+            },
+            "maxItems": 16,
+            "type": "array"
           }
         },
         "required": [
           "durable_session_scope_id",
           "durable_frontier",
+          "retained_terminal_runs",
           "recovery_actions"
         ],
         "type": "object"
@@ -6128,6 +6341,36 @@
           "session_id"
         ],
         "type": "object"
+      },
+      "SessionGrantUnavailableReason": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/SessionGrantUnavailableReasonCode"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "SessionGrantUnavailableReasonCode": {
+        "enum": [
+          "analysis_incomplete",
+          "semantic_scope_unavailable",
+          "non_grantable_effect",
+          "containment_binding_unavailable",
+          "policy_decision_not_grantable",
+          "no_reusable_approval_facet",
+          "network_scope_not_grantable",
+          "confirmation_required",
+          "snapshot_required",
+          "subject_scope_unavailable",
+          "risk_not_grantable",
+          "external_mutation",
+          "operation_not_grantable"
+        ],
+        "type": "string"
       },
       "SessionInvalidSourceDeleteReceipt": {
         "additionalProperties": false,
@@ -7208,6 +7451,322 @@
         ],
         "type": "object"
       },
+      "TerminalLifecycle": {
+        "additionalProperties": false,
+        "properties": {
+          "emitted_at_ms": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "generation": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/TerminalReadinessStatus"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TerminalTaskStatus"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "total_output_bytes": {
+            "format": "uint64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id",
+          "generation",
+          "status",
+          "readiness",
+          "total_output_bytes",
+          "emitted_at_ms"
+        ],
+        "type": "object"
+      },
+      "TerminalLifecycleEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/TerminalLifecycle"
+          },
+          "type": {
+            "const": "terminal_lifecycle",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "event"
+        ],
+        "type": "object"
+      },
+      "TerminalReadinessKind": {
+        "enum": [
+          "none",
+          "output_contains",
+          "output_regex"
+        ],
+        "type": "string"
+      },
+      "TerminalReadinessStatus": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "none"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/TerminalReadinessKind"
+              },
+              "state": {
+                "const": "waiting"
+              }
+            },
+            "required": [
+              "state",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/TerminalReadinessKind"
+              },
+              "ready_at_ms": {
+                "format": "uint64",
+                "type": "integer"
+              },
+              "state": {
+                "const": "ready"
+              }
+            },
+            "required": [
+              "state",
+              "kind",
+              "ready_at_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/TerminalReadinessKind"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "state",
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/TerminalReadinessKind"
+              },
+              "state": {
+                "const": "timed_out"
+              }
+            },
+            "required": [
+              "state",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TerminalTaskCancelCommand": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommandEnvelopeBase"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/TerminalTaskCancelRequest"
+              }
+            },
+            "required": [
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TerminalTaskCancelCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "format": "uint64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "terminal_task": {
+            "$ref": "#/components/schemas/TerminalLifecycle"
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "run_id",
+          "terminal_task",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "TerminalTaskCancelRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_generation": {
+            "format": "uint64",
+            "type": "integer"
+          },
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "expected_generation"
+        ],
+        "type": "object"
+      },
+      "TerminalTaskStatus": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "starting"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "running"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "exit_code": {
+                "format": "int32",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "state": {
+                "const": "exited"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "cancelled"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "const": "interrupted"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "TextDeltaEvent": {
         "additionalProperties": false,
         "properties": {
@@ -8182,6 +8741,56 @@
           }
         },
         "summary": "Pause one exact durable Task plan"
+      }
+    },
+    "/runs/{run_id}/terminal-cancel": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RunId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerminalTaskCancelCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminalTaskCancelCommandReceipt"
+                }
+              }
+            },
+            "description": "Generation-bound terminal cancellation receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Cancel one exact persistent terminal task"
       }
     },
     "/server-info": {

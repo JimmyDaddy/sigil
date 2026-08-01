@@ -5,19 +5,20 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalMode, EgressBindingOrigin, EgressDataCategory, EgressDisclosurePresenter,
-    EgressNetworkRoute, McpRemoteClientCapability, McpServerConfig, NetworkEffect, NetworkPolicy,
-    RootConfig, SecretString, Tool, ToolAccess, ToolCategory, ToolContext, ToolEgressAudit,
-    ToolErrorKind, ToolLifecycleOwner, ToolMutationTracking, ToolOperation, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudgetLimits,
-    safe_persistence_text,
+    EgressBindingOrigin, EgressDataCategory, EgressDisclosurePresenter, EgressNetworkRoute,
+    McpRemoteClientCapability, McpServerConfig, NetworkPolicy, RootConfig, SecretString, Tool,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner,
+    ToolMutationTracking, ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudgetLimits, safe_persistence_text,
 };
 use sigil_mcp::{
-    McpElicitationAction, McpElicitationHandler, McpElicitationRequest,
-    McpRemoteClientCapabilities, McpRemoteFormHandler, McpRemoteFormResponse, McpRemoteRoot,
-    McpRemoteTool, McpStreamableHttpBearerProvider, McpStreamableHttpClient,
-    McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment, McpStreamableHttpLimits,
-    McpToolName, PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
+    McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpPermissionBinding,
+    McpPermissionTransport, McpRemoteClientCapabilities, McpRemoteFormHandler,
+    McpRemoteFormResponse, McpRemoteRoot, McpRemoteTool, McpStreamableHttpBearerProvider,
+    McpStreamableHttpClient, McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment,
+    McpStreamableHttpLimits, McpToolName, PreparedMcpStreamableHttpHeaders,
+    ValidatedMcpFormRequest, classify_mcp_permission, mcp_permission_fingerprint,
+    mcp_tool_permission_plan,
 };
 use url::Url;
 
@@ -257,7 +258,14 @@ async fn prepare_remote_mcp_generation(
         .egress_audit_recorder()
         .ok_or_else(|| anyhow!("remote MCP activation requires a durable session recorder"))?;
     let endpoint = Url::parse(&remote.url).context("invalid remote MCP endpoint")?;
+    let endpoint_fingerprint = sha256_fingerprint(endpoint.as_str());
     enforce_allowed_domain(root_config, &endpoint)?;
+    let header_schema_fingerprint = mcp_permission_fingerprint(&json!({
+        "literal_header_names": remote.http_headers.keys().collect::<Vec<_>>(),
+        "environment_header_sources": remote.env_http_headers.iter().collect::<Vec<_>>(),
+        "bearer_environment_source": remote.bearer_token_env_var,
+        "oauth_configured": remote.oauth.is_some(),
+    }))?;
     let endpoint_secret = SecretString::new(remote.url.clone());
     let header_config = McpStreamableHttpHeaderConfig {
         literal: remote.http_headers.clone(),
@@ -413,6 +421,24 @@ async fn prepare_remote_mcp_generation(
         server.name.clone(),
         generation,
     );
+    let remote_identity = client
+        .server_identity()
+        .await
+        .ok_or_else(|| anyhow!("remote MCP server identity is unavailable after initialization"))?;
+    let protocol_version = client.protocol_version().await.ok_or_else(|| {
+        anyhow!("remote MCP protocol version is unavailable after initialization")
+    })?;
+    let permission_binding = McpPermissionBinding {
+        execution_profile: mcp_permission_fingerprint(&json!({
+            "endpoint": endpoint_fingerprint,
+            "transport": client.transport_fingerprint(),
+            "transport_profile": client.profile_config_proxy_fingerprint(),
+            "server_identity": remote_identity.fingerprint,
+            "protocol": format!("{protocol_version:?}"),
+            "lifecycle_generation": lifecycle_owner.generation(),
+        }))?,
+        environment_binding: header_schema_fingerprint,
+    };
     let redactor = secret_redactor_for_root_config(root_config);
     let execution_lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut used = registry
@@ -436,6 +462,7 @@ async fn prepare_remote_mcp_generation(
             server_name: server.name.clone(),
             trust: server.trust.clone(),
             lifecycle_owner: lifecycle_owner.clone(),
+            permission_binding: permission_binding.clone(),
             redactor: redactor.clone(),
             attempts: Arc::clone(&attempts),
             execution_lock: Arc::clone(&execution_lock),
@@ -501,6 +528,7 @@ struct RemoteMcpTool {
     server_name: String,
     trust: sigil_kernel::McpServerTrustPolicy,
     lifecycle_owner: ToolLifecycleOwner,
+    permission_binding: McpPermissionBinding,
     redactor: sigil_kernel::SecretRedactor,
     attempts: Arc<RuntimeMcpTransportAttemptFactory>,
     execution_lock: Arc<tokio::sync::Mutex<()>>,
@@ -509,6 +537,11 @@ struct RemoteMcpTool {
 #[async_trait]
 impl Tool for RemoteMcpTool {
     fn spec(&self) -> ToolSpec {
+        let permission = classify_mcp_permission(
+            &self.remote_tool.annotations,
+            self.trust.trust_class,
+            McpPermissionTransport::StreamableHttp,
+        );
         ToolSpec {
             name: self.provider_name.clone(),
             description: self
@@ -518,8 +551,8 @@ impl Tool for RemoteMcpTool {
                 .unwrap_or_else(|| format!("Remote MCP tool {}", self.remote_tool.name)),
             input_schema: self.remote_tool.input_schema.clone(),
             category: ToolCategory::Mcp,
-            access: ToolAccess::Read,
-            network_effect: Some(NetworkEffect::Read),
+            access: permission.access,
+            network_effect: permission.network_effect,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -535,23 +568,26 @@ impl Tool for RemoteMcpTool {
         Some(self.lifecycle_owner.clone())
     }
 
-    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
-        Ok(ToolOperation::NetworkRequest)
-    }
-
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![
-            ToolSubject::mcp_tool(self.provider_name.clone()),
-            ToolSubject::mcp_trust_class(self.server_name.clone(), self.trust.trust_class.as_str()),
-        ])
-    }
-
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(self.trust.approval_default))
+    ) -> Result<ToolPermissionPlanDraft> {
+        mcp_tool_permission_plan(
+            &self.provider_name,
+            &self.remote_tool.name,
+            &self.remote_tool.annotations,
+            &self.trust,
+            McpPermissionTransport::StreamableHttp,
+            vec![
+                ToolSubject::mcp_tool(self.provider_name.clone()),
+                ToolSubject::mcp_trust_class(
+                    self.server_name.clone(),
+                    self.trust.trust_class.as_str(),
+                ),
+            ],
+            &self.permission_binding,
+        )
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {

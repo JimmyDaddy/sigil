@@ -97,6 +97,12 @@ codesign --verify --deep --strict --verbose=4 target/release/bundle/macos/Sigil.
 `~/Library/Logs/Sigil/startup-error.log`，Linux 位于 `$XDG_STATE_HOME/sigil` 或 `~/.local/state/sigil`，Windows
 位于 `%LOCALAPPDATA%\Sigil\logs`。成功启动前会删除上一份错误，文件不会自动上传。
 
+Desktop launcher 会有界收集 sidecar startup stderr，但不会把原始 stderr、路径或凭据投影到 renderer。已知安全分类
+分别使用 `workspace_server_busy`、`workspace_server_state_invalid` 与
+`workspace_server_loopback_unavailable`；未知失败才保留通用 `workspace_server_start_failed`。HTTP protocol replay
+journal 的内容损坏不会进入这些阻塞态：server 会隔离该可重建 projection 并继续启动，canonical session 文件保持
+不变。lease/ownership/I/O 与 durable command identity 错误仍 fail closed，不能通过删除状态绕过。
+
 ## 5. Crash、restart 与 upgrade 结论
 
 - `sigil serve` crash 会投影为 workspace `crashed/exited`，不会在 renderer 内静默新建第二个 server。用户重新打开

@@ -347,6 +347,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/runs/{run_id}/terminal-cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel one exact persistent terminal task */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    run_id: components["parameters"]["RunId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["TerminalTaskCancelCommand"];
+                };
+            };
+            responses: {
+                /** @description Generation-bound terminal cancellation receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TerminalTaskCancelCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/server-info": {
         parameters: {
             query?: never;
@@ -2158,6 +2206,7 @@ export interface components {
             unavailable_reason?: string | null;
         };
         ApprovalCommandReceipt: {
+            approval_request_id: string;
             call_id: string;
             client_id: string;
             command_id: string;
@@ -2165,7 +2214,10 @@ export interface components {
             decision: components["schemas"]["ApprovalDecisionRecord"];
             /** Format: uint64 */
             expected_stream_sequence?: number | null;
+            /** Format: uint64 */
+            registry_revision: number;
             replayed: boolean;
+            route_state: components["schemas"]["ApprovalRouteState"];
             run_id: string;
             session_id: string;
         };
@@ -2177,7 +2229,7 @@ export interface components {
         ApprovalDecisionRecord: {
             call_id: string;
             /** @enum {string} */
-            decision: "approved" | "denied";
+            decision: "approved" | "approved_for_session" | "denied";
             reason?: string | null;
             run_id: string;
         };
@@ -2200,6 +2252,8 @@ export interface components {
             operation?: string;
             preview?: components["schemas"]["PublicToolPreview"] | null;
             risk?: string;
+            session_grant_available: boolean;
+            session_grant_unavailable_reason: components["schemas"]["SessionGrantUnavailableReason"] | null;
             snapshot_required: boolean;
             source_policy_decision?: string;
             spec?: Record<string, never>;
@@ -2217,6 +2271,8 @@ export interface components {
             /** @constant */
             type: "approval_resolved";
         };
+        /** @enum {string} */
+        ApprovalRouteState: "decision_accepted" | "delivery_uncertain" | "terminal";
         AssistantMessageEvent: {
             message: components["schemas"]["PublicAssistantMessage"];
             /** @constant */
@@ -2989,12 +3045,35 @@ export interface components {
         PendingApproval: {
             approval_request_id: string;
             call_id: string;
+            display: components["schemas"]["PendingApprovalDisplay"];
             /** Format: uint64 */
             expires_at_ms: number;
             policy_version: string;
             session_grant_available: boolean;
+            session_grant_unavailable_reason: components["schemas"]["SessionGrantUnavailableReason"] | null;
             tool_call_hash: string;
             tool_name: string;
+        };
+        PendingApprovalDisplay: {
+            analysis_reason_codes: ("unknown_program" | "dynamic_command" | "unsupported_syntax" | "invalid_syntax" | "analysis_limit_exceeded" | "unresolved_path" | "unresolved_executable" | "unproven_containment")[];
+            analysis_reasons: string[];
+            analysis_status: string;
+            containment: string[];
+            decision_reasons: string[];
+            effects: string[];
+            /** Format: uint64 */
+            event_sequence: number;
+            operation?: string | null;
+            risk?: string | null;
+            safe_summary_detail: string;
+            safe_summary_title: string;
+            snapshot_required: boolean;
+            subjects: components["schemas"]["PendingApprovalSubject"][];
+        };
+        PendingApprovalSubject: {
+            kind: string;
+            scope: string;
+            workspace_label?: string | null;
         };
         /** @enum {string} */
         PermissionMode: "read-only" | "manual" | "auto-edit" | "danger-full-access";
@@ -3108,12 +3187,12 @@ export interface components {
             event: components["schemas"]["PublicRunEventPayload"];
             run_id: string;
             /** @constant */
-            schema_version: 1;
+            schema_version: 2;
             /** Format: uint64 */
             sequence: number;
             session_id: string;
         };
-        PublicRunEventPayload: components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        PublicRunEventPayload: components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
         /** @enum {string} */
         PublicTaskPhase: "routing" | "planning" | "execution" | "integration" | "synthesis" | "terminal";
         PublicTaskPlanStep: {
@@ -3204,7 +3283,7 @@ export interface components {
             model_options: components["schemas"]["ApplicationModelOption"][];
             model_ref: components["schemas"]["ProviderModelRef"];
             /** @enum {string} */
-            model_selection: "fresh_session";
+            model_selection: "same_session";
             model_selection_binding: string;
             provider_name: string;
             reasoning_effort_binding?: string | null;
@@ -3221,7 +3300,7 @@ export interface components {
         };
         RunSnapshot: {
             id: string;
-            pending_approval_call_ids: string[];
+            pending_approvals: components["schemas"]["PendingApproval"][];
             permission_mode: components["schemas"]["PermissionMode"];
             prompt_preview: string;
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
@@ -3229,6 +3308,7 @@ export interface components {
             status: components["schemas"]["RunStatus"];
             /** Format: uint64 */
             stream_sequence: number;
+            terminal_tasks: components["schemas"]["TerminalLifecycle"][];
         };
         RunStartCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunStartRequest"];
@@ -3246,7 +3326,7 @@ export interface components {
         };
         RunStartRequest: {
             agent_binding?: components["schemas"]["ApplicationAgentBinding"] | null;
-            model_name?: string | null;
+            model_ref?: components["schemas"]["ProviderModelRef"] | null;
             model_selection_binding?: string | null;
             permission_mode: components["schemas"]["PermissionMode"];
             prompt: string;
@@ -3280,6 +3360,7 @@ export interface components {
             support_diagnostics: boolean;
             task_integration: boolean;
             task_pause: boolean;
+            terminal_task_cancel: boolean;
             typed_tool_artifact_retrieval: boolean;
             verification: boolean;
         };
@@ -3405,6 +3486,7 @@ export interface components {
             durable_session_scope_id: string;
             foreground_owner?: components["schemas"]["ForegroundRunOwner"] | null;
             recovery_actions: components["schemas"]["ContinuityRecoveryAction"][];
+            retained_terminal_runs: components["schemas"]["RunSnapshot"][];
         };
         SessionCreateRequest: {
             label?: string;
@@ -3414,6 +3496,11 @@ export interface components {
             session_id: string;
             session_ref: string;
         };
+        SessionGrantUnavailableReason: {
+            code: components["schemas"]["SessionGrantUnavailableReasonCode"];
+        };
+        /** @enum {string} */
+        SessionGrantUnavailableReasonCode: "analysis_incomplete" | "semantic_scope_unavailable" | "non_grantable_effect" | "containment_binding_unavailable" | "policy_decision_not_grantable" | "no_reusable_approval_facet" | "network_scope_not_grantable" | "confirmation_required" | "snapshot_required" | "subject_scope_unavailable" | "risk_not_grantable" | "external_mutation" | "operation_not_grantable";
         SessionInvalidSourceDeleteReceipt: {
             operation_id: string;
             /** Format: uint64 */
@@ -3673,6 +3760,88 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_step_changed";
+        };
+        TerminalLifecycle: {
+            /** Format: uint64 */
+            emitted_at_ms: number;
+            /** Format: uint64 */
+            generation: number;
+            readiness: components["schemas"]["TerminalReadinessStatus"];
+            status: components["schemas"]["TerminalTaskStatus"];
+            task_id: string;
+            /** Format: uint64 */
+            total_output_bytes: number;
+        };
+        TerminalLifecycleEvent: {
+            event: components["schemas"]["TerminalLifecycle"];
+            /** @constant */
+            type: "terminal_lifecycle";
+        };
+        /** @enum {string} */
+        TerminalReadinessKind: "none" | "output_contains" | "output_regex";
+        TerminalReadinessStatus: {
+            /** @constant */
+            state: "none";
+        } | {
+            kind: components["schemas"]["TerminalReadinessKind"];
+            /** @constant */
+            state: "waiting";
+        } | {
+            kind: components["schemas"]["TerminalReadinessKind"];
+            /** Format: uint64 */
+            ready_at_ms: number;
+            /** @constant */
+            state: "ready";
+        } | {
+            kind: components["schemas"]["TerminalReadinessKind"];
+            reason: string;
+            /** @constant */
+            state: "failed";
+        } | {
+            kind: components["schemas"]["TerminalReadinessKind"];
+            /** @constant */
+            state: "timed_out";
+        };
+        TerminalTaskCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
+            payload: components["schemas"]["TerminalTaskCancelRequest"];
+        };
+        TerminalTaskCancelCommandReceipt: {
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            /** Format: uint64 */
+            expected_stream_sequence?: number | null;
+            replayed: boolean;
+            run_id: string;
+            session_id: string;
+            terminal_task: components["schemas"]["TerminalLifecycle"];
+        };
+        TerminalTaskCancelRequest: {
+            /** Format: uint64 */
+            expected_generation: number;
+            task_id: string;
+        };
+        TerminalTaskStatus: {
+            /** @constant */
+            state: "starting";
+        } | {
+            /** @constant */
+            state: "running";
+        } | {
+            /** Format: int32 */
+            exit_code?: number | null;
+            /** @constant */
+            state: "exited";
+        } | {
+            reason: string;
+            /** @constant */
+            state: "failed";
+        } | {
+            /** @constant */
+            state: "cancelled";
+        } | {
+            /** @constant */
+            state: "interrupted";
         };
         TextDeltaEvent: {
             text: string;

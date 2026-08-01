@@ -850,7 +850,7 @@ impl AppState {
         let (token, _) = Self::slash_query(&self.composer.input)?;
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
             Some("/agent") => Some("Agent"),
-            Some("/model") => Some("Model · Enter starts fresh session · D sets saved default"),
+            Some("/model") => Some("Model · Enter switches current session · D sets saved default"),
             Some("/resume") => Some("Resume session"),
             _ => None,
         }

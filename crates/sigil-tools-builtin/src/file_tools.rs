@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{BufRead, BufReader, Write},
     path::Path,
@@ -11,10 +12,12 @@ use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    Tool, ToolAccess, ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity,
-    ToolCategory, ToolContext, ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
-    delete_file_with_mutation, safe_persistence_json_value, safe_persistence_text,
+    DeclaredToolPermissionFacts, Tool, ToolAccess, ToolAnalysisStatus, ToolArtifactDescriptorV1,
+    ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolErrorKind,
+    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta,
+    ToolSemanticScope, ToolSpec, ToolSubjectScope, declared_tool_permission_plan,
+    delete_file_with_mutation, safe_persistence_json_value, safe_persistence_text, sha256_hex,
     write_file_with_mutation,
 };
 
@@ -93,9 +96,20 @@ impl Tool for ReadFileTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let path = required_string(args, "path")?;
-        Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect: None,
+                subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -445,6 +459,26 @@ fn read_file_language(path: &str) -> Option<&'static str> {
     }
 }
 
+fn write_file_permission_operation(ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+    let path = required_string(args, "path")?;
+    let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
+    let requested_path = Path::new(path);
+    let target = if requested_path.is_absolute() {
+        lexically_normalize_path(requested_path)?
+    } else {
+        lexically_normalize_path(&workspace_root.join(requested_path))?
+    };
+    let resolved = resolve_tool_path_from_base(&workspace_root, &workspace_root, path)?;
+    if resolved.scope != ToolSubjectScope::Workspace {
+        bail!("write_file path is outside workspace: {path}");
+    }
+    if target.exists() {
+        Ok(ToolOperation::OverwriteFile)
+    } else {
+        Ok(ToolOperation::CreateFile)
+    }
+}
+
 #[async_trait]
 impl Tool for WriteFileTool {
     fn spec(&self) -> ToolSpec {
@@ -468,29 +502,47 @@ impl Tool for WriteFileTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let path = required_string(args, "path")?;
-        Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
-    }
-
-    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
-        let path = required_string(args, "path")?;
-        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
-        let requested_path = Path::new(path);
-        let target = if requested_path.is_absolute() {
-            lexically_normalize_path(requested_path)?
-        } else {
-            lexically_normalize_path(&workspace_root.join(requested_path))?
-        };
-        let resolved = resolve_tool_path_from_base(&workspace_root, &workspace_root, path)?;
-        if resolved.scope != ToolSubjectScope::Workspace {
-            bail!("write_file path is outside workspace: {path}");
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let content = required_string(args, "content")?;
+        let operation = write_file_permission_operation(ctx, args)?;
+        let mut effects = BTreeSet::from([ToolPermissionEffect::FileWrite]);
+        if operation == ToolOperation::OverwriteFile {
+            effects.insert(ToolPermissionEffect::FileRead);
         }
-        if target.exists() {
-            Ok(ToolOperation::OverwriteFile)
-        } else {
-            Ok(ToolOperation::CreateFile)
-        }
+        let mut semantic_scope = ToolSemanticScope::new("workspace:file_write", 1);
+        semantic_scope
+            .qualifiers
+            .insert("operation".to_owned(), operation.as_str().to_owned());
+        semantic_scope
+            .qualifiers
+            .insert("content_sha256".to_owned(), sha256_hex(content.as_bytes()));
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Write,
+            operation,
+            effects,
+            subjects: vec![tool_path_subject(
+                &ctx.workspace_root,
+                required_string(args, "path")?,
+            )?],
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(semantic_scope),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([(
+                "planner".to_owned(),
+                "typed_file_write_v2".to_owned(),
+            )]),
+            safe_summary: ToolPermissionSummary {
+                title: if operation == ToolOperation::CreateFile {
+                    "Create workspace file".to_owned()
+                } else {
+                    "Overwrite workspace file".to_owned()
+                },
+                detail: "Write one approval-bound workspace file".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -590,9 +642,40 @@ impl Tool for EditFileTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let path = required_string(args, "path")?;
-        Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let old_text = required_string(args, "old_text")?;
+        let new_text = required_string(args, "new_text")?;
+        let mut semantic_scope = ToolSemanticScope::new("workspace:file_edit", 1);
+        semantic_scope.qualifiers.insert(
+            "replacement_sha256".to_owned(),
+            sha256_hex(format!("{old_text}\0{new_text}").as_bytes()),
+        );
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Write,
+            operation: ToolOperation::EditFile,
+            effects: BTreeSet::from([
+                ToolPermissionEffect::FileRead,
+                ToolPermissionEffect::FileWrite,
+            ]),
+            subjects: vec![tool_path_subject(
+                &ctx.workspace_root,
+                required_string(args, "path")?,
+            )?],
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(semantic_scope),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([(
+                "planner".to_owned(),
+                "typed_file_edit_v2".to_owned(),
+            )]),
+            safe_summary: ToolPermissionSummary {
+                title: "Edit workspace file".to_owned(),
+                detail: "Read and replace one exact snippet in a workspace file".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -705,9 +788,33 @@ impl Tool for DeleteFileTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let path = required_string(args, "path")?;
-        Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Write,
+            operation: ToolOperation::DeleteFile,
+            effects: BTreeSet::from([
+                ToolPermissionEffect::FileRead,
+                ToolPermissionEffect::FileDelete,
+            ]),
+            subjects: vec![tool_path_subject(
+                &ctx.workspace_root,
+                required_string(args, "path")?,
+            )?],
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: None,
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([(
+                "planner".to_owned(),
+                "typed_file_delete_v2".to_owned(),
+            )]),
+            safe_summary: ToolPermissionSummary {
+                title: "Delete workspace file".to_owned(),
+                detail: "Inspect and delete one approval-bound workspace file".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -795,9 +902,20 @@ impl Tool for ListTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let path = optional_string(args, "path").unwrap_or(".");
-        Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Search,
+                network_effect: None,
+                subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -875,6 +993,22 @@ impl Tool for GlobTool {
         }
     }
 
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        required_string(args, "pattern")?;
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Search,
+                network_effect: None,
+                subjects: vec![tool_path_subject(&ctx.workspace_root, ".")?],
+                tool_default_mode: None,
+            },
+        )
+    }
+
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let pattern = required_string(&args, "pattern")?.to_owned();
         let limit = optional_usize(&args, "limit")?
@@ -941,9 +1075,21 @@ impl Tool for GrepTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        required_string(args, "pattern")?;
         let path = optional_string(args, "path").unwrap_or(".");
-        Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Search,
+                network_effect: None,
+                subjects: vec![tool_path_subject(&ctx.workspace_root, path)?],
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {

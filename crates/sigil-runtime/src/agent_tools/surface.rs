@@ -221,67 +221,88 @@ impl Tool for AgentTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let subject = match self.kind {
-            AgentToolKind::RequestDelegation => {
-                return Ok(RequestAgentDelegationArgs::parse(args)?
-                    .members
-                    .into_iter()
-                    .map(|member| ToolSubject::agent(member.spawn.profile_id.as_str().to_owned()))
-                    .collect());
-            }
-            AgentToolKind::Spawn => ToolSubject::agent(required_string(args, "profile_id")?),
-            AgentToolKind::SpawnBatch => {
-                return Ok(SpawnAgentsArgs::parse(args)?
-                    .members
-                    .into_iter()
-                    .map(|member| ToolSubject::agent(member.spawn.profile_id.as_str().to_owned()))
-                    .collect());
-            }
-            AgentToolKind::List => ToolSubject::agent("all".to_owned()),
-            AgentToolKind::Wait
-            | AgentToolKind::ReadResult
-            | AgentToolKind::Cancel
-            | AgentToolKind::Message
-            | AgentToolKind::Close => ToolSubject::agent(required_string(args, "thread_id")?),
-        };
-        Ok(vec![subject])
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        args: &Value,
-    ) -> Result<Option<sigil_kernel::ApprovalMode>> {
-        Ok(match self.kind {
-            AgentToolKind::RequestDelegation
-                if self.surface.multi_agent_mode == MultiAgentMode::None =>
-            {
-                Some(sigil_kernel::ApprovalMode::Deny)
-            }
-            AgentToolKind::RequestDelegation => Some(sigil_kernel::ApprovalMode::Ask),
-            AgentToolKind::Spawn | AgentToolKind::SpawnBatch
-                if self.surface.multi_agent_mode == MultiAgentMode::None =>
-            {
-                Some(sigil_kernel::ApprovalMode::Deny)
-            }
-            AgentToolKind::Spawn if self.safe_model_spawn(args)? => {
-                Some(sigil_kernel::ApprovalMode::Allow)
-            }
-            AgentToolKind::SpawnBatch if self.safe_model_batch_spawn(args)? => {
-                Some(sigil_kernel::ApprovalMode::Allow)
-            }
-            AgentToolKind::Spawn | AgentToolKind::SpawnBatch => {
-                Some(sigil_kernel::ApprovalMode::Ask)
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let spec = self.spec();
+        let (subjects, tool_default_mode, safe_read_only_spawn) = self.permission_inputs(args)?;
+        let operation = match self.kind {
+            AgentToolKind::RequestDelegation | AgentToolKind::Spawn | AgentToolKind::SpawnBatch => {
+                ToolOperation::SpawnAgent
             }
             AgentToolKind::Wait | AgentToolKind::ReadResult | AgentToolKind::List => {
-                Some(sigil_kernel::ApprovalMode::Allow)
+                ToolOperation::Read
             }
-            AgentToolKind::Cancel | AgentToolKind::Message | AgentToolKind::Close => {
-                Some(sigil_kernel::ApprovalMode::Allow)
+            AgentToolKind::Cancel | AgentToolKind::Close => ToolOperation::CloseAgent,
+            AgentToolKind::Message => ToolOperation::MessageAgent,
+        };
+        let mut effects = BTreeSet::new();
+        match self.kind {
+            AgentToolKind::RequestDelegation => {
+                effects.insert(ToolPermissionEffect::AgentLifecycle);
+                effects.insert(ToolPermissionEffect::Unknown);
             }
+            AgentToolKind::Spawn | AgentToolKind::SpawnBatch => {
+                effects.insert(ToolPermissionEffect::AgentLifecycle);
+                if safe_read_only_spawn {
+                    effects.insert(ToolPermissionEffect::FileRead);
+                } else {
+                    effects.insert(ToolPermissionEffect::Unknown);
+                }
+            }
+            AgentToolKind::Wait
+            | AgentToolKind::ReadResult
+            | AgentToolKind::List
+            | AgentToolKind::Cancel
+            | AgentToolKind::Message
+            | AgentToolKind::Close => {
+                effects.insert(ToolPermissionEffect::AgentLifecycle);
+            }
+        }
+        let mut semantic_scope =
+            ToolSemanticScope::new(format!("agent_thread:{}", self.kind.name()), 1);
+        if matches!(self.kind, AgentToolKind::Spawn | AgentToolKind::SpawnBatch) {
+            semantic_scope.qualifiers.insert(
+                "safe_read_only_profile".to_owned(),
+                safe_read_only_spawn.to_string(),
+            );
+        }
+        Ok(ToolPermissionPlanDraft {
+            access: spec.access,
+            operation,
+            effects,
+            subjects,
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(semantic_scope),
+            tool_default_mode,
+            analysis_bindings: BTreeMap::from([(
+                "planner".to_owned(),
+                "agent_thread_v2".to_owned(),
+            )]),
+            safe_summary: ToolPermissionSummary {
+                title: self.kind.name().replace('_', " "),
+                detail: match self.kind {
+                    AgentToolKind::RequestDelegation => {
+                        "Request explicit authority for a bounded agent batch".to_owned()
+                    }
+                    AgentToolKind::Spawn | AgentToolKind::SpawnBatch if safe_read_only_spawn => {
+                        "Start trusted read-only agent work".to_owned()
+                    }
+                    AgentToolKind::Spawn | AgentToolKind::SpawnBatch => {
+                        "Start agent work with effects requiring explicit review".to_owned()
+                    }
+                    AgentToolKind::Wait => "Wait for one agent state change".to_owned(),
+                    AgentToolKind::ReadResult => "Read one bounded result page".to_owned(),
+                    AgentToolKind::List => "Read the bounded agent thread list".to_owned(),
+                    AgentToolKind::Cancel => "Cancel one active agent thread".to_owned(),
+                    AgentToolKind::Message => "Route one message to an active agent".to_owned(),
+                    AgentToolKind::Close => "Close one terminal agent thread".to_owned(),
+                },
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
         })
     }
+
     async fn preview(&self, _ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
         Ok(match self.kind {
             AgentToolKind::RequestDelegation => Some(self.delegation_request_preview(&args)?),
@@ -327,10 +348,89 @@ impl Tool for AgentTool {
 }
 
 impl AgentTool {
-    fn safe_model_spawn(&self, args: &Value) -> Result<bool> {
-        let profile_id = AgentProfileId::new(required_string(args, "profile_id")?)?;
-        let Some(resolved) = self.surface.profile_registry.get(&profile_id) else {
-            return Ok(false);
+    fn permission_inputs(
+        &self,
+        args: &Value,
+    ) -> Result<(Vec<ToolSubject>, Option<sigil_kernel::ApprovalMode>, bool)> {
+        let disabled = self.surface.multi_agent_mode == MultiAgentMode::None;
+        match self.kind {
+            AgentToolKind::RequestDelegation => {
+                let parsed = RequestAgentDelegationArgs::parse(args)?;
+                Ok((
+                    parsed
+                        .members
+                        .into_iter()
+                        .map(|member| {
+                            ToolSubject::agent(member.spawn.profile_id.as_str().to_owned())
+                        })
+                        .collect(),
+                    Some(if disabled {
+                        sigil_kernel::ApprovalMode::Deny
+                    } else {
+                        sigil_kernel::ApprovalMode::Ask
+                    }),
+                    false,
+                ))
+            }
+            AgentToolKind::Spawn => {
+                let profile_id = AgentProfileId::new(required_string(args, "profile_id")?)?;
+                let safe_read_only_spawn = self.safe_model_spawn_for_profile(&profile_id);
+                Ok((
+                    vec![ToolSubject::agent(profile_id.as_str().to_owned())],
+                    Some(if disabled {
+                        sigil_kernel::ApprovalMode::Deny
+                    } else if safe_read_only_spawn {
+                        sigil_kernel::ApprovalMode::Allow
+                    } else {
+                        sigil_kernel::ApprovalMode::Ask
+                    }),
+                    safe_read_only_spawn,
+                ))
+            }
+            AgentToolKind::SpawnBatch => {
+                let parsed = SpawnAgentsArgs::parse(args)?;
+                let safe_read_only_spawn = parsed
+                    .members
+                    .iter()
+                    .all(|member| self.safe_model_spawn_for_profile(&member.spawn.profile_id));
+                Ok((
+                    parsed
+                        .members
+                        .into_iter()
+                        .map(|member| {
+                            ToolSubject::agent(member.spawn.profile_id.as_str().to_owned())
+                        })
+                        .collect(),
+                    Some(if disabled {
+                        sigil_kernel::ApprovalMode::Deny
+                    } else if safe_read_only_spawn {
+                        sigil_kernel::ApprovalMode::Allow
+                    } else {
+                        sigil_kernel::ApprovalMode::Ask
+                    }),
+                    safe_read_only_spawn,
+                ))
+            }
+            AgentToolKind::List => Ok((
+                vec![ToolSubject::agent("all".to_owned())],
+                Some(sigil_kernel::ApprovalMode::Allow),
+                false,
+            )),
+            AgentToolKind::Wait
+            | AgentToolKind::ReadResult
+            | AgentToolKind::Cancel
+            | AgentToolKind::Message
+            | AgentToolKind::Close => Ok((
+                vec![ToolSubject::agent(required_string(args, "thread_id")?)],
+                Some(sigil_kernel::ApprovalMode::Allow),
+                false,
+            )),
+        }
+    }
+
+    fn safe_model_spawn_for_profile(&self, profile_id: &AgentProfileId) -> bool {
+        let Some(resolved) = self.surface.profile_registry.get(profile_id) else {
+            return false;
         };
         let resolved_contracts = self
             .surface
@@ -339,19 +439,10 @@ impl AgentTool {
             .filter(|(spec, _)| resolved.profile.tool_scope.allows(&spec.name))
             .cloned()
             .collect::<Vec<_>>();
-        Ok(resolved.effective_enabled()
+        resolved.effective_enabled()
             && resolved.trust_state == AgentTrustState::Trusted
             && resolved.effective_model_invocation_allowed()
-            && tool_contracts_are_safe_readonly_for_auto_spawn(&resolved_contracts))
-    }
-
-    fn safe_model_batch_spawn(&self, args: &Value) -> Result<bool> {
-        for member in &SpawnAgentsArgs::parse(args)?.members {
-            if !self.safe_model_spawn(&member.raw_args)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+            && tool_contracts_are_safe_readonly_for_auto_spawn(&resolved_contracts)
     }
 
     fn description(&self) -> String {

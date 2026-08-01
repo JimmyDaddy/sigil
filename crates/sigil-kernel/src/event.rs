@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
@@ -8,30 +8,33 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ApprovalMode, ChangeSet, ChangeSetResult, CommandPermissionMatch, CompactionAppliedV2,
-    CompactionFailureEntry, CompactionStartedEntry, ControlEntry, ConversationInputPromotedEntry,
-    EgressDisclosurePresented, HostedToolAuthorization, HostedToolOutcome, IntentEventV1,
-    JobIntentEntry, McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared,
-    NetworkEffect, OrchestrationRouteDisabledEntry, PathTrustZone, PermissionConfirmation,
-    PermissionRisk, ProviderContinuationCandidateInvalidatedEntry,
+    ApprovalMode, ApprovalRequestIdentityV2, ChangeSet, ChangeSetResult, CommandPermissionMatch,
+    CompactionAppliedV2, CompactionFailureEntry, CompactionStartedEntry, ControlEntry,
+    ConversationInputPromotedEntry, EgressDisclosurePresented, ExecutionContainmentRequest,
+    HostedToolAuthorization, HostedToolOutcome, IntentEventV1, JobIntentEntry,
+    McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared, NetworkEffect,
+    OrchestrationRouteDisabledEntry, PathTrustZone, PermissionConfirmation,
+    PermissionDecisionReason, PermissionRisk, ProviderContinuationCandidateInvalidatedEntry,
     ProviderContinuationCandidateRecordedEntry, ProviderContinuationObservedEntry,
     ProviderContinuationPayloadLifecycleEntry, ProviderContinuationState,
     ProviderContinuationToolClosureRecordedEntry, ProviderObservedResolutionPlanRecordedEntry,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome,
     QueryEgressStarted, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
     TaskGuidancePromotedEntry, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
-    TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalTaskEntry, ToolCall, ToolOperation,
-    ToolOutputAgingActivatedV1, ToolOutputProjectionShrinkRecorded, ToolPreview, ToolProgressEvent,
-    ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
-    VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
-    WebFetchTransportAuthorization, WorkspaceMutationDetected,
+    TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1, TerminalLifecycleEvent, TerminalTaskEntry,
+    ToolAnalysisStatus, ToolApprovalSessionGrantUnavailableReason, ToolCall, ToolOperation,
+    ToolOutputAgingActivatedV1, ToolOutputProjectionShrinkRecorded, ToolPermissionEffect,
+    ToolPermissionSummary, ToolPreview, ToolProgressEvent, ToolResult, ToolSpec, ToolSubject,
+    UsageStats, VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
+    VerificationReceiptLinkRecorded, VerificationRecordedEntry, WebFetchTransportAuthorization,
+    WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
-pub const PUBLIC_RUN_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const PUBLIC_RUN_EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// Current schema version for durable stored event envelopes.
-pub const STORED_EVENT_SCHEMA_VERSION: u16 = 1;
+pub const STORED_EVENT_SCHEMA_VERSION: u16 = 2;
 
 /// Checksum prefix for deterministic stored event records.
 pub const RECORD_CHECKSUM_PREFIX: &str = "sha256:jcs-v1:";
@@ -1226,6 +1229,14 @@ pub enum RunEvent {
     },
     ToolCallCompleted(ToolCall),
     ToolApprovalRequested {
+        approval_identity: ApprovalRequestIdentityV2,
+        effects: BTreeSet<ToolPermissionEffect>,
+        analysis: ToolAnalysisStatus,
+        containment: ExecutionContainmentRequest,
+        safe_summary: ToolPermissionSummary,
+        decision_reasons: Vec<PermissionDecisionReason>,
+        session_grant_available: bool,
+        session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
         call: ToolCall,
         spec: ToolSpec,
         subjects: Vec<ToolSubject>,
@@ -1243,6 +1254,7 @@ pub enum RunEvent {
     },
     ToolApprovalResolved {
         call_id: String,
+        approval_request_id: String,
         approved: bool,
         reason: Option<String>,
     },
@@ -1375,6 +1387,14 @@ pub enum PublicRunEventKind {
         call: ToolCall,
     },
     ApprovalRequested {
+        approval_identity: ApprovalRequestIdentityV2,
+        effects: BTreeSet<ToolPermissionEffect>,
+        analysis: ToolAnalysisStatus,
+        containment: ExecutionContainmentRequest,
+        safe_summary: ToolPermissionSummary,
+        decision_reasons: Vec<PermissionDecisionReason>,
+        session_grant_available: bool,
+        session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
         call: ToolCall,
         spec: ToolSpec,
         subjects: Vec<ToolSubject>,
@@ -1402,6 +1422,7 @@ pub enum PublicRunEventKind {
     },
     ApprovalResolved {
         call_id: String,
+        approval_request_id: String,
         approved: bool,
         reason: Option<String>,
     },
@@ -1410,6 +1431,10 @@ pub enum PublicRunEventKind {
     },
     ToolProgress {
         progress: ToolProgressEvent,
+    },
+    /// Bounded event-driven update from an owned persistent terminal task.
+    TerminalLifecycle {
+        event: TerminalLifecycleEvent,
     },
     Usage {
         usage: UsageStats,
@@ -1480,6 +1505,14 @@ impl From<RunEvent> for PublicRunEventKind {
             RunEvent::ToolCallArgsDelta { id, delta } => Self::ToolCallArgsDelta { id, delta },
             RunEvent::ToolCallCompleted(call) => Self::ToolCallCompleted { call },
             RunEvent::ToolApprovalRequested {
+                approval_identity,
+                effects,
+                analysis,
+                containment,
+                safe_summary,
+                decision_reasons,
+                session_grant_available,
+                session_grant_unavailable_reason,
                 call,
                 spec,
                 subjects,
@@ -1495,6 +1528,14 @@ impl From<RunEvent> for PublicRunEventKind {
                 command_permission_matches,
                 preview,
             } => Self::ApprovalRequested {
+                approval_identity,
+                effects,
+                analysis,
+                containment,
+                safe_summary,
+                decision_reasons,
+                session_grant_available,
+                session_grant_unavailable_reason,
                 call,
                 spec,
                 subjects,
@@ -1512,10 +1553,12 @@ impl From<RunEvent> for PublicRunEventKind {
             },
             RunEvent::ToolApprovalResolved {
                 call_id,
+                approval_request_id,
                 approved,
                 reason,
             } => Self::ApprovalResolved {
                 call_id,
+                approval_request_id,
                 approved,
                 reason,
             },
@@ -1549,6 +1592,8 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::UsageSnapshot(_) => "usage_snapshot",
         ControlEntry::SemanticCompactionUsageSnapshot(_) => "semantic_compaction_usage_snapshot",
         ControlEntry::ToolApproval(_) => "tool_approval",
+        ControlEntry::ToolPermissionPlannedV2(_) => "tool_permission_planned_v2",
+        ControlEntry::ToolPermissionDecisionV2(_) => "tool_permission_decision_v2",
         ControlEntry::ToolApprovalSessionGrant(_) => "tool_approval_session_grant",
         ControlEntry::ToolExecution(_) => "tool_execution",
         ControlEntry::ToolArtifactRead(_) => "tool_artifact_read",

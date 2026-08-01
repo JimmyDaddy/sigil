@@ -1,10 +1,14 @@
 use std::{
+    collections::BTreeSet,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
-use sigil_kernel::{ControlEntry, JsonlSessionStore, Session, SessionLogEntry};
+use sigil_kernel::{
+    ControlEntry, JsonlSessionStore, Session, SessionLogEntry, TerminalTaskEntry,
+    TerminalTaskProjection,
+};
 
 #[must_use]
 pub fn current_unix_time_ms() -> u64 {
@@ -67,4 +71,47 @@ pub fn append_session_control_entries_and_track_detached(
     }
     JsonlSessionStore::read_entries(session_log_path)
         .with_context(|| format!("failed to reload {context} controls"))
+}
+
+/// Performs one restart reconciliation pass for terminal tasks that cannot have a live owner in
+/// the newly started process.
+///
+/// This function is intentionally one-shot and caller-driven. It does not install a timer or
+/// retain a polling worker. Every active task becomes `Interrupted` with generation advanced and
+/// unknown cleanup evidence; no command is replayed.
+pub fn reconcile_terminal_tasks_after_restart(
+    session_log_path: &Path,
+    expected_session_scope_id: &str,
+    now_ms: u64,
+) -> Result<Vec<TerminalTaskEntry>> {
+    let records = JsonlSessionStore::read_event_records(session_log_path)
+        .with_context(|| "failed to read terminal restart reconciliation records")?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    if expected_session_scope_id.trim().is_empty()
+        || records
+            .iter()
+            .any(|record| record.session_id() != expected_session_scope_id)
+    {
+        anyhow::bail!("terminal restart reconciliation session identity changed");
+    }
+    let entries = JsonlSessionStore::read_entries(session_log_path)
+        .with_context(|| "failed to read terminal restart projection")?;
+    let projection = TerminalTaskProjection::from_entries(&entries);
+    let interrupted =
+        projection.interrupted_entries_for_missing_processes(&BTreeSet::new(), now_ms, 0);
+    if interrupted.is_empty() {
+        return Ok(interrupted);
+    }
+    let store = JsonlSessionStore::new(session_log_path.to_path_buf())
+        .with_context(|| "failed to open terminal restart reconciliation store")?;
+    for entry in &interrupted {
+        store
+            .append(&SessionLogEntry::Control(ControlEntry::TerminalTask(
+                entry.clone(),
+            )))
+            .with_context(|| "failed to append interrupted terminal task")?;
+    }
+    Ok(interrupted)
 }

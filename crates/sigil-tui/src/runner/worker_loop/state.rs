@@ -1,8 +1,12 @@
 use super::*;
 
+const MAX_APPROVAL_COMMAND_RECEIPTS: usize = 256;
+
 pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) event_tx: mpsc::Sender<WorkerEvent>,
     pub(in crate::runner) wake_coalescer: WorkerWakeCoalescer,
+    pub(in crate::runner) terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
+    pub(in crate::runner) terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
     pub(in crate::runner) readiness: WorkerReadiness,
     pub(in crate::runner) session: SessionWorkerState,
     pub(in crate::runner) run: RunWorkerState,
@@ -11,7 +15,8 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) refresh: RefreshWorkerState,
     pub(in crate::runner) agent: AgentWorkerState,
     pub(in crate::runner) mcp_oauth: McpOAuthWorkerState,
-    pub(in crate::runner) processed_worker_command_ids: BTreeSet<String>,
+    pub(in crate::runner) approval_command_receipts: BTreeMap<String, WorkerApprovalCommandReceipt>,
+    approval_command_receipt_order: VecDeque<String>,
     pub(in crate::runner) last_observed_run_active: bool,
 }
 
@@ -23,6 +28,8 @@ impl WorkerLoopState {
         background_agent_runs: sigil_runtime::AgentToolBackgroundRuns,
         event_tx: mpsc::Sender<WorkerEvent>,
         wake_coalescer: WorkerWakeCoalescer,
+        terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
+        terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
     ) -> Self {
         let pending_agent_result_continuations =
             pending_agent_result_continuations_from_session(session.as_ref());
@@ -36,9 +43,22 @@ impl WorkerLoopState {
                     .collect()
             })
             .unwrap_or_default();
+        let terminal_lifecycle_generations = session
+            .as_ref()
+            .map(|session| {
+                session
+                    .terminal_task_projection()
+                    .tasks
+                    .into_iter()
+                    .map(|(task_id, summary)| (task_id, summary.generation))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             event_tx: event_tx.clone(),
             wake_coalescer,
+            terminal_lifecycle_router,
+            terminal_control,
             readiness: WorkerReadiness::new(),
             session: SessionWorkerState {
                 log_path: session_log_path,
@@ -62,6 +82,8 @@ impl WorkerLoopState {
                 task_guidance_retry_latched: false,
                 conversation_queue_retry_latched: false,
                 active_terminal_task_ids,
+                terminal_lifecycle_generations,
+                terminal_task_control_identities: BTreeMap::new(),
                 pending_agent_result_continuations,
                 last_queued_pre_turn_block: None,
                 last_task_guidance_block: None,
@@ -93,7 +115,6 @@ impl WorkerLoopState {
                 provider_status_tasks: ProviderStatusTaskManager::new(),
                 pending_mcp_servers: BTreeSet::new(),
                 next_mcp_retry_at: Instant::now(),
-                next_terminal_task_refresh_at: Instant::now(),
             },
             agent: AgentWorkerState {
                 supervisor: agent_supervisor,
@@ -107,22 +128,48 @@ impl WorkerLoopState {
                 result_tx: WorkerEventPayloadSender::mcp_oauth(event_tx),
                 active: BTreeMap::new(),
             },
-            processed_worker_command_ids: BTreeSet::new(),
+            approval_command_receipts: BTreeMap::new(),
+            approval_command_receipt_order: VecDeque::new(),
             last_observed_run_active: false,
         }
+    }
+
+    pub(in crate::runner) fn remember_approval_command_receipt(
+        &mut self,
+        receipt: WorkerApprovalCommandReceipt,
+    ) {
+        let command_id = receipt.command_id.clone();
+        if self
+            .approval_command_receipts
+            .insert(command_id.clone(), receipt)
+            .is_none()
+        {
+            self.approval_command_receipt_order.push_back(command_id);
+        }
+        while self.approval_command_receipt_order.len() > MAX_APPROVAL_COMMAND_RECEIPTS {
+            if let Some(expired_command_id) = self.approval_command_receipt_order.pop_front() {
+                self.approval_command_receipts.remove(&expired_command_id);
+            }
+        }
+    }
+
+    pub(in crate::runner) fn clear_approval_command_receipts(&mut self) {
+        self.approval_command_receipts.clear();
+        self.approval_command_receipt_order.clear();
+    }
+
+    pub(in crate::runner) fn allocate_run_id(&mut self) -> u64 {
+        let run_id = self.run.next_id;
+        self.run.next_id = self.run.next_id.saturating_add(1);
+        run_id
     }
 
     pub(in crate::runner) fn nearest_deadline(&self) -> Option<Instant> {
         let mcp_deadline = (self.run.active.is_none()
             && !self.refresh.pending_mcp_servers.is_empty())
         .then_some(self.refresh.next_mcp_retry_at);
-        let terminal_deadline = (!self.session.projection_reconciling
-            && self.run.active.is_none()
-            && !self.session.active_terminal_task_ids.is_empty())
-        .then_some(self.refresh.next_terminal_task_refresh_at);
         [
             mcp_deadline,
-            terminal_deadline,
             self.session.projection_retry_at,
             self.session.task_guidance_retry_at,
             self.session.conversation_queue_retry_at,
@@ -183,6 +230,9 @@ pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) task_guidance_retry_latched: bool,
     pub(in crate::runner) conversation_queue_retry_latched: bool,
     pub(in crate::runner) active_terminal_task_ids: BTreeSet<TerminalTaskId>,
+    pub(in crate::runner) terminal_lifecycle_generations: BTreeMap<TerminalTaskId, u64>,
+    pub(in crate::runner) terminal_task_control_identities:
+        BTreeMap<TerminalTaskId, TerminalTaskControlIdentity>,
     pub(in crate::runner) pending_agent_result_continuations: Vec<AgentThreadId>,
     pub(in crate::runner) last_queued_pre_turn_block: Option<(ConversationInputQueueId, String)>,
     pub(in crate::runner) last_task_guidance_block: Option<(ConversationInputQueueId, String)>,
@@ -231,7 +281,6 @@ pub(in crate::runner) struct RefreshWorkerState {
     pub(in crate::runner) provider_status_tasks: ProviderStatusTaskManager,
     pub(in crate::runner) pending_mcp_servers: BTreeSet<String>,
     pub(in crate::runner) next_mcp_retry_at: Instant,
-    pub(in crate::runner) next_terminal_task_refresh_at: Instant,
 }
 
 pub(in crate::runner) struct AgentWorkerState {

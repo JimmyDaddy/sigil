@@ -34,3 +34,9 @@ The original launch video remains the focused edit, approval, verification, and
 resume demo. The separate real-run script for AI-generated plans, parallel Task
 steps, and final verification lives in
 [`dev/docs/launch/ai-planned-task-demo-script.md`](../../dev/docs/launch/ai-planned-task-demo-script.md).
+
+Future recordings that show Shell execution must keep the product distinction visible: finite
+checks use the foreground command card with live progress; persistent or interactive processes use
+an explicit terminal-task card with readiness, one event-driven wait, and a terminal cancel state.
+Approval footage must show the structured effect/reason/containment summary and must not present an
+expired or cancelled request as a user denial.

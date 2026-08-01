@@ -15,6 +15,8 @@ pub(super) struct McpToolDescriptor {
     pub(super) description: Option<String>,
     #[serde(default, rename = "inputSchema")]
     pub(super) input_schema: Value,
+    #[serde(default)]
+    pub(super) annotations: McpToolAnnotations,
 }
 
 pub(super) struct McpTool {
@@ -22,6 +24,37 @@ pub(super) struct McpTool {
     pub(super) spec: ToolSpec,
     pub(super) tool_name: McpToolName,
     pub(super) trust: McpServerTrustPolicy,
+    pub(super) annotations: McpToolAnnotations,
+}
+
+pub(super) fn stdio_mcp_permission_inputs(
+    client: &McpClient,
+    provider_tool_name: &str,
+    tool_name: &McpToolName,
+    trust: &McpServerTrustPolicy,
+) -> Result<(Vec<ToolSubject>, McpPermissionBinding)> {
+    let identity = client.identity();
+    let lifecycle = client.lifecycle_owner();
+    Ok((
+        vec![
+            ToolSubject::mcp_tool(provider_tool_name),
+            identity.trust_subject(tool_name.server_name.clone(), trust.trust_class.as_str()),
+        ],
+        McpPermissionBinding {
+            execution_profile: mcp_permission_fingerprint(&json!({
+                "transport": identity.transport_fingerprint,
+                "process_authorization": identity.process_authorization_fingerprint,
+                "protocol": identity.protocol_version,
+                "server_name": identity.server_name,
+                "server_version": identity.server_version,
+                "lifecycle_generation": lifecycle.generation(),
+            }))?,
+            environment_binding: mcp_permission_fingerprint(&json!({
+                "static": identity.environment_static_fingerprint,
+                "live": identity.environment_live_fingerprint,
+            }))?,
+        },
+    ))
 }
 
 #[async_trait]
@@ -40,26 +73,26 @@ impl Tool for McpTool {
         Some(self.client.lifecycle_owner())
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![
-            ToolSubject::mcp_tool(self.spec.name.clone()),
-            self.client.identity().trust_subject(
-                self.tool_name.server_name.clone(),
-                self.trust.trust_class.as_str(),
-            ),
-        ])
-    }
-
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(self.trust.approval_default))
-    }
-
-    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
-        Ok(ToolOperation::NetworkRequest)
+    ) -> Result<ToolPermissionPlanDraft> {
+        let (subjects, binding) = stdio_mcp_permission_inputs(
+            &self.client,
+            &self.spec.name,
+            &self.tool_name,
+            &self.trust,
+        )?;
+        mcp_tool_permission_plan(
+            &self.spec.name,
+            &self.tool_name.original_name,
+            &self.annotations,
+            &self.trust,
+            McpPermissionTransport::Stdio,
+            subjects,
+            &binding,
+        )
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {

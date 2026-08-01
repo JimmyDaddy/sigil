@@ -1,13 +1,30 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::{ToolCall, ToolSpec};
+
+/// Exact V2 identity shared by kernel, route adapters, durable audit and clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ApprovalRequestIdentityV2 {
+    pub session_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub approval_request_id: String,
+    pub plan_hash: String,
+    pub policy_version: String,
+    pub execution_binding_hash: String,
+    pub expires_at_ms: u64,
+}
 
 /// Exact, secret-free permission identity attached to an interactive approval request.
 ///
 /// The signature binds the raw tool-call digest, policy snapshot, subjects, risk and preview
 /// identity without exposing any of those potentially sensitive values to routing adapters.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ToolApprovalContext {
+    pub identity: ApprovalRequestIdentityV2,
     pub permission_signature: String,
     pub policy_fingerprint: String,
     pub requested_at_ms: u64,
@@ -28,6 +45,12 @@ pub enum ToolApproval {
     ApproveWithArgs { args_json: String },
     /// Deny the tool call and persist a user-facing reason.
     Deny { reason: String },
+    /// The exact approval request expired before a user decision was accepted.
+    Expired { reason: String },
+    /// The approval route was cancelled before a user decision was accepted.
+    Cancelled { reason: String },
+    /// The response targeted an approval request that is no longer current.
+    Stale { reason: String },
 }
 
 /// Approval policy used by the agent loop before executing mutating tools.

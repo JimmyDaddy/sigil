@@ -163,8 +163,20 @@ export type ConversationContinuityAction =
   | { type: "initial_page_failed"; sessionId: string; code?: string; message: string }
   | { type: "older_page_received"; sessionId: string; page: ConversationDisplayPage }
   | { type: "live_item_received"; sessionId: string; item: LiveConversationDisplayItem }
-  | { type: "terminal_observed"; sessionId: string; terminal: ConversationTerminalObservation }
-  | { type: "terminal_transport_observed"; sessionId: string; runId: string }
+  | {
+    type: "terminal_observed";
+    sessionId: string;
+    terminal: ConversationTerminalObservation;
+    supersedesRunId?: string;
+    supersededByRunId?: string;
+  }
+  | {
+    type: "terminal_transport_observed";
+    sessionId: string;
+    runId: string;
+    supersedesRunId?: string;
+    supersededByRunId?: string;
+  }
   | { type: "owner_probe_started"; sessionId: string }
   | {
     type: "owner_probe_resolved";
@@ -245,9 +257,19 @@ export function reduceConversationContinuity(
     case "live_item_received":
       return receiveLiveItem(state, action.item);
     case "terminal_observed":
-      return observeTerminal(state, action.terminal);
+      return observeTerminal(
+        state,
+        action.terminal,
+        action.supersedesRunId,
+        action.supersededByRunId,
+      );
     case "terminal_transport_observed":
-      return observeTerminalTransport(state, action.runId);
+      return observeTerminalTransport(
+        state,
+        action.runId,
+        action.supersedesRunId,
+        action.supersededByRunId,
+      );
     case "owner_probe_started":
       return {
         ...state,
@@ -439,7 +461,9 @@ function receivePage(
     && hasPendingTerminal(state)
     && terminalCoveredByRefreshPage;
   const lifecycle = mode === "initial"
-    ? "checking_owner"
+    ? state.transcriptLoaded && state.contractError === undefined
+      ? state.lifecycle
+      : "checking_owner"
     : mode === "refresh" && state.lifecycle === "finalizing" && terminalSettled
       ? "idle"
       : state.lifecycle;
@@ -685,6 +709,8 @@ function utf8Length(value: string): number {
 function observeTerminal(
   state: ConversationContinuityState,
   terminal: ConversationTerminalObservation,
+  supersedesRunId?: string,
+  supersededByRunId?: string,
 ): ConversationContinuityState {
   if (!isValidTerminalObservation(terminal)) {
     return rejectContract(state, {
@@ -694,6 +720,10 @@ function observeTerminal(
   }
   if (state.observedTerminal !== undefined) {
     if (sameValue(state.observedTerminal, terminal)) return state;
+    if (supersededByRunId === state.observedTerminal.runId) return state;
+    if (supersedesRunId === state.observedTerminal.runId) {
+      return beginTerminalSettlement(state, terminal);
+    }
     return rejectContract(state, {
       code: "terminal_conflict",
       message: "A second terminal transport fact conflicts with the run being finalized.",
@@ -703,6 +733,10 @@ function observeTerminal(
     state.pendingTerminalRunId !== undefined
     && state.pendingTerminalRunId !== terminal.runId
   ) {
+    if (supersededByRunId === state.pendingTerminalRunId) return state;
+    if (supersedesRunId === state.pendingTerminalRunId) {
+      return beginTerminalSettlement(state, terminal);
+    }
     return rejectContract(state, {
       code: "terminal_conflict",
       message: "A terminal transport fact conflicts with the run being finalized.",
@@ -720,6 +754,50 @@ function observeTerminal(
   if (terminalIsCovered(terminal, state.canonicalTerminal, state.throughSessionStreamSequence)) {
     return state;
   }
+  return beginTerminalSettlement(state, terminal);
+}
+
+function observeTerminalTransport(
+  state: ConversationContinuityState,
+  runId: string,
+  supersedesRunId?: string,
+  supersededByRunId?: string,
+): ConversationContinuityState {
+  if (runId.length === 0) {
+    return rejectContract(state, {
+      code: "terminal_conflict",
+      message: "The terminal transport run identity is invalid.",
+    });
+  }
+  if (state.observedTerminal !== undefined) {
+    if (state.observedTerminal.runId === runId) return state;
+    if (supersededByRunId === state.observedTerminal.runId) return state;
+    if (supersedesRunId === state.observedTerminal.runId) {
+      return beginTerminalTransportSettlement(state, runId);
+    }
+    return rejectContract(state, {
+        code: "terminal_conflict",
+        message: "A terminal transport fact conflicts with the run being finalized.",
+      });
+  }
+  if (state.pendingTerminalRunId !== undefined) {
+    if (state.pendingTerminalRunId === runId) return state;
+    if (supersededByRunId === state.pendingTerminalRunId) return state;
+    if (supersedesRunId === state.pendingTerminalRunId) {
+      return beginTerminalTransportSettlement(state, runId);
+    }
+    return rejectContract(state, {
+        code: "terminal_conflict",
+        message: "A second terminal transport fact conflicts with the run being finalized.",
+      });
+  }
+  return beginTerminalTransportSettlement(state, runId);
+}
+
+function beginTerminalSettlement(
+  state: ConversationContinuityState,
+  terminal: ConversationTerminalObservation,
+): ConversationContinuityState {
   return {
     ...state,
     lifecycle: "finalizing",
@@ -730,35 +808,14 @@ function observeTerminal(
   };
 }
 
-function observeTerminalTransport(
+function beginTerminalTransportSettlement(
   state: ConversationContinuityState,
   runId: string,
 ): ConversationContinuityState {
-  if (runId.length === 0) {
-    return rejectContract(state, {
-      code: "terminal_conflict",
-      message: "The terminal transport run identity is invalid.",
-    });
-  }
-  if (state.observedTerminal !== undefined) {
-    return state.observedTerminal.runId === runId
-      ? state
-      : rejectContract(state, {
-        code: "terminal_conflict",
-        message: "A terminal transport fact conflicts with the run being finalized.",
-      });
-  }
-  if (state.pendingTerminalRunId !== undefined) {
-    return state.pendingTerminalRunId === runId
-      ? state
-      : rejectContract(state, {
-        code: "terminal_conflict",
-        message: "A second terminal transport fact conflicts with the run being finalized.",
-      });
-  }
   return {
     ...state,
     lifecycle: "finalizing",
+    observedTerminal: undefined,
     pendingTerminalRunId: runId,
     refreshState: "needed",
     recovery: undefined,

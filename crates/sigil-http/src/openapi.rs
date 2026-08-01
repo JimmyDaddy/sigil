@@ -890,6 +890,36 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/runs/{run_id}/terminal-cancel": {
+                "post": {
+                    "summary": "Cancel one exact persistent terminal task",
+                    "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/TerminalTaskCancelCommand" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Generation-bound terminal cancellation receipt",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/TerminalTaskCancelCommandReceipt" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/runs/{run_id}/task-pause": {
                 "post": {
                     "summary": "Pause one exact durable Task plan",
@@ -1053,7 +1083,7 @@ pub fn http_openapi_document() -> Value {
                 "ServerCapabilities": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
+                    "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "cancellation", "task_pause", "terminal_task_cancel", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
                         "durable_session_reopen": { "type": "boolean" },
@@ -1066,6 +1096,7 @@ pub fn http_openapi_document() -> Value {
                         "approval": { "type": "boolean" },
                         "cancellation": { "type": "boolean" },
                         "task_pause": { "type": "boolean" },
+                        "terminal_task_cancel": { "type": "boolean" },
                         "verification": { "type": "boolean" },
                         "task_integration": { "type": "boolean" },
                         "intent_stack": { "type": "boolean" },
@@ -1456,7 +1487,7 @@ pub fn http_openapi_document() -> Value {
                 "SessionContinuityView": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["durable_session_scope_id", "durable_frontier", "recovery_actions"],
+                    "required": ["durable_session_scope_id", "durable_frontier", "retained_terminal_runs", "recovery_actions"],
                     "properties": {
                         "durable_session_scope_id": { "type": "string" },
                         "durable_frontier": { "$ref": "#/components/schemas/DurableSessionFrontier" },
@@ -1465,6 +1496,11 @@ pub fn http_openapi_document() -> Value {
                                 { "$ref": "#/components/schemas/ForegroundRunOwner" },
                                 { "type": "null" }
                             ]
+                        },
+                        "retained_terminal_runs": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "items": { "$ref": "#/components/schemas/RunSnapshot" }
                         },
                         "recovery_actions": {
                             "type": "array",
@@ -2646,7 +2682,7 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "prompt": { "type": "string" },
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
-                        "model_name": { "type": ["string", "null"] },
+                        "model_ref": { "oneOf": [{ "$ref": "#/components/schemas/ProviderModelRef" }, { "type": "null" }] },
                         "model_selection_binding": { "type": ["string", "null"] },
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "reasoning_effort_binding": { "type": ["string", "null"] },
@@ -2705,7 +2741,7 @@ pub fn http_openapi_document() -> Value {
                             "minItems": 1,
                             "items": { "$ref": "#/components/schemas/ApplicationModelOption" }
                         },
-                        "model_selection": { "type": "string", "enum": ["fresh_session"] },
+                        "model_selection": { "type": "string", "enum": ["same_session"] },
                         "model_selection_binding": { "type": "string" },
                         "default_permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "available_permission_modes": {
@@ -2862,6 +2898,42 @@ pub fn http_openapi_document() -> Value {
                         "replayed": { "type": "boolean" }
                     }
                 },
+                "TerminalTaskCancelCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/TerminalTaskCancelRequest" }
+                            }
+                        }
+                    ]
+                },
+                "TerminalTaskCancelRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["task_id", "expected_generation"],
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "expected_generation": { "type": "integer", "format": "uint64" }
+                    }
+                },
+                "TerminalTaskCancelCommandReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "client_id", "session_id", "run_id", "terminal_task", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "run_id": { "type": "string" },
+                        "terminal_task": { "$ref": "#/components/schemas/TerminalLifecycle" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
                 "TaskPauseCommand": {
                     "allOf": [
                         { "$ref": "#/components/schemas/CommandEnvelopeBase" },
@@ -2901,7 +2973,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunSnapshot": {
                     "type": "object",
-                    "required": ["id", "session_id", "status", "permission_mode", "prompt_preview", "pending_approval_call_ids", "stream_sequence"],
+                    "required": ["id", "session_id", "status", "permission_mode", "prompt_preview", "pending_approvals", "terminal_tasks", "stream_sequence"],
                     "properties": {
                         "id": { "type": "string" },
                         "session_id": { "type": "string" },
@@ -2910,7 +2982,44 @@ pub fn http_openapi_document() -> Value {
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "prompt_preview": { "type": "string" },
                         "stream_sequence": { "type": "integer", "format": "uint64" },
-                        "pending_approval_call_ids": { "type": "array", "items": { "type": "string" } }
+                        "pending_approvals": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/PendingApproval" } },
+                        "terminal_tasks": { "type": "array", "items": { "$ref": "#/components/schemas/TerminalLifecycle" } }
+                    }
+                },
+                "TerminalReadinessKind": {
+                    "type": "string",
+                    "enum": ["none", "output_contains", "output_regex"]
+                },
+                "TerminalTaskStatus": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "starting" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "running" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "exited" }, "exit_code": { "type": ["integer", "null"], "format": "int32" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": { "state": { "const": "failed" }, "reason": { "type": "string" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "cancelled" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "interrupted" } } }
+                    ]
+                },
+                "TerminalReadinessStatus": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "none" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state", "kind"], "properties": { "state": { "const": "waiting" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state", "kind", "ready_at_ms"], "properties": { "state": { "const": "ready" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" }, "ready_at_ms": { "type": "integer", "format": "uint64" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state", "kind", "reason"], "properties": { "state": { "const": "failed" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" }, "reason": { "type": "string" } } },
+                        { "type": "object", "additionalProperties": false, "required": ["state", "kind"], "properties": { "state": { "const": "timed_out" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" } } }
+                    ]
+                },
+                "TerminalLifecycle": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["task_id", "generation", "status", "readiness", "total_output_bytes", "emitted_at_ms"],
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "generation": { "type": "integer", "format": "uint64" },
+                        "status": { "$ref": "#/components/schemas/TerminalTaskStatus" },
+                        "readiness": { "$ref": "#/components/schemas/TerminalReadinessStatus" },
+                        "total_output_bytes": { "type": "integer", "format": "uint64" },
+                        "emitted_at_ms": { "type": "integer", "format": "uint64" }
                     }
                 },
                 "RunStatus": {
@@ -2947,18 +3056,25 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApprovalCommandReceipt": {
                     "type": "object",
-                    "required": ["command_id", "client_id", "session_id", "run_id", "call_id", "decision", "replayed"],
+                    "required": ["command_id", "client_id", "session_id", "run_id", "call_id", "approval_request_id", "decision", "route_state", "registry_revision", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
                         "client_id": { "type": "string" },
                         "session_id": { "type": "string" },
                         "run_id": { "type": "string" },
                         "call_id": { "type": "string" },
+                        "approval_request_id": { "type": "string" },
                         "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
                         "correlation_id": { "type": ["string", "null"] },
                         "decision": { "$ref": "#/components/schemas/ApprovalDecisionRecord" },
+                        "route_state": { "$ref": "#/components/schemas/ApprovalRouteState" },
+                        "registry_revision": { "type": "integer", "format": "uint64" },
                         "replayed": { "type": "boolean" }
                     }
+                },
+                "ApprovalRouteState": {
+                    "type": "string",
+                    "enum": ["decision_accepted", "delivery_uncertain", "terminal"]
                 },
                 "ApprovalDecisionRecord": {
                     "type": "object",
@@ -2966,7 +3082,7 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "run_id": { "type": "string" },
                         "call_id": { "type": "string" },
-                        "decision": { "type": "string", "enum": ["approved", "denied"] },
+                        "decision": { "type": "string", "enum": ["approved", "approved_for_session", "denied"] },
                         "reason": { "type": ["string", "null"] }
                     }
                 },
@@ -3548,11 +3664,43 @@ fn public_event_schemas() -> Map<String, Value> {
         }),
     );
     schemas.insert(
+        "SessionGrantUnavailableReasonCode".to_owned(),
+        json!({
+            "type": "string",
+            "enum": [
+                "analysis_incomplete",
+                "semantic_scope_unavailable",
+                "non_grantable_effect",
+                "containment_binding_unavailable",
+                "policy_decision_not_grantable",
+                "no_reusable_approval_facet",
+                "network_scope_not_grantable",
+                "confirmation_required",
+                "snapshot_required",
+                "subject_scope_unavailable",
+                "risk_not_grantable",
+                "external_mutation",
+                "operation_not_grantable"
+            ]
+        }),
+    );
+    schemas.insert(
+        "SessionGrantUnavailableReason".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code"],
+            "properties": {
+                "code": { "$ref": "#/components/schemas/SessionGrantUnavailableReasonCode" }
+            }
+        }),
+    );
+    schemas.insert(
         "PendingApproval".to_owned(),
         json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["call_id", "tool_name", "approval_request_id", "tool_call_hash", "policy_version", "expires_at_ms", "session_grant_available"],
+            "required": ["call_id", "tool_name", "approval_request_id", "tool_call_hash", "policy_version", "expires_at_ms", "session_grant_available", "session_grant_unavailable_reason", "display"],
             "properties": {
                 "call_id": { "type": "string" },
                 "tool_name": { "type": "string" },
@@ -3560,7 +3708,50 @@ fn public_event_schemas() -> Map<String, Value> {
                 "tool_call_hash": { "type": "string" },
                 "policy_version": { "type": "string" },
                 "expires_at_ms": { "type": "integer", "format": "uint64" },
-                "session_grant_available": { "type": "boolean" }
+                "session_grant_available": { "type": "boolean" },
+                "session_grant_unavailable_reason": {
+                    "oneOf": [
+                        { "$ref": "#/components/schemas/SessionGrantUnavailableReason" },
+                        { "type": "null" }
+                    ]
+                },
+                "display": { "$ref": "#/components/schemas/PendingApprovalDisplay" }
+            }
+        }),
+    );
+    schemas.insert(
+        "PendingApprovalDisplay".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["event_sequence", "effects", "subjects", "analysis_status", "analysis_reason_codes", "analysis_reasons", "containment", "decision_reasons", "safe_summary_title", "safe_summary_detail", "snapshot_required"],
+            "properties": {
+                "event_sequence": { "type": "integer", "format": "uint64", "minimum": 1 },
+                "effects": { "type": "array", "maxItems": 16, "items": { "type": "string", "maxLength": 2048 } },
+                "subjects": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/PendingApprovalSubject" } },
+                "analysis_status": { "type": "string", "maxLength": 2048 },
+                "analysis_reason_codes": { "type": "array", "maxItems": 8, "items": { "type": "string", "enum": ["unknown_program", "dynamic_command", "unsupported_syntax", "invalid_syntax", "analysis_limit_exceeded", "unresolved_path", "unresolved_executable", "unproven_containment"] } },
+                "analysis_reasons": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 2048 } },
+                "containment": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 2048 } },
+                "decision_reasons": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 2048 } },
+                "safe_summary_title": { "type": "string", "maxLength": 2048 },
+                "safe_summary_detail": { "type": "string", "maxLength": 2048 },
+                "operation": { "type": ["string", "null"], "maxLength": 2048 },
+                "risk": { "type": ["string", "null"], "maxLength": 2048 },
+                "snapshot_required": { "type": "boolean" }
+            }
+        }),
+    );
+    schemas.insert(
+        "PendingApprovalSubject".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "scope"],
+            "properties": {
+                "kind": { "type": "string", "maxLength": 2048 },
+                "scope": { "type": "string", "maxLength": 2048 },
+                "workspace_label": { "type": ["string", "null"], "maxLength": 2048 }
             }
         }),
     );
@@ -3916,9 +4107,21 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
             "ApprovalRequestedEvent",
             public_event_variant(
                 "approval_requested",
-                &["call", "snapshot_required"],
+                &[
+                    "call",
+                    "session_grant_available",
+                    "session_grant_unavailable_reason",
+                    "snapshot_required",
+                ],
                 json_properties(json!({
                     "call": { "$ref": "#/components/schemas/PublicToolCall" },
+                    "session_grant_available": { "type": "boolean" },
+                    "session_grant_unavailable_reason": {
+                        "oneOf": [
+                            { "$ref": "#/components/schemas/SessionGrantUnavailableReason" },
+                            { "type": "null" }
+                        ]
+                    },
                     "spec": { "type": "object" },
                     "subjects": { "type": "array", "items": { "type": "object" } },
                     "network_effect": { "type": "string" },
@@ -3974,6 +4177,17 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                     json!({ "progress": { "$ref": "#/components/schemas/PublicToolProgress" } }),
                 ),
                 false,
+            ),
+        ),
+        (
+            "TerminalLifecycleEvent",
+            public_event_variant(
+                "terminal_lifecycle",
+                &["event"],
+                json_properties(json!({
+                    "event": { "$ref": "#/components/schemas/TerminalLifecycle" }
+                })),
+                true,
             ),
         ),
         (

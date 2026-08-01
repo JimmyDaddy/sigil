@@ -315,6 +315,7 @@ fn spawn_openai_responses_catalog_fixture()
                 Err(error) => return Err(error.into()),
             }
         };
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(PROCESS_TIMEOUT))?;
         let mut request = [0_u8; 8 * 1024];
         let read = stream.read(&mut request)?;
@@ -474,6 +475,7 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                 write_input(writer, b"\r")?;
                 thread::sleep(Duration::from_millis(150));
 
+                let setup_complete_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\r")?;
                 thread::sleep(Duration::from_millis(100));
                 write_input(writer, &[0x7f; 64])?;
@@ -521,6 +523,7 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                     }
                     thread::sleep(Duration::from_millis(25));
                 }
+                wait_for_text_after(output, setup_complete_offset, "sigil ready.")?;
 
                 let root = RootConfig::load(&config_path)?;
                 assert_eq!(root.config_version, sigil_kernel::CONFIG_VERSION_V2);

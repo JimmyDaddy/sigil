@@ -25,35 +25,33 @@ fn healthy_idle_streams_do_not_exhaust_the_reconnect_budget() {
 }
 
 #[test]
-fn only_server_terminal_events_finish_a_stream() {
-    let event = |kind| DesktopTimelineEvent {
-        workspace_id: "workspace-1".to_owned(),
-        session_id: "session-1".to_owned(),
-        run_id: "run-1".to_owned(),
-        sequence: 1,
-        run_sequence: "1".to_owned(),
-        replayable: true,
-        replay_id: None,
-        provisional_id: None,
-        kind,
-        text: None,
-        item_id: None,
-        tool_name: None,
-        status: None,
-        assistant_kind: None,
-        tool_input: None,
-        approval: None,
-        task: None,
-    };
-    assert!(!timeline_is_terminal(&event(
-        DesktopTimelineEventKind::AssistantMessage
-    )));
-    assert!(timeline_is_terminal(&event(
-        DesktopTimelineEventKind::RunFinished
-    )));
-    assert!(timeline_is_terminal(&event(
-        DesktopTimelineEventKind::RunCancelled
-    )));
+fn foreground_terminal_waits_for_owned_terminal_tasks_to_settle() {
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    projection.push(terminal_timeline(1, 1, "running"));
+    projection.push(timeline(2, DesktopTimelineEventKind::RunFinished));
+
+    assert_eq!(projection.run_status, DesktopRunStatus::Finished);
+    assert!(!projection.is_settled());
+
+    projection.push(terminal_timeline(3, 2, "exited"));
+    assert!(projection.is_settled());
+}
+
+#[test]
+fn canonical_snapshot_keeps_terminal_follower_live_until_later_exit() {
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    let mut foreground_done = run_snapshot(12, Vec::new());
+    foreground_done.status = DesktopRunStatus::Finished;
+    foreground_done.terminal_tasks = vec![terminal_snapshot(1, "running")];
+
+    assert!(projection.reconcile_run_snapshot(&foreground_done, "workspace-1", "session-1"));
+    assert!(!projection.is_settled());
+
+    let mut task_done = foreground_done;
+    task_done.stream_sequence = 13;
+    task_done.terminal_tasks = vec![terminal_snapshot(2, "exited")];
+    assert!(projection.reconcile_run_snapshot(&task_done, "workspace-1", "session-1"));
+    assert!(projection.is_settled());
 }
 
 #[test]
@@ -114,6 +112,21 @@ fn pending_approval_survives_timeline_eviction_for_safe_reattach() {
         policy_version: "policy-1".to_owned(),
         expires_at_ms: 1,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(
+            sigil_desktop::DesktopSessionGrantUnavailableReason {
+                code:
+                    sigil_desktop::DesktopSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            },
+        ),
+        effects: Vec::new(),
+        subjects: Vec::new(),
+        analysis_status: "complete".to_owned(),
+        analysis_reason_codes: Vec::new(),
+        analysis_reasons: Vec::new(),
+        containment: Vec::new(),
+        decision_reasons: Vec::new(),
+        safe_summary_title: "Write a file".to_owned(),
+        safe_summary_detail: "write_file operation".to_owned(),
         tool_input: None,
         operation: None,
         risk: None,
@@ -133,6 +146,28 @@ fn pending_approval_survives_timeline_eviction_for_safe_reattach() {
         event.kind == DesktopTimelineEventKind::ApprovalRequested
             && event.item_id.as_deref() == Some("call-1")
     }));
+}
+
+#[test]
+fn canonical_run_snapshot_rebuilds_clears_and_rejects_stale_pending_approvals() {
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, true);
+    let waiting = run_snapshot(12, vec![pending_snapshot("request-1", 7)]);
+    assert!(projection.reconcile_run_snapshot(&waiting, "workspace-1", "session-1"));
+    assert_eq!(
+        projection
+            .pending_approvals
+            .get("call-1")
+            .and_then(|event| event.approval.as_ref())
+            .map(|approval| approval.approval_request_id.as_str()),
+        Some("request-1")
+    );
+
+    let resolved = run_snapshot(13, Vec::new());
+    assert!(projection.reconcile_run_snapshot(&resolved, "workspace-1", "session-1"));
+    assert!(projection.pending_approvals.is_empty());
+
+    assert!(!projection.reconcile_run_snapshot(&waiting, "workspace-1", "session-1"));
+    assert!(projection.pending_approvals.is_empty());
 }
 
 #[tokio::test]
@@ -186,6 +221,109 @@ fn timeline(sequence: u64, kind: DesktopTimelineEventKind) -> DesktopTimelineEve
         assistant_kind: None,
         tool_input: None,
         approval: None,
+        approval_request_id: None,
+        tool_execution: None,
         task: None,
+        terminal_task: None,
+    }
+}
+
+fn terminal_timeline(sequence: u64, generation: u64, status: &str) -> DesktopTimelineEvent {
+    let mut event = timeline(sequence, DesktopTimelineEventKind::TerminalLifecycle);
+    event.item_id = Some("terminal-1".to_owned());
+    event.status = Some(status.to_owned());
+    event.terminal_task = Some(DesktopTimelineTerminalTask {
+        task_id: "terminal-1".to_owned(),
+        generation,
+        status: status.to_owned(),
+        exit_code: (status == "exited").then_some(0),
+        failure_reason: None,
+        readiness: "ready".to_owned(),
+        readiness_kind: Some("output_contains".to_owned()),
+        readiness_failure_reason: None,
+        ready_at_ms: Some(10),
+        total_output_bytes: 16,
+        emitted_at_ms: generation * 10,
+        execution_backend: None,
+        sandbox_profile: None,
+    });
+    event
+}
+
+fn terminal_snapshot(generation: u64, status: &str) -> sigil_desktop::DesktopTerminalLifecycleView {
+    sigil_desktop::DesktopTerminalLifecycleView {
+        task_id: "terminal-1".to_owned(),
+        generation,
+        status: match status {
+            "running" => sigil_desktop::DesktopTerminalTaskStatus::Running,
+            "exited" => sigil_desktop::DesktopTerminalTaskStatus::Exited { exit_code: Some(0) },
+            _ => panic!("unsupported terminal test status"),
+        },
+        readiness: sigil_desktop::DesktopTerminalReadinessStatus::Ready {
+            kind: sigil_desktop::DesktopTerminalReadinessKind::OutputContains,
+            ready_at_ms: 10,
+        },
+        total_output_bytes: 16,
+        emitted_at_ms: generation * 10,
+        execution_backend: None,
+        sandbox_profile: None,
+    }
+}
+
+fn run_snapshot(
+    stream_sequence: u64,
+    pending_approvals: Vec<sigil_desktop::DesktopPendingApproval>,
+) -> DesktopRunSnapshot {
+    DesktopRunSnapshot {
+        id: "run-1".to_owned(),
+        session_id: "durable-1".to_owned(),
+        status: if pending_approvals.is_empty() {
+            DesktopRunStatus::Running
+        } else {
+            DesktopRunStatus::WaitingForApproval
+        },
+        permission_mode: sigil_desktop::DesktopPermissionMode::Manual,
+        reasoning_effort: None,
+        prompt_preview: String::new(),
+        pending_approvals,
+        approval_lifecycles: Vec::new(),
+        terminal_tasks: Vec::new(),
+        stream_sequence,
+    }
+}
+
+fn pending_snapshot(
+    approval_request_id: &str,
+    event_sequence: u64,
+) -> sigil_desktop::DesktopPendingApproval {
+    sigil_desktop::DesktopPendingApproval {
+        call_id: "call-1".to_owned(),
+        tool_name: "bash".to_owned(),
+        approval_request_id: approval_request_id.to_owned(),
+        tool_call_hash: "a".repeat(64),
+        policy_version: "permission-policy-v2".to_owned(),
+        expires_at_ms: u64::MAX,
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(
+            sigil_desktop::DesktopSessionGrantUnavailableReason {
+                code:
+                    sigil_desktop::DesktopSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            },
+        ),
+        display: sigil_desktop::DesktopPendingApprovalDisplay {
+            event_sequence,
+            effects: vec!["execute_workspace_code".to_owned()],
+            subjects: Vec::new(),
+            analysis_status: "complete".to_owned(),
+            analysis_reason_codes: Vec::new(),
+            analysis_reasons: Vec::new(),
+            containment: vec!["network=deny".to_owned()],
+            decision_reasons: vec!["explicit_ask".to_owned()],
+            safe_summary_title: "Run validation".to_owned(),
+            safe_summary_detail: "Runs workspace validation".to_owned(),
+            operation: Some("execute_workspace_check_command".to_owned()),
+            risk: Some("medium".to_owned()),
+            snapshot_required: false,
+        },
     }
 }

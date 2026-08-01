@@ -239,6 +239,7 @@ pub(in crate::runner) fn start_agent_result_continuation_run<P>(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     next_run_id: &mut u64,
+    _terminal_lifecycle_router: &ChannelTerminalLifecycleRouter,
     tool_artifact_read_budget: ToolArtifactReadBudgetV1,
     completed_thread_ids: Vec<AgentThreadId>,
 ) -> Option<ActiveRun>
@@ -399,6 +400,7 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
     role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     session_log_path: &Path,
     next_run_id: &mut u64,
+    _terminal_lifecycle_router: &ChannelTerminalLifecycleRouter,
     tool_artifact_read_budget: ToolArtifactReadBudgetV1,
     queued: PreparedQueuedConversationCandidate,
 ) -> Option<ActiveRun>
@@ -691,6 +693,7 @@ pub(in crate::runner) fn start_portable_overflow_recovery_run<P>(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     next_run_id: &mut u64,
+    _terminal_lifecycle_router: &ChannelTerminalLifecycleRouter,
     frozen_request: sigil_kernel::FrozenProviderRequestMaterial,
     logical_run_id: String,
     tool_artifact_read_budget: ToolArtifactReadBudgetV1,

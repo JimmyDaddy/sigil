@@ -126,12 +126,88 @@ fn tool_result_projection_keeps_bounded_safe_output_for_the_tool_card() {
 }
 
 #[test]
+fn approval_resolution_and_tool_execution_keep_exact_typed_identity() {
+    let resolved = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "approval_resolved",
+            "call_id": "call-1",
+            "approval_request_id": "approval-1",
+            "approved": true
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("approval resolution should project");
+    assert_eq!(resolved.approval_request_id.as_deref(), Some("approval-1"));
+
+    let execution = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "control",
+            "control": {
+                "kind": "tool_execution",
+                "payload": {
+                    "tool_execution": {
+                        "call_id": "call-1",
+                        "tool_name": "bash",
+                        "status": "started"
+                    }
+                }
+            }
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("tool execution should project");
+    assert_eq!(
+        execution.tool_execution,
+        Some(crate::DesktopTimelineToolExecution {
+            call_id: "call-1".to_owned(),
+            tool_name: "bash".to_owned(),
+            status: "started".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn redacted_durable_tool_execution_control_does_not_block_later_replay() {
+    let execution = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "control",
+            "control": {
+                "kind": "tool_execution"
+            }
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("redacted durable control should remain replayable");
+
+    assert_eq!(execution.kind, DesktopTimelineEventKind::Control);
+    assert_eq!(execution.item_id.as_deref(), Some("tool_execution"));
+    assert_eq!(execution.tool_execution, None);
+}
+
+#[test]
 fn approval_projection_requires_exact_guard_and_bounds_preview() {
     let mut event = envelope(
         DesktopProtocolEventClass::Durable,
         json!({
             "type": "approval_requested",
             "call": {"id": "call-1", "name": "write_file", "args_json": "{}"},
+            "session_grant_available": false,
+            "session_grant_unavailable_reason": {"code": "operation_not_grantable"},
+            "effects": ["file_write"],
+            "analysis": {"status": "complete"},
+            "containment": {
+                "filesystem": "workspace_write",
+                "network": "deny",
+                "process": "owned_tree",
+                "environment": "restricted",
+                "persistent_process": false
+            },
+            "safe_summary": {"title": "Edit file", "detail": "Writes one workspace file"},
+            "decision_reasons": [{"source": "local_policy", "code": "workspace_write", "detail": "Workspace writes require review"}],
+            "subjects": [{"normalized": "workspace:README.md"}],
             "operation": "edit_file",
             "risk": "medium",
             "snapshot_required": true,
@@ -146,6 +222,28 @@ fn approval_projection_requires_exact_guard_and_bounds_preview() {
         policy_version: "policy-1".to_owned(),
         expires_at_ms: 42,
         session_grant_available: false,
+        session_grant_unavailable_reason: Some(crate::DesktopSessionGrantUnavailableReason {
+            code: crate::DesktopSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        display: crate::DesktopPendingApprovalDisplay {
+            event_sequence: 1,
+            effects: vec!["file_write".to_owned()],
+            subjects: vec![crate::DesktopPendingApprovalSubject {
+                kind: "path".to_owned(),
+                scope: "workspace".to_owned(),
+                workspace_label: Some("README.md".to_owned()),
+            }],
+            analysis_status: "complete".to_owned(),
+            analysis_reason_codes: Vec::new(),
+            analysis_reasons: Vec::new(),
+            containment: vec!["network=deny".to_owned()],
+            decision_reasons: vec!["Workspace writes require review".to_owned()],
+            safe_summary_title: "Edit file".to_owned(),
+            safe_summary_detail: "Writes one workspace file".to_owned(),
+            operation: Some("edit_file".to_owned()),
+            risk: Some("medium".to_owned()),
+            snapshot_required: true,
+        },
     });
 
     let timeline = event
@@ -154,6 +252,21 @@ fn approval_projection_requires_exact_guard_and_bounds_preview() {
     let approval = timeline.approval.expect("approval guard should remain");
     assert_eq!(approval.tool_name, "write_file");
     assert_eq!(approval.operation.as_deref(), Some("edit_file"));
+    assert_eq!(approval.effects, vec!["file_write"]);
+    assert_eq!(approval.subjects, vec!["workspace:README.md"]);
+    assert_eq!(approval.analysis_status, "complete");
+    assert!(approval.containment.contains(&"network=deny".to_owned()));
+    assert_eq!(approval.safe_summary_detail, "Writes one workspace file");
+    assert_eq!(
+        approval
+            .session_grant_unavailable_reason
+            .map(|reason| reason.code),
+        Some(crate::DesktopSessionGrantUnavailableReasonCode::OperationNotGrantable)
+    );
+    assert_eq!(
+        approval.decision_reasons,
+        vec!["Workspace writes require review"]
+    );
     assert!(approval.snapshot_required);
     assert_eq!(approval.preview_body.as_deref(), Some("diff"));
 }
@@ -293,6 +406,44 @@ fn unknown_future_event_type_degrades_without_forwarding_opaque_payload() {
 }
 
 #[test]
+fn terminal_lifecycle_projects_bounded_renderer_facts() {
+    let event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "terminal_lifecycle",
+            "event": {
+                "task_id": "terminal-1",
+                "generation": 3,
+                "status": {"state": "exited", "exit_code": 0},
+                "readiness": {
+                    "state": "ready",
+                    "kind": "output_contains",
+                    "ready_at_ms": 42
+                },
+                "total_output_bytes": 128,
+                "emitted_at_ms": 43
+            }
+        }),
+    )
+    .into_timeline("workspace-1", "session-1", "run-1", "http-session-1")
+    .expect("terminal lifecycle should project");
+
+    assert_eq!(event.kind, DesktopTimelineEventKind::TerminalLifecycle);
+    assert_eq!(event.item_id.as_deref(), Some("terminal-1"));
+    let task = event
+        .terminal_task
+        .expect("terminal facts should be present");
+    assert_eq!(task.task_id, "terminal-1");
+    assert_eq!(task.generation, 3);
+    assert_eq!(task.status, "exited");
+    assert_eq!(task.exit_code, Some(0));
+    assert_eq!(task.readiness, "ready");
+    assert_eq!(task.readiness_kind.as_deref(), Some("output_contains"));
+    assert_eq!(task.ready_at_ms, Some(42));
+    assert_eq!(task.total_output_bytes, 128);
+}
+
+#[test]
 fn every_current_public_event_variant_deserializes_without_opaque_event_parsing() {
     let events = [
         json!({"type": "run_started", "prompt": "prompt"}),
@@ -312,10 +463,29 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
         json!({"type": "tool_call_started", "call": {"id": "call-1", "name": "bash", "args_json": "{}"}}),
         json!({"type": "tool_call_args_delta", "id": "call-1", "delta": "{}"}),
         json!({"type": "tool_call_completed", "call": {"id": "call-1", "name": "bash", "args_json": "{}"}}),
-        json!({"type": "approval_requested", "call": {"id": "call-1", "name": "bash", "args_json": "{}"}, "snapshot_required": false}),
-        json!({"type": "approval_resolved", "call_id": "call-1", "approved": false, "reason": null}),
+        json!({
+            "type": "approval_requested",
+            "call": {"id": "call-1", "name": "bash", "args_json": "{}"},
+            "session_grant_available": false,
+            "session_grant_unavailable_reason": {"code": "operation_not_grantable"},
+            "effects": ["execute_workspace_code"],
+            "analysis": {"status": "complete"},
+            "containment": {
+                "filesystem": "workspace_write",
+                "network": "deny",
+                "process": "owned_tree",
+                "environment": "restricted",
+                "persistent_process": false
+            },
+            "safe_summary": {"title": "Run validation", "detail": "Runs workspace code"},
+            "decision_reasons": [],
+            "subjects": [],
+            "snapshot_required": false
+        }),
+        json!({"type": "approval_resolved", "call_id": "call-1", "approval_request_id": "approval-1", "approved": false, "reason": null}),
         json!({"type": "tool_result", "result": {"call_id": "call-1", "tool_name": "bash", "content": "failed", "status": {"error": {"kind": "internal", "message": "failed", "retryable": false}}, "metadata": {}}}),
         json!({"type": "tool_progress", "progress": {"execution_id": "execution-1", "call_id": "call-1", "tool_name": "bash", "sequence": 1, "status": "running", "details": {}}}),
+        json!({"type": "terminal_lifecycle", "event": {"task_id": "terminal-1", "generation": 1, "status": {"state": "running"}, "readiness": {"state": "waiting", "kind": "output_contains"}, "total_output_bytes": 0, "emitted_at_ms": 1}}),
         json!({"type": "usage", "usage": {"prompt_tokens": 1}}),
         json!({"type": "continuation_state", "state": {"provider_name": "provider"}}),
         json!({"type": "control", "control": {"kind": "task_status_changed", "payload": {"private": "ignored"}}}),

@@ -1,4 +1,4 @@
-<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-or-timed-out,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
+<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
 
 # Troubleshooting
 
@@ -76,9 +76,12 @@ Read the tool-card error first. Confirm that the path is inside the workspace, i
 
 Headless mode cannot show an approval modal. Use a policy that permits the intended action, or run the task interactively. Never use a broader policy than the automation requires.
 
-## An Approval Was Denied Or Timed Out
+## An Approval Was Denied, Expired, Or Cancelled
 
-The action did not run. Inspect the preview, correct the request, and retry. A timeout is treated like a denial; Sigil does not silently continue.
+The action did not run. A denial records an explicit user decision; expiry, process cancellation,
+and stale recovery are separate terminal outcomes and never fabricate that decision. Inspect the
+approval card or audit reason, correct the request if needed, and retry. Sigil never continues an
+expired or cancelled operation silently.
 
 ## Mouse Or Clipboard Does Not Work
 

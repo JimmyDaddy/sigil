@@ -1,15 +1,13 @@
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeSet;
 
 use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
-    TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskProjection, TerminalTaskStatus, terminal_cleanup_receipt_for_status,
+    TERMINAL_TASK_SCHEMA_VERSION, TerminalExecutionBackendCapabilities,
+    TerminalExecutionBackendKind, TerminalOutputTerminationReason, TerminalReadinessStatus,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,
+    TerminalTaskStatus, terminal_cleanup_receipt_for_status,
 };
 use crate::{
     ControlEntry, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
@@ -151,7 +149,7 @@ fn terminal_task_projection_builds_interrupted_entries_for_missing_running_tasks
         TerminalTaskStatus::Interrupted
     ));
     assert_eq!(interrupted[0].updated_at_ms, 200);
-    assert_eq!(interrupted[0].output_preview.as_deref(), Some("tail"));
+    assert!(interrupted[0].output_preview.is_none());
     assert_eq!(interrupted[0].output_total_bytes, 128);
 }
 
@@ -210,13 +208,17 @@ fn terminal_task_status_labels_and_terminal_state_are_stable() {
 #[test]
 fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
     let details = json!({
+        "schema_version": TERMINAL_TASK_SCHEMA_VERSION,
         "task_id": "terminal-1",
+        "generation": 4,
         "status": "cancelled",
         "status_detail": { "state": "cancelled" },
-        "command": "cargo test -- --ignored",
-        "cwd": ".",
-        "shell": "zsh",
-        "log_path": ".sigil/terminal/terminal-1/output.log",
+        "readiness": { "state": "none" },
+        "command_sha256": "0".repeat(64),
+        "cwd_label": ".",
+        "shell_label": "zsh",
+        "shell_sha256": "1".repeat(64),
+        "log_ref": "terminal-log:terminal-1",
         "created_at_ms": 100,
         "execution_backend": "local_pty",
         "execution_backend_capabilities": {
@@ -242,7 +244,7 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         },
         "updated_at_ms": 140,
         "output_preview": "final tail",
-        "output_hash": "sha256:def",
+        "output_hash": "2".repeat(64),
         "output_truncated": true,
         "output_total_bytes": 65537,
         "output_limit_bytes": 65536,
@@ -253,7 +255,11 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         .expect("terminal metadata should project to an entry");
 
     assert_eq!(entry.handle.task_id.as_str(), "terminal-1");
-    assert_eq!(entry.handle.command, "cargo test -- --ignored");
+    assert_eq!(entry.handle.command_sha256, "0".repeat(64));
+    assert_eq!(entry.handle.cwd_label, ".");
+    assert_eq!(entry.handle.shell_label, "zsh");
+    assert_eq!(entry.handle.log_ref, "terminal-log:terminal-1");
+    assert!(entry.output_preview.is_none());
     assert_eq!(
         entry.handle.execution_backend,
         Some(TerminalExecutionBackendKind::LocalPty)
@@ -279,8 +285,8 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         entry.cleanup.as_ref().expect("cleanup should parse").status,
         ExecutionCleanupStatus::Completed
     );
-    assert_eq!(entry.output_preview.as_deref(), Some("final tail"));
-    assert_eq!(entry.output_hash.as_deref(), Some("sha256:def"));
+    assert!(entry.output_preview.is_none());
+    assert_eq!(entry.output_hash.as_deref(), Some("2".repeat(64).as_str()));
     assert!(entry.output_truncated);
     assert_eq!(entry.output_total_bytes, 65537);
     assert_eq!(entry.output_limit_bytes, Some(65536));
@@ -361,15 +367,15 @@ fn sample_entry_for_id(
     updated_at_ms: u64,
 ) -> TerminalTaskEntry {
     TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: updated_at_ms,
         handle: TerminalTaskHandle {
             task_id: TerminalTaskId::new(task_id).expect("valid terminal task id"),
-            command: "cargo test".to_owned(),
-            cwd: PathBuf::from("."),
-            shell: "zsh".to_owned(),
-            log_path: Path::new(".sigil")
-                .join("terminal")
-                .join(task_id)
-                .join("output.log"),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: format!("terminal-log:{task_id}"),
             created_at_ms: 100,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -378,8 +384,9 @@ fn sample_entry_for_id(
             sandbox_profile: None,
         },
         status,
-        output_preview: Some("tail".to_owned()),
-        output_hash: Some("sha256:abc".to_owned()),
+        readiness: TerminalReadinessStatus::None,
+        output_preview: None,
+        output_hash: Some("2".repeat(64)),
         output_truncated: true,
         output_total_bytes: 128,
         output_limit_bytes: None,
@@ -387,4 +394,72 @@ fn sample_entry_for_id(
         cleanup: None,
         updated_at_ms,
     }
+}
+
+#[test]
+fn durable_terminal_projection_drops_raw_output_and_bounds_sensitive_reasons() -> Result<()> {
+    let secret = "terminal-secret-value-456";
+    let mut entry = sample_entry(
+        TerminalTaskStatus::Failed {
+            reason: format!(
+                "failed https://example.test/run?token={secret} {}",
+                "x".repeat(4_096)
+            ),
+        },
+        200,
+    );
+    entry.output_preview = Some(format!("raw output {secret}"));
+
+    let durable = entry.durable_projection()?;
+    let json = serde_json::to_string(&durable)?;
+
+    assert!(durable.output_preview.is_none());
+    assert!(json.len() <= crate::MAX_DURABLE_TERMINAL_TASK_BYTES);
+    assert!(!json.contains(secret));
+    assert!(!json.contains("https://example.test"));
+    let TerminalTaskStatus::Failed { reason } = &durable.status else {
+        panic!("failed status should be retained");
+    };
+    assert!(reason.len() <= crate::MAX_TERMINAL_REASON_BYTES);
+    Ok(())
+}
+
+#[test]
+fn durable_terminal_handle_rejects_absolute_or_legacy_machine_local_fields() -> Result<()> {
+    let mut absolute = sample_entry(TerminalTaskStatus::Running, 200);
+    absolute.handle.cwd_label = "/Users/private/workspace".to_owned();
+    let error = absolute
+        .validate_durable()
+        .expect_err("absolute cwd labels must not be durable");
+    assert!(error.to_string().contains("cwd label"));
+
+    let valid = sample_entry(TerminalTaskStatus::Running, 200);
+    let mut legacy = serde_json::to_value(valid)?;
+    let handle = legacy["handle"]
+        .as_object_mut()
+        .expect("terminal handle should serialize as an object");
+    handle.insert("command".to_owned(), json!("cargo test --all"));
+    handle.insert("cwd".to_owned(), json!("/Users/private/workspace"));
+    handle.insert("shell".to_owned(), json!("/bin/zsh"));
+    handle.insert(
+        "log_path".to_owned(),
+        json!("/Users/private/.sigil/output.log"),
+    );
+    assert!(serde_json::from_value::<TerminalTaskEntry>(legacy).is_err());
+    Ok(())
+}
+
+#[test]
+fn durable_terminal_entry_contains_hashes_and_safe_labels_only() -> Result<()> {
+    let entry = sample_entry(TerminalTaskStatus::Running, 200);
+    let json = serde_json::to_string(&entry)?;
+
+    assert!(json.contains("command_sha256"));
+    assert!(json.contains("cwd_label"));
+    assert!(json.contains("log_ref"));
+    assert!(!json.contains("cargo test"));
+    assert!(!json.contains("/Users/"));
+    assert!(!json.contains("log_path"));
+    assert!(json.len() <= crate::MAX_DURABLE_TERMINAL_TASK_BYTES);
+    Ok(())
 }

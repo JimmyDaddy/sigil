@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, EgressDisclosurePresenter,
-    NetworkEffect, PreEgressDisclosure, RootConfig, ToolAccess, ToolRegistry,
+    NetworkEffect, PreEgressDisclosure, RootConfig, SecretString, ToolAccess, ToolAnalysisStatus,
+    ToolOperation, ToolPermissionEffect, ToolRegistry, ToolRestartPolicy, ToolSubjectScope,
+    WebUrlProvenanceKind,
 };
 
 use super::*;
@@ -67,4 +69,40 @@ fn public_webfetch_registration_tracks_web_enabled_and_exposes_capability_only_i
     let mut registry = ToolRegistry::new();
     register_web_fetch_tool(&mut registry, &disabled, Arc::new(AcceptingPresenter));
     assert!(registry.spec_for("webfetch").is_none());
+}
+
+#[test]
+fn webfetch_permission_plan_binds_exact_safe_endpoint_once() {
+    let args = json!({
+        "source_id": "src_exact",
+        "format": "markdown",
+        "max_content_bytes": 4096
+    });
+    let capability = sigil_kernel::ResolvedUserUrlCapability::new(
+        "session-exact",
+        "src_exact",
+        SecretString::new("https://example.test/page?token=secret"),
+        "https://example.test/page?[redacted]",
+        ToolRestartPolicy::InterruptOnRestart,
+        WebUrlProvenanceKind::UserMessage,
+    );
+
+    let first = webfetch_permission_plan(&args, &capability).expect("webfetch plan");
+    let repeated = webfetch_permission_plan(&args, &capability).expect("repeated webfetch plan");
+
+    assert_eq!(first, repeated);
+    assert_eq!(first.operation, ToolOperation::NetworkRequest);
+    assert_eq!(first.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(
+        first.effects,
+        std::collections::BTreeSet::from([ToolPermissionEffect::NetworkRead])
+    );
+    assert_eq!(first.tool_default_mode, None);
+    assert_eq!(first.subjects.len(), 1);
+    assert_eq!(first.subjects[0].scope, ToolSubjectScope::External);
+    assert_eq!(
+        first.subjects[0].normalized,
+        "https://example.test/page?[redacted]"
+    );
+    assert!(!format!("{first:?}").contains("token=secret"));
 }

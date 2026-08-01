@@ -137,7 +137,7 @@ fn run_context_decodes_exact_typed_server_contract() {
         },
         "provider_name": "deepseek",
         "model_name": "deepseek-v4-flash",
-        "model_selection": "fresh_session",
+            "model_selection": "same_session",
         "model_selection_binding": "model-binding",
         "model_options": [
             {
@@ -211,7 +211,7 @@ fn run_context_decodes_exact_typed_server_contract() {
     );
     assert_eq!(
         context.model_selection,
-        crate::DesktopModelSelectionPolicy::FreshSession
+        crate::DesktopModelSelectionPolicy::SameSession
     );
     assert_eq!(
         context.extension_catalog.commands[0].client_action,
@@ -491,11 +491,13 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
         tool_name: Some("shell".to_owned()),
         output: Some("bounded preview".to_owned()),
         truncated: true,
-        original_content_bytes: 1_024,
+        original_content_bytes: 8_363,
         artifact_ref: Some(format!("ta1_{}", "a".repeat(32))),
         artifact_availability: Some(crate::DesktopToolArtifactAvailability::Available),
-        observed_bytes: Some(1_024),
-        persisted_bytes: Some(1_024),
+        observed_bytes: Some(8_363),
+        // Safe persistence projection may expand the stored representation, for example when
+        // control material is replaced or escaped. These are independent truthful coordinates.
+        persisted_bytes: Some(8_403),
         has_more: true,
     };
     validate_conversation_display_page(&typed_tool_page, "http-session-1")
@@ -853,6 +855,41 @@ fn conversation_queue_receipt_echoes_cas_and_exact_interrupt_owner() {
 }
 
 #[test]
+fn approval_receipt_preserves_exact_route_identity_and_revision() {
+    let receipt: crate::DesktopApprovalCommandReceipt = serde_json::from_value(serde_json::json!({
+        "command_id": "approval-command-1",
+        "client_id": "desktop-1",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "call_id": "call-1",
+        "approval_request_id": "approval-1",
+        "expected_stream_sequence": 7,
+        "correlation_id": "event-1",
+        "decision": {
+            "run_id": "run-1",
+            "call_id": "call-1",
+            "decision": "approved_for_session",
+            "reason": "approved in Desktop"
+        },
+        "route_state": "decision_accepted",
+        "registry_revision": 8,
+        "replayed": false
+    }))
+    .expect("approval receipt should decode");
+
+    assert_eq!(receipt.approval_request_id, "approval-1");
+    assert_eq!(
+        receipt.route_state,
+        crate::DesktopApprovalRouteState::DecisionAccepted
+    );
+    assert_eq!(receipt.registry_revision, 8);
+    assert_eq!(
+        receipt.decision.decision,
+        crate::DesktopApprovalRecordedDecision::ApprovedForSession
+    );
+}
+
+#[test]
 fn agent_activity_decodes_bounded_result_handoff_without_storage_identity() {
     let activity: crate::DesktopAgentActivityView = serde_json::from_value(serde_json::json!({
         "total_agents": 1,
@@ -901,7 +938,7 @@ fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
     let request = crate::DesktopRunStartRequest {
         prompt: String::new(),
         permission_mode: crate::DesktopPermissionMode::Manual,
-        model_name: None,
+        model_ref: None,
         model_selection_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
@@ -927,6 +964,37 @@ fn task_continuation_serializes_as_an_exact_non_chat_run_start() {
 }
 
 #[test]
+fn run_start_serializes_an_exact_same_session_model_route() {
+    let request = crate::DesktopRunStartRequest {
+        prompt: "continue here".to_owned(),
+        permission_mode: crate::DesktopPermissionMode::Manual,
+        model_ref: Some(crate::DesktopProviderModelRef {
+            connection_id: "gateway-team".to_owned(),
+            model_id: "gpt-5".to_owned(),
+        }),
+        model_selection_binding: Some("selection-binding".to_owned()),
+        reasoning_effort: None,
+        reasoning_effort_binding: None,
+        skill_binding: None,
+        agent_binding: None,
+        task_continuation: None,
+    };
+
+    assert_eq!(
+        serde_json::to_value(request).expect("model route should encode"),
+        serde_json::json!({
+            "prompt": "continue here",
+            "permission_mode": "manual",
+            "model_ref": {
+                "connection_id": "gateway-team",
+                "model_id": "gpt-5"
+            },
+            "model_selection_binding": "selection-binding"
+        })
+    );
+}
+
+#[test]
 fn task_pause_request_identity_matches_the_shared_content_binding() {
     let request = desktop_task_pause_request("task_1", 3);
 
@@ -942,6 +1010,43 @@ fn task_pause_request_identity_matches_the_shared_content_binding() {
             "plan_version": 3
         })
     );
+}
+
+#[test]
+fn terminal_task_cancel_contract_is_exact_generation_bound_and_bounded() {
+    let request = crate::DesktopTerminalTaskCancelRequest {
+        task_id: "terminal_1".to_owned(),
+        expected_generation: 4,
+    };
+    assert_eq!(
+        serde_json::to_value(request).expect("terminal cancel should encode"),
+        serde_json::json!({
+            "task_id": "terminal_1",
+            "expected_generation": 4
+        })
+    );
+
+    let receipt: crate::DesktopTerminalTaskCancelCommandReceipt =
+        serde_json::from_value(serde_json::json!({
+            "command_id": "command-1",
+            "client_id": "desktop-1",
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "terminal_task": {
+                "task_id": "terminal_1",
+                "generation": 5,
+                "status": {"state": "cancelled"},
+                "readiness": {"state": "ready", "kind": "output_contains", "ready_at_ms": 12},
+                "total_output_bytes": 24,
+                "emitted_at_ms": 13
+            },
+            "replayed": false
+        }))
+        .expect("terminal cancel receipt should decode");
+    assert_eq!(receipt.run_id, "run-1");
+    assert_eq!(receipt.terminal_task.generation, 5);
+    assert_eq!(receipt.terminal_task.task_id, "terminal_1");
+    assert_eq!(receipt.expected_stream_sequence, None);
 }
 
 #[test]
@@ -1190,6 +1295,129 @@ async fn save_provider_default_model_uses_the_exact_put_route_and_compound_ident
     server.await.expect("server task should complete");
 }
 
+#[tokio::test]
+async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1_024];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await.expect("request should read");
+            assert!(read > 0, "request closed before its headers completed");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).expect("headers should be UTF-8");
+        assert!(
+            headers.starts_with("POST /runs/run-1/approvals/call-1 HTTP/1.1\r\n"),
+            "unexpected approval route: {headers}"
+        );
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::parse::<usize>)
+            })
+            .expect("request should include content length")
+            .expect("content length should be numeric");
+        while request.len() - header_end < content_length {
+            let read = stream.read(&mut buffer).await.expect("body should read");
+            assert!(read > 0, "request closed before its body completed");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        serde_json::from_slice(&request[header_end..header_end + content_length])
+            .expect("request body should be JSON")
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("loopback listener should expose its address");
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener
+            .accept()
+            .await
+            .expect("first request should connect");
+        let first_body = read_request(&mut first).await;
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.expect("retry should connect");
+        let second_body = read_request(&mut second).await;
+        assert_eq!(
+            second_body, first_body,
+            "retry must reuse the exact envelope"
+        );
+
+        let command_id = first_body["command_id"]
+            .as_str()
+            .expect("command id should be present");
+        let client_id = first_body["client_id"]
+            .as_str()
+            .expect("client id should be present");
+        let response_body = serde_json::json!({
+            "command_id": command_id,
+            "client_id": client_id,
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "call_id": "call-1",
+            "approval_request_id": "approval-request-1",
+            "expected_stream_sequence": 7,
+            "correlation_id": "event-8",
+            "decision": {
+                "run_id": "run-1",
+                "call_id": "call-1",
+                "decision": "approved",
+                "reason": "approved in Desktop"
+            },
+            "route_state": "decision_accepted",
+            "registry_revision": 8,
+            "replayed": true
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        second
+            .write_all(response.as_bytes())
+            .await
+            .expect("response should write");
+    });
+
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token should generate")),
+    );
+    let receipt = client
+        .resolve_approval(
+            "session-1",
+            "run-1",
+            "call-1",
+            7,
+            DesktopApprovalDecisionRequest {
+                approval_request_id: "approval-request-1".to_owned(),
+                tool_call_hash: "a".repeat(64),
+                policy_version: "permission-policy-v2".to_owned(),
+                expires_at_ms: 10_000,
+                decision: crate::DesktopApprovalDecision::Approve,
+                reason: Some("approved in Desktop".to_owned()),
+            },
+        )
+        .await
+        .expect("lost response should be recovered by exact replay");
+
+    assert!(receipt.replayed);
+    assert_eq!(receipt.registry_revision, 8);
+    server.await.expect("server task should complete");
+}
+
 #[test]
 fn session_management_contract_is_exact_and_path_free() {
     let rename = DesktopSessionRenameRequest {
@@ -1393,7 +1621,7 @@ async fn tool_artifact_request_rejects_unbounded_values_before_transport() {
 fn sse_decoder_accepts_durable_and_transient_frames_and_rejects_gaps() {
     let durable = br#"id: sigil-http-run-v1:session-1:run-1:1
 event: run_event
-data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
+data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
 "#;
     let decoded = decode_sse_frame(durable, "session-1", "run-1")
         .expect("frame should decode")
@@ -1401,7 +1629,7 @@ data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1
     assert_eq!(decoded.run_event.sequence, 1);
 
     let transient = br#"event: run_event
-data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":2,"event":{"type":"text_delta","text":"live"}}}
+data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":2,"event":{"type":"text_delta","text":"live"}}}
 "#;
     let decoded = decode_sse_frame(transient, "session-1", "run-1")
         .expect("frame should decode")
@@ -1421,7 +1649,7 @@ data: {"dropped_live_events":1}
 fn sse_decoder_rejects_cursor_or_stream_mismatch() {
     let mismatched_cursor = br#"id: cursor-other
 event: run_event
-data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
+data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
 "#;
     assert!(matches!(
         decode_sse_frame(mismatched_cursor, "session-1", "run-1"),
@@ -1429,7 +1657,7 @@ data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1
     ));
 
     let wrong_run = br#"event: run_event
-data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":1,"session_id":"session-1","run_id":"run-other","sequence":2,"event":{"type":"text_delta","text":"live"}}}
+data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-other","sequence":2,"event":{"type":"text_delta","text":"live"}}}
 "#;
     assert!(matches!(
         decode_sse_frame(wrong_run, "session-1", "run-1"),

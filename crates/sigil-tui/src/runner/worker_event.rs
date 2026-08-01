@@ -6,7 +6,7 @@ use std::{
 };
 
 use sigil_kernel::{
-    AgentThreadId,
+    AgentThreadId, TerminalLifecycleUpdateV2, TerminalTaskId,
     session::{ActiveProjectionFamily, ActiveProjectionNotice, ActiveProjectionObserver},
 };
 use sigil_runtime::ProviderStatusTaskResult;
@@ -30,9 +30,120 @@ pub(in crate::runner) enum WorkerEvent {
     McpOAuthCompleted(McpOAuthTaskResult),
     ArtifactGcCompleted(ArtifactGcTaskResult),
     McpRuntimeReady(WorkerMcpRuntimeEventSender),
+    TerminalLifecycleReady(WorkerTerminalLifecycleEventSender),
     Wake(WorkerWakeCoalescer),
     TimerDue,
     ControlWake,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::runner) struct RoutedTerminalLifecycleUpdate {
+    pub(in crate::runner) session_scope_id: String,
+    pub(in crate::runner) run_id: String,
+    pub(in crate::runner) update: TerminalLifecycleUpdateV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TerminalLifecycleEventKey {
+    session_scope_id: String,
+    task_id: TerminalTaskId,
+}
+
+#[derive(Clone)]
+pub(in crate::runner) struct WorkerTerminalLifecycleEventSender {
+    inner: Arc<WorkerTerminalLifecycleEventSenderInner>,
+}
+
+struct WorkerTerminalLifecycleEventSenderInner {
+    event_tx: mpsc::Sender<WorkerEvent>,
+    slot: Mutex<WorkerTerminalLifecycleEventSlot>,
+}
+
+struct WorkerTerminalLifecycleEventSlot {
+    wake_queued: bool,
+    pending: BTreeMap<TerminalLifecycleEventKey, RoutedTerminalLifecycleUpdate>,
+    order: VecDeque<TerminalLifecycleEventKey>,
+}
+
+impl WorkerTerminalLifecycleEventSender {
+    pub(in crate::runner) fn new(event_tx: mpsc::Sender<WorkerEvent>) -> Self {
+        Self {
+            inner: Arc::new(WorkerTerminalLifecycleEventSenderInner {
+                event_tx,
+                slot: Mutex::new(WorkerTerminalLifecycleEventSlot {
+                    wake_queued: false,
+                    pending: BTreeMap::new(),
+                    order: VecDeque::new(),
+                }),
+            }),
+        }
+    }
+
+    pub(in crate::runner) fn send(
+        &self,
+        routed: RoutedTerminalLifecycleUpdate,
+    ) -> Result<(), WorkerEventSendError> {
+        let key = TerminalLifecycleEventKey {
+            session_scope_id: routed.session_scope_id.clone(),
+            task_id: routed.update.event.task_id.clone(),
+        };
+        let should_publish = {
+            let mut slot = self.lock_slot();
+            if slot.pending.get(&key).is_some_and(|pending| {
+                pending.update.event.generation >= routed.update.event.generation
+            }) {
+                return Ok(());
+            }
+            if slot.pending.insert(key.clone(), routed).is_none() {
+                slot.order.push_back(key);
+            }
+            if slot.wake_queued {
+                false
+            } else {
+                slot.wake_queued = true;
+                true
+            }
+        };
+        if should_publish
+            && self
+                .inner
+                .event_tx
+                .send(WorkerEvent::TerminalLifecycleReady(self.clone()))
+                .is_err()
+        {
+            self.lock_slot().wake_queued = false;
+            return Err(WorkerEventSendError);
+        }
+        Ok(())
+    }
+
+    fn drain(&self) -> VecDeque<RoutedTerminalLifecycleUpdate> {
+        let mut slot = self.lock_slot();
+        let mut drained = VecDeque::with_capacity(slot.pending.len());
+        while let Some(key) = slot.order.pop_front() {
+            if let Some(update) = slot.pending.remove(&key) {
+                drained.push_back(update);
+            }
+        }
+        slot.wake_queued = false;
+        drained
+    }
+
+    fn lock_slot(&self) -> std::sync::MutexGuard<'_, WorkerTerminalLifecycleEventSlot> {
+        self.inner
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl fmt::Debug for WorkerTerminalLifecycleEventSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkerTerminalLifecycleEventSender")
+            .field("pending", &self.lock_slot().pending.len())
+            .finish_non_exhaustive()
+    }
 }
 
 pub(in crate::runner) type WorkerEventInbox = (
@@ -491,6 +602,7 @@ pub(in crate::runner) struct WorkerReadiness {
     pub(in crate::runner) artifact_gc_results: VecDeque<ArtifactGcTaskResult>,
     pub(in crate::runner) mcp_runtime_events: VecDeque<McpRuntimeEvent>,
     pub(in crate::runner) mcp_resync_servers: BTreeSet<String>,
+    pub(in crate::runner) terminal_lifecycle_updates: VecDeque<RoutedTerminalLifecycleUpdate>,
     wakes: VecDeque<WorkerWakeBatch>,
     timer_due: bool,
 }
@@ -507,6 +619,7 @@ impl WorkerReadiness {
             artifact_gc_results: VecDeque::new(),
             mcp_runtime_events: VecDeque::new(),
             mcp_resync_servers: BTreeSet::new(),
+            terminal_lifecycle_updates: VecDeque::new(),
             wakes: VecDeque::new(),
             timer_due: false,
         }
@@ -528,6 +641,9 @@ impl WorkerReadiness {
                 let (events, resync_servers) = sender.drain();
                 self.mcp_runtime_events.extend(events);
                 self.mcp_resync_servers.extend(resync_servers);
+            }
+            WorkerEvent::TerminalLifecycleReady(sender) => {
+                self.terminal_lifecycle_updates.extend(sender.drain());
             }
             WorkerEvent::Wake(wake) => {
                 let batch = wake.drain();
@@ -577,6 +693,7 @@ impl WorkerReadiness {
             || !self.artifact_gc_results.is_empty()
             || !self.mcp_runtime_events.is_empty()
             || !self.mcp_resync_servers.is_empty()
+            || !self.terminal_lifecycle_updates.is_empty()
             || !self.wakes.is_empty()
             || self.timer_due
     }
@@ -589,6 +706,7 @@ impl WorkerReadiness {
             || !self.compaction_results.is_empty()
             || !self.provider_status_results.is_empty()
             || !self.mcp_oauth_results.is_empty()
+            || !self.terminal_lifecycle_updates.is_empty()
             || self.wakes.iter().any(|batch| {
                 batch.session_projection_invalid
                     || !batch.background_agents.is_empty()

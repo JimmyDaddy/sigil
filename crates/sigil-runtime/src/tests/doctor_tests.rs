@@ -11,6 +11,7 @@ use sigil_kernel::{
 use tempfile::tempdir;
 
 use super::*;
+use crate::doctor::mcp::command_status_with_search_path;
 
 #[test]
 fn internal_web_snapshot_is_offline_unprobed_and_does_not_claim_public_activation() {
@@ -1626,8 +1627,6 @@ fn terminal_environment_summary_covers_known_profiles_and_layers() {
 
 #[test]
 fn command_status_checks_path_and_relative_commands() -> Result<()> {
-    let _env_lock = crate::test_env::lock();
-    let _env_scope = EnvScope::remove_many(&["PATH"]);
     let temp = tempdir()?;
     let workspace = temp.path();
     let relative_command = workspace.join("bin").join("local-tool");
@@ -1640,36 +1639,41 @@ fn command_status_checks_path_and_relative_commands() -> Result<()> {
     let absolute_command = workspace.join("absolute-tool");
     fs::write(&absolute_command, "#!/bin/sh\n")?;
 
-    assert_eq!(command_status("", workspace), CommandStatus::Empty);
     assert_eq!(
-        command_status(
+        command_status_with_search_path("", workspace, None),
+        CommandStatus::Empty
+    );
+    assert_eq!(
+        command_status_with_search_path(
             absolute_command
                 .to_str()
                 .expect("test path should be representable as utf-8"),
-            workspace
+            workspace,
+            None,
         ),
         CommandStatus::Available
     );
     assert_eq!(
-        command_status(
+        command_status_with_search_path(
             workspace
                 .join("missing-absolute-tool")
                 .to_str()
                 .expect("test path should be representable as utf-8"),
-            workspace
+            workspace,
+            None,
         ),
         CommandStatus::Missing
     );
     assert_eq!(
-        command_status("./bin/local-tool", workspace),
+        command_status_with_search_path("./bin/local-tool", workspace, None),
         CommandStatus::Available
     );
     assert_eq!(
-        command_status("./bin/missing-tool", workspace),
+        command_status_with_search_path("./bin/missing-tool", workspace, None),
         CommandStatus::Missing
     );
     assert_eq!(
-        command_status("pathless-tool", workspace),
+        command_status_with_search_path("pathless-tool", workspace, None),
         CommandStatus::Missing
     );
     Ok(())
@@ -1677,25 +1681,19 @@ fn command_status_checks_path_and_relative_commands() -> Result<()> {
 
 #[test]
 fn command_status_finds_pathless_commands_on_path() -> Result<()> {
-    let _env_lock = crate::test_env::lock();
     let temp = tempdir()?;
     let workspace = temp.path();
     let bin_dir = workspace.join("bin");
     fs::create_dir(&bin_dir)?;
     fs::write(bin_dir.join("path-tool"), "#!/bin/sh\n")?;
-    let _env_scope = EnvScope::set_many(&[(
-        "PATH",
-        bin_dir
-            .to_str()
-            .expect("test path should be representable as utf-8"),
-    )]);
+    let search_path = env::join_paths([&bin_dir])?;
 
     assert_eq!(
-        command_status("path-tool", workspace),
+        command_status_with_search_path("path-tool", workspace, Some(&search_path)),
         CommandStatus::Available
     );
     assert_eq!(
-        command_status("missing-path-tool", workspace),
+        command_status_with_search_path("missing-path-tool", workspace, Some(&search_path)),
         CommandStatus::Missing
     );
     Ok(())

@@ -1787,7 +1787,7 @@ impl AppState {
         Some(refreshed)
     }
 
-    fn ensure_current_session_identity(&mut self) -> Result<()> {
+    pub(super) fn ensure_current_session_identity(&mut self) -> Result<()> {
         if self.session_browser.current_entries.iter().any(|entry| {
             matches!(
                 entry,

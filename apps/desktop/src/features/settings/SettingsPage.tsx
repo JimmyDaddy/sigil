@@ -294,11 +294,9 @@ export function SettingsPage({
                   {option.displayName === option.modelName
                     ? option.modelName
                     : `${option.displayName} · ${option.modelName}`}
-                  {option.availability === "available"
-                    ? ""
-                    : option.availability === "unverified"
-                      ? ` · ${t("modelCatalogUnconfirmed")}`
-                      : ` · ${t("unavailable")}`}
+                  {option.availability === "configured_unavailable"
+                    ? ` · ${t("unavailable")}`
+                    : ""}
                 </option>
               ))}
             </Select>

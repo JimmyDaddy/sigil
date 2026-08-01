@@ -3,19 +3,20 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ExecutionCleanupStatus, TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool,
-    ToolAccess, ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext,
-    ToolErrorKind, ToolExecutionId, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, safe_persistence_text,
+    DeclaredToolPermissionFacts, EnvironmentContainment, ProcessContainment, TerminalTaskEntry,
+    TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolArtifactEncoding,
+    ToolArtifactSensitivity, ToolCategory, ToolContext, ToolErrorKind, ToolOperation,
+    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionPlanV2, ToolPermissionSummary,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    declared_tool_permission_plan, safe_persistence_text,
 };
-use tokio::time::sleep;
 
 use crate::{
     constants::{
@@ -26,22 +27,24 @@ use crate::{
         tool_path_subject,
     },
     shell::{
-        ShellCommandAnalysis, analyze_shell_command_with_shell, bash_path_subjects_from_cwd,
-        command_permission_subject, shell_grant_scope_detail,
+        CommandFamily, ShellCommandAnalysis, ShellPathPolicyBinding,
+        analyze_shell_command_with_path_policy, bash_path_subjects_from_cwd,
+        command_permission_subject, known_finite_terminal_command_reason,
+        shell_environment_binding, shell_grant_scope_detail,
     },
     shell_runtime::{ResolvedShell, ShellDialect},
     support::{optional_string, optional_usize, required_string},
     terminal_process::{
         MAX_TERMINAL_INPUT_BYTES, TerminalExecutionConfig, TerminalInputResult,
-        TerminalProcessManager, TerminalPtySize, TerminalReadResult, TerminalResizeResult,
-        TerminalStartRequest, TerminalTaskPermissionContext,
+        TerminalProcessManager, TerminalPtySize, TerminalReadResult, TerminalReadinessCondition,
+        TerminalResizeResult, TerminalStartRequest, TerminalTaskPermissionContext,
+        TerminalTaskSnapshot, TerminalWaitCondition, TerminalWaitOutcome, TerminalWaitResult,
     },
 };
 
-const FOREGROUND_TERMINAL_POLL_INTERVAL_MS: u64 = 500;
-const FOREGROUND_TERMINAL_PROGRESS_LIMIT_BYTES: usize = 12 * 1024;
-const DEFAULT_FOREGROUND_TERMINAL_TIMEOUT_SECS: u64 = 30 * 60;
-const DEFAULT_FOREGROUND_TERMINAL_INACTIVITY_TIMEOUT_SECS: u64 = 5 * 60;
+const DEFAULT_TERMINAL_READINESS_TIMEOUT_SECS: u64 = 30;
+const MAX_TERMINAL_WAIT_TIMEOUT_SECS: u64 = 60 * 60;
+pub(crate) const MAX_TERMINAL_READ_GUARDS: usize = 1_024;
 
 pub(crate) struct TerminalStartTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
@@ -51,6 +54,11 @@ pub(crate) struct TerminalStartTool {
     pub(crate) scratch_label: String,
 }
 pub(crate) struct TerminalReadTool {
+    pub(crate) managers: Arc<TerminalProcessManagers>,
+    pub(crate) artifact_root: PathBuf,
+    pub(crate) artifact_label_root: PathBuf,
+}
+pub(crate) struct TerminalWaitTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
     pub(crate) artifact_root: PathBuf,
     pub(crate) artifact_label_root: PathBuf,
@@ -71,22 +79,245 @@ pub(crate) struct TerminalCancelTool {
     pub(crate) artifact_label_root: PathBuf,
 }
 
+/// Process-local typed control retained by product adapters for persistent terminal tasks.
+///
+/// The handle owns the exact manager set used by the registered terminal tools. It never exposes
+/// physical artifact paths to renderer clients; adapters must bind cancellation to an already
+/// authenticated workspace and terminal task identity.
+#[derive(Clone)]
+pub struct TerminalTaskControlHandle {
+    managers: Arc<TerminalProcessManagers>,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
+}
+
+impl std::fmt::Debug for TerminalTaskControlHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalTaskControlHandle")
+            .field("artifact_root", &"[bound]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl TerminalTaskControlHandle {
+    pub(crate) fn new(
+        managers: Arc<TerminalProcessManagers>,
+        artifact_root: PathBuf,
+        artifact_label_root: PathBuf,
+    ) -> Self {
+        Self {
+            managers,
+            artifact_root,
+            artifact_label_root,
+        }
+    }
+
+    /// Cancels one task through the exact process manager that admitted it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace/task identity is invalid, the task is unknown to this
+    /// process owner, or cleanup cannot be confirmed.
+    pub async fn cancel(
+        &self,
+        workspace_root: &Path,
+        task_id: &TerminalTaskId,
+    ) -> Result<TerminalTaskEntry> {
+        self.managers
+            .manager_for(
+                workspace_root,
+                &self.artifact_root,
+                &self.artifact_label_root,
+            )?
+            .cancel(task_id)
+            .await
+    }
+
+    /// Reads the latest process-owner state for one exact task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace/task identity is invalid or the task is not owned by
+    /// this process.
+    pub async fn status(
+        &self,
+        workspace_root: &Path,
+        task_id: &TerminalTaskId,
+    ) -> Result<TerminalTaskEntry> {
+        self.managers
+            .manager_for(
+                workspace_root,
+                &self.artifact_root,
+                &self.artifact_label_root,
+            )?
+            .status(task_id)
+            .await
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalProcessManagers {
     terminal_execution_config: TerminalExecutionConfig,
+    lifecycle_route: Option<TerminalLifecycleRoute>,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
+    terminal_read_guards: StdMutex<TerminalReadGuardState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TerminalReadGuardKey {
+    session_scope_id: String,
+    logical_run_id: String,
+    task_id: String,
+    offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalReadGuardObservation {
+    generation: u64,
+    total_bytes: u64,
+    sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalReadGuardDecision {
+    Bypass,
+    Proceed,
+    UseTerminalWait,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TerminalReadGuardState {
+    next_sequence: u64,
+    observations: BTreeMap<TerminalReadGuardKey, TerminalReadGuardObservation>,
+}
+
+impl TerminalReadGuardState {
+    pub(crate) fn observe(
+        &mut self,
+        key: TerminalReadGuardKey,
+        generation: u64,
+        total_bytes: u64,
+        no_change: bool,
+    ) -> TerminalReadGuardDecision {
+        if !no_change {
+            self.observations.remove(&key);
+            return TerminalReadGuardDecision::Proceed;
+        }
+        if self.observations.get(&key).is_some_and(|observation| {
+            observation.generation == generation && observation.total_bytes == total_bytes
+        }) {
+            return TerminalReadGuardDecision::UseTerminalWait;
+        }
+        if !self.observations.contains_key(&key)
+            && self.observations.len() >= MAX_TERMINAL_READ_GUARDS
+            && let Some(oldest) = self
+                .observations
+                .iter()
+                .min_by_key(|(_, observation)| observation.sequence)
+                .map(|(key, _)| key.clone())
+        {
+            self.observations.remove(&oldest);
+        }
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.observations.insert(
+            key,
+            TerminalReadGuardObservation {
+                generation,
+                total_bytes,
+                sequence: self.next_sequence,
+            },
+        );
+        TerminalReadGuardDecision::Proceed
+    }
+
+    pub(crate) fn key(
+        session_scope_id: &str,
+        logical_run_id: &str,
+        task_id: &str,
+        offset: u64,
+    ) -> TerminalReadGuardKey {
+        TerminalReadGuardKey {
+            session_scope_id: session_scope_id.to_owned(),
+            logical_run_id: logical_run_id.to_owned(),
+            task_id: task_id.to_owned(),
+            offset,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.observations.len()
+    }
+
+    pub(crate) fn clear_task(
+        &mut self,
+        session_scope_id: &str,
+        logical_run_id: &str,
+        task_id: &str,
+    ) {
+        self.observations.retain(|key, _| {
+            key.session_scope_id != session_scope_id
+                || key.logical_run_id != logical_run_id
+                || key.task_id != task_id
+        });
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum TerminalLifecycleRoute {
+    Bound(Arc<dyn sigil_kernel::TerminalLifecycleSink>),
+    Factory(Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>),
 }
 
 impl TerminalProcessManagers {
     pub(crate) fn new(terminal_execution_config: TerminalExecutionConfig) -> Self {
         Self {
             terminal_execution_config,
+            lifecycle_route: None,
+            terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
             managers: StdMutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub(crate) fn with_lifecycle_route(
+        mut self,
+        lifecycle_route: Option<TerminalLifecycleRoute>,
+    ) -> Self {
+        self.lifecycle_route = lifecycle_route;
+        self
+    }
+
+    fn lifecycle_sink(
+        &self,
+        ctx: &ToolContext,
+    ) -> Result<Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>> {
+        match &self.lifecycle_route {
+            None => Ok(None),
+            Some(TerminalLifecycleRoute::Bound(sink)) => Ok(Some(Arc::clone(sink))),
+            Some(TerminalLifecycleRoute::Factory(factory)) => {
+                let session_scope_id = ctx.session_scope_id().ok_or_else(|| {
+                    anyhow!("terminal lifecycle route requires an exact session scope")
+                })?;
+                let logical_run_id = ctx.logical_run_id().ok_or_else(|| {
+                    anyhow!("terminal lifecycle route requires an exact logical run id")
+                })?;
+                let recorder = ctx.mutation_recorder.clone().ok_or_else(|| {
+                    anyhow!("terminal lifecycle route requires a durable mutation recorder")
+                })?;
+                factory
+                    .sink_for_run(session_scope_id, logical_run_id, recorder)
+                    .map(Some)
+            }
         }
     }
 
     fn resolve_shell(&self, explicit: Option<&str>) -> Result<ResolvedShell> {
         self.terminal_execution_config.resolve_shell(explicit)
+    }
+
+    fn permission_backend_binding(&self) -> String {
+        self.terminal_execution_config.permission_backend_binding()
     }
 
     fn default_shell_summary(&self) -> String {
@@ -129,6 +360,57 @@ impl TerminalProcessManagers {
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)
     }
+
+    fn observe_terminal_read(
+        &self,
+        ctx: &ToolContext,
+        task_id: &TerminalTaskId,
+        offset: u64,
+        read: &TerminalReadResult,
+    ) -> Result<TerminalReadGuardDecision> {
+        let (Some(session_scope_id), Some(logical_run_id)) =
+            (ctx.session_scope_id(), ctx.logical_run_id())
+        else {
+            return Ok(TerminalReadGuardDecision::Bypass);
+        };
+        let key =
+            TerminalReadGuardState::key(session_scope_id, logical_run_id, task_id.as_str(), offset);
+        self.terminal_read_guards
+            .lock()
+            .map_err(|_| anyhow!("terminal read guard lock poisoned"))
+            .map(|mut state| state.observe(key, read.generation, read.total_bytes, read.no_change))
+    }
+
+    fn clear_terminal_read_guards(
+        &self,
+        ctx: &ToolContext,
+        task_id: &TerminalTaskId,
+    ) -> Result<()> {
+        let (Some(session_scope_id), Some(logical_run_id)) =
+            (ctx.session_scope_id(), ctx.logical_run_id())
+        else {
+            return Ok(());
+        };
+        let mut state = self
+            .terminal_read_guards
+            .lock()
+            .map_err(|_| anyhow!("terminal read guard lock poisoned"))?;
+        state.clear_task(session_scope_id, logical_run_id, task_id.as_str());
+        Ok(())
+    }
+}
+
+impl TerminalStartTool {
+    fn analyze_command(
+        &self,
+        ctx: &ToolContext,
+        command: &str,
+        shell: &ResolvedShell,
+    ) -> Result<ShellCommandAnalysis> {
+        let path_policy =
+            ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &self.scratch_root, false)?;
+        analyze_shell_command_with_path_policy(&ctx.workspace_root, command, shell, &path_policy)
+    }
 }
 
 #[async_trait]
@@ -137,7 +419,7 @@ impl Tool for TerminalStartTool {
         ToolSpec {
             name: "terminal_start".to_owned(),
             description: format!(
-                "Start a terminal task from the workspace. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or cmd executables. Use mode=foreground for one-shot checks that should return a single final result, mode=background for long-lived tasks, and pty=true/mode=interactive for tasks that need input. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                "Start a persistent background or interactive terminal task from the workspace. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or cmd executables. mode is required: use background for long-lived services/watchers and interactive with pty=true for tasks that need input. Never use terminal_start for finite checks, builds, or tests; use bash for one-shot commands. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
                 self.managers.default_shell_summary(),
                 self.scratch_label
             ),
@@ -150,21 +432,25 @@ impl Tool for TerminalStartTool {
                     "shell": { "type": "string" },
                     "mode": {
                         "type": "string",
-                        "enum": ["foreground", "background", "interactive"]
+                        "enum": ["background", "interactive"]
                     },
                     "pty": { "type": "boolean" },
                     "rows": { "type": "integer" },
                     "cols": { "type": "integer" },
-                    "foreground_timeout_secs": {
-                        "type": "integer",
-                        "description": "Foreground-only total timeout. Defaults to 1800 seconds and is independent from the short tool-call timeout."
-                    },
-                    "foreground_inactivity_timeout_secs": {
-                        "type": "integer",
-                        "description": "Foreground-only no-output/no-status-change timeout. Defaults to 300 seconds."
+                    "readiness": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["none", "output_contains", "output_regex"]
+                            },
+                            "value": { "type": "string" },
+                            "timeout_secs": { "type": "integer" }
+                        },
+                        "required": ["kind"]
                     }
                 },
-                "required": ["command"]
+                "required": ["command", "mode"]
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
@@ -173,50 +459,133 @@ impl Tool for TerminalStartTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let command = required_string(args, "command")?;
-        let cwd = optional_string(args, "cwd");
-        let shell = optional_string(args, "shell");
-        let resolved_shell = self.managers.resolve_shell(shell)?;
-        let mut subjects =
-            analyze_shell_command_with_shell(&ctx.workspace_root, command, &resolved_shell)?
-                .subjects;
-        if let Some(shell) = shell {
-            subjects.push(ToolSubject::command(
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let args = parse_terminal_start_args(args)?;
+        validate_terminal_start_execution_mode(args.mode, args.pty)?;
+        let resolved_shell = self.managers.resolve_shell(args.shell.as_deref())?;
+        let analysis = self.analyze_command(ctx, &args.command, &resolved_shell)?;
+        reject_known_finite_terminal_start_command(&args.command, &resolved_shell, &analysis)?;
+        let mut plan = analysis.permission_plan();
+        let cwd = args.cwd.as_deref().and_then(Path::to_str);
+
+        let mut terminal_subjects = Vec::new();
+        if let Some(shell) = args.shell.as_deref() {
+            terminal_subjects.push(ToolSubject::command(
                 shell.to_owned(),
                 command_permission_subject(shell),
             ));
         }
-        subjects.push(tool_path_subject(&ctx.workspace_root, cwd.unwrap_or("."))?);
+        terminal_subjects.push(tool_path_subject(&ctx.workspace_root, cwd.unwrap_or("."))?);
         if resolved_shell.dialect() == ShellDialect::Posix {
-            subjects.extend(terminal_command_path_subjects(
+            terminal_subjects.extend(terminal_command_path_subjects(
                 &ctx.workspace_root,
                 cwd,
-                command,
+                &args.command,
             )?);
         }
-        Ok(subjects)
-    }
+        for subject in terminal_subjects {
+            if !plan.subjects.contains(&subject) {
+                plan.subjects.push(subject);
+            }
+        }
 
-    fn permission_access(&self, ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
-        let command = required_string(args, "command")?;
-        let shell = self
-            .managers
-            .resolve_shell(optional_string(args, "shell"))?;
-        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &shell)?.access)
-    }
-
-    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
-        let command = required_string(args, "command")?;
-        let shell = self
-            .managers
-            .resolve_shell(optional_string(args, "shell"))?;
-        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &shell)?.operation)
+        plan.access = ToolAccess::Execute;
+        if plan.operation != ToolOperation::ExecuteDestructiveCommand {
+            plan.operation = ToolOperation::ExecuteMutatingCommand;
+        }
+        plan.effects.insert(ToolPermissionEffect::ProcessControl);
+        plan.effects.insert(ToolPermissionEffect::PersistenceChange);
+        plan.containment.process = ProcessContainment::OwnedTree;
+        plan.containment.environment = EnvironmentContainment::UserInherited;
+        plan.containment.persistent_process = true;
+        if let Some(scope) = plan.semantic_scope.as_mut() {
+            scope
+                .qualifiers
+                .insert("terminal_mode".to_owned(), args.mode.as_str().to_owned());
+            scope
+                .qualifiers
+                .insert("terminal_pty".to_owned(), args.pty.to_string());
+            scope.qualifiers.insert(
+                "terminal_readiness".to_owned(),
+                terminal_readiness_kind_label(&args.readiness).to_owned(),
+            );
+        }
+        plan.analysis_bindings.insert(
+            "terminal_execution_class".to_owned(),
+            "persistent".to_owned(),
+        );
+        plan.analysis_bindings
+            .insert("containment_proven".to_owned(), "false".to_owned());
+        plan.analysis_bindings.insert(
+            "execution_backend".to_owned(),
+            self.managers.permission_backend_binding(),
+        );
+        plan.analysis_bindings.insert(
+            "execution_profile".to_owned(),
+            serde_json::to_string(&plan.containment)?,
+        );
+        plan.analysis_bindings.insert(
+            "environment_binding".to_owned(),
+            shell_environment_binding(
+                ctx,
+                &self.scratch_root,
+                &resolved_shell,
+                EnvironmentContainment::UserInherited,
+            )?,
+        );
+        plan.analysis_bindings
+            .insert("terminal_mode".to_owned(), args.mode.as_str().to_owned());
+        plan.analysis_bindings
+            .insert("terminal_pty".to_owned(), args.pty.to_string());
+        plan.analysis_bindings.insert(
+            "terminal_readiness".to_owned(),
+            terminal_readiness_kind_label(&args.readiness).to_owned(),
+        );
+        plan.safe_summary = ToolPermissionSummary {
+            title: "Start a persistent terminal task".to_owned(),
+            detail: format!(
+                "{} terminal task with {} readiness; process ownership remains active after start",
+                args.mode.as_str(),
+                terminal_readiness_kind_label(&args.readiness)
+            ),
+            step_count: plan.safe_summary.step_count.max(1),
+            workspace_code_steps: plan.safe_summary.workspace_code_steps,
+        };
+        Ok(plan)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
-        let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         let args = parse_terminal_start_args(&args)?;
+        validate_terminal_start_execution_mode(args.mode, args.pty)?;
+        let shell = self.managers.resolve_shell(args.shell.as_deref())?;
+        let execution_analysis = self.analyze_command(&ctx, &args.command, &shell)?;
+        reject_known_finite_terminal_start_command(&args.command, &shell, &execution_analysis)?;
+        let fallback_analysis = if let Some(plan) = ctx.prepared_permission_plan() {
+            validate_terminal_start_prepared_plan(
+                &ctx,
+                plan,
+                &shell,
+                &args,
+                &self.scratch_root,
+                &self.managers,
+            )?;
+            None
+        } else {
+            // Direct diagnostics and tests do not pass through the agent permission envelope.
+            // Analyze once here and reuse that same analysis for execution receipts.
+            Some(execution_analysis)
+        };
+        let receipt_context = || {
+            ctx.prepared_permission_plan()
+                .map(TerminalShellReceiptContext::Prepared)
+                .or_else(|| {
+                    fallback_analysis
+                        .as_ref()
+                        .map(TerminalShellReceiptContext::Analysis)
+                })
+                .expect("terminal start always has a prepared plan or fallback analysis")
+        };
+        let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         let manager = self.managers.manager_for(
             &ctx.workspace_root,
             &self.artifact_root,
@@ -226,10 +595,6 @@ impl Tool for TerminalStartTool {
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
-        let shell = self.managers.resolve_shell(args.shell.as_deref())?;
-        let analysis =
-            analyze_shell_command_with_shell(&ctx.workspace_root, &args.command, &shell)?;
-        let execution_mode = resolve_terminal_start_execution_mode(args.mode, args.pty, &analysis)?;
         let mut env = BTreeMap::new();
         env.insert(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
@@ -242,30 +607,91 @@ impl Tool for TerminalStartTool {
             shell: args.shell,
             env,
         };
+        let lifecycle_sink = self.managers.lifecycle_sink(&ctx)?;
         let entry = if args.pty {
-            manager.start_pty(request, args.pty_size).await?
+            manager
+                .start_pty_with_readiness_and_sink(
+                    request,
+                    args.pty_size,
+                    args.readiness.clone(),
+                    lifecycle_sink,
+                )
+                .await?
         } else {
-            manager.start(request).await?
+            manager
+                .start_with_readiness_and_sink(request, args.readiness.clone(), lifecycle_sink)
+                .await?
         };
-        if execution_mode == TerminalStartExecutionMode::Foreground {
-            return wait_for_foreground_terminal(
+        let task_id = entry.handle.task_id.clone();
+        let mut snapshot = manager.snapshot(&task_id).await?;
+        if let Some(readiness_timeout) = args.readiness.timeout() {
+            let wait = wait_with_cancellation(
                 &ctx,
-                manager,
-                call_id,
-                self.spec().name,
-                entry,
-                &analysis,
-                execution_mode,
-                args.foreground_timeouts,
+                &manager,
+                &task_id,
+                snapshot.generation,
+                TerminalWaitCondition::Readiness,
+                readiness_timeout,
             )
-            .await;
+            .await?;
+            snapshot = wait.snapshot;
+            match wait.outcome {
+                TerminalWaitOutcome::ConditionMet => {}
+                TerminalWaitOutcome::Timeout => {
+                    manager.mark_readiness_timed_out(&task_id).await?;
+                    let _ = manager.cancel(&task_id).await;
+                    snapshot = manager.snapshot(&task_id).await?;
+                    return Ok(terminal_start_failure_result(
+                        call_id,
+                        self.spec().name,
+                        "terminal readiness timed out",
+                        ToolErrorKind::Timeout,
+                        snapshot,
+                        receipt_context(),
+                        args.mode,
+                    ));
+                }
+                TerminalWaitOutcome::OwnerShutdown => {
+                    return Ok(terminal_start_failure_result(
+                        call_id,
+                        self.spec().name,
+                        "terminal owner shut down before readiness was resolved",
+                        ToolErrorKind::Interrupted,
+                        snapshot,
+                        receipt_context(),
+                        args.mode,
+                    ));
+                }
+                TerminalWaitOutcome::Cancelled => {
+                    return Ok(terminal_start_failure_result(
+                        call_id,
+                        self.spec().name,
+                        "terminal readiness wait was cancelled",
+                        ToolErrorKind::Interrupted,
+                        snapshot,
+                        receipt_context(),
+                        args.mode,
+                    ));
+                }
+            }
+            if !snapshot.readiness.is_ready() {
+                return Ok(terminal_start_failure_result(
+                    call_id,
+                    self.spec().name,
+                    "terminal task exited before readiness was observed",
+                    ToolErrorKind::ExitStatus,
+                    snapshot,
+                    receipt_context(),
+                    args.mode,
+                ));
+            }
         }
-        Ok(terminal_entry_result_with_shell_analysis(
+        Ok(terminal_start_result(
             call_id,
             self.spec().name,
-            "started",
-            entry,
-            Some(&analysis),
+            snapshot,
+            receipt_context(),
+            args.mode,
         ))
     }
 }
@@ -275,7 +701,7 @@ impl Tool for TerminalReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "terminal_read".to_owned(),
-            description: "Read a bounded slice of a terminal task output log.".to_owned(),
+            description: "Inspect one explicit bounded page of a terminal task output log. This is not a polling tool; use terminal_wait to wait for lifecycle or output changes.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -284,10 +710,10 @@ impl Tool for TerminalReadTool {
                     "limit_bytes": { "type": "integer" },
                     "include_content": {
                         "type": "boolean",
-                        "description": "Return the raw output slice in the tool result content. Defaults to false so polling a long terminal task only returns structured facts and a log reference."
+                        "description": "Return the raw output slice in the tool result content. Defaults to false."
                     }
                 },
-                "required": ["task_id"]
+                "required": ["task_id", "offset"]
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Read,
@@ -296,14 +722,25 @@ impl Tool for TerminalReadTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let task_id = required_terminal_task_id(args)?;
-        Ok(vec![terminal_task_subject(&task_id)])
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect: None,
+                subjects: vec![terminal_task_subject(&task_id)],
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let task_id = required_terminal_task_id(&args)?;
-        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        let offset = required_u64_arg(&args, "offset")?;
         let limit_bytes = terminal_read_limit(&args)?;
         let include_content = args
             .get("include_content")
@@ -315,6 +752,29 @@ impl Tool for TerminalReadTool {
             &self.artifact_label_root,
         )?;
         let read = manager.read(&task_id, offset, limit_bytes).await?;
+        if self
+            .managers
+            .observe_terminal_read(&ctx, &task_id, offset, &read)?
+            == TerminalReadGuardDecision::UseTerminalWait
+        {
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec().name,
+                ToolErrorKind::InvalidInput,
+                "terminal output has not changed since the previous read; use terminal_wait instead of polling terminal_read",
+            )
+            .with_error_details(
+                false,
+                json!({
+                    "task_id": task_id.as_str(),
+                    "offset": offset,
+                    "generation": read.generation,
+                    "total_bytes": read.total_bytes,
+                    "next_action": "terminal_wait",
+                    "after_generation": read.generation,
+                }),
+            ));
+        }
         let result = ToolResult::ok(
             call_id,
             self.spec().name,
@@ -336,6 +796,81 @@ impl Tool for TerminalReadTool {
             },
         );
         Ok(attach_terminal_read_artifact(&ctx, result, &read))
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalWaitTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "terminal_wait".to_owned(),
+            description: "Wait once for a terminal lifecycle or output condition. This subscribes to the task owner generation and does not poll terminal_read.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "after_generation": { "type": "integer" },
+                    "until": {
+                        "type": "string",
+                        "enum": ["status_change", "exit", "output_contains", "output_regex"]
+                    },
+                    "value": { "type": "string" },
+                    "timeout_secs": { "type": "integer" }
+                },
+                "required": ["task_id", "after_generation", "until", "timeout_secs"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let task_id = required_terminal_task_id(args)?;
+        required_u64_arg(args, "after_generation")?;
+        required_u64_arg(args, "timeout_secs")?;
+        parse_terminal_wait_condition(args)?;
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect: None,
+                subjects: vec![terminal_task_subject(&task_id)],
+                tool_default_mode: None,
+            },
+        )
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let task_id = required_terminal_task_id(&args)?;
+        let after_generation = required_u64_arg(&args, "after_generation")?;
+        let timeout_secs = required_u64_arg(&args, "timeout_secs")?;
+        if timeout_secs == 0 || timeout_secs > MAX_TERMINAL_WAIT_TIMEOUT_SECS {
+            bail!(
+                "terminal_wait timeout_secs must be between 1 and {MAX_TERMINAL_WAIT_TIMEOUT_SECS}"
+            );
+        }
+        let condition = parse_terminal_wait_condition(&args)?;
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
+        self.managers.clear_terminal_read_guards(&ctx, &task_id)?;
+        let result = wait_with_cancellation(
+            &ctx,
+            &manager,
+            &task_id,
+            after_generation,
+            condition,
+            Duration::from_secs(timeout_secs),
+        )
+        .await?;
+        Ok(terminal_wait_result(call_id, self.spec().name, result))
     }
 }
 
@@ -395,50 +930,22 @@ impl Tool for TerminalInputTool {
         }
     }
 
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let task_id = required_terminal_task_id(args)?;
-        let input = required_string(args, "input")?;
-        validate_terminal_input_len(input)?;
-        let context = self.terminal_input_permission_context(ctx, &task_id)?;
-        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
-        let shell = ResolvedShell::resolve_explicit(&context.shell)?;
-        let analysis = analyze_shell_command_with_shell(&workspace_root, input, &shell)?;
-        let mut subjects = vec![
-            terminal_task_subject(&task_id),
-            terminal_input_subject(input.len()),
-        ];
-        subjects.extend(
-            analysis
-                .subjects
-                .into_iter()
-                .filter(|subject| subject.kind == ToolSubjectKind::Command),
-        );
-        if shell.dialect() == ShellDialect::Posix {
-            subjects.extend(bash_path_subjects_from_cwd(
-                &workspace_root,
-                &context.cwd,
-                input,
-            )?);
-        }
-        Ok(subjects)
-    }
-
-    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
-        let task_id = required_terminal_task_id(args)?;
-        let input = required_string(args, "input")?;
-        validate_terminal_input_len(input)?;
-        let context = self.terminal_input_permission_context(ctx, &task_id)?;
-        let shell = ResolvedShell::resolve_explicit(&context.shell)?;
-        let operation =
-            analyze_shell_command_with_shell(&ctx.workspace_root, input, &shell)?.operation;
-        Ok(match operation {
-            ToolOperation::ExecuteDestructiveCommand => ToolOperation::ExecuteDestructiveCommand,
-            ToolOperation::ExecuteReadOnlyCommand => ToolOperation::ExecuteReadOnlyCommand,
-            ToolOperation::ExecuteWorkspaceCheckCommand => {
-                ToolOperation::ExecuteWorkspaceCheckCommand
-            }
-            _ => ToolOperation::SendTerminalInput,
-        })
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let (subjects, operation, analysis) = self.permission_facts(ctx, args)?;
+        let mut plan = analysis.permission_plan();
+        plan.access = ToolAccess::Execute;
+        plan.operation = operation;
+        plan.subjects = subjects;
+        plan.effects.insert(ToolPermissionEffect::ProcessControl);
+        plan.analysis_bindings
+            .insert("terminal_execution_class".to_owned(), "input".to_owned());
+        plan.safe_summary = ToolPermissionSummary {
+            title: "Send terminal input".to_owned(),
+            detail: "Send one bounded input payload to an existing interactive task".to_owned(),
+            step_count: 1,
+            workspace_code_steps: plan.safe_summary.workspace_code_steps,
+        };
+        Ok(plan)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -499,6 +1006,69 @@ impl Tool for TerminalInputTool {
 }
 
 impl TerminalInputTool {
+    fn permission_facts(
+        &self,
+        ctx: &ToolContext,
+        args: &Value,
+    ) -> Result<(Vec<ToolSubject>, ToolOperation, ShellCommandAnalysis)> {
+        let task_id = required_terminal_task_id(args)?;
+        let input = required_string(args, "input")?;
+        validate_terminal_input_len(input)?;
+        let context = self.terminal_input_permission_context(ctx, &task_id)?;
+        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
+        let shell = ResolvedShell::resolve_explicit(&context.shell)?;
+        let analysis = self.analyze_input(ctx, &context, input, &shell)?;
+        let operation = match analysis.operation {
+            ToolOperation::ExecuteDestructiveCommand => ToolOperation::ExecuteDestructiveCommand,
+            ToolOperation::ExecuteReadOnlyCommand
+                if !matches!(analysis.command_family, CommandFamily::ShellNoop) =>
+            {
+                ToolOperation::ExecuteReadOnlyCommand
+            }
+            ToolOperation::ExecuteWorkspaceCheckCommand => {
+                ToolOperation::ExecuteWorkspaceCheckCommand
+            }
+            _ => ToolOperation::SendTerminalInput,
+        };
+        let mut subjects = vec![
+            terminal_task_subject(&task_id),
+            terminal_input_subject(input.len()),
+        ];
+        subjects.extend(
+            analysis
+                .subjects
+                .iter()
+                .filter(|subject| subject.kind == ToolSubjectKind::Command)
+                .cloned(),
+        );
+        if shell.dialect() == ShellDialect::Posix {
+            subjects.extend(bash_path_subjects_from_cwd(
+                &workspace_root,
+                &context.cwd,
+                input,
+            )?);
+        }
+        Ok((subjects, operation, analysis))
+    }
+
+    fn analyze_input(
+        &self,
+        ctx: &ToolContext,
+        context: &TerminalTaskPermissionContext,
+        input: &str,
+        shell: &ResolvedShell,
+    ) -> Result<ShellCommandAnalysis> {
+        let path_policy = context
+            .scratch_root
+            .as_deref()
+            .map(|scratch_root| {
+                ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, scratch_root, false)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        analyze_shell_command_with_path_policy(&ctx.workspace_root, input, shell, &path_policy)
+    }
+
     fn terminal_input_permission_context(
         &self,
         ctx: &ToolContext,
@@ -535,9 +1105,21 @@ impl Tool for TerminalResizeTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let task_id = required_terminal_task_id(args)?;
-        Ok(vec![terminal_task_subject(&task_id)])
+        required_terminal_pty_size(args)?;
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Execute,
+                operation: ToolOperation::ResizeTerminalTask,
+                network_effect: None,
+                subjects: vec![terminal_task_subject(&task_id)],
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -597,9 +1179,20 @@ impl Tool for TerminalCancelTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let task_id = required_terminal_task_id(args)?;
-        Ok(vec![terminal_task_subject(&task_id)])
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Execute,
+                operation: ToolOperation::CancelTerminalTask,
+                network_effect: None,
+                subjects: vec![terminal_task_subject(&task_id)],
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -626,7 +1219,6 @@ impl Tool for TerminalCancelTool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalStartExecutionMode {
-    Foreground,
     Background,
     Interactive,
 }
@@ -634,7 +1226,6 @@ pub(crate) enum TerminalStartExecutionMode {
 impl TerminalStartExecutionMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Foreground => "foreground",
             Self::Background => "background",
             Self::Interactive => "interactive",
         }
@@ -642,10 +1233,9 @@ impl TerminalStartExecutionMode {
 
     fn parse(value: &str) -> Result<Self> {
         match value {
-            "foreground" => Ok(Self::Foreground),
             "background" => Ok(Self::Background),
             "interactive" => Ok(Self::Interactive),
-            _ => bail!("terminal_start mode must be foreground, background, or interactive"),
+            _ => bail!("terminal_start mode must be background or interactive"),
         }
     }
 }
@@ -656,10 +1246,10 @@ pub(crate) struct TerminalStartArgs {
     command: String,
     cwd: Option<PathBuf>,
     shell: Option<String>,
-    mode: Option<TerminalStartExecutionMode>,
+    mode: TerminalStartExecutionMode,
     pty: bool,
     pty_size: Option<TerminalPtySize>,
-    foreground_timeouts: ForegroundTerminalTimeouts,
+    readiness: TerminalReadinessCondition,
 }
 
 pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
@@ -669,16 +1259,14 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
     let command = required_string(args, "command")?.to_owned();
     let cwd = optional_string(args, "cwd").map(PathBuf::from);
     let shell = optional_string(args, "shell").map(str::to_owned);
-    let mode = optional_string(args, "mode")
-        .map(TerminalStartExecutionMode::parse)
-        .transpose()?;
+    let mode = TerminalStartExecutionMode::parse(required_string(args, "mode")?)?;
     let pty = args.get("pty").and_then(Value::as_bool).unwrap_or(false);
     let pty_size = if args.get("rows").is_some() || args.get("cols").is_some() {
         Some(required_terminal_pty_size(args)?)
     } else {
         None
     };
-    let foreground_timeouts = ForegroundTerminalTimeouts::from_args(args)?;
+    let readiness = parse_terminal_readiness(args.get("readiness"))?;
     Ok(TerminalStartArgs {
         task_id,
         command,
@@ -687,58 +1275,8 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
         mode,
         pty,
         pty_size,
-        foreground_timeouts,
+        readiness,
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ForegroundTerminalTimeouts {
-    total: Duration,
-    inactivity: Duration,
-}
-
-impl ForegroundTerminalTimeouts {
-    fn from_args(args: &Value) -> Result<Self> {
-        let total_secs = optional_positive_u64(args, "foreground_timeout_secs")?
-            .unwrap_or(DEFAULT_FOREGROUND_TERMINAL_TIMEOUT_SECS);
-        let inactivity_secs = optional_positive_u64(args, "foreground_inactivity_timeout_secs")?
-            .unwrap_or(DEFAULT_FOREGROUND_TERMINAL_INACTIVITY_TIMEOUT_SECS);
-        Ok(Self {
-            total: Duration::from_secs(total_secs),
-            inactivity: Duration::from_secs(inactivity_secs),
-        })
-    }
-
-    fn total_secs(self) -> u64 {
-        self.total.as_secs()
-    }
-
-    fn inactivity_secs(self) -> u64 {
-        self.inactivity.as_secs()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForegroundTerminalTimeoutKind {
-    Total,
-    Inactivity,
-}
-
-impl ForegroundTerminalTimeoutKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Total => "total",
-            Self::Inactivity => "inactivity",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ForegroundTerminalProgress<'a> {
-    output_preview: Option<&'a str>,
-    total_bytes: Option<u64>,
-    verdict_override: Option<&'a str>,
-    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
 }
 
 fn optional_positive_u64(args: &Value, key: &str) -> Result<Option<u64>> {
@@ -754,103 +1292,145 @@ fn optional_positive_u64(args: &Value, key: &str) -> Result<Option<u64>> {
     Ok(Some(value))
 }
 
-pub(crate) fn resolve_terminal_start_execution_mode(
-    requested: Option<TerminalStartExecutionMode>,
+pub(crate) fn validate_terminal_start_execution_mode(
+    mode: TerminalStartExecutionMode,
     pty: bool,
-    analysis: &ShellCommandAnalysis,
-) -> Result<TerminalStartExecutionMode> {
-    let mode = requested.unwrap_or_else(|| {
-        if pty {
-            TerminalStartExecutionMode::Interactive
-        } else if terminal_command_defaults_to_background(&analysis.command) {
-            TerminalStartExecutionMode::Background
-        } else {
-            TerminalStartExecutionMode::Foreground
-        }
-    });
+) -> Result<()> {
     match (mode, pty) {
-        (TerminalStartExecutionMode::Foreground, true) => {
-            bail!("terminal_start mode=foreground does not support pty=true")
+        (TerminalStartExecutionMode::Background, true) => {
+            bail!("terminal_start mode=background does not support pty=true")
         }
         (TerminalStartExecutionMode::Interactive, false) => {
             bail!("terminal_start mode=interactive requires pty=true")
         }
-        _ => Ok(mode),
+        _ => Ok(()),
     }
 }
 
-fn terminal_command_defaults_to_background(command: &str) -> bool {
-    let normalized = command.to_ascii_lowercase();
-    let words = normalized
-        .split_whitespace()
-        .map(|word| word.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '(' | ')')))
-        .collect::<Vec<_>>();
-    if words.is_empty() {
-        return false;
+fn reject_known_finite_terminal_start_command(
+    command: &str,
+    shell: &ResolvedShell,
+    analysis: &ShellCommandAnalysis,
+) -> Result<()> {
+    if let Some(reason) = known_finite_terminal_command_reason(command, shell, analysis) {
+        bail!(
+            "terminal_start only supports persistent background or interactive work; {reason} must use bash"
+        );
     }
-    let first = words[0];
-    if first == "watch" {
-        return true;
-    }
-    if first == "tail" && words.iter().any(|word| matches!(*word, "-f" | "--follow")) {
-        return true;
-    }
-    if first == "cargo" && words.get(1) == Some(&"watch") {
-        return true;
-    }
-    if matches!(first, "vite" | "serve" | "http-server") {
-        return true;
-    }
-    if matches!(first, "next" | "nuxt" | "astro") && words.get(1) == Some(&"dev") {
-        return true;
-    }
-    if matches!(first, "npm" | "pnpm" | "yarn" | "bun")
-        && terminal_package_manager_command_is_long_lived(&words)
-    {
-        return true;
-    }
-    if first == "python"
-        && words
-            .windows(2)
-            .any(|window| window == ["-m", "http.server"])
-    {
-        return true;
-    }
-    if first == "php" && words.contains(&"-s") {
-        return true;
-    }
-    if first == "docker-compose" && words.get(1) == Some(&"up") {
-        return true;
-    }
-    if first == "docker" && words.get(1) == Some(&"compose") && words.get(2) == Some(&"up") {
-        return true;
-    }
-    if first == "kubectl" && words.get(1) == Some(&"port-forward") {
-        return true;
-    }
-    words.iter().any(|word| {
-        matches!(
-            *word,
-            "--watch" | "--watch-all" | "--serve" | "--host" | "--listen"
-        )
-    })
+    Ok(())
 }
 
-fn terminal_package_manager_command_is_long_lived(words: &[&str]) -> bool {
-    match words {
-        ["npm", "run", script, ..]
-        | ["pnpm", "run", script, ..]
-        | ["yarn", "run", script, ..]
-        | ["bun", "run", script, ..] => matches!(
-            *script,
-            "dev" | "develop" | "serve" | "start" | "preview" | "watch"
+fn terminal_readiness_kind_label(readiness: &TerminalReadinessCondition) -> &'static str {
+    match readiness {
+        TerminalReadinessCondition::None => "none",
+        TerminalReadinessCondition::OutputContains { .. } => "output_contains",
+        TerminalReadinessCondition::OutputRegex { .. } => "output_regex",
+    }
+}
+
+fn validate_terminal_start_prepared_plan(
+    ctx: &ToolContext,
+    plan: &ToolPermissionPlanV2,
+    shell: &ResolvedShell,
+    args: &TerminalStartArgs,
+    scratch_root: &Path,
+    managers: &TerminalProcessManagers,
+) -> Result<()> {
+    anyhow::ensure!(
+        plan.tool_name == "terminal_start",
+        "prepared permission plan belongs to a different tool"
+    );
+    anyhow::ensure!(
+        plan.access == ToolAccess::Execute
+            && plan.effects.contains(&ToolPermissionEffect::ProcessControl)
+            && plan
+                .effects
+                .contains(&ToolPermissionEffect::PersistenceChange),
+        "prepared terminal permission plan does not authorize persistent process control"
+    );
+    anyhow::ensure!(
+        plan.containment.process == ProcessContainment::OwnedTree
+            && plan.containment.environment == EnvironmentContainment::UserInherited
+            && plan.containment.persistent_process,
+        "prepared terminal containment changed before execution"
+    );
+    let expected_backend = managers.permission_backend_binding();
+    anyhow::ensure!(
+        plan.analysis_bindings.get("execution_backend") == Some(&expected_backend),
+        "prepared terminal execution backend changed before execution"
+    );
+    let expected_profile = serde_json::to_string(&plan.containment)?;
+    anyhow::ensure!(
+        plan.analysis_bindings.get("execution_profile") == Some(&expected_profile),
+        "prepared terminal execution profile changed before execution"
+    );
+    let expected_environment = shell_environment_binding(
+        ctx,
+        scratch_root,
+        shell,
+        EnvironmentContainment::UserInherited,
+    )?;
+    anyhow::ensure!(
+        plan.analysis_bindings.get("environment_binding") == Some(&expected_environment),
+        "prepared terminal environment binding changed before execution"
+    );
+    let expected_path_policy =
+        ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, scratch_root, false)?
+            .stable_hash();
+    anyhow::ensure!(
+        plan.analysis_bindings.get("path_policy_binding") == Some(&expected_path_policy),
+        "prepared terminal symbolic path binding changed before execution"
+    );
+    for (key, expected) in [
+        ("terminal_execution_class", "persistent"),
+        ("terminal_mode", args.mode.as_str()),
+        ("terminal_pty", if args.pty { "true" } else { "false" }),
+        (
+            "terminal_readiness",
+            terminal_readiness_kind_label(&args.readiness),
         ),
-        ["pnpm", script, ..] | ["yarn", script, ..] => matches!(
-            *script,
-            "dev" | "develop" | "serve" | "start" | "preview" | "watch"
-        ),
-        ["npm", script, ..] => matches!(*script, "start"),
-        _ => false,
+    ] {
+        anyhow::ensure!(
+            plan.analysis_bindings.get(key).map(String::as_str) == Some(expected),
+            "prepared terminal permission binding {key} changed before execution"
+        );
+    }
+    Ok(())
+}
+
+fn parse_terminal_readiness(value: Option<&Value>) -> Result<TerminalReadinessCondition> {
+    let Some(value) = value else {
+        return Ok(TerminalReadinessCondition::None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("terminal_start readiness must be an object"))?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("terminal_start readiness.kind is required"))?;
+    let timeout = Duration::from_secs(
+        optional_positive_u64(value, "timeout_secs")?
+            .unwrap_or(DEFAULT_TERMINAL_READINESS_TIMEOUT_SECS),
+    );
+    let match_value = || {
+        object
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("terminal_start readiness.value is required for {kind}"))
+    };
+    match kind {
+        "none" => Ok(TerminalReadinessCondition::None),
+        "output_contains" => Ok(TerminalReadinessCondition::OutputContains {
+            value: match_value()?,
+            timeout,
+        }),
+        "output_regex" => Ok(TerminalReadinessCondition::OutputRegex {
+            value: match_value()?,
+            timeout,
+        }),
+        _ => bail!("terminal_start readiness.kind must be none, output_contains, or output_regex"),
     }
 }
 
@@ -868,6 +1448,30 @@ pub(crate) fn required_u16(args: &Value, key: &str) -> Result<u16> {
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("missing positive integer field {key}"))?;
     u16::try_from(value).map_err(|_| anyhow!("{key} is too large for a terminal dimension"))
+}
+
+fn required_u64_arg(args: &Value, key: &str) -> Result<u64> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing unsigned integer field {key}"))
+}
+
+fn parse_terminal_wait_condition(args: &Value) -> Result<TerminalWaitCondition> {
+    let until = required_string(args, "until")?;
+    let value = || {
+        optional_string(args, "value")
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("terminal_wait value is required for {until}"))
+    };
+    match until {
+        "status_change" => Ok(TerminalWaitCondition::StatusChange),
+        "exit" => Ok(TerminalWaitCondition::Exit),
+        "output_contains" => Ok(TerminalWaitCondition::OutputContains(value()?)),
+        "output_regex" => Ok(TerminalWaitCondition::OutputRegex(value()?)),
+        _ => bail!(
+            "terminal_wait until must be status_change, exit, output_contains, or output_regex"
+        ),
+    }
 }
 
 pub(crate) fn terminal_read_limit(args: &Value) -> Result<usize> {
@@ -928,11 +1532,33 @@ pub(crate) fn terminal_entry_result_with_shell_analysis(
     entry: TerminalTaskEntry,
     analysis: Option<&ShellCommandAnalysis>,
 ) -> ToolResult {
+    terminal_entry_result_with_shell_context(
+        call_id,
+        tool_name,
+        action,
+        entry,
+        analysis.map(TerminalShellReceiptContext::Analysis),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalShellReceiptContext<'a> {
+    Analysis(&'a ShellCommandAnalysis),
+    Prepared(&'a ToolPermissionPlanV2),
+}
+
+fn terminal_entry_result_with_shell_context(
+    call_id: String,
+    tool_name: String,
+    action: &'static str,
+    entry: TerminalTaskEntry,
+    shell_context: Option<TerminalShellReceiptContext<'_>>,
+) -> ToolResult {
     let content = format!(
         "{action} terminal task {}\nstatus: {}\nlog: {}",
         entry.handle.task_id.as_str(),
         entry.status.as_str(),
-        entry.handle.log_path.display()
+        entry.handle.log_ref
     );
     ToolResult::ok(
         call_id,
@@ -942,369 +1568,153 @@ pub(crate) fn terminal_entry_result_with_shell_analysis(
             truncated: entry.output_truncated,
             total_bytes: Some(entry.output_total_bytes),
             limit_bytes: entry.output_limit_bytes,
-            details: terminal_entry_details(&entry, analysis),
+            details: terminal_entry_details_with_shell_context(&entry, shell_context),
             ..ToolResultMeta::default()
         },
     )
 }
 
-async fn wait_for_foreground_terminal(
-    ctx: &ToolContext,
-    manager: Arc<TerminalProcessManager>,
+fn terminal_start_result(
     call_id: String,
     tool_name: String,
-    entry: TerminalTaskEntry,
-    analysis: &ShellCommandAnalysis,
-    execution_mode: TerminalStartExecutionMode,
-    timeouts: ForegroundTerminalTimeouts,
-) -> Result<ToolResult> {
-    let started = Instant::now();
-    let mut last_activity = started;
-    let task_id = entry.handle.task_id.clone();
-    let read_limit =
-        FOREGROUND_TERMINAL_PROGRESS_LIMIT_BYTES.clamp(1, HARD_TERMINAL_READ_LIMIT_BYTES);
-    let mut latest = entry;
-    let mut next_offset = 0;
-    let mut sequence = 0;
-
-    emit_terminal_progress(
-        ctx,
-        &call_id,
-        &tool_name,
-        sequence,
-        &latest,
-        analysis,
-        execution_mode,
-        timeouts,
-        ForegroundTerminalProgress::default(),
-    )?;
-
-    loop {
-        if let Some(cancellation) = ctx.cancellation_handle()
-            && cancellation.is_cancel_requested()
-        {
-            let cancelled = manager
-                .cancel(&task_id)
-                .await
-                .unwrap_or_else(|_| latest.clone());
-            if !cancelled
-                .cleanup
-                .as_ref()
-                .is_some_and(|receipt| receipt.status == ExecutionCleanupStatus::Completed)
-            {
-                cancellation.mark_cleanup_incomplete();
-            }
-            return Ok(terminal_foreground_result(
-                call_id,
-                tool_name,
-                cancelled,
-                analysis,
-                execution_mode,
-                elapsed_millis(started),
-                timeouts,
-                Some("interrupted"),
-                None,
-                Some(ToolErrorKind::Interrupted),
-            ));
-        }
-        if latest.status.is_terminal() {
-            return Ok(terminal_foreground_result(
-                call_id,
-                tool_name,
-                latest,
-                analysis,
-                execution_mode,
-                elapsed_millis(started),
-                timeouts,
-                None,
-                None,
-                None,
-            ));
-        }
-
-        if started.elapsed() >= timeouts.total {
-            let cancelled = manager
-                .cancel(&task_id)
-                .await
-                .unwrap_or_else(|_| latest.clone());
-            sequence = sequence.saturating_add(1);
-            let duration_ms = elapsed_millis(started);
-            emit_terminal_progress(
-                ctx,
-                &call_id,
-                &tool_name,
-                sequence,
-                &cancelled,
-                analysis,
-                execution_mode,
-                timeouts,
-                ForegroundTerminalProgress {
-                    verdict_override: Some("timed_out"),
-                    timeout_kind: Some(ForegroundTerminalTimeoutKind::Total),
-                    ..ForegroundTerminalProgress::default()
-                },
-            )?;
-            return Ok(terminal_foreground_result(
-                call_id,
-                tool_name,
-                cancelled,
-                analysis,
-                execution_mode,
-                duration_ms,
-                timeouts,
-                Some("timed_out"),
-                Some(ForegroundTerminalTimeoutKind::Total),
-                Some(ToolErrorKind::Timeout),
-            ));
-        }
-
-        if last_activity.elapsed() >= timeouts.inactivity {
-            let cancelled = manager
-                .cancel(&task_id)
-                .await
-                .unwrap_or_else(|_| latest.clone());
-            sequence = sequence.saturating_add(1);
-            let duration_ms = elapsed_millis(started);
-            emit_terminal_progress(
-                ctx,
-                &call_id,
-                &tool_name,
-                sequence,
-                &cancelled,
-                analysis,
-                execution_mode,
-                timeouts,
-                ForegroundTerminalProgress {
-                    verdict_override: Some("inactive_timeout"),
-                    timeout_kind: Some(ForegroundTerminalTimeoutKind::Inactivity),
-                    ..ForegroundTerminalProgress::default()
-                },
-            )?;
-            return Ok(terminal_foreground_result(
-                call_id,
-                tool_name,
-                cancelled,
-                analysis,
-                execution_mode,
-                duration_ms,
-                timeouts,
-                Some("inactive_timeout"),
-                Some(ForegroundTerminalTimeoutKind::Inactivity),
-                Some(ToolErrorKind::Timeout),
-            ));
-        }
-
-        let poll_delay = Duration::from_millis(FOREGROUND_TERMINAL_POLL_INTERVAL_MS)
-            .min(timeouts.total.saturating_sub(started.elapsed()))
-            .min(timeouts.inactivity.saturating_sub(last_activity.elapsed()));
-        if !poll_delay.is_zero() {
-            sleep(poll_delay).await;
-        }
-        let previous_status = latest.status.clone();
-        let read = manager.read(&task_id, next_offset, read_limit).await?;
-        next_offset = read.next_offset.unwrap_or(read.total_bytes);
-        if let Some(entry) = read.latest_entry.clone() {
-            latest = entry;
-        }
-        if read.returned_bytes > 0
-            || latest.status != previous_status
-            || latest.status.is_terminal()
-        {
-            last_activity = Instant::now();
-            sequence = sequence.saturating_add(1);
-            emit_terminal_progress(
-                ctx,
-                &call_id,
-                &tool_name,
-                sequence,
-                &latest,
-                analysis,
-                execution_mode,
-                timeouts,
-                ForegroundTerminalProgress {
-                    output_preview: (!read.content.is_empty()).then_some(read.content.as_str()),
-                    total_bytes: Some(read.total_bytes),
-                    ..ForegroundTerminalProgress::default()
-                },
-            )?;
-        }
-    }
-}
-
-fn emit_terminal_progress(
-    ctx: &ToolContext,
-    call_id: &str,
-    tool_name: &str,
-    sequence: u64,
-    entry: &TerminalTaskEntry,
-    analysis: &ShellCommandAnalysis,
-    execution_mode: TerminalStartExecutionMode,
-    timeouts: ForegroundTerminalTimeouts,
-    progress: ForegroundTerminalProgress<'_>,
-) -> Result<()> {
-    ctx.emit_progress(ToolProgressEvent {
-        execution_id: ToolExecutionId::new(entry.handle.task_id.as_str())?,
-        call_id: call_id.to_owned(),
-        tool_name: tool_name.to_owned(),
-        sequence,
-        status: entry.status.as_str().to_owned(),
-        message: Some(format!(
-            "terminal {} {}",
-            entry.handle.task_id.as_str(),
-            entry.status.as_str()
-        )),
-        output_preview: progress.output_preview.map(str::to_owned),
-        output_log_ref: Some(entry.handle.log_path.clone()),
-        total_bytes: progress.total_bytes,
-        updated_at_ms: Some(entry.updated_at_ms),
-        details: terminal_entry_details_with_execution_mode(
-            entry,
-            Some(analysis),
-            execution_mode,
-            Some(timeouts),
-            progress.verdict_override,
-            progress.timeout_kind,
-        ),
-    })
-}
-
-fn terminal_foreground_result(
-    call_id: String,
-    tool_name: String,
-    entry: TerminalTaskEntry,
-    analysis: &ShellCommandAnalysis,
-    execution_mode: TerminalStartExecutionMode,
-    duration_ms: u64,
-    timeouts: ForegroundTerminalTimeouts,
-    verdict_override: Option<&str>,
-    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
-    error_kind_override: Option<ToolErrorKind>,
+    snapshot: TerminalTaskSnapshot,
+    shell_context: TerminalShellReceiptContext<'_>,
+    mode: TerminalStartExecutionMode,
 ) -> ToolResult {
-    let exit_code = terminal_exit_code(&entry.status);
-    let verdict = verdict_override.unwrap_or_else(|| terminal_verdict(&entry.status));
-    let rerun_not_needed = matches!(verdict, "passed" | "failed");
-    let mut details = terminal_entry_details_with_execution_mode(
-        &entry,
-        Some(analysis),
-        execution_mode,
-        Some(timeouts),
-        None,
-        timeout_kind,
+    let mut result = terminal_entry_result_with_shell_context(
+        call_id,
+        tool_name,
+        "started",
+        snapshot.entry.clone(),
+        Some(shell_context),
     );
-    set_terminal_details_verdict(&mut details, verdict, rerun_not_needed);
-    if let Some(object) = details.as_object_mut() {
-        object.insert("duration_ms".to_owned(), json!(duration_ms));
-        object.insert("output_log_ref".to_owned(), json!(&entry.handle.log_path));
-    }
+    attach_lifecycle_details(&mut result.metadata.details, &snapshot, mode);
+    result
+}
 
-    let content = terminal_foreground_content(&entry, verdict, duration_ms, timeout_kind);
-    let metadata = ToolResultMeta {
-        duration_ms: Some(duration_ms),
-        exit_code,
-        truncated: entry.output_truncated,
-        total_bytes: Some(entry.output_total_bytes),
-        limit_bytes: entry.output_limit_bytes,
-        returned_bytes: Some(content.len() as u64),
-        returned_lines: Some(content.lines().count() as u64),
-        details: details.clone(),
+fn terminal_start_failure_result(
+    call_id: String,
+    tool_name: String,
+    message: &str,
+    error_kind: ToolErrorKind,
+    snapshot: TerminalTaskSnapshot,
+    shell_context: TerminalShellReceiptContext<'_>,
+    mode: TerminalStartExecutionMode,
+) -> ToolResult {
+    let mut details =
+        terminal_entry_details_with_shell_context(&snapshot.entry, Some(shell_context));
+    attach_lifecycle_details(&mut details, &snapshot, mode);
+    let mut result = ToolResult::error(call_id, tool_name, error_kind, message)
+        .with_error_details(false, details.clone());
+    result.metadata = ToolResultMeta {
+        truncated: snapshot.entry.output_truncated,
+        total_bytes: Some(snapshot.entry.output_total_bytes),
+        limit_bytes: snapshot.entry.output_limit_bytes,
+        details,
         ..ToolResultMeta::default()
     };
-
-    if let Some(error_kind) = error_kind_override.or_else(|| terminal_error_kind(&entry)) {
-        let mut result = ToolResult::error(call_id, tool_name, error_kind, content)
-            .with_error_details(false, details);
-        result.metadata = metadata;
-        return result;
-    }
-
-    ToolResult::ok(call_id, tool_name, content, metadata)
+    result
 }
 
-fn terminal_foreground_content(
-    entry: &TerminalTaskEntry,
-    verdict: &str,
-    duration_ms: u64,
-    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
-) -> String {
-    let mut lines = vec![format!(
-        "terminal task {} {} · verdict {} · {} ms",
-        entry.handle.task_id.as_str(),
-        entry.status.as_str(),
-        verdict,
-        duration_ms
-    )];
-    if let Some(code) = terminal_exit_code(&entry.status) {
-        lines.push(format!("exit_code: {code}"));
-    }
-    if let Some(timeout_kind) = timeout_kind {
-        lines.push(format!("timeout_kind: {}", timeout_kind.as_str()));
-    }
-    lines.push(format!("log: {}", entry.handle.log_path.display()));
-    if entry.output_truncated {
-        lines.push("output_truncated: true".to_owned());
-    }
-    if entry
-        .output_preview
-        .as_deref()
-        .is_some_and(|preview| !preview.is_empty())
-    {
-        lines.push(
-            "output_preview: omitted from model context; inspect the log artifact if needed"
-                .to_owned(),
-        );
-    }
-    lines.join("\n")
-}
-
-fn elapsed_millis(started: Instant) -> u64 {
-    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn terminal_exit_code(status: &TerminalTaskStatus) -> Option<i32> {
-    match status {
-        TerminalTaskStatus::Exited { exit_code } => *exit_code,
-        _ => None,
+fn attach_lifecycle_details(
+    details: &mut Value,
+    snapshot: &TerminalTaskSnapshot,
+    mode: TerminalStartExecutionMode,
+) {
+    if let Some(object) = details.as_object_mut() {
+        object.insert("generation".to_owned(), json!(snapshot.generation));
+        object.insert("readiness".to_owned(), json!(&snapshot.readiness));
+        object.insert("execution_mode".to_owned(), json!(mode.as_str()));
     }
 }
 
-fn terminal_verdict(status: &TerminalTaskStatus) -> &'static str {
-    match status {
-        TerminalTaskStatus::Exited { exit_code: Some(0) } => "passed",
-        TerminalTaskStatus::Exited { .. } | TerminalTaskStatus::Failed { .. } => "failed",
-        TerminalTaskStatus::Cancelled => "cancelled",
-        TerminalTaskStatus::Interrupted => "interrupted",
-        TerminalTaskStatus::Starting | TerminalTaskStatus::Running => "running",
+async fn wait_with_cancellation(
+    ctx: &ToolContext,
+    manager: &TerminalProcessManager,
+    task_id: &TerminalTaskId,
+    after_generation: u64,
+    condition: TerminalWaitCondition,
+    max_wait: Duration,
+) -> Result<TerminalWaitResult> {
+    let wait = manager.wait(task_id, after_generation, condition, max_wait);
+    if let Some(cancellation) = ctx.cancellation_handle() {
+        tokio::select! {
+            result = wait => result,
+            () = cancellation.cancelled() => {
+                Ok(TerminalWaitResult {
+                    outcome: TerminalWaitOutcome::Cancelled,
+                    snapshot: manager.snapshot(task_id).await?,
+                })
+            }
+        }
+    } else {
+        wait.await
     }
 }
 
-fn terminal_error_kind(entry: &TerminalTaskEntry) -> Option<ToolErrorKind> {
-    if entry.output_termination_reason
-        == Some(sigil_kernel::TerminalOutputTerminationReason::OutputLimitExceeded)
-    {
-        return Some(ToolErrorKind::ResourceLimit);
-    }
-    match &entry.status {
-        TerminalTaskStatus::Exited { exit_code: Some(0) } => None,
-        TerminalTaskStatus::Exited { .. } => Some(ToolErrorKind::ExitStatus),
-        TerminalTaskStatus::Failed { .. } => Some(ToolErrorKind::Internal),
-        TerminalTaskStatus::Cancelled => Some(ToolErrorKind::Interrupted),
-        TerminalTaskStatus::Interrupted => Some(ToolErrorKind::Interrupted),
-        TerminalTaskStatus::Starting | TerminalTaskStatus::Running => None,
-    }
+fn terminal_wait_result(
+    call_id: String,
+    tool_name: String,
+    result: TerminalWaitResult,
+) -> ToolResult {
+    let outcome = match result.outcome {
+        TerminalWaitOutcome::ConditionMet => "condition_met",
+        TerminalWaitOutcome::Timeout => "timeout",
+        TerminalWaitOutcome::OwnerShutdown => "owner_shutdown",
+        TerminalWaitOutcome::Cancelled => "cancelled",
+    };
+    let content = format!(
+        "terminal task {} wait {outcome}\ngeneration: {}\nstatus: {}",
+        result.snapshot.entry.handle.task_id.as_str(),
+        result.snapshot.generation,
+        result.snapshot.entry.status.as_str()
+    );
+    ToolResult::ok(
+        call_id,
+        tool_name,
+        content,
+        ToolResultMeta {
+            total_bytes: Some(result.snapshot.entry.output_total_bytes),
+            details: json!({
+                "task_id": result.snapshot.entry.handle.task_id.as_str(),
+                "outcome": outcome,
+                "generation": result.snapshot.generation,
+                "status": result.snapshot.entry.status.as_str(),
+                "status_detail": &result.snapshot.entry.status,
+                "readiness": &result.snapshot.readiness,
+                "total_output_bytes": result.snapshot.entry.output_total_bytes
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
 }
 
 pub(crate) fn terminal_entry_details(
     entry: &TerminalTaskEntry,
     analysis: Option<&ShellCommandAnalysis>,
 ) -> Value {
+    terminal_entry_details_with_shell_context(
+        entry,
+        analysis.map(TerminalShellReceiptContext::Analysis),
+    )
+}
+
+fn terminal_entry_details_with_shell_context(
+    entry: &TerminalTaskEntry,
+    shell_context: Option<TerminalShellReceiptContext<'_>>,
+) -> Value {
     let mut details = json!({
+        "schema_version": entry.schema_version,
         "task_id": entry.handle.task_id.as_str(),
+        "generation": entry.generation,
         "status": entry.status.as_str(),
         "status_detail": &entry.status,
-        "command": &entry.handle.command,
-        "cwd": &entry.handle.cwd,
-        "shell": &entry.handle.shell,
-        "log_path": &entry.handle.log_path,
+        "readiness": &entry.readiness,
+        "command_sha256": &entry.handle.command_sha256,
+        "cwd_label": &entry.handle.cwd_label,
+        "shell_label": &entry.handle.shell_label,
+        "shell_sha256": &entry.handle.shell_sha256,
+        "log_ref": &entry.handle.log_ref,
         "created_at_ms": entry.handle.created_at_ms,
         "updated_at_ms": entry.updated_at_ms,
         "output_preview": &entry.output_preview,
@@ -1338,10 +1748,9 @@ pub(crate) fn terminal_entry_details(
         json!(entry.handle.sandbox_profile),
     );
     details_object.insert("cleanup".to_owned(), json!(entry.cleanup));
-    if let Some(analysis) = analysis {
-        details_object.insert(
-            "shell_analysis".to_owned(),
-            json!({
+    if let Some(shell_context) = shell_context {
+        let shell_analysis = match shell_context {
+            TerminalShellReceiptContext::Analysis(analysis) => json!({
                 "program": analysis.shell_program.as_str(),
                 "dialect": analysis.shell_dialect.as_str(),
                 "command": analysis.command.as_str(),
@@ -1357,90 +1766,21 @@ pub(crate) fn terminal_entry_details(
                 "tail_available": false,
                 "rerun_not_needed": false,
             }),
-        );
+            TerminalShellReceiptContext::Prepared(plan) => json!({
+                "command_family": plan.semantic_scope.as_ref().map(|scope| scope.family.as_str()).unwrap_or("reviewed_shell"),
+                "classification_source": "prepared_permission_plan_v2",
+                "permission_plan_hash": plan.plan_hash.as_str(),
+                "approval_reason": plan.operation.as_str(),
+                "exit_code": Value::Null,
+                "verdict": "running",
+                "output_truncated": entry.output_truncated,
+                "tail_available": false,
+                "rerun_not_needed": false,
+            }),
+        };
+        details_object.insert("shell_analysis".to_owned(), shell_analysis);
     }
     details
-}
-
-fn terminal_entry_details_with_execution_mode(
-    entry: &TerminalTaskEntry,
-    analysis: Option<&ShellCommandAnalysis>,
-    execution_mode: TerminalStartExecutionMode,
-    foreground_timeouts: Option<ForegroundTerminalTimeouts>,
-    verdict_override: Option<&str>,
-    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
-) -> Value {
-    let mut details = terminal_entry_details(entry, analysis);
-    let verdict = verdict_override.unwrap_or_else(|| terminal_verdict(&entry.status));
-    let rerun_not_needed = matches!(verdict, "passed" | "failed");
-    if let Some(object) = details.as_object_mut() {
-        object.insert(
-            "execution_id".to_owned(),
-            json!(entry.handle.task_id.as_str()),
-        );
-        object.insert("execution_mode".to_owned(), json!(execution_mode.as_str()));
-        object.insert(
-            "exit_code".to_owned(),
-            json!(terminal_exit_code(&entry.status)),
-        );
-        object.insert("verdict".to_owned(), json!(verdict));
-        object.insert("output_log_ref".to_owned(), json!(&entry.handle.log_path));
-        object.insert("tail_available".to_owned(), json!(false));
-        object.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
-        if let Some(timeouts) = foreground_timeouts {
-            object.insert(
-                "foreground_timeout_secs".to_owned(),
-                json!(timeouts.total_secs()),
-            );
-            object.insert(
-                "foreground_inactivity_timeout_secs".to_owned(),
-                json!(timeouts.inactivity_secs()),
-            );
-            if let Some(timeout_kind) = timeout_kind {
-                object.insert("timeout_kind".to_owned(), json!(timeout_kind.as_str()));
-            }
-        }
-        if let Some(shell) = object
-            .get_mut("shell_analysis")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            shell.insert(
-                "exit_code".to_owned(),
-                json!(terminal_exit_code(&entry.status)),
-            );
-            if let Some(timeouts) = foreground_timeouts {
-                shell.insert(
-                    "foreground_timeout_secs".to_owned(),
-                    json!(timeouts.total_secs()),
-                );
-                shell.insert(
-                    "foreground_inactivity_timeout_secs".to_owned(),
-                    json!(timeouts.inactivity_secs()),
-                );
-                if let Some(timeout_kind) = timeout_kind {
-                    shell.insert("timeout_kind".to_owned(), json!(timeout_kind.as_str()));
-                }
-            }
-        }
-    }
-    set_terminal_details_verdict(&mut details, verdict, rerun_not_needed);
-    details
-}
-
-fn set_terminal_details_verdict(details: &mut Value, verdict: &str, rerun_not_needed: bool) {
-    let Some(object) = details.as_object_mut() else {
-        return;
-    };
-    object.insert("verdict".to_owned(), json!(verdict));
-    object.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
-    if let Some(shell) = object
-        .get_mut("shell_analysis")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        shell.insert("verdict".to_owned(), json!(verdict));
-        shell.insert("tail_available".to_owned(), json!(false));
-        shell.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
-    }
 }
 
 pub(crate) fn terminal_input_result(
@@ -1509,6 +1849,8 @@ pub(crate) fn terminal_read_details(
 ) -> Value {
     let mut details = json!({
         "task_id": read.task_id.as_str(),
+        "generation": read.generation,
+        "readiness": &read.readiness,
         "offset": read.offset,
         "next_offset": read.next_offset,
         "returned_bytes": read.returned_bytes,
@@ -1516,7 +1858,9 @@ pub(crate) fn terminal_read_details(
         "limit_bytes": limit_bytes,
         "truncated": read.truncated,
         "content_returned": include_content,
-        "content_omitted": !include_content
+        "content_omitted": !include_content,
+        "no_change": read.no_change,
+        "use_terminal_wait": read.no_change
     });
     if let Some(entry) = &read.latest_entry
         && let Some(object) = details.as_object_mut()
@@ -1525,6 +1869,12 @@ pub(crate) fn terminal_read_details(
             "terminal_task".to_owned(),
             terminal_entry_details(entry, None),
         );
+    }
+    if read.no_change
+        && let Some(object) = details.as_object_mut()
+    {
+        object.insert("next_action".to_owned(), json!("terminal_wait"));
+        object.insert("after_generation".to_owned(), json!(read.generation));
     }
     details
 }
@@ -1543,12 +1893,17 @@ pub(crate) fn terminal_read_content(read: &TerminalReadResult, include_content: 
     }
     lines.push(format!("returned_bytes: {}", read.returned_bytes));
     lines.push(format!("total_bytes: {}", read.total_bytes));
+    lines.push(format!("generation: {}", read.generation));
     if read.truncated {
         lines.push("truncated: true".to_owned());
     }
+    if read.no_change {
+        lines.push("no_change: true".to_owned());
+        lines.push("use terminal_wait instead of repeating terminal_read".to_owned());
+    }
     if let Some(entry) = &read.latest_entry {
         lines.push(format!("status: {}", entry.status.as_str()));
-        lines.push(format!("log: {}", entry.handle.log_path.display()));
+        lines.push(format!("log: {}", entry.handle.log_ref));
     }
     lines.push(
         "pass include_content=true to read a bounded raw output page for diagnosis".to_owned(),

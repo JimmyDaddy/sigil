@@ -10,13 +10,45 @@ import { desktopProviderCanaries } from "../provider-fixture";
 const unavailableSessionRef = "desktop-e2e-unsupported.jsonl";
 let unavailableSessionPath: string | undefined;
 
+async function waitForComposerEnabled(
+  timeoutMsg = "the desktop composer did not become enabled",
+): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      try {
+        const composerEnabled = await $("#desktop-prompt").isEnabled();
+        const lifecycle = await $(".conversation-panel").getAttribute(
+          "data-continuity-lifecycle",
+        );
+        return composerEnabled && (lifecycle === "idle" || lifecycle === "live");
+      } catch {
+        // Canonical refreshes may replace the textarea while WebDriver is observing it. Re-query
+        // on every attempt instead of retaining a stale native WebKit element reference.
+        return false;
+      }
+    },
+    { timeout: 20_000, timeoutMsg },
+  );
+}
+
 Given("the current-source desktop has restored the isolated workspace", async () => {
   await $(".app-shell").waitForDisplayed();
   const workspace = await $(".workspace-switcher");
-  await workspace.waitUntil(
-    async () => (await workspace.getText()).includes("desktop-e2e-workspace"),
-    { timeout: 20_000, timeoutMsg: "the isolated workspace was not restored" },
-  );
+  try {
+    await workspace.waitUntil(
+      async () => (await workspace.getText()).includes("desktop-e2e-workspace"),
+      { timeout: 20_000, timeoutMsg: "the isolated workspace was not restored" },
+    );
+  } catch (error) {
+    const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
+    if (artifactRoot !== undefined) {
+      await browser.saveScreenshot(resolve(artifactRoot, "desktop-workspace-restore-failure.png"));
+    }
+    const bodyText = await $("body").getText();
+    throw new Error(`the isolated workspace was not restored; visible desktop text:\n${bodyText}`, {
+      cause: error,
+    });
+  }
 });
 
 When("I create a new desktop conversation", async () => {
@@ -58,7 +90,7 @@ Then("the conversation timeline and composer are usable", async () => {
   await $(".conversation-panel").waitForDisplayed({ timeout: 20_000 });
   await $(".timeline").waitForDisplayed();
   await $(".composer").waitForDisplayed();
-  await $("#desktop-prompt").waitForEnabled();
+  await waitForComposerEnabled();
 
   const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
   assert.ok(artifactRoot, "desktop E2E artifact directory is configured");
@@ -105,7 +137,17 @@ When("I start a run that requires approval", async () => {
 
 Then("the approval remains live without losing runtime control", async () => {
   await browser.pause(12_000);
-  await $(".approval-dock").waitForDisplayed();
+  const approvalDock = await $(".approval-dock");
+  await approvalDock.waitForDisplayed();
+  const approvalText = await approvalDock.getText();
+  assert.ok(
+    approvalText.includes("file_write"),
+    `approval did not expose its structured file effect: ${approvalText}`,
+  );
+  assert.ok(
+    approvalText.includes("filesystem=workspace_write"),
+    `approval did not expose its requested filesystem containment: ${approvalText}`,
+  );
   assert.equal(
     await $$(".notification-toast").some(async (toast) =>
       (await toast.getText()).includes("无法连接实时运行控制")
@@ -113,7 +155,7 @@ Then("the approval remains live without losing runtime control", async () => {
     false,
     "live runtime control entered an error state while approval was pending",
   );
-  await $("#desktop-prompt").waitForEnabled();
+  await waitForComposerEnabled();
 
   const geometry = await browser.execute(() => {
     const approval = document.querySelector<HTMLElement>(".approval-dock");
@@ -169,6 +211,26 @@ When("I approve the pending command", async () => {
   await approve.click();
 });
 
+Then("the accepted approval stops offering actions before the next run event", async () => {
+  await browser.waitUntil(
+    async () => {
+      const actions = await $$(".approval-actions button");
+      const approval = await $(".approval-dock");
+      if (actions.length !== 0) return false;
+      if (!(await approval.isExisting())) return true;
+      const text = await approval.getText();
+      return text.includes("正在恢复")
+        || text.includes("已接受")
+        || text.includes("Resuming")
+        || text.includes("accepted");
+    },
+    {
+      timeout: 5_000,
+      timeoutMsg: "the accepted approval kept its decision actions after the command receipt",
+    },
+  );
+});
+
 Then("the initial run and queued follow-up both complete", async () => {
   const timeline = await $(".timeline");
   await timeline.waitUntil(
@@ -192,11 +254,10 @@ Then("the initial run and queued follow-up both complete", async () => {
 });
 
 Then("terminal completion releases continuity and history controls", async () => {
+  await waitForComposerEnabled(
+    "terminal completion left the Desktop composer blocked by continuity recovery",
+  );
   const composer = await $("#desktop-prompt");
-  await composer.waitForEnabled({
-    timeout: 20_000,
-    timeoutMsg: "terminal completion left the Desktop composer blocked by continuity recovery",
-  });
   try {
     await browser.waitUntil(
       async () =>
@@ -259,8 +320,8 @@ Then("the generated semantic title is synchronized into the conversation page", 
 });
 
 When("I invoke the custom workspace skill", async () => {
+  await waitForComposerEnabled();
   const composer = await $("#desktop-prompt");
-  await composer.waitForEnabled({ timeout: 20_000 });
   await composer.setValue("$desktop-e2e-skill inspect README");
   await browser.keys("Enter");
 });
@@ -294,8 +355,8 @@ Then("the custom workspace skill executes with durable load evidence", async () 
 });
 
 When("I invoke the custom workspace agent", async () => {
+  await waitForComposerEnabled();
   const composer = await $("#desktop-prompt");
-  await composer.waitForEnabled({ timeout: 20_000 });
   await composer.setValue("@desktop-e2e-agent inspect README");
   await browser.keys("Enter");
 });
@@ -311,9 +372,168 @@ Then("the custom workspace agent executes with its profile instructions", async 
   );
 });
 
-When("I invoke Desktop plan mode", async () => {
+When("I start a persistent terminal task from Desktop", async () => {
+  await waitForComposerEnabled();
   const composer = await $("#desktop-prompt");
-  await composer.waitForEnabled({ timeout: 20_000 });
+  await composer.setValue(desktopProviderCanaries.terminalLifecyclePrompt);
+  await browser.keys("Enter");
+
+  await browser.waitUntil(
+    async () => {
+      const approval = await $(".approval-dock");
+      const card = await $(".terminal-task-card");
+      return await approval.isExisting() || await card.isExisting();
+    },
+    {
+      timeout: 30_000,
+      timeoutMsg: "the persistent terminal request produced neither approval nor a task card",
+    },
+  );
+  const approval = await $(".approval-dock");
+  if (await approval.isExisting()) {
+    await $(".approval-actions .sg-button-primary").click();
+  }
+});
+
+Then("the terminal task becomes ready before the foreground answer completes", async () => {
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  await card.waitForDisplayed({
+    timeout: 30_000,
+    timeoutMsg: "Desktop did not render the persistent terminal task card",
+  });
+  await browser.waitUntil(
+    async () => (
+      await card.getAttribute("data-terminal-task-readiness") === "ready"
+      && await card.getAttribute("data-terminal-task-status") === "running"
+    ),
+    {
+      timeout: 20_000,
+      timeoutMsg: "the terminal task did not reach ready/running",
+    },
+  );
+  assert.ok(
+    (await card.getText()).includes(desktopProviderCanaries.terminalLifecycleReady) === false,
+    "the bounded card leaked raw terminal output instead of lifecycle facts",
+  );
+});
+
+Then("the foreground answer completes while the terminal task remains running", async () => {
+  const timeline = await $(".timeline");
+  await timeline.waitUntil(
+    async () => (await timeline.getText()).includes(desktopProviderCanaries.terminalLifecycleFinal),
+    {
+      timeout: 30_000,
+      timeoutMsg: "the foreground answer did not complete after terminal readiness",
+    },
+  );
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  assert.equal(await card.getAttribute("data-terminal-task-status"), "running");
+});
+
+When("I start a successor run while the older terminal task remains running", async () => {
+  await waitForComposerEnabled("the composer did not recover after foreground completion");
+  const composer = await $("#desktop-prompt");
+  await composer.setValue(desktopProviderCanaries.terminalSuccessorPrompt);
+  await browser.keys("Enter");
+});
+
+Then("the successor completes while the older terminal task is still tracked", async () => {
+  const timeline = await $(".timeline");
+  await timeline.waitUntil(
+    async () => (await timeline.getText()).includes(desktopProviderCanaries.terminalSuccessorFinal),
+    {
+      timeout: 20_000,
+      timeoutMsg: "the successor run did not complete while the older terminal owner was retained",
+    },
+  );
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  assert.equal(
+    await card.getAttribute("data-terminal-task-status"),
+    "running",
+    "the successor run displaced the older terminal owner before it settled",
+  );
+});
+
+When("I stop the retained terminal task", async () => {
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  const stop = await card.$("button");
+  await stop.waitForEnabled({
+    timeout: 10_000,
+    timeoutMsg: "the retained terminal task did not expose its stop control",
+  });
+  await stop.click();
+});
+
+Then("the retained terminal task becomes cancelled", async () => {
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  await browser.waitUntil(
+    async () => await card.getAttribute("data-terminal-task-status") === "cancelled",
+    {
+      timeout: 20_000,
+      timeoutMsg: "the retained terminal task did not reach cancelled",
+    },
+  );
+});
+
+When("I reload Desktop while the retained terminal task is owned by the session", async () => {
+  await browser.refresh();
+});
+
+Then("Desktop restores the retained terminal task from continuity", async () => {
+  await $(".app-shell").waitForDisplayed({ timeout: 20_000 });
+  const workspace = await $(".workspace-switcher");
+  await workspace.waitUntil(
+    async () => (await workspace.getText()).includes("desktop-e2e-workspace"),
+    {
+      timeout: 20_000,
+      timeoutMsg: "Desktop did not restore the isolated workspace after renderer reload",
+    },
+  );
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  await card.waitForDisplayed({
+    timeout: 20_000,
+    timeoutMsg: "continuity did not restore the retained terminal task card",
+  });
+  const status = await card.getAttribute("data-terminal-task-status");
+  assert.ok(
+    status === "running" || status === "exited",
+    `continuity restored an invalid terminal status: ${status}`,
+  );
+  const generation = Number.parseInt(
+    await card.getAttribute("data-terminal-task-generation") ?? "0",
+    10,
+  );
+  assert.ok(generation > 0, "continuity did not restore a generation-bound terminal owner");
+  assert.equal(
+    await $(".conversation-continuity-loading").isExisting(),
+    false,
+    "continuity hydration left the conversation in recovery",
+  );
+});
+
+Then("the later terminal exit settles the Desktop task card", async () => {
+  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  await browser.waitUntil(
+    async () => await card.getAttribute("data-terminal-task-status") === "exited",
+    {
+      timeout: 20_000,
+      timeoutMsg: "Desktop stopped following terminal lifecycle after foreground completion",
+    },
+  );
+  const generation = Number.parseInt(
+    await card.getAttribute("data-terminal-task-generation") ?? "0",
+    10,
+  );
+  assert.ok(generation > 1, `the terminal lifecycle generation did not advance: ${generation}`);
+  assert.ok((await card.getText()).includes("0"), "the exited task card did not show its exit code");
+  const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
+  assert.ok(artifactRoot, "desktop E2E artifact directory is configured");
+  await browser.saveScreenshot(resolve(artifactRoot, "desktop-terminal-lifecycle.png"));
+});
+
+When("I invoke Desktop plan mode", async () => {
+  await waitForComposerEnabled();
+  const composer = await $("#desktop-prompt");
   await composer.setValue("/plan inspect the runtime architecture");
   await browser.keys("Enter");
 });
@@ -337,8 +557,8 @@ Then("the supervised plan agent executes with durable profile evidence", async (
 });
 
 When("I request automatic multi-Agent execution", async () => {
+  await waitForComposerEnabled();
   const composer = await $("#desktop-prompt");
-  await composer.waitForEnabled({ timeout: 20_000 });
   await composer.setValue(desktopProviderCanaries.autoOrchestrationPrompt);
   await browser.keys("Enter");
 });

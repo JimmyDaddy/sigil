@@ -143,6 +143,8 @@ fn setup_explicitly_replaces_an_existing_malformed_config() -> Result<()> {
 
 #[test]
 fn setup_startup_recovery_error_blocks_publish_when_config_is_missing() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset(DEFAULT_SETUP_API_KEY_ENV);
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     let mut app = AppState::from_setup(

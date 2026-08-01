@@ -2,11 +2,13 @@ use std::{collections::BTreeSet, path::Path, process::Command, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentRunOptions, ApprovalMode, ControlEntry, PermissionPolicy, RunEvent, Session,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolErrorKind,
-    ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolResultStatus, ToolSubject, ToolSubjectAudit, saturating_elapsed,
+    AgentRunOptions, ApprovalMode, ControlEntry, PermissionPolicyChain, RunEvent, Session,
+    TOOL_PERMISSION_DECISION_SCHEMA_VERSION, ToolCall, ToolErrorKind, ToolExecutionStatus,
+    ToolPermissionDecisionV2Entry, ToolPermissionPlanV2, ToolPermissionPlannedV2Entry,
+    ToolRegistry, ToolResult, ToolSubject, ToolSubjectAudit, durable_tool_execution_entry,
+    saturating_elapsed,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -105,8 +107,8 @@ async fn execute_changed_files_diagnostics(
         return Ok(result);
     };
 
-    let subjects = match tools.permission_subjects(&tool_ctx, &call) {
-        Ok(subjects) => subjects,
+    let permission_plan = match tools.permission_plan(&tool_ctx, &call) {
+        Ok(plan) => plan,
         Err(error) => {
             let mut result = ToolResult::error(
                 call.id.clone(),
@@ -126,100 +128,22 @@ async fn execute_changed_files_diagnostics(
             return Ok(result);
         }
     };
-    let access = match tools.permission_access(&tool_ctx, &call) {
-        Ok(access) => access,
-        Err(error) => {
-            let mut result = ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::InvalidInput,
-                format!("invalid code diagnostics arguments: {error}"),
-            );
-            attach_diagnostics_context(&mut result, &paths);
-            append_execution_audit(
-                session,
-                &call,
-                &subjects,
-                ToolExecutionStatus::Failed,
-                None,
-                Some(&result),
-            )?;
-            return Ok(result);
-        }
-    };
-    let network_effect = match tools.permission_network_effect(&tool_ctx, &call) {
-        Ok(network_effect) => network_effect,
-        Err(error) => {
-            let mut result = ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::InvalidInput,
-                format!("invalid code diagnostics network effect: {error}"),
-            );
-            attach_diagnostics_context(&mut result, &paths);
-            append_execution_audit(
-                session,
-                &call,
-                &subjects,
-                ToolExecutionStatus::Failed,
-                None,
-                Some(&result),
-            )?;
-            return Ok(result);
-        }
-    };
-    let operation = match tools.permission_operation(&tool_ctx, &call) {
-        Ok(operation) => operation,
-        Err(error) => {
-            let mut result = ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::InvalidInput,
-                format!("invalid code diagnostics arguments: {error}"),
-            );
-            attach_diagnostics_context(&mut result, &paths);
-            append_execution_audit(
-                session,
-                &call,
-                &subjects,
-                ToolExecutionStatus::Failed,
-                None,
-                Some(&result),
-            )?;
-            return Ok(result);
-        }
-    };
-    let decision =
-        PermissionPolicy::new_with_context(&options.permission_config, &options.permission_context)
-            .decide_with_operation_network_effect_and_default(
-                &spec,
-                &call.name,
-                access,
-                operation,
-                network_effect,
-                subjects.clone(),
-                None,
-            )?;
-    append_policy_audit(
+    let decision = PermissionPolicyChain::new_with_context(
+        &options.permission_config,
+        &options.permission_context,
+    )
+    .decide_plan(&spec, &permission_plan)?;
+    append_permission_audit(
         session,
         &call,
+        &permission_plan,
         &decision,
-        ToolApprovalAuditAction::PolicyEvaluated,
-        None,
-        None,
+        &permission_policy_version(options)?,
     )?;
     match decision.mode {
         ApprovalMode::Allow => {}
         ApprovalMode::Ask | ApprovalMode::Deny => {
             let (kind, reason) = permission_block_reason(&call, &decision);
-            append_policy_audit(
-                session,
-                &call,
-                &decision,
-                ToolApprovalAuditAction::Resolved,
-                Some(ToolApprovalUserDecision::Denied),
-                Some(reason.clone()),
-            )?;
             let mut result = ToolResult::error(call.id.clone(), call.name.clone(), kind, reason);
             attach_diagnostics_context(&mut result, &paths);
             append_execution_audit(
@@ -243,7 +167,10 @@ async fn execute_changed_files_diagnostics(
         None,
     )?;
     let started = Instant::now();
-    let mut result = match tools.execute(tool_ctx, call.clone()).await {
+    let execution_ctx = tool_ctx
+        .with_approved_subjects(decision.subjects.clone())
+        .with_prepared_permission_plan(permission_plan);
+    let mut result = match tools.execute(execution_ctx, call.clone()).await {
         Ok(result) => result,
         Err(error) => ToolResult::error(
             call.id.clone(),
@@ -417,38 +344,49 @@ pub(super) fn permission_block_reason(
     }
 }
 
-fn append_policy_audit(
+fn permission_policy_version(options: &AgentRunOptions) -> Result<String> {
+    let encoded = serde_json::to_vec(&options.permission_config)
+        .context("failed to encode the diagnostics permission policy")?;
+    Ok(format!("sha256:{:x}", Sha256::digest(encoded)))
+}
+
+fn append_permission_audit(
     session: &mut Session,
     call: &ToolCall,
+    plan: &ToolPermissionPlanV2,
     decision: &sigil_kernel::PermissionDecision,
-    action: ToolApprovalAuditAction,
-    user_decision: Option<ToolApprovalUserDecision>,
-    reason: Option<String>,
+    policy_version: &str,
 ) -> Result<()> {
-    session.append_control(ControlEntry::ToolApproval(ToolApprovalEntry {
-        action,
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        access: decision.access,
-        network_effect: decision.network_effect,
-        local_policy_decision: decision.local_policy_decision,
-        network_policy_decision: decision.network_policy_decision,
-        source_policy_decision: decision.source_policy_decision,
-        subjects: audit_subjects(&decision.subjects),
-        operation: Some(decision.operation),
-        risk: Some(decision.risk),
-        subject_zones: decision.subject_zones.clone(),
-        confirmation: decision.confirmation.clone(),
-        snapshot_required: decision.snapshot_required,
-        command_permission_matches: decision.command_permission_matches.clone(),
-        policy_decision: decision.mode,
-        external_directory_required: decision.external_directory_required,
-        allow_source: None,
-        grant_call_id: None,
-        user_decision,
-        reason,
-        preview_hash: None,
-    }))
+    session.append_control(ControlEntry::ToolPermissionPlannedV2(Box::new(
+        ToolPermissionPlannedV2Entry::from_plan(&call.id, plan)?,
+    )))?;
+    session.append_control(ControlEntry::ToolPermissionDecisionV2(Box::new(
+        ToolPermissionDecisionV2Entry {
+            schema_version: TOOL_PERMISSION_DECISION_SCHEMA_VERSION,
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            plan_hash: plan.plan_hash.clone(),
+            policy_version: policy_version.to_owned(),
+            policy_decision: decision.mode,
+            access: decision.access,
+            network_effect: decision.network_effect,
+            local_policy_decision: decision.local_policy_decision,
+            network_policy_decision: decision.network_policy_decision,
+            source_policy_decision: decision.source_policy_decision,
+            subjects: audit_subjects(&decision.subjects),
+            operation: decision.operation,
+            risk: decision.risk,
+            subject_zones: decision.subject_zones.clone(),
+            confirmation: decision.confirmation.clone(),
+            snapshot_required: decision.snapshot_required,
+            command_permission_matches: decision.command_permission_matches.clone(),
+            external_directory_required: decision.external_directory_required,
+            decision_reasons: decision.reasons.clone(),
+            allow_source: None,
+            grant_id: None,
+            prepared_digest: None,
+        },
+    )))
 }
 
 fn append_execution_audit(
@@ -459,38 +397,8 @@ fn append_execution_audit(
     duration_ms: Option<u64>,
     result: Option<&ToolResult>,
 ) -> Result<()> {
-    let (changed_files, metadata, error) = if let Some(result) = result {
-        let error = match &result.status {
-            ToolResultStatus::Ok => None,
-            ToolResultStatus::Error(error) => Some(error.clone()),
-        };
-        (
-            result.metadata.changed_files.clone(),
-            result.metadata.clone(),
-            error,
-        )
-    } else {
-        (
-            Vec::new(),
-            ToolResultMeta {
-                details: json!({ "call": { "summary": "paths=diagnostics" } }),
-                ..ToolResultMeta::default()
-            },
-            None,
-        )
-    };
-
-    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        status,
-        duration_ms,
-        subjects: audit_subjects(subjects),
-        changed_files,
-        metadata,
-        error,
-        model_content_hash: None,
-    })))
+    let execution = durable_tool_execution_entry(call, subjects, status, duration_ms, result)?;
+    session.append_control(ControlEntry::ToolExecution(Box::new(execution)))
 }
 
 fn audit_subjects(subjects: &[ToolSubject]) -> Vec<ToolSubjectAudit> {

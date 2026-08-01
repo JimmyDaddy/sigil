@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -23,6 +24,33 @@ def tool(name: str) -> dict[str, object]:
 
 
 class OrchestrationPtyAcceptanceTests(unittest.TestCase):
+    def test_session_audit_distinguishes_cancelled_from_hard_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory) / "session.jsonl"
+            records = [
+                {
+                    "event_type": "run_finalized",
+                    "payload": {
+                        "outcome": outcome,
+                        "cleanup_complete": cleanup_complete,
+                    },
+                }
+                for outcome, cleanup_complete in (
+                    ("cancelled", True),
+                    ("interrupted", False),
+                    ("cancelled", False),
+                )
+            ]
+            session.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+            audit = MODULE.read_session_audit(session)
+
+            self.assertEqual(audit.cancelled_run_count, 1)
+            self.assertEqual(audit.failed_run_count, 2)
+
     def test_write_config_uses_v2_unauthenticated_loopback_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -44,6 +72,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             self.assertIn('protocol = "chat_completions"', text)
             self.assertIn('base_url = "http://127.0.0.1:43123/v1"', text)
             self.assertIn('credential = { source = "none" }', text)
+            self.assertIn('[permission.tools]\nterminal_cancel = "allow"', text)
             self.assertNotIn("[providers.", text)
             self.assertNotIn("api_key", text)
 
@@ -228,6 +257,55 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             ),
             "integration:step:b",
         )
+        terminal_messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Execute task step.\nStep: terminal_lifecycle\nRole: executor"
+                ),
+            }
+        ]
+        self.assertEqual(
+            MODULE.classify_request({"messages": terminal_messages, "tools": []}),
+            "terminal:start",
+        )
+        self.assertEqual(
+            MODULE.classify_request(
+                {
+                    "messages": terminal_messages
+                    + [
+                        {
+                            "role": "tool",
+                            "tool_call_id": MODULE.TERMINAL_START_TOOL_CALL_ID,
+                            "content": "started",
+                        }
+                    ],
+                    "tools": [],
+                }
+            ),
+            "terminal:after_start",
+        )
+        self.assertEqual(
+            MODULE.classify_request(
+                {
+                    "messages": terminal_messages
+                    + [
+                        {
+                            "role": "tool",
+                            "tool_call_id": MODULE.TERMINAL_START_TOOL_CALL_ID,
+                            "content": "started",
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": MODULE.TERMINAL_CANCEL_TOOL_CALL_ID,
+                            "content": "cancelled",
+                        },
+                    ],
+                    "tools": [],
+                }
+            ),
+            "terminal:after_cancel",
+        )
 
     def test_unknown_request_fails_closed(self) -> None:
         with self.assertRaises(MODULE.AcceptanceError):
@@ -249,9 +327,17 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             approval_final_answer_count=0,
             continue_final_answer_count=0,
             integration_final_answer_count=0,
+            terminal_final_answer_count=0,
             task_final_count=1,
             approval_route_resolved_count=0,
             approved_tool_call_count=0,
+            terminal_approval_route_resolved_count=0,
+            approved_terminal_start_count=0,
+            terminal_start_completed_count=0,
+            terminal_cancel_completed_count=0,
+            terminal_task_statuses=(),
+            terminal_readiness_states=(),
+            terminal_max_output_bytes=0,
             paused_task_run_count=0,
             interrupted_step_count=0,
             cancelled_task_run_count=0,
@@ -260,6 +346,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
             promoted_integration_count=0,
             parent_verification_count=0,
             failed_run_count=0,
+            cancelled_run_count=0,
         )
         fixture = MODULE.FixtureState(
             request_counts={
@@ -277,6 +364,67 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
         fixture.max_concurrent_reads = 1
         with self.assertRaises(MODULE.AcceptanceError):
             MODULE.validate_audit(audit, fixture)
+
+    def test_valid_terminal_audit_requires_approval_readiness_progress_and_cancel(self) -> None:
+        audit = MODULE.SessionAudit(
+            event_counts={
+                "task_handoff_requested": 6,
+                "task_handoff_resolved": 6,
+            },
+            completed_steps=("terminal_lifecycle",),
+            final_answer_count=1,
+            approval_final_answer_count=1,
+            continue_final_answer_count=1,
+            integration_final_answer_count=1,
+            terminal_final_answer_count=1,
+            task_final_count=5,
+            approval_route_resolved_count=1,
+            approved_tool_call_count=1,
+            terminal_approval_route_resolved_count=1,
+            approved_terminal_start_count=1,
+            terminal_start_completed_count=1,
+            terminal_cancel_completed_count=1,
+            terminal_task_statuses=("cancelled", "running"),
+            terminal_readiness_states=("ready", "waiting"),
+            terminal_max_output_bytes=(
+                len(MODULE.TERMINAL_READY_CANARY)
+                + len(MODULE.TERMINAL_PROGRESS_CANARY)
+                + 2
+            ),
+            paused_task_run_count=1,
+            interrupted_step_count=1,
+            cancelled_task_run_count=1,
+            promotion_preview_count=1,
+            promotion_authority_count=1,
+            promoted_integration_count=1,
+            parent_verification_count=1,
+            failed_run_count=0,
+            cancelled_run_count=1,
+        )
+        fixture = MODULE.FixtureState(
+            request_counts={
+                "conversation": 6,
+                "planner": 6,
+                f"read:{MODULE.READ_STEP_IDS[0]}": 1,
+                f"read:{MODULE.READ_STEP_IDS[1]}": 1,
+                "write:request": 1,
+                "write:after_tool": 1,
+                "continue:step": 2,
+                "cancel:step": 1,
+                "integration:step:a": 2,
+                "integration:step:b": 2,
+                "terminal:start": 1,
+                "terminal:after_start": 1,
+                "terminal:after_cancel": 1,
+                "synthesis": 5,
+                "title": 1,
+            }
+        )
+
+        MODULE.validate_terminal_audit(audit, fixture)
+        audit = MODULE.dataclasses.replace(audit, terminal_max_output_bytes=1)
+        with self.assertRaises(MODULE.AcceptanceError):
+            MODULE.validate_terminal_audit(audit, fixture)
 
 
 if __name__ == "__main__":

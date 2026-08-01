@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -12,18 +12,21 @@ use sigil_kernel::ExecutionOutputStream;
 use sigil_kernel::session::ToolArtifactReadBudgetV1;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
-    ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputReceipt, ExecutionReceipt,
-    ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
+    EnvironmentContainment, ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionCleanupStatus, ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputReceipt,
+    ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
     ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionStreamCapture,
-    ExecutionTerminationCause, ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder,
-    PathTrustZone, PermissionRisk, RunCancellationOwner, TerminalExecutionBackendCapabilities,
-    TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, Tool, ToolAccess, ToolArtifactBindingV1, ToolArtifactEncoding,
+    ExecutionTerminationCause, ExecutionTimeoutSource, FilesystemContainment, JsonlSessionStore,
+    MutationEventRecorder, NetworkContainment, PathTrustZone, PermissionConfig,
+    PermissionEvaluationContext, PermissionMode, PermissionPolicyChain, PermissionRisk,
+    ProcessContainment, RunCancellationOwner, TERMINAL_TASK_SCHEMA_VERSION,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalReadinessStatus,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess,
+    ToolAnalysisReasonCode, ToolAnalysisStatus, ToolArtifactBindingV1, ToolArtifactEncoding,
     ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolContext, ToolErrorKind,
-    ToolOperation, ToolPreviewCapability, ToolProgressEvent, ToolProgressSink, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolResultStatus, ToolSubjectKind,
-    ToolSubjectScope,
+    ToolOperation, ToolPermissionEffect, ToolPreviewCapability, ToolProgressEvent,
+    ToolProgressSink, ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV2,
+    ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -47,6 +50,97 @@ fn bash_tool(test_root: &Path) -> BashTool {
         backend: Arc::new(LocalExecutionBackend),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
+}
+
+#[derive(Default)]
+struct RecordingProgressSink {
+    events: Mutex<Vec<ToolProgressEvent>>,
+}
+
+impl ToolProgressSink for RecordingProgressSink {
+    fn emit(&self, event: ToolProgressEvent) -> Result<()> {
+        self.events
+            .lock()
+            .map_err(|_| anyhow::anyhow!("progress sink lock poisoned"))?
+            .push(event);
+        Ok(())
+    }
+}
+
+#[test]
+fn bash_permission_plan_rejects_persistent_shell_constructs() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+
+    for command in [
+        "sleep 3600 >/dev/null 2>&1 &",
+        "nohup sleep 3600 >/dev/null 2>&1",
+        "setsid sleep 3600",
+        "watch cargo check",
+        "tail -f application.log",
+        "sh -c 'journalctl --follow'",
+    ] {
+        let error = tool
+            .permission_plan(&ctx, &json!({ "command": command }))
+            .expect_err("bash must reject persistent work before approval");
+        let message = error.to_string();
+        assert!(message.contains("finite foreground commands"), "{message}");
+        assert!(message.contains("terminal_start"), "{message}");
+    }
+
+    let quoted_operator = tool.permission_plan(&ctx, &json!({ "command": "printf '&'" }))?;
+    assert_eq!(quoted_operator.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(quoted_operator.access, ToolAccess::Read);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_execution_rechecks_finite_only_contract() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+
+    let error = tool
+        .execute(
+            ctx,
+            "call-background".to_owned(),
+            json!({ "command": "nohup sleep 3600 >/dev/null 2>&1 &" }),
+        )
+        .await
+        .expect_err("direct execution must not bypass bash finite-only validation");
+    assert!(error.to_string().contains("terminal_start"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_emits_foreground_running_progress_before_completion() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let sink = Arc::new(RecordingProgressSink::default());
+    let context =
+        ToolContext::new(workspace.path().to_path_buf(), 5).with_progress_sink(sink.clone());
+
+    let result = tool
+        .execute(
+            context,
+            "call-progress".to_owned(),
+            json!({ "command": "printf ok" }),
+        )
+        .await?;
+
+    assert!(!result.is_error());
+    let events = sink
+        .events
+        .lock()
+        .map_err(|_| anyhow::anyhow!("progress sink lock poisoned"))?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].call_id, "call-progress");
+    assert_eq!(events[0].tool_name, "bash");
+    assert_eq!(events[0].status, "running");
+    assert_eq!(events[0].details["execution_mode"], "foreground");
+    assert!(events[0].output_preview.is_none());
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -430,6 +524,8 @@ fn terminal_log_page_publishes_policy_safe_artifact_when_content_is_omitted_from
     let body = format!("token=local-secret\n{}", "test output\n".repeat(8_000));
     let read = TerminalReadResult {
         task_id: TerminalTaskId::new("terminal-test")?,
+        generation: 1,
+        readiness: sigil_kernel::terminal_task::TerminalReadinessStatus::None,
         offset: 0,
         next_offset: Some(body.len() as u64),
         latest_entry: None,
@@ -437,6 +533,7 @@ fn terminal_log_page_publishes_policy_safe_artifact_when_content_is_omitted_from
         returned_bytes: body.len() as u64,
         total_bytes: body.len() as u64 * 2,
         truncated: true,
+        no_change: false,
     };
     let result = super::attach_terminal_read_artifact(
         &context,
@@ -465,20 +562,6 @@ fn terminal_log_page_publishes_policy_safe_artifact_when_content_is_omitted_from
     Ok(())
 }
 
-struct RecordingProgressSink {
-    events: Arc<Mutex<Vec<ToolProgressEvent>>>,
-}
-
-impl ToolProgressSink for RecordingProgressSink {
-    fn emit(&self, event: ToolProgressEvent) -> Result<()> {
-        self.events
-            .lock()
-            .expect("progress event lock should not be poisoned")
-            .push(event);
-        Ok(())
-    }
-}
-
 #[test]
 fn module_split_facade_registers_tools_paths_and_backend_contracts() -> Result<()> {
     let mut registry = ToolRegistry::new();
@@ -498,6 +581,7 @@ fn module_split_facade_registers_tools_paths_and_backend_contracts() -> Result<(
         "bash",
         "terminal_start",
         "terminal_read",
+        "terminal_wait",
         "terminal_input",
         "terminal_cancel",
     ] {
@@ -617,12 +701,15 @@ fn long_lived_stdio_process_plan_docker_fails_closed_for_stdio_mcp() -> Result<(
 #[test]
 fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> {
     let entry = TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: 1,
         handle: TerminalTaskHandle {
             task_id: TerminalTaskId::new("terminal-details")?,
-            command: "cargo test".to_owned(),
-            cwd: ".".into(),
-            shell: "zsh".to_owned(),
-            log_path: "state/artifacts/tasks/terminal-details/output.log".into(),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:terminal-details".to_owned(),
             created_at_ms: 100,
             execution_backend: Some(TerminalExecutionBackendKind::LocalPty),
             execution_backend_capabilities: Some(TerminalExecutionBackendCapabilities::local_pty()),
@@ -633,8 +720,9 @@ fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> 
             sandbox_profile: Some(sigil_kernel::ExecutionSandboxProfile::Unconfined),
         },
         status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::None,
         output_preview: Some("tail".to_owned()),
-        output_hash: Some("sha256:terminal".to_owned()),
+        output_hash: Some("2".repeat(64)),
         output_truncated: false,
         output_total_bytes: 4,
         output_limit_bytes: None,
@@ -2328,9 +2416,876 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
 }
 
 #[test]
+fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+    let plan = tool.permission_plan(
+        &context,
+        &json!({
+            "command": "cargo fmt --all --check && cargo check 2>&1 | tail -5 && cargo test 2>&1 | tail -15 && cargo clippy --all-targets -- -D warnings"
+        }),
+    )?;
+
+    assert_eq!(plan.access, ToolAccess::Execute);
+    assert_eq!(plan.operation, ToolOperation::ExecuteWorkspaceCheckCommand);
+    assert_eq!(plan.analysis, ToolAnalysisStatus::Complete);
+    assert!(
+        plan.effects
+            .contains(&ToolPermissionEffect::ExecuteWorkspaceCode)
+    );
+    assert!(plan.effects.contains(&ToolPermissionEffect::FileRead));
+    assert!(plan.effects.contains(&ToolPermissionEffect::FileWrite));
+    assert_eq!(plan.safe_summary.step_count, 4);
+    assert_eq!(plan.safe_summary.workspace_code_steps, 3);
+    let scope = plan
+        .semantic_scope
+        .expect("complete plan has semantic scope");
+    assert_eq!(scope.family, "workspace_validation");
+    assert_eq!(
+        scope.qualifiers.get("commands").map(String::as_str),
+        Some("cargo_fmt_check,cargo_check,cargo_test,cargo_clippy")
+    );
+    assert_eq!(
+        plan.containment.filesystem,
+        FilesystemContainment::WorkspaceAndScratch
+    );
+    assert_eq!(plan.containment.network, NetworkContainment::Deny);
+    assert_eq!(
+        plan.containment.environment,
+        EnvironmentContainment::Restricted
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_fails_closed_for_dynamic_shell_escape_hatches() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    for command in [
+        "rg --pre cat needle .",
+        "rg -z needle .",
+        "git diff --ext-diff",
+        "git show --textconv HEAD",
+        "git --paginate log",
+        "git -c core.pager=cat log",
+        "find . -exec sh -c 'touch marker' \\;",
+        "echo $(whoami)",
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.access, ToolAccess::Execute, "{command}");
+        assert_eq!(
+            plan.operation,
+            ToolOperation::ExecuteUnknownCommand,
+            "{command}"
+        );
+        assert!(!plan.analysis.is_complete(), "{command}");
+        assert!(plan.semantic_scope.is_none(), "{command}");
+        assert_eq!(
+            plan.containment.environment,
+            EnvironmentContainment::UserInherited,
+            "{command}"
+        );
+        assert!(
+            plan.effects
+                .contains(&ToolPermissionEffect::ExecuteDynamicCode),
+            "{command}"
+        );
+    }
+
+    let invalid = tool.permission_plan(&context, &json!({ "command": "echo '" }))?;
+    assert!(matches!(
+        invalid.analysis,
+        ToolAnalysisStatus::Invalid { .. }
+    ));
+    assert_eq!(invalid.access, ToolAccess::Execute);
+    assert_eq!(invalid.operation, ToolOperation::ExecuteUnknownCommand);
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_fails_closed_for_shell_syntax_bypass_corpus() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    for command in [
+        "echo `whoami`",
+        "cat <(printf secret)",
+        "cat <<< secret",
+        "cat <<EOF\nsecret\nEOF",
+        "BASH_ENV=./hook sh -c 'git status'",
+        "ENV=./hook sh -c 'git status'",
+        "GIT_SSH_COMMAND='./hook' git fetch",
+        "env -i PATH=./bin git status",
+        "fn() { git status; }; fn",
+        "alias inspect='git status'; inspect",
+        "fish -c 'git status'",
+        "git\u{00a0}status",
+        "git \u{2212}c core.pager=cat log",
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.access, ToolAccess::Execute, "{command:?}");
+        assert!(!plan.analysis.is_complete(), "{command:?}");
+        assert!(plan.semantic_scope.is_none(), "{command:?}");
+        assert!(
+            plan.effects
+                .contains(&ToolPermissionEffect::ExecuteDynamicCode)
+                || plan.effects.contains(&ToolPermissionEffect::Unknown),
+            "{command:?}: {:?}",
+            plan.effects
+        );
+    }
+
+    for command in ["ls *.rs", "find . *", "find . -name *.rs"] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert!(matches!(
+            plan.analysis,
+            ToolAnalysisStatus::Conservative { ref reasons }
+                if reasons.iter().any(|reason| reason.code == ToolAnalysisReasonCode::DynamicCommand)
+        ));
+        assert_eq!(plan.operation, ToolOperation::ExecuteUnknownCommand);
+        assert!(
+            plan.effects
+                .contains(&ToolPermissionEffect::ExecuteDynamicCode)
+        );
+    }
+
+    let quoted_separator = tool.permission_plan(
+        &context,
+        &json!({ "command": "printf 'safe; still one argument'" }),
+    )?;
+    assert_eq!(quoted_separator.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(quoted_separator.access, ToolAccess::Read);
+
+    let real_separator =
+        tool.permission_plan(&context, &json!({ "command": "printf safe; rm -f marker" }))?;
+    assert_eq!(
+        real_separator.operation,
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    assert!(
+        real_separator
+            .effects
+            .contains(&ToolPermissionEffect::FileDelete)
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_matches_deterministic_risk_corpus() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+    let spec = registry.spec_for("bash").context("bash spec must exist")?;
+    let corpus: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../dev/evals/shell-risk-corpus.json"
+    )))?;
+    assert_eq!(corpus["schema_version"], 2);
+    let cases = corpus["cases"]
+        .as_array()
+        .context("shell risk corpus cases must be an array")?;
+    assert!(!cases.is_empty());
+
+    for case in cases {
+        let id = case["id"]
+            .as_str()
+            .context("shell risk corpus case id must be a string")?;
+        let command = case["command"]
+            .as_str()
+            .context("shell risk corpus command must be a string")?;
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(
+            shell_analysis_status_label(&plan.analysis),
+            case["expected_analysis"],
+            "analysis mismatch for {id}: {command:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(plan.operation)?,
+            case["expected_operation"],
+            "operation mismatch for {id}: {command:?}"
+        );
+        let actual_effects = plan
+            .effects
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        for effect in case["required_effects"]
+            .as_array()
+            .context("required_effects must be an array")?
+        {
+            assert!(
+                actual_effects.contains(effect),
+                "missing effect {effect} for {id}: {actual_effects:?}"
+            );
+        }
+        assert_eq!(
+            shell_approval_class(&plan),
+            case["expected_approval_class"],
+            "approval class mismatch for {id}: {command:?}"
+        );
+        let call = tool_call("bash", json!({ "command": command }));
+        let bound_plan = registry.permission_plan(&context, &call)?;
+        let expected_policy = case["expected_policy"]
+            .as_object()
+            .context("expected_policy must be an object")?;
+        let decisions = [
+            ("manual", PermissionMode::Manual),
+            ("auto_edit", PermissionMode::AutoEdit),
+            ("danger_full_access", PermissionMode::DangerFullAccess),
+        ]
+        .into_iter()
+        .map(|(label, mode)| {
+            let config = PermissionConfig {
+                mode,
+                ..Default::default()
+            };
+            let policy_context = PermissionEvaluationContext {
+                workspace_root: workspace.path().to_path_buf(),
+                ..Default::default()
+            };
+            PermissionPolicyChain::new_with_context(&config, &policy_context)
+                .decide_plan(&spec, &bound_plan)
+                .map(|decision| (label, decision))
+        })
+        .collect::<Result<Vec<_>>>()?;
+        for (label, decision) in decisions {
+            assert_eq!(
+                serde_json::to_value(decision.mode)?,
+                expected_policy[label],
+                "policy decision mismatch for {id} in {label} mode"
+            );
+            assert_eq!(
+                serde_json::to_value(decision.risk)?,
+                expected_policy["risk"],
+                "policy risk mismatch for {id} in {label} mode"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+    let workspace_plan =
+        tool.permission_plan(&context, &json!({ "command": "cat \"$PWD/Cargo.toml\"" }))?;
+    assert!(workspace_plan.analysis.is_complete());
+    assert!(workspace_plan.semantic_scope.is_some());
+
+    let scratch_plan = tool.permission_plan(
+        &context,
+        &json!({ "command": "printf payload > \"$SIGIL_SCRATCH_DIR/result.txt\"" }),
+    )?;
+    assert!(scratch_plan.analysis.is_complete());
+    assert!(scratch_plan.semantic_scope.is_some());
+    assert!(
+        scratch_plan.subjects.iter().any(|subject| {
+            subject.kind == ToolSubjectKind::Path
+                && subject.original == "$SIGIL_SCRATCH_DIR/result.txt"
+                && subject.scope == ToolSubjectScope::Workspace
+                && subject.normalized.ends_with("scratch-cache/tmp/result.txt")
+        }),
+        "{:?}",
+        scratch_plan.subjects
+    );
+    assert!(
+        scratch_plan
+            .analysis_bindings
+            .get("path_policy_binding")
+            .is_some_and(|binding| binding.len() == 64)
+    );
+
+    let tmpdir_plan = tool.permission_plan(
+        &context,
+        &json!({ "command": "cargo check --target-dir \"$TMPDIR/build\"" }),
+    )?;
+    assert!(tmpdir_plan.analysis.is_complete());
+    assert_eq!(
+        tmpdir_plan.operation,
+        ToolOperation::ExecuteWorkspaceCheckCommand
+    );
+    assert_eq!(
+        tmpdir_plan.containment.environment,
+        EnvironmentContainment::Restricted
+    );
+    assert!(tmpdir_plan.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.original == "$TMPDIR/build"
+            && subject.scope == ToolSubjectScope::Workspace
+            && subject.normalized.ends_with("scratch-cache/tmp/build")
+    }));
+    Ok(())
+}
+
+#[test]
+fn shell_symbolic_path_bindings_fail_closed_when_unbound_forged_or_escaping() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let unbound = super::analyze_shell_command(
+        workspace.path(),
+        "printf payload > \"$SIGIL_SCRATCH_DIR/result.txt\"",
+    )?;
+    assert!(!unbound.analysis_status.is_complete());
+    assert!(unbound.semantic_scope.is_none());
+    assert!(
+        unbound
+            .permission_effects
+            .contains(&ToolPermissionEffect::ExecuteDynamicCode)
+            || unbound
+                .permission_effects
+                .contains(&ToolPermissionEffect::Unknown)
+    );
+
+    for command in [
+        "printf payload > \"${SIGIL_SCRATCH_DIR:-/tmp}/result.txt\"",
+        "printf payload > \"$SIGIL_SCRATCH_DIR/../../escape.txt\"",
+        "printf payload > \"$TMPDIR/result.txt\"",
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert!(!plan.analysis.is_complete(), "{command}");
+        assert!(plan.semantic_scope.is_none(), "{command}");
+        assert!(
+            plan.effects
+                .contains(&ToolPermissionEffect::ExecuteDynamicCode)
+                || plan.effects.contains(&ToolPermissionEffect::Unknown),
+            "{command}: {:?}",
+            plan.effects
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_symbolic_path_binding_rejects_symlink_escape() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    fs::create_dir_all(&tool.scratch_root)?;
+    symlink(outside.path(), tool.scratch_root.join("escape"))?;
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let plan = tool.permission_plan(
+        &context,
+        &json!({
+            "command": "printf payload > \"$SIGIL_SCRATCH_DIR/escape/result.txt\""
+        }),
+    )?;
+    assert!(!plan.analysis.is_complete());
+    assert!(plan.semantic_scope.is_none());
+    assert!(plan.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.scope == ToolSubjectScope::External
+    }));
+    Ok(())
+}
+
+fn shell_analysis_status_label(status: &ToolAnalysisStatus) -> &'static str {
+    match status {
+        ToolAnalysisStatus::Complete => "complete",
+        ToolAnalysisStatus::Conservative { .. } => "conservative",
+        ToolAnalysisStatus::Unsupported { .. } => "unsupported",
+        ToolAnalysisStatus::Invalid { .. } => "invalid",
+    }
+}
+
+fn shell_approval_class(plan: &sigil_kernel::ToolPermissionPlanDraft) -> &'static str {
+    if plan
+        .effects
+        .contains(&ToolPermissionEffect::CredentialAccess)
+    {
+        return "protected";
+    }
+    if plan.operation == ToolOperation::ExecuteDestructiveCommand {
+        return "destructive";
+    }
+    if !plan.analysis.is_complete()
+        || plan
+            .subjects
+            .iter()
+            .any(|subject| subject.scope == ToolSubjectScope::External)
+        || plan.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                ToolPermissionEffect::ExecuteDynamicCode
+                    | ToolPermissionEffect::NetworkRead
+                    | ToolPermissionEffect::NetworkMutate
+                    | ToolPermissionEffect::NetworkUnknown
+                    | ToolPermissionEffect::ProcessControl
+                    | ToolPermissionEffect::PrivilegeEscalation
+                    | ToolPermissionEffect::PersistenceChange
+                    | ToolPermissionEffect::RemoteMutation
+                    | ToolPermissionEffect::ExternalApplicationControl
+                    | ToolPermissionEffect::Unknown
+            )
+        })
+    {
+        return "high";
+    }
+    if plan.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            ToolPermissionEffect::FileWrite | ToolPermissionEffect::ExecuteWorkspaceCode
+        )
+    }) {
+        return "medium";
+    }
+    "low"
+}
+
+#[test]
+fn bash_permission_plan_deterministic_mutation_property_fails_closed() -> Result<()> {
+    const FIXED_SEED: u64 = 0x5a17_0060_d15c_a11d;
+    const MAX_CASES: usize = 256;
+    const MAX_CASE_BYTES: usize = 2 * 1024;
+    const MUTATIONS_PER_CASE: usize = 8;
+    const SEEDS: &[&str] = &[
+        "git status --short",
+        "cargo test -p sigil-kernel",
+        "printf safe",
+        "rm -rf target",
+        "sh -c 'touch marker'",
+        "curl https://example.invalid",
+        "find . -delete",
+    ];
+    const TOKENS: &[&str] = &[
+        ";", " && ", " || ", "\n", " & ", "`id`", "$(id)", "\t", "\u{00a0}", "\u{2003}",
+        "\u{2212}", "<(", ">>", "\\\n",
+    ];
+
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+    let mut state = FIXED_SEED;
+    for case_index in 0..MAX_CASES {
+        let mut command = SEEDS[next_deterministic_index(&mut state, SEEDS.len())].to_owned();
+        for _ in 0..MUTATIONS_PER_CASE {
+            let token = TOKENS[next_deterministic_index(&mut state, TOKENS.len())];
+            if command.len().saturating_add(token.len()) > MAX_CASE_BYTES {
+                continue;
+            }
+            let boundaries = command
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(command.len()))
+                .collect::<Vec<_>>();
+            let insertion = boundaries[next_deterministic_index(&mut state, boundaries.len())];
+            command.insert_str(insertion, token);
+        }
+        assert!(command.len() <= MAX_CASE_BYTES, "case {case_index}");
+
+        // A panic is itself a test failure. Every incomplete analysis must fail closed without a
+        // reusable semantic grant and with an explicit unknown/dynamic effect.
+        let plan = match tool.permission_plan(&context, &json!({ "command": command })) {
+            Ok(plan) => plan,
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("finite foreground commands"),
+                    "case {case_index}: {error:#}"
+                );
+                continue;
+            }
+        };
+        if !plan.analysis.is_complete() {
+            assert!(plan.semantic_scope.is_none(), "case {case_index}");
+            assert!(
+                plan.effects
+                    .contains(&ToolPermissionEffect::ExecuteDynamicCode)
+                    || plan.effects.contains(&ToolPermissionEffect::Unknown),
+                "case {case_index}: {:?}",
+                plan.effects
+            );
+        }
+    }
+
+    // A destructive seed joined through every modeled separator and whitespace/Unicode variant
+    // must never become a complete read-only command eligible for automatic execution.
+    for separator in [";", "&&", "||", "\n", "&"] {
+        for left_space in ["", " ", "\t", "\u{00a0}", "\u{2003}"] {
+            for right_space in ["", " ", "\t", "\u{00a0}", "\u{2003}"] {
+                let command =
+                    format!("printf safe{left_space}{separator}{right_space}rm -rf target");
+                assert!(command.len() <= MAX_CASE_BYTES);
+                let plan = match tool.permission_plan(&context, &json!({ "command": command })) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        assert!(
+                            error.to_string().contains("finite foreground commands"),
+                            "{command:?}: {error:#}"
+                        );
+                        continue;
+                    }
+                };
+                let auto_safe = plan.analysis.is_complete()
+                    && plan.semantic_scope.is_some()
+                    && plan.access == ToolAccess::Read
+                    && matches!(
+                        plan.operation,
+                        ToolOperation::ExecuteReadOnlyCommand
+                            | ToolOperation::ExecuteWorkspaceCheckCommand
+                    )
+                    && !plan.effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            ToolPermissionEffect::FileWrite
+                                | ToolPermissionEffect::FileDelete
+                                | ToolPermissionEffect::ExecuteDynamicCode
+                                | ToolPermissionEffect::NetworkMutate
+                                | ToolPermissionEffect::NetworkUnknown
+                                | ToolPermissionEffect::PrivilegeEscalation
+                                | ToolPermissionEffect::PersistenceChange
+                                | ToolPermissionEffect::RemoteMutation
+                                | ToolPermissionEffect::CredentialAccess
+                                | ToolPermissionEffect::ExternalApplicationControl
+                                | ToolPermissionEffect::Unknown
+                        )
+                    });
+                assert!(
+                    !auto_safe,
+                    "dangerous mutation became auto-safe: {command:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn next_deterministic_index(state: &mut u64, upper_bound: usize) -> usize {
+    debug_assert!(upper_bound > 0);
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    (*state as usize) % upper_bound
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_permission_plan_does_not_claim_workspace_containment_for_redirection_escape() -> Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let outside_file = outside.path().join("outside.txt");
+    fs::write(&outside_file, "old")?;
+    symlink(&outside_file, workspace.path().join("linked.txt"))?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    for command in [
+        "printf changed > linked.txt",
+        "printf changed > ../outside.txt",
+        "git -C .. status --short",
+        "git --git-dir=../outside.git status --short",
+        "cargo check --manifest-path ../outside/Cargo.toml",
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.analysis, ToolAnalysisStatus::Complete, "{command}");
+        assert_eq!(
+            plan.containment.filesystem,
+            FilesystemContainment::Unspecified,
+            "{command}"
+        );
+        assert!(
+            plan.subjects
+                .iter()
+                .any(|subject| subject.scope == ToolSubjectScope::External),
+            "{command}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_enforces_command_and_ast_resource_limits() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let oversized = format!("printf {}", "x".repeat(64 * 1024));
+    let oversized_plan = tool.permission_plan(&context, &json!({ "command": oversized }))?;
+    assert!(matches!(
+        oversized_plan.analysis,
+        ToolAnalysisStatus::Conservative { ref reasons }
+            if reasons.iter().any(|reason| reason.code == ToolAnalysisReasonCode::AnalysisLimitExceeded)
+    ));
+
+    let too_many_nodes = "true;".repeat(2_100);
+    let node_plan = tool.permission_plan(&context, &json!({ "command": too_many_nodes }))?;
+    assert!(matches!(
+        node_plan.analysis,
+        ToolAnalysisStatus::Conservative { ref reasons }
+            if reasons.iter().any(|reason| reason.code == ToolAnalysisReasonCode::AnalysisLimitExceeded)
+    ));
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_models_find_and_redirection_file_effects() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let delete = tool.permission_plan(&context, &json!({ "command": "find . -delete" }))?;
+    assert_eq!(delete.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(delete.operation, ToolOperation::ExecuteDestructiveCommand);
+    assert!(delete.effects.contains(&ToolPermissionEffect::FileDelete));
+
+    let write = tool.permission_plan(
+        &context,
+        &json!({ "command": "find . -type f -fprint paths.txt" }),
+    )?;
+    assert_eq!(write.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(write.operation, ToolOperation::ExecuteMutatingCommand);
+    assert!(write.effects.contains(&ToolPermissionEffect::FileWrite));
+
+    let find_read = tool.permission_plan(
+        &context,
+        &json!({ "command": "find . -type f -exec cat {} \\;" }),
+    )?;
+    assert_eq!(find_read.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(find_read.access, ToolAccess::Read);
+    assert_eq!(find_read.operation, ToolOperation::ExecuteReadOnlyCommand);
+
+    let redirect = tool.permission_plan(
+        &context,
+        &json!({ "command": "cat Cargo.toml > result.txt" }),
+    )?;
+    assert_eq!(redirect.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(redirect.operation, ToolOperation::ExecuteDestructiveCommand);
+    assert!(redirect.effects.contains(&ToolPermissionEffect::FileWrite));
+    assert_ne!(
+        redirect.containment.filesystem,
+        FilesystemContainment::WorkspaceReadOnly
+    );
+
+    let desktop_fixture = tool.permission_plan(
+        &context,
+        &json!({ "command": "printf 'desktop approval accepted\n' > desktop-e2e-approved.txt" }),
+    )?;
+    assert_eq!(desktop_fixture.analysis, ToolAnalysisStatus::Complete);
+    assert!(
+        desktop_fixture
+            .effects
+            .contains(&ToolPermissionEffect::FileWrite)
+    );
+    assert_eq!(
+        desktop_fixture.containment.filesystem,
+        FilesystemContainment::WorkspaceWrite
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_traverses_compound_pipeline_newline_and_attached_redirection() -> Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let compound = tool.permission_plan(
+        &context,
+        &json!({ "command": "git status\nrg needle . | head -1" }),
+    )?;
+    assert_eq!(compound.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(compound.access, ToolAccess::Read);
+    assert_eq!(compound.operation, ToolOperation::ExecuteReadOnlyCommand);
+
+    let attached =
+        tool.permission_plan(&context, &json!({ "command": "cat Cargo.toml>result.txt" }))?;
+    assert_eq!(attached.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(attached.operation, ToolOperation::ExecuteDestructiveCommand);
+    assert!(attached.effects.contains(&ToolPermissionEffect::FileWrite));
+    assert!(attached.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.normalized == "result.txt"
+    }));
+
+    let pipe_to_shell =
+        tool.permission_plan(&context, &json!({ "command": "printf payload | sh" }))?;
+    assert!(!pipe_to_shell.analysis.is_complete());
+    assert_eq!(
+        pipe_to_shell.operation,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert!(
+        pipe_to_shell
+            .effects
+            .contains(&ToolPermissionEffect::ExecuteDynamicCode)
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_recurses_static_wrappers_and_limits_depth() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    for command in [
+        "command env -i timeout 5 nice -n 5 stdbuf -oL git status",
+        "sh -c 'git status && rg needle .'",
+        "find . -type f -exec command cat {} \\;",
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.analysis, ToolAnalysisStatus::Complete, "{command}");
+        assert_eq!(plan.access, ToolAccess::Read, "{command}");
+    }
+
+    for (command, effect) in [
+        ("sudo git status", ToolPermissionEffect::PrivilegeEscalation),
+        (
+            "printf file | xargs cat",
+            ToolPermissionEffect::ExecuteDynamicCode,
+        ),
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.access, ToolAccess::Execute, "{command}");
+        assert!(plan.effects.contains(&effect), "{command}");
+        assert!(plan.semantic_scope.is_none());
+    }
+
+    let nohup_error = tool
+        .permission_plan(&context, &json!({ "command": "nohup git status" }))
+        .expect_err("nohup must be redirected to terminal_start before authorization");
+    assert!(nohup_error.to_string().contains("terminal_start"));
+
+    let deep = format!("{}git status", "command ".repeat(10));
+    let deep_error = tool
+        .permission_plan(&context, &json!({ "command": deep }))
+        .expect_err("unbounded wrapper recursion must fail before authorization");
+    assert!(deep_error.to_string().contains("finite-command limit"));
+    Ok(())
+}
+
+#[test]
+fn bash_permission_plan_classifies_program_specific_escape_effects() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = bash_tool(workspace.path());
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let safe_git =
+        tool.permission_plan(&context, &json!({ "command": "git --no-pager log -1" }))?;
+    assert_eq!(safe_git.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(safe_git.access, ToolAccess::Read);
+
+    for (command, expected) in [
+        (
+            "git -c core.pager=cat log",
+            ToolPermissionEffect::ExecuteDynamicCode,
+        ),
+        (
+            "rg --pre cat needle .",
+            ToolPermissionEffect::ExecuteDynamicCode,
+        ),
+        (
+            "curl https://example.com",
+            ToolPermissionEffect::NetworkRead,
+        ),
+        ("git push origin main", ToolPermissionEffect::RemoteMutation),
+        ("kill 123", ToolPermissionEffect::ProcessControl),
+        (
+            "open https://example.com",
+            ToolPermissionEffect::ExternalApplicationControl,
+        ),
+        ("pnpm install", ToolPermissionEffect::ExecuteDynamicCode),
+    ] {
+        let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
+        assert_eq!(plan.access, ToolAccess::Execute, "{command}");
+        assert!(plan.effects.contains(&expected), "{command}");
+    }
+    Ok(())
+}
+
+#[test]
+fn bash_session_scope_and_environment_binding_are_exact() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let first_tool = bash_tool(workspace.path());
+    let mut second_tool = bash_tool(workspace.path());
+    second_tool.scratch_root = workspace.path().join("different-scratch");
+    let context = ToolContext::new(workspace.path(), 30);
+
+    let first =
+        first_tool.permission_plan(&context, &json!({ "command": "cargo check --workspace" }))?;
+    let repeated = first_tool.permission_plan(
+        &context,
+        &json!({ "command": "  cargo   check   --workspace  " }),
+    )?;
+    let changed =
+        first_tool.permission_plan(&context, &json!({ "command": "cargo check --all-targets" }))?;
+    let first_scope = first.semantic_scope.as_ref().expect("stable scope");
+    let repeated_scope = repeated.semantic_scope.as_ref().expect("stable scope");
+    let changed_scope = changed.semantic_scope.as_ref().expect("stable scope");
+    assert_eq!(
+        first_scope.qualifiers.get("arguments_sha256"),
+        repeated_scope.qualifiers.get("arguments_sha256")
+    );
+    assert_ne!(
+        first_scope.qualifiers.get("arguments_sha256"),
+        changed_scope.qualifiers.get("arguments_sha256")
+    );
+    assert!(first_scope.qualifiers.contains_key("ast_sha256"));
+
+    let first_binding = first
+        .analysis_bindings
+        .get("environment_binding")
+        .expect("environment binding");
+    assert!(first_binding.starts_with("shell-env-v1:"));
+    assert_eq!(first_binding.len(), "shell-env-v1:".len() + 64);
+    let second =
+        second_tool.permission_plan(&context, &json!({ "command": "cargo check --workspace" }))?;
+    assert_ne!(
+        Some(first_binding),
+        second.analysis_bindings.get("environment_binding")
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_execution_request_uses_restricted_environment_only_for_complete_known_commands()
+-> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let scratch = workspace.path().join("scratch");
+
+    let restricted = super::bash_execution_request("git status", workspace.path(), &scratch, 9);
+    assert_eq!(
+        restricted.environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
+    );
+    assert!(restricted.env.contains_key("PATH"));
+    assert_eq!(
+        restricted
+            .env
+            .get(super::SIGIL_SCRATCH_DIR_ENV)
+            .map(String::as_str),
+        Some(scratch.to_string_lossy().as_ref())
+    );
+    for inherited_name in ["BASH_ENV", "ENV", "PROMPT_COMMAND", "GITHUB_TOKEN"] {
+        assert!(!restricted.env.contains_key(inherited_name));
+    }
+
+    let inherited =
+        super::bash_execution_request("python script.py", workspace.path(), &scratch, 9);
+    assert_eq!(
+        inherited.environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::InheritParent
+    );
+    assert_eq!(inherited.env.len(), 1);
+    assert!(inherited.env.contains_key(super::SIGIL_SCRATCH_DIR_ENV));
+    Ok(())
+}
+
+#[test]
 fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
-    let workspace = PathBuf::from("/workspace");
-    let scratch = PathBuf::from("/scratch");
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().canonicalize()?;
+    let scratch = workspace.join("scratch");
     let request = super::bash_execution_request("printf ok", &workspace, &scratch, 9);
     assert_eq!(request.program, "sh");
     assert_eq!(request.args, vec!["-c".to_owned(), "printf ok".to_owned()]);
@@ -2340,9 +3295,13 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             .env
             .get(super::SIGIL_SCRATCH_DIR_ENV)
             .map(String::as_str),
-        Some("/scratch")
+        Some(scratch.to_string_lossy().as_ref())
     );
     assert_eq!(request.timeout_secs, 9);
+    assert_eq!(
+        request.environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
+    );
 
     let output_receipt =
         |stdout_bytes: u64, stderr_bytes: u64, termination: ExecutionTerminationCause| {
@@ -2644,24 +3603,58 @@ fn write_file_permission_operation_classifies_create_overwrite_and_external() ->
     fs::write(temp.path().join("existing.txt"), "old")?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
-    assert_eq!(
-        WriteFileTool.permission_operation(&ctx, &json!({"path":"existing.txt"}))?,
-        ToolOperation::OverwriteFile
-    );
-    assert_eq!(
-        WriteFileTool.permission_operation(&ctx, &json!({"path":"new.txt"}))?,
-        ToolOperation::CreateFile
-    );
-    assert_eq!(
-        WriteFileTool
-            .permission_operation(&ctx, &json!({"path": temp.path().join("abs-new.txt")}))?,
-        ToolOperation::CreateFile
-    );
+    let overwrite =
+        WriteFileTool.permission_plan(&ctx, &json!({"path":"existing.txt", "content":"new"}))?;
+    assert_eq!(overwrite.operation, ToolOperation::OverwriteFile);
+    let create =
+        WriteFileTool.permission_plan(&ctx, &json!({"path":"new.txt", "content":"new"}))?;
+    assert_eq!(create.operation, ToolOperation::CreateFile);
+    let absolute_create = WriteFileTool.permission_plan(
+        &ctx,
+        &json!({"path": temp.path().join("abs-new.txt"), "content":"new"}),
+    )?;
+    assert_eq!(absolute_create.operation, ToolOperation::CreateFile);
     assert!(
         WriteFileTool
-            .permission_operation(&ctx, &json!({"path":"../outside.txt"}))
+            .permission_plan(&ctx, &json!({"path":"../outside.txt", "content":"new"}),)
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn typed_file_mutation_plans_publish_exact_read_write_delete_facts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("existing.txt"), "old")?;
+    let ctx = ToolContext::new(temp.path(), 5);
+
+    let create =
+        WriteFileTool.permission_plan(&ctx, &json!({ "path": "new.txt", "content": "new" }))?;
+    assert_eq!(create.operation, ToolOperation::CreateFile);
+    assert_eq!(
+        create.effects,
+        BTreeSet::from([ToolPermissionEffect::FileWrite])
+    );
+
+    let overwrite = WriteFileTool
+        .permission_plan(&ctx, &json!({ "path": "existing.txt", "content": "new" }))?;
+    assert_eq!(overwrite.operation, ToolOperation::OverwriteFile);
+    assert!(overwrite.effects.contains(&ToolPermissionEffect::FileRead));
+    assert!(overwrite.effects.contains(&ToolPermissionEffect::FileWrite));
+
+    let edit = EditFileTool.permission_plan(
+        &ctx,
+        &json!({ "path": "existing.txt", "old_text": "old", "new_text": "new" }),
+    )?;
+    assert!(edit.effects.contains(&ToolPermissionEffect::FileRead));
+    assert!(edit.effects.contains(&ToolPermissionEffect::FileWrite));
+
+    let delete = DeleteFileTool.permission_plan(&ctx, &json!({ "path": "existing.txt" }))?;
+    assert_eq!(delete.operation, ToolOperation::DeleteFile);
+    assert!(delete.effects.contains(&ToolPermissionEffect::FileRead));
+    assert!(delete.effects.contains(&ToolPermissionEffect::FileDelete));
+    assert!(!delete.effects.contains(&ToolPermissionEffect::FileWrite));
+    assert!(delete.semantic_scope.is_none());
     Ok(())
 }
 
@@ -2999,6 +3992,13 @@ fn register_builtin_tools_registers_multiple_tools() {
     );
     assert_eq!(
         registry
+            .spec_for("terminal_wait")
+            .expect("terminal_wait should be registered")
+            .access,
+        ToolAccess::Read
+    );
+    assert_eq!(
+        registry
             .spec_for("terminal_input")
             .expect("terminal_input should be registered")
             .access,
@@ -3040,18 +4040,18 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
     let start_call = tool_call(
         "terminal_start",
         json!({
-            "command": "cat input.txt > out.txt",
+            "command": "tail -f input.txt > out.txt",
             "cwd": "logs",
-            "shell": "/bin/sh"
+            "shell": "/bin/sh",
+            "mode": "background"
         }),
     );
-    assert_eq!(
-        registry.permission_access(&ctx, &start_call)?,
-        ToolAccess::Execute
-    );
-    let start_subjects = registry.permission_subjects(&ctx, &start_call)?;
+    let start_plan = registry.permission_plan(&ctx, &start_call)?;
+    assert_eq!(start_plan.access, ToolAccess::Execute);
+    let start_subjects = &start_plan.subjects;
     assert!(start_subjects.iter().any(|subject| {
-        subject.kind == ToolSubjectKind::Command && subject.original == "cat input.txt > out.txt"
+        subject.kind == ToolSubjectKind::Command
+            && subject.original == "tail -f input.txt > out.txt"
     }));
     assert!(start_subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Command && subject.original == "/bin/sh"
@@ -3072,35 +4072,6 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
             && subject.scope == ToolSubjectScope::Workspace
     }));
 
-    let cargo_check_call = tool_call(
-        "terminal_start",
-        json!({ "command": "cd . && cargo check 2>&1 | tail -20" }),
-    );
-    assert_eq!(
-        registry.permission_access(&ctx, &cargo_check_call)?,
-        ToolAccess::Execute
-    );
-    #[cfg(unix)]
-    assert_eq!(
-        registry.permission_operation(&ctx, &cargo_check_call)?,
-        ToolOperation::ExecuteWorkspaceCheckCommand
-    );
-    #[cfg(windows)]
-    assert_eq!(
-        registry.permission_operation(&ctx, &cargo_check_call)?,
-        ToolOperation::ExecuteUnknownCommand
-    );
-    let cargo_check_subjects = registry.permission_subjects(&ctx, &cargo_check_call)?;
-    #[cfg(unix)]
-    assert!(cargo_check_subjects.iter().any(|subject| {
-        subject.kind == ToolSubjectKind::Command && subject.normalized == "family:cargo_check"
-    }));
-    #[cfg(windows)]
-    assert!(cargo_check_subjects.iter().any(|subject| {
-        subject.kind == ToolSubjectKind::Command
-            && subject.normalized == "cd . && cargo check 2>&1 | tail -20"
-    }));
-
     let read_call = tool_call("terminal_read", json!({ "task_id": "terminal-perm" }));
     let input_call = tool_call(
         "terminal_input",
@@ -3111,24 +4082,16 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
         json!({ "task_id": "terminal-perm", "rows": 30, "cols": 100 }),
     );
     let cancel_call = tool_call("terminal_cancel", json!({ "task_id": "terminal-perm" }));
-    assert_eq!(
-        registry.permission_access(&ctx, &read_call)?,
-        ToolAccess::Read
-    );
-    assert_eq!(
-        registry.permission_access(&ctx, &input_call)?,
-        ToolAccess::Execute
-    );
-    assert_eq!(
-        registry.permission_access(&ctx, &resize_call)?,
-        ToolAccess::Execute
-    );
-    assert_eq!(
-        registry.permission_access(&ctx, &cancel_call)?,
-        ToolAccess::Execute
-    );
+    let read_plan = registry.permission_plan(&ctx, &read_call)?;
+    assert_eq!(read_plan.access, ToolAccess::Read);
+    let resize_plan = registry.permission_plan(&ctx, &resize_call)?;
+    assert_eq!(resize_plan.access, ToolAccess::Execute);
+    assert_eq!(resize_plan.operation, ToolOperation::ResizeTerminalTask);
+    let cancel_plan = registry.permission_plan(&ctx, &cancel_call)?;
+    assert_eq!(cancel_plan.access, ToolAccess::Execute);
+    assert_eq!(cancel_plan.operation, ToolOperation::CancelTerminalTask);
     let missing_context = registry
-        .permission_subjects(&ctx, &input_call)
+        .permission_plan(&ctx, &input_call)
         .expect_err("terminal_input without a live task context should fail closed");
     assert!(
         missing_context
@@ -3136,12 +4099,183 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
             .contains("permission context is unavailable")
     );
     assert!(
-        registry
-            .permission_subjects(&ctx, &resize_call)?
+        resize_plan
+            .subjects
             .iter()
             .any(|subject| subject.kind == ToolSubjectKind::Command
                 && subject.original == "terminal_task:terminal-perm")
     );
+    Ok(())
+}
+
+#[test]
+fn terminal_start_uses_native_persistent_permission_plan() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let plan = registry.permission_plan(
+        &ctx,
+        &tool_call(
+            "terminal_start",
+            json!({
+                "command": "python -m http.server 8000",
+                "mode": "background",
+                "readiness": { "kind": "none" }
+            }),
+        ),
+    )?;
+
+    assert_eq!(plan.access, ToolAccess::Execute);
+    assert_eq!(plan.operation, ToolOperation::ExecuteMutatingCommand);
+    assert!(plan.effects.contains(&ToolPermissionEffect::ProcessControl));
+    assert!(
+        plan.effects
+            .contains(&ToolPermissionEffect::PersistenceChange)
+    );
+    assert_eq!(plan.containment.process, ProcessContainment::OwnedTree);
+    assert_eq!(
+        plan.containment.environment,
+        EnvironmentContainment::UserInherited
+    );
+    assert!(plan.containment.persistent_process);
+    assert!(plan.semantic_scope.is_none());
+    assert_eq!(plan.analysis_bindings["terminal_mode"], "background");
+    assert_eq!(plan.analysis_bindings["terminal_pty"], "false");
+    assert_eq!(plan.analysis_bindings["terminal_readiness"], "none");
+    Ok(())
+}
+
+#[test]
+fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let scratch = registry.permission_plan(
+        &ctx,
+        &tool_call(
+            "terminal_start",
+            json!({
+                "command": "printf payload > \"$SIGIL_SCRATCH_DIR/result.txt\"; while :; do sleep 60; done",
+                "mode": "background"
+            }),
+        ),
+    )?;
+    assert!(scratch.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.original == "$SIGIL_SCRATCH_DIR/result.txt"
+            && subject.scope == ToolSubjectScope::Workspace
+    }));
+
+    let inherited_tmpdir = registry.permission_plan(
+        &ctx,
+        &tool_call(
+            "terminal_start",
+            json!({
+                "command": "printf payload > \"$TMPDIR/result.txt\"; while :; do sleep 60; done",
+                "mode": "background"
+            }),
+        ),
+    )?;
+    assert!(!inherited_tmpdir.analysis.is_complete());
+    assert!(inherited_tmpdir.semantic_scope.is_none());
+    assert!(inherited_tmpdir.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.scope == ToolSubjectScope::Unknown
+    }));
+    Ok(())
+}
+
+#[test]
+fn terminal_read_guard_rejects_identical_no_change_loops_and_resets_on_progress_or_wait() {
+    use crate::terminal_tools::{TerminalReadGuardDecision, TerminalReadGuardState};
+
+    let mut state = TerminalReadGuardState::default();
+    let key = || TerminalReadGuardState::key("session-1", "run-1", "terminal-1", 12);
+    assert_eq!(
+        state.observe(key(), 3, 12, true),
+        TerminalReadGuardDecision::Proceed
+    );
+    assert_eq!(
+        state.observe(key(), 3, 12, true),
+        TerminalReadGuardDecision::UseTerminalWait
+    );
+
+    assert_eq!(
+        state.observe(key(), 4, 20, true),
+        TerminalReadGuardDecision::Proceed
+    );
+    assert_eq!(
+        state.observe(key(), 4, 20, true),
+        TerminalReadGuardDecision::UseTerminalWait
+    );
+    assert_eq!(
+        state.observe(key(), 5, 24, false),
+        TerminalReadGuardDecision::Proceed
+    );
+    assert_eq!(
+        state.observe(key(), 5, 24, true),
+        TerminalReadGuardDecision::Proceed
+    );
+
+    state.clear_task("session-1", "run-1", "terminal-1");
+    assert_eq!(
+        state.observe(key(), 5, 24, true),
+        TerminalReadGuardDecision::Proceed
+    );
+    assert_eq!(
+        state.observe(
+            TerminalReadGuardState::key("session-1", "run-2", "terminal-1", 12),
+            5,
+            24,
+            true,
+        ),
+        TerminalReadGuardDecision::Proceed
+    );
+}
+
+#[test]
+fn terminal_read_guard_has_a_deterministic_hard_cap() {
+    use crate::terminal_tools::{
+        MAX_TERMINAL_READ_GUARDS, TerminalReadGuardDecision, TerminalReadGuardState,
+    };
+
+    let mut state = TerminalReadGuardState::default();
+    for offset in 0..=MAX_TERMINAL_READ_GUARDS as u64 {
+        assert_eq!(
+            state.observe(
+                TerminalReadGuardState::key("session", "run", "terminal", offset),
+                1,
+                offset,
+                true,
+            ),
+            TerminalReadGuardDecision::Proceed
+        );
+    }
+    assert_eq!(state.len(), MAX_TERMINAL_READ_GUARDS);
+}
+
+#[test]
+fn terminal_read_no_change_points_to_event_driven_wait() -> Result<()> {
+    let read = TerminalReadResult {
+        task_id: TerminalTaskId::new("terminal-no-change")?,
+        generation: 9,
+        readiness: TerminalReadinessStatus::None,
+        offset: 24,
+        next_offset: None,
+        latest_entry: None,
+        content: String::new(),
+        returned_bytes: 0,
+        total_bytes: 24,
+        truncated: false,
+        no_change: true,
+    };
+    let details = crate::terminal_tools::terminal_read_details(&read, 128, false);
+    assert_eq!(details["next_action"], "terminal_wait");
+    assert_eq!(details["after_generation"], 9);
+    assert!(crate::terminal_tools::terminal_read_content(&read, false).contains("terminal_wait"));
     Ok(())
 }
 
@@ -3153,62 +4287,57 @@ fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &tool_call("write_file", json!({ "path": "new.txt", "content": "new" }))
-        )?,
-        ToolOperation::CreateFile
-    );
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &tool_call(
-                "write_file",
-                json!({ "path": "existing.txt", "content": "new" })
-            )
-        )?,
-        ToolOperation::OverwriteFile
-    );
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &tool_call("delete_file", json!({ "path": "existing.txt" }))
-        )?,
-        ToolOperation::DeleteFile
-    );
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &tool_call(
-                "apply_changeset",
-                json!({
-                    "id": "change-1",
-                    "files": [
-                        {"path": "existing.txt", "action": "delete"}
-                    ]
-                })
-            )
-        )?,
-        ToolOperation::ApplyChangeSet
-    );
-    let bash_operation = registry.permission_operation(
+    let create = registry.permission_plan(
+        &ctx,
+        &tool_call("write_file", json!({ "path": "new.txt", "content": "new" })),
+    )?;
+    assert_eq!(create.operation, ToolOperation::CreateFile);
+    let overwrite = registry.permission_plan(
+        &ctx,
+        &tool_call(
+            "write_file",
+            json!({ "path": "existing.txt", "content": "new" }),
+        ),
+    )?;
+    assert_eq!(overwrite.operation, ToolOperation::OverwriteFile);
+    let delete = registry.permission_plan(
+        &ctx,
+        &tool_call("delete_file", json!({ "path": "existing.txt" })),
+    )?;
+    assert_eq!(delete.operation, ToolOperation::DeleteFile);
+    let changeset = registry.permission_plan(
+        &ctx,
+        &tool_call(
+            "apply_changeset",
+            json!({
+                "id": "change-1",
+                "files": [
+                    {"path": "existing.txt", "action": "delete"}
+                ]
+            }),
+        ),
+    )?;
+    assert_eq!(changeset.operation, ToolOperation::ApplyChangeSet);
+    let bash = registry.permission_plan(
         &ctx,
         &tool_call("bash", json!({ "command": "rm -rf .sigil" })),
     )?;
-    let terminal_operation = registry.permission_operation(
+    let terminal = registry.permission_plan(
         &ctx,
-        &tool_call("terminal_start", json!({ "command": "git clean -fdx" })),
+        &tool_call(
+            "terminal_start",
+            json!({ "command": "tail -f app.log", "mode": "background" }),
+        ),
     )?;
     #[cfg(unix)]
     {
-        assert_eq!(bash_operation, ToolOperation::ExecuteDestructiveCommand);
-        assert_eq!(terminal_operation, ToolOperation::ExecuteDestructiveCommand);
+        assert_eq!(bash.operation, ToolOperation::ExecuteDestructiveCommand);
+        assert_eq!(terminal.operation, ToolOperation::ExecuteMutatingCommand);
     }
     #[cfg(windows)]
     {
-        assert_eq!(bash_operation, ToolOperation::ExecuteUnknownCommand);
-        assert_eq!(terminal_operation, ToolOperation::ExecuteUnknownCommand);
+        assert_eq!(bash.operation, ToolOperation::ExecuteUnknownCommand);
+        assert_eq!(terminal.operation, ToolOperation::ExecuteMutatingCommand);
     }
     Ok(())
 }
@@ -3230,7 +4359,7 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
                 "terminal_start",
                 json!({
                     "task_id": "terminal-tool-read",
-                    "command": "printf 0123456789",
+                    "command": "printf 0123456789; sleep 0.1",
                     "mode": "background",
                     "shell": shell
                 }),
@@ -3255,7 +4384,7 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
             ctx.clone(),
             tool_call(
                 "terminal_read",
-                json!({ "task_id": "terminal-tool-read", "limit_bytes": 3 }),
+                json!({ "task_id": "terminal-tool-read", "offset": 0, "limit_bytes": 3 }),
             ),
         )
         .await?;
@@ -3314,7 +4443,8 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
                 "terminal_start",
                 json!({
                     "task_id": "terminal-read-status",
-                    "command": "printf 0123456789",
+                    "command": "printf 0123456789; sleep 0.1",
+                    "mode": "background",
                     "shell": shell
                 }),
             ),
@@ -3328,7 +4458,7 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
                 ctx.clone(),
                 tool_call(
                     "terminal_read",
-                    json!({ "task_id": "terminal-read-status", "limit_bytes": 10 }),
+                    json!({ "task_id": "terminal-read-status", "offset": 0, "limit_bytes": 10 }),
                 ),
             )
             .await?;
@@ -3362,6 +4492,7 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
                 "terminal_read",
                 json!({
                     "task_id": "terminal-read-status",
+                    "offset": 0,
                     "limit_bytes": 10,
                     "include_content": true
                 }),
@@ -3375,354 +4506,173 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
     Ok(())
 }
 
-#[serial]
-#[cfg_attr(coverage, ignore)]
-#[tokio::test]
-async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
-    let progress_events = Arc::new(Mutex::new(Vec::new()));
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5).with_progress_sink(Arc::new(
-        RecordingProgressSink {
-            events: Arc::clone(&progress_events),
-        },
-    ));
+#[test]
+fn terminal_start_schema_requires_explicit_persistent_mode() {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-
-    let result = registry
-        .execute(
-            ctx,
-            tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-foreground",
-                    "command": "printf foreground-ok",
-                    "shell": shell,
-                    "mode": "foreground"
-                }),
-            ),
-        )
-        .await?;
-
-    assert!(matches!(result.status, ToolResultStatus::Ok));
-    assert_eq!(result.metadata.exit_code, Some(0));
-    assert_eq!(result.metadata.details["task_id"], "terminal-foreground");
-    assert_eq!(result.metadata.details["status"], "exited");
-    assert_eq!(result.metadata.details["execution_mode"], "foreground");
-    assert_eq!(result.metadata.details["verdict"], "passed");
-    assert_eq!(result.metadata.details["rerun_not_needed"], true);
+    let spec = registry
+        .spec_for("terminal_start")
+        .expect("terminal_start should be registered");
+    assert_eq!(spec.input_schema["required"], json!(["command", "mode"]));
     assert_eq!(
-        result.metadata.details["shell_analysis"]["verdict"],
-        "passed"
+        spec.input_schema["properties"]["mode"]["enum"],
+        json!(["background", "interactive"])
     );
-    assert!(
-        result
-            .metadata
-            .details
-            .get("output_preview")
-            .is_some_and(|preview| preview.as_str() == Some("foreground-ok"))
-    );
-    assert!(!result.content.contains("foreground-ok"));
-    let model_content: serde_json::Value = serde_json::from_str(&result.to_model_content())?;
-    assert_eq!(
-        model_content["meta"]["details"]["output_preview"]["omitted"],
-        true
-    );
-    let progress_events = progress_events
-        .lock()
-        .expect("progress event lock should not be poisoned");
-    assert!(!progress_events.is_empty());
-    assert!(progress_events.iter().all(|event| {
-        event.execution_id.as_str() == "terminal-foreground" && event.tool_name == "terminal_start"
-    }));
-    Ok(())
-}
-
-#[serial]
-#[cfg(unix)]
-#[tokio::test]
-async fn terminal_start_foreground_cancellation_reaps_process_tree() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let root = temp.path().to_path_buf();
-    let shell = test_shell(&root)?;
-    let pid_file = root.join("foreground-descendant.pid");
-    let owner = RunCancellationOwner::new();
-    let ctx = ToolContext::new(root.clone(), 30).with_cancellation(owner.handle());
-    let mut registry = ToolRegistry::new();
-    register_builtin_tools(&mut registry);
-    let task = tokio::spawn(async move {
-        registry
-            .execute(
-                ctx,
-                tool_call(
-                    "terminal_start",
-                    json!({
-                        "task_id": "terminal-foreground-cancel",
-                        "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > foreground-descendant.pid; wait",
-                        "shell": shell,
-                        "mode": "foreground"
-                    }),
-                ),
-            )
-            .await
-    });
-    let descendant_pid = wait_for_published_pid(&pid_file).await?;
-    assert!(owner.request_cancel());
-    let result = task.await??;
-    let ToolResultStatus::Error(error) = result.status else {
-        anyhow::bail!("cancelled foreground terminal must be interrupted");
-    };
-    assert_eq!(error.kind, ToolErrorKind::Interrupted);
-    assert!(owner.cleanup_complete());
-    let alive = crate::process_group::process_is_live(descendant_pid).unwrap_or(true);
-    assert!(
-        !alive,
-        "foreground terminal descendant survived cancellation"
-    );
-    Ok(())
-}
-
-#[serial]
-#[cfg_attr(coverage, ignore)]
-#[tokio::test]
-async fn terminal_start_defaults_check_touched_to_foreground() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let scripts = temp.path().join("scripts");
-    fs::create_dir_all(&scripts)?;
-    let check_touched = scripts.join("check-touched.sh");
-    fs::write(&check_touched, "#!/bin/sh\necho check-touched-ok\n")?;
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&check_touched)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&check_touched, permissions)?;
-    }
-    let shell = test_shell(temp.path())?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
-    let mut registry = ToolRegistry::new();
-    register_builtin_tools(&mut registry);
-
-    let result = registry
-        .execute(
-            ctx,
-            tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-check-touched-default",
-                    "command": "./scripts/check-touched.sh --tier quick 2>&1",
-                    "shell": shell
-                }),
-            ),
-        )
-        .await?;
-
-    assert!(matches!(result.status, ToolResultStatus::Ok));
-    assert_eq!(result.metadata.exit_code, Some(0));
-    assert_eq!(result.metadata.details["execution_mode"], "foreground");
-    assert_eq!(result.metadata.details["verdict"], "passed");
-    assert_eq!(result.metadata.details["rerun_not_needed"], true);
-    assert_eq!(
-        result.metadata.details["shell_analysis"]["command_family"],
-        "check_touched"
-    );
-    assert!(!result.content.contains("check-touched-ok"));
-    Ok(())
+    assert!(spec.description.contains("use bash for one-shot commands"));
 }
 
 #[test]
-fn terminal_start_defaults_unknown_one_shot_to_foreground() -> Result<()> {
-    let workspace = tempfile::tempdir()?;
-    let one_shot = super::analyze_shell_command(workspace.path(), "printf unknown-ok")?;
-    let dev_server = super::analyze_shell_command(workspace.path(), "npm run dev")?;
-    let tail_follow = super::analyze_shell_command(workspace.path(), "tail -f logs/app.log")?;
-
-    assert_eq!(
-        super::resolve_terminal_start_execution_mode(None, false, &one_shot)?,
-        super::TerminalStartExecutionMode::Foreground
+fn terminal_start_rejects_foreground_and_invalid_pty_combinations() -> Result<()> {
+    assert!(
+        super::parse_terminal_start_args(&json!({
+            "command": "cargo check",
+            "mode": "foreground"
+        }))
+        .is_err()
     );
-    assert_eq!(
-        super::resolve_terminal_start_execution_mode(None, false, &dev_server)?,
-        super::TerminalStartExecutionMode::Background
+    assert!(
+        super::validate_terminal_start_execution_mode(
+            super::TerminalStartExecutionMode::Background,
+            true,
+        )
+        .is_err()
     );
-    assert_eq!(
-        super::resolve_terminal_start_execution_mode(None, false, &tail_follow)?,
-        super::TerminalStartExecutionMode::Background
-    );
-    assert_eq!(
-        super::resolve_terminal_start_execution_mode(
-            Some(super::TerminalStartExecutionMode::Background),
+    assert!(
+        super::validate_terminal_start_execution_mode(
+            super::TerminalStartExecutionMode::Interactive,
             false,
-            &one_shot
-        )?,
-        super::TerminalStartExecutionMode::Background
+        )
+        .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_start_rejects_known_finite_commands_before_approval_and_execution() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    for command in [
+        "cargo check",
+        "cargo test",
+        "cargo clippy --all-targets",
+        "cargo fmt --all -- --check",
+        "git status --short",
+        "npm test",
+        "pnpm run build",
+        "yarn lint",
+        "bun run typecheck",
+        "sh -c 'cargo check && cargo test'",
+        "env CI=1 pnpm test",
+        "echo start && cargo build",
+        "set -o pipefail; pnpm test",
+        "pnpm test 2>&1 | tail -20",
+        "sh -c 'echo start && cargo build 2>&1 | tail -20'",
+    ] {
+        let call = tool_call(
+            "terminal_start",
+            json!({
+                "command": command,
+                "mode": "background",
+                "readiness": { "kind": "none" }
+            }),
+        );
+        let error = registry
+            .permission_plan(&ctx, &call)
+            .expect_err("known finite commands must be redirected before approval");
+        let message = error.to_string();
+        assert!(message.contains("finite"), "{message}");
+        assert!(message.contains("must use bash"), "{message}");
+    }
+
+    for command in ["tail -f application.log", "pnpm test --watch"] {
+        registry.permission_plan(
+            &ctx,
+            &tool_call(
+                "terminal_start",
+                json!({
+                    "command": command,
+                    "mode": "background",
+                    "readiness": { "kind": "none" }
+                }),
+            ),
+        )?;
+    }
+
+    let error = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "command": "cargo check",
+                    "mode": "background",
+                    "readiness": { "kind": "none" }
+                }),
+            ),
+        )
+        .await
+        .expect_err("direct execution must not bypass persistent-only validation");
+    assert!(error.to_string().contains("must use bash"));
     Ok(())
 }
 
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
-async fn terminal_start_unknown_one_shot_without_mode_returns_final_facts() -> Result<()> {
+async fn terminal_wait_tool_observes_output_without_terminal_read_polling() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-
-    let result = registry
+    let start = registry
         .execute(
-            ctx,
+            ctx.clone(),
             tool_call(
                 "terminal_start",
                 json!({
-                    "task_id": "terminal-unknown-one-shot-default",
-                    "command": "printf unknown-one-shot-ok",
+                    "task_id": "terminal-wait-tool",
+                    "command": "sleep 0.1; printf READY; sleep 5",
+                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
-
-    assert!(matches!(result.status, ToolResultStatus::Ok));
-    assert_eq!(result.metadata.exit_code, Some(0));
-    assert_eq!(result.metadata.details["execution_mode"], "foreground");
-    assert_eq!(result.metadata.details["verdict"], "passed");
-    assert_eq!(result.metadata.details["rerun_not_needed"], true);
-    assert_eq!(result.metadata.details["status"], "exited");
-    assert!(!result.content.contains("unknown-one-shot-ok"));
-    Ok(())
-}
-
-#[serial]
-#[cfg_attr(coverage, ignore)]
-#[tokio::test]
-async fn terminal_start_foreground_uses_long_task_timeout_contract() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
-    let mut registry = ToolRegistry::new();
-    register_builtin_tools(&mut registry);
-
-    let result = registry
+    let generation = start.metadata.details["generation"]
+        .as_u64()
+        .expect("terminal_start should return generation");
+    let waited = registry
         .execute(
-            ctx,
+            ctx.clone(),
             tool_call(
-                "terminal_start",
+                "terminal_wait",
                 json!({
-                    "task_id": "terminal-foreground-long-contract",
-                    "command": "sleep 2; printf foreground-late-ok",
-                    "shell": shell,
-                    "mode": "foreground"
+                    "task_id": "terminal-wait-tool",
+                    "after_generation": generation,
+                    "until": "output_contains",
+                    "value": "READY",
+                    "timeout_secs": 5
                 }),
             ),
         )
         .await?;
-
-    assert!(matches!(result.status, ToolResultStatus::Ok));
-    assert_eq!(result.metadata.exit_code, Some(0));
-    assert_eq!(result.metadata.details["verdict"], "passed");
-    assert_eq!(result.metadata.details["rerun_not_needed"], true);
-    assert_eq!(result.metadata.details["foreground_timeout_secs"], 1800);
-    assert_eq!(
-        result.metadata.details["foreground_inactivity_timeout_secs"],
-        300
-    );
-    assert!(
-        result
-            .metadata
-            .details
-            .get("output_preview")
-            .is_some_and(|preview| preview.as_str() == Some("foreground-late-ok"))
-    );
-    assert!(!result.content.contains("foreground-late-ok"));
-    Ok(())
-}
-
-#[serial]
-#[cfg_attr(coverage, ignore)]
-#[tokio::test]
-async fn terminal_start_foreground_explicit_total_timeout_cancels_task() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 30);
-    let mut registry = ToolRegistry::new();
-    register_builtin_tools(&mut registry);
-
-    let result = registry
+    assert_eq!(waited.metadata.details["outcome"], "condition_met");
+    registry
         .execute(
             ctx,
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-foreground-total-timeout",
-                    "command": "sleep 5; printf never",
-                    "shell": shell,
-                    "mode": "foreground",
-                    "foreground_timeout_secs": 1,
-                    "foreground_inactivity_timeout_secs": 10
-                }),
+                "terminal_cancel",
+                json!({ "task_id": "terminal-wait-tool" }),
             ),
         )
         .await?;
-
-    let ToolResultStatus::Error(error) = &result.status else {
-        panic!("expected foreground timeout to surface as an error result");
-    };
-    assert_eq!(error.kind, ToolErrorKind::Timeout);
-    assert_eq!(result.metadata.details["verdict"], "timed_out");
-    assert_eq!(result.metadata.details["timeout_kind"], "total");
-    assert_eq!(result.metadata.details["foreground_timeout_secs"], 1);
-    assert_eq!(result.metadata.details["rerun_not_needed"], false);
-    assert!(result.content.contains("timeout_kind: total"));
     Ok(())
 }
-
-#[serial]
-#[cfg_attr(coverage, ignore)]
-#[tokio::test]
-async fn terminal_start_foreground_explicit_inactivity_timeout_cancels_task() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let shell = test_shell(temp.path())?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 30);
-    let mut registry = ToolRegistry::new();
-    register_builtin_tools(&mut registry);
-
-    let result = registry
-        .execute(
-            ctx,
-            tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-foreground-inactivity-timeout",
-                    "command": "sleep 5; printf never",
-                    "shell": shell,
-                    "mode": "foreground",
-                    "foreground_timeout_secs": 10,
-                    "foreground_inactivity_timeout_secs": 1
-                }),
-            ),
-        )
-        .await?;
-
-    let ToolResultStatus::Error(error) = &result.status else {
-        panic!("expected foreground inactivity timeout to surface as an error result");
-    };
-    assert_eq!(error.kind, ToolErrorKind::Timeout);
-    assert_eq!(result.metadata.details["verdict"], "inactive_timeout");
-    assert_eq!(result.metadata.details["timeout_kind"], "inactivity");
-    assert_eq!(
-        result.metadata.details["shell_analysis"]["timeout_kind"],
-        "inactivity"
-    );
-    assert_eq!(
-        result.metadata.details["foreground_inactivity_timeout_secs"],
-        1
-    );
-    assert!(result.content.contains("timeout_kind: inactivity"));
-    Ok(())
-}
-
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
@@ -3744,6 +4694,7 @@ async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
                 json!({
                     "task_id": "terminal-scratch-env",
                     "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf terminal-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf done",
+                    "mode": "background",
                     "shell": shell
                 }),
             ),
@@ -3793,11 +4744,12 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
             "input": "rm -rf .sigil\n"
         }),
     );
+    let destructive_plan = registry.permission_plan(&ctx, &destructive_input)?;
     assert_eq!(
-        registry.permission_operation(&ctx, &destructive_input)?,
+        destructive_plan.operation,
         ToolOperation::ExecuteDestructiveCommand
     );
-    let destructive_subjects = registry.permission_subjects(&ctx, &destructive_input)?;
+    let destructive_subjects = &destructive_plan.subjects;
     assert!(destructive_subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path && subject.normalized == ".sigil"
     }));
@@ -3902,11 +4854,12 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
         "task_id": task_id.as_str(),
         "input": "cat input.txt > out.txt\n"
     });
+    let input_plan = tool.permission_plan(&ctx, &input_args)?;
     assert_eq!(
-        tool.permission_operation(&ctx, &input_args)?,
+        input_plan.operation,
         ToolOperation::ExecuteDestructiveCommand
     );
-    let subjects = tool.permission_subjects(&ctx, &input_args)?;
+    let subjects = &input_plan.subjects;
     assert!(subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Command && subject.original == "terminal_input bytes=24"
     }));
@@ -3920,22 +4873,18 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
         subject.kind == ToolSubjectKind::Path && subject.normalized == "logs/out.txt"
     }));
 
-    assert_eq!(
-        tool.permission_operation(
-            &ctx,
-            &json!({ "task_id": task_id.as_str(), "input": "echo hello\n" }),
-        )?,
-        ToolOperation::SendTerminalInput
-    );
+    let ordinary_input = tool.permission_plan(
+        &ctx,
+        &json!({ "task_id": task_id.as_str(), "input": "echo hello\n" }),
+    )?;
+    assert_eq!(ordinary_input.operation, ToolOperation::SendTerminalInput);
     let read_args = json!({
         "task_id": task_id.as_str(),
         "input": "cat input.txt\n"
     });
-    assert_eq!(
-        tool.permission_operation(&ctx, &read_args)?,
-        ToolOperation::ExecuteReadOnlyCommand
-    );
-    let read_subjects = tool.permission_subjects(&ctx, &read_args)?;
+    let read_plan = tool.permission_plan(&ctx, &read_args)?;
+    assert_eq!(read_plan.operation, ToolOperation::ExecuteReadOnlyCommand);
+    let read_subjects = &read_plan.subjects;
     assert!(read_subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Command && subject.original == "cat input.txt"
     }));
@@ -3963,6 +4912,7 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
                     "task_id": "terminal-pty-tool",
                     "command": "trap '' WINCH; IFS= read -r line; printf 'got:%s\\n' \"$line\"",
                     "shell": shell,
+                    "mode": "interactive",
                     "pty": true,
                     "rows": 12,
                     "cols": 50
@@ -4185,7 +5135,7 @@ async fn bash_inflight_cancellation_reaps_the_process_group() -> Result<()> {
                 ctx,
                 "bash-inflight-cancel".to_owned(),
                 json!({
-                    "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > descendant.pid; wait"
+                    "command": "sh -c 'trap \"\" TERM; echo $$ > descendant.pid; while :; do sleep 1; done'"
                 }),
             )
             .await
@@ -4274,7 +5224,7 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
     .execute(
         ctx,
         "terminal-start".to_owned(),
-        json!({ "command": "printf never" }),
+        json!({ "command": "printf never; sleep 5", "mode": "background" }),
     )
     .await
     .expect_err("terminal_start scratch file should fail create_dir_all");
@@ -4297,7 +5247,8 @@ fn read_file_reports_symlink_escape_as_external_subject() -> Result<()> {
     let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let subjects = ReadFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
+    let plan = ReadFileTool.permission_plan(&ctx, &json!({ "path": "leak.txt" }))?;
+    let subjects = &plan.subjects;
 
     assert_eq!(subjects[0].scope, ToolSubjectScope::External);
     assert_eq!(
@@ -4309,43 +5260,42 @@ fn read_file_reports_symlink_escape_as_external_subject() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn write_file_reports_existing_symlink_escape_as_external_subject() -> Result<()> {
+fn write_file_rejects_existing_symlink_escape_before_planning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let outside_file = outside.path().join("secret.txt");
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
-    let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let subjects = WriteFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
+    let error = WriteFileTool
+        .permission_plan(
+            &ctx,
+            &json!({ "path": "leak.txt", "content": "replacement" }),
+        )
+        .expect_err("workspace write planning must reject a symlink escape");
 
-    assert_eq!(subjects[0].scope, ToolSubjectScope::External);
-    assert_eq!(
-        subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
-    );
+    assert!(error.to_string().contains("outside workspace"));
     assert_eq!(fs::read_to_string(outside_file)?, "secret");
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn write_file_reports_symlink_parent_escape_for_new_file_as_external_subject() -> Result<()> {
+fn write_file_rejects_symlink_parent_escape_before_planning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     symlink(outside.path(), workspace.path().join("outside-dir"))?;
-    let expected = outside.path().canonicalize()?.join("new.txt");
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let subjects =
-        WriteFileTool.permission_subjects(&ctx, &json!({ "path": "outside-dir/new.txt" }))?;
+    let error = WriteFileTool
+        .permission_plan(
+            &ctx,
+            &json!({ "path": "outside-dir/new.txt", "content": "new" }),
+        )
+        .expect_err("workspace write planning must reject a symlink-parent escape");
 
-    assert_eq!(subjects[0].scope, ToolSubjectScope::External);
-    assert_eq!(
-        subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
-    );
+    assert!(error.to_string().contains("outside workspace"));
     assert!(!outside.path().join("new.txt").exists());
     Ok(())
 }
@@ -4361,7 +5311,11 @@ fn edit_file_reports_symlink_escape_as_external_subject() -> Result<()> {
     let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let subjects = EditFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
+    let plan = EditFileTool.permission_plan(
+        &ctx,
+        &json!({ "path": "leak.txt", "old_text": "old", "new_text": "new" }),
+    )?;
+    let subjects = &plan.subjects;
 
     assert_eq!(subjects[0].scope, ToolSubjectScope::External);
     assert_eq!(
@@ -4383,7 +5337,8 @@ fn delete_file_reports_symlink_escape_as_external_subject() -> Result<()> {
     let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let subjects = DeleteFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
+    let plan = DeleteFileTool.permission_plan(&ctx, &json!({ "path": "leak.txt" }))?;
+    let subjects = &plan.subjects;
 
     assert_eq!(subjects[0].scope, ToolSubjectScope::External);
     assert_eq!(
@@ -4404,9 +5359,11 @@ fn list_and_grep_report_external_symlink_roots_as_external_subjects() -> Result<
     let expected = outside.path().canonicalize()?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let list_subjects = ListTool.permission_subjects(&ctx, &json!({ "path": "outside-dir" }))?;
-    let grep_subjects = GrepTool
-        .permission_subjects(&ctx, &json!({ "path": "outside-dir", "pattern": "secret" }))?;
+    let list_plan = ListTool.permission_plan(&ctx, &json!({ "path": "outside-dir" }))?;
+    let grep_plan =
+        GrepTool.permission_plan(&ctx, &json!({ "path": "outside-dir", "pattern": "secret" }))?;
+    let list_subjects = &list_plan.subjects;
+    let grep_subjects = &grep_plan.subjects;
 
     assert_eq!(list_subjects[0].scope, ToolSubjectScope::External);
     assert_eq!(grep_subjects[0].scope, ToolSubjectScope::External);
@@ -4514,6 +5471,7 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
 fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let tool = bash_tool(temp.path());
 
     for command in [
         "pwd",
@@ -4525,12 +5483,20 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
         "command -v cargo",
         "rustc --version",
         "pwd | wc -l",
-        "ls *.rs",
     ] {
+        let plan = tool.permission_plan(&ctx, &json!({ "command": command }))?;
         assert_eq!(
-            bash_tool(temp.path()).permission_access(&ctx, &json!({ "command": command }))?,
+            plan.access,
             ToolAccess::Read,
             "{command} should be read-only"
+        );
+    }
+    for command in ["ls *.rs", "find . *"] {
+        let plan = tool.permission_plan(&ctx, &json!({ "command": command }))?;
+        assert_eq!(
+            plan.access,
+            ToolAccess::Execute,
+            "{command} has an unquoted glob that may expand to an option"
         );
     }
 
@@ -4544,8 +5510,9 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
         "python script.py",
         "cargo test",
     ] {
+        let plan = tool.permission_plan(&ctx, &json!({ "command": command }))?;
         assert_eq!(
-            bash_tool(temp.path()).permission_access(&ctx, &json!({ "command": command }))?,
+            plan.access,
             ToolAccess::Execute,
             "{command} should require execute approval"
         );
@@ -4563,11 +5530,13 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
     fs::write(&outside_file, "needle")?;
     let outside_output = outside.path().canonicalize()?.join("out.txt");
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+    let tool = bash_tool(workspace.path());
 
-    let subjects = bash_tool(workspace.path()).permission_subjects(
+    let external_plan = tool.permission_plan(
         &ctx,
         &json!({ "command": format!("cat {} > {}", outside_file.display(), outside_output.display()) }),
     )?;
+    let subjects = &external_plan.subjects;
 
     assert!(subjects.iter().any(|subject| {
         subject.scope == ToolSubjectScope::External
@@ -4578,8 +5547,8 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
             && subject.canonical_path.as_deref() == Some(outside_output.as_path())
     }));
 
-    let fd_redirect_subjects = bash_tool(workspace.path())
-        .permission_subjects(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
+    let fd_redirect_plan = tool.permission_plan(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
+    let fd_redirect_subjects = &fd_redirect_plan.subjects;
     assert!(
         fd_redirect_subjects
             .iter()
@@ -4597,32 +5566,30 @@ async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Res
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let tool = bash_tool(workspace.path());
 
-    let first = tool.permission_subjects(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
-    let piped = tool.permission_subjects(
+    let first = tool.permission_plan(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
+    let piped = tool.permission_plan(
         &ctx,
         &json!({ "command": "cd . && cargo check 2>&1 | tail -20" }),
     )?;
+    let tail = tool.permission_plan(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?;
 
-    assert_eq!(first.len(), 1);
-    assert_eq!(piped.len(), 1);
-    assert_eq!(first[0].original, "cargo check 2>&1");
-    assert_eq!(first[0].normalized, "family:cargo_check");
-    assert_eq!(piped[0].original, "cd . && cargo check 2>&1 | tail -20");
-    assert_eq!(piped[0].normalized, "family:cargo_check");
+    assert_eq!(first.subjects.len(), 1);
+    assert_eq!(piped.subjects.len(), 1);
+    assert_eq!(first.subjects[0].original, "cargo check 2>&1");
+    assert_eq!(first.subjects[0].normalized, "family:cargo_check");
     assert_eq!(
-        tool.permission_access(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?,
-        ToolAccess::Execute
+        piped.subjects[0].original,
+        "cd . && cargo check 2>&1 | tail -20"
     );
-    assert_eq!(
-        tool.permission_operation(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?,
-        ToolOperation::ExecuteWorkspaceCheckCommand
-    );
+    assert_eq!(piped.subjects[0].normalized, "family:cargo_check");
+    assert_eq!(tail.access, ToolAccess::Execute);
+    assert_eq!(tail.operation, ToolOperation::ExecuteWorkspaceCheckCommand);
     assert!(
         sigil_kernel::tool_approval_session_grant_available_for_parts(
             ToolAccess::Execute,
             ToolOperation::ExecuteWorkspaceCheckCommand,
             PermissionRisk::Medium,
-            &first,
+            &first.subjects,
             &[PathTrustZone::Unknown],
             None,
             false,
@@ -4639,23 +5606,24 @@ async fn bash_shell_analysis_allows_safe_search_and_devices_without_external_app
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let tool = bash_tool(workspace.path());
 
-    assert_eq!(
-        tool.permission_access(
-            &ctx,
-            &json!({ "command": "grep -r 'XYZ' --include='*.rs' --include='*.md' ." })
-        )?,
-        ToolAccess::Read
-    );
-    let subjects =
-        tool.permission_subjects(&ctx, &json!({ "command": "cargo check >/dev/null 2>&1" }))?;
+    let search = tool.permission_plan(
+        &ctx,
+        &json!({ "command": "grep -r 'XYZ' --include='*.rs' --include='*.md' ." }),
+    )?;
+    assert_eq!(search.access, ToolAccess::Read);
+    let redirect =
+        tool.permission_plan(&ctx, &json!({ "command": "cargo check >/dev/null 2>&1" }))?;
+    let subjects = &redirect.subjects;
     assert!(
         subjects
             .iter()
             .all(|subject| subject.scope != ToolSubjectScope::External),
         "{subjects:?}"
     );
+    let spaced_redirect =
+        tool.permission_plan(&ctx, &json!({ "command": "cargo check > /dev/null 2>&1" }))?;
     assert_eq!(
-        tool.permission_operation(&ctx, &json!({ "command": "cargo check > /dev/null 2>&1" }))?,
+        spaced_redirect.operation,
         ToolOperation::ExecuteWorkspaceCheckCommand
     );
     Ok(())
@@ -4729,8 +5697,8 @@ async fn bash_shell_analysis_treats_missing_relative_paths_as_workspace_subjects
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let tool = bash_tool(workspace.path());
 
-    let subjects =
-        tool.permission_subjects(&ctx, &json!({ "command": "ls missing_workspace_dir" }))?;
+    let plan = tool.permission_plan(&ctx, &json!({ "command": "ls missing_workspace_dir" }))?;
+    let subjects = &plan.subjects;
 
     assert!(subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path
@@ -4755,10 +5723,11 @@ async fn bash_permission_subjects_resolve_cd_relative_paths_against_external_cwd
     let outside_child = outside_root.join("child.txt");
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let subjects = bash_tool(workspace.path()).permission_subjects(
+    let plan = bash_tool(workspace.path()).permission_plan(
         &ctx,
         &json!({ "command": format!("cd {} && ls child.txt", outside_root.display()) }),
     )?;
+    let subjects = &plan.subjects;
 
     assert!(subjects.iter().any(|subject| {
         subject.scope == ToolSubjectScope::External
@@ -4936,21 +5905,18 @@ async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     for (tool_name, result) in [
-        (
-            "read_file",
-            ReadFileTool.permission_subjects(&ctx, &json!({})),
-        ),
+        ("read_file", ReadFileTool.permission_plan(&ctx, &json!({}))),
         (
             "write_file",
-            WriteFileTool.permission_subjects(&ctx, &json!({ "content": "hello" })),
+            WriteFileTool.permission_plan(&ctx, &json!({ "content": "hello" })),
         ),
         (
             "edit_file",
-            EditFileTool.permission_subjects(&ctx, &json!({ "old_text": "a", "new_text": "b" })),
+            EditFileTool.permission_plan(&ctx, &json!({ "old_text": "a", "new_text": "b" })),
         ),
         (
             "delete_file",
-            DeleteFileTool.permission_subjects(&ctx, &json!({})),
+            DeleteFileTool.permission_plan(&ctx, &json!({})),
         ),
     ] {
         let error = result.expect_err(tool_name);
@@ -4961,7 +5927,7 @@ async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
     }
 
     let empty_apply = apply_changeset_tool()
-        .permission_subjects(&ctx, &json!({ "id": "change-empty", "files": [] }))
+        .permission_plan(&ctx, &json!({ "id": "change-empty", "files": [] }))
         .expect_err("apply_changeset should require at least one file");
     assert!(
         empty_apply
@@ -5114,7 +6080,7 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
     );
     assert_eq!(
         long_ls_analysis.grant_scope,
-        Some(super::CommandGrantScope::ExactCommand)
+        Some(super::CommandGrantScope::WorkspaceReadOnlyShell)
     );
     assert!(long_ls_analysis.subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path && subject.normalized == "_site/docs/providers"
@@ -5153,7 +6119,7 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
     );
     assert_eq!(
         cat_head_analysis.classification_source,
-        super::ShellClassificationSource::AstKnownReadonly
+        super::ShellClassificationSource::BuiltinFamily
     );
 
     let workspace_cd = "cd . && ";
@@ -5192,7 +6158,7 @@ fn bash_file_test_echo_loop_is_readonly_but_scripts_still_execute() -> Result<()
     );
     assert_eq!(
         loop_analysis.grant_scope,
-        Some(super::CommandGrantScope::ExactCommand)
+        Some(super::CommandGrantScope::WorkspaceReadOnlyShell)
     );
 
     let script_analysis =
@@ -5340,11 +6306,24 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
         ]
     });
 
-    let subjects = apply_changeset_tool().permission_subjects(&ctx, &args)?;
-    assert_eq!(subjects.len(), 3);
-    assert_eq!(subjects[0].normalized, "new.txt");
+    let tool = apply_changeset_tool();
+    let permission_plan = tool.permission_plan(&ctx, &args)?;
+    assert_eq!(permission_plan.subjects.len(), 3);
+    assert_eq!(permission_plan.subjects[0].normalized, "new.txt");
+    assert_eq!(permission_plan.operation, ToolOperation::ApplyChangeSet);
+    assert!(
+        permission_plan
+            .effects
+            .contains(&ToolPermissionEffect::FileWrite)
+    );
+    assert!(
+        permission_plan
+            .effects
+            .contains(&ToolPermissionEffect::FileDelete)
+    );
+    assert!(permission_plan.analysis.is_complete());
 
-    let preview = apply_changeset_tool()
+    let preview = tool
         .preview(ctx.clone(), args.clone())
         .await?
         .expect("apply_changeset should preview");
@@ -5358,9 +6337,7 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
             .exists()
     );
 
-    let result = apply_changeset_tool()
-        .execute(ctx, "apply".to_owned(), args)
-        .await?;
+    let result = tool.execute(ctx, "apply".to_owned(), args).await?;
 
     assert!(!result.is_error());
     assert_eq!(
@@ -6448,6 +7425,7 @@ async fn wait_for_terminal_read(
                     "terminal_read",
                     json!({
                         "task_id": task_id,
+                        "offset": 0,
                         "limit_bytes": limit_bytes,
                         "include_content": true
                     }),
@@ -6466,6 +7444,7 @@ async fn wait_for_terminal_read(
                 "terminal_read",
                 json!({
                     "task_id": task_id,
+                    "offset": 0,
                     "limit_bytes": limit_bytes,
                     "include_content": true
                 }),
@@ -6488,6 +7467,7 @@ async fn wait_for_terminal_read_contains(
                     "terminal_read",
                     json!({
                         "task_id": task_id,
+                        "offset": 0,
                         "limit_bytes": 1024,
                         "include_content": true
                     }),
@@ -6506,6 +7486,7 @@ async fn wait_for_terminal_read_contains(
                 "terminal_read",
                 json!({
                     "task_id": task_id,
+                    "offset": 0,
                     "limit_bytes": 1024,
                     "include_content": true
                 }),

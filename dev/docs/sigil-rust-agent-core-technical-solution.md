@@ -260,6 +260,7 @@ sigil/
           tests/
         runner.rs
         runner/
+          terminal_lifecycle_bridge.rs
           worker_loop/
             active_run.rs
             agent_runtime.rs
@@ -268,7 +269,7 @@ sigil/
             queue_driver.rs
             scheduler.rs
             task_runtime.rs
-            terminal_refresh.rs
+            terminal_control.rs
           tests/
         ui.rs
         ui/
@@ -323,9 +324,10 @@ secret-free offline readiness，用户主动进入配置流程后才异步验证
 制造伪失败。Desktop 只消费不含 secret 的 exact model option 和 freshness/availability
 元数据；application run context 按 connection 投影全部已配置连接的有界已知模型，Desktop 与 TUI
 选择值都保持完整 `ModelRef`。设置 saved default 使用共享 typed mutation，不保存 renderer-local
-Provider/model override。session 一旦开始即绑定 immutable exact route；endpoint/protocol semantic fingerprint
-漂移时 fail closed，切换 connection 或 model 必须创建新 session，fork/restore 也不得静默改写
-原 route。
+Provider/model override。session identity 建立 initial exact route，后续只允许在 idle 边界追加完整、
+可审计的 route-selection event；endpoint/protocol semantic fingerprint 漂移时 fail closed，
+fork/restore 不得静默改写既有事件，切换 connection 或 model 后不得复用边界前 provider-private
+continuation/cache material。
 
 这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流留在 `sigil-tui` 内，Desktop 的 renderer 与 native shell 状态留在各自 adapter 内，因为它们属于不同产品表面的交互模型。
 
@@ -383,37 +385,11 @@ pub trait Provider: Send + Sync {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<Vec<ToolSubject>> {
-        Ok(Vec::new())
-    }
-
-    fn permission_access(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<ToolAccess> {
-        Ok(self.spec().access)
-    }
-
-    fn permission_network_effect(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<Option<NetworkEffect>> {
-        Ok(self.spec().network_effect)
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<Option<ApprovalMode>> {
-        Ok(None)
-    }
+        ctx: &ToolContext,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<ToolPermissionPlanDraft>;
 
     fn egress_audit(
         &self,
@@ -446,10 +422,11 @@ pub trait Tool: Send + Sync {
 - `ToolSpec` 必须保持 provider-neutral，表达 `name / description / input_schema / category / access / network_effect / preview`，不携带 DeepSeek、MCP 或 TUI 私有状态；其中 `access` 只描述本地 Read/Write/Execute，`network_effect` 独立描述可选的 Read/Mutate/Unknown 网络效果
 - 工具执行失败要返回给模型，不应该直接把整个进程打死
 - preview 是可选能力，只给交互式前端做审批卡片和 diff 预览用，返回统一的 `ToolPreview`
-- `permission_subjects` 是审批与 permission layer 的稳定资源键，文件类工具必须从结构化参数中导出，shell / MCP 等工具可返回多 subject，而不是让 UI 猜字符串
-- `permission_access` 默认使用 `ToolSpec.access`；少数工具可以按本次参数保守调整 access，例如 `bash` 只对简单只读 allowlist 命令降为 `Read`，未知或复杂语法仍为 `Execute`
-- `permission_network_effect` 默认使用 `ToolSpec.network_effect`；只有能从最终参数和 exact launch plan 得出可复核证据的 adapter 才能动态收窄，registry 与 scoped registry 必须原样转发该 hook
-- `permission_default_mode` 用于工具域内更具体的默认审批策略，例如 MCP server trust policy；它只改变默认基线，显式 permission tool/rule override 仍然优先
+- `permission_plan` 是每次具体调用唯一的权限事实入口；registry 只解析一次参数，产出 immutable `ToolPermissionPlanV2`，并让策略、审批、执行、审计和会话授权复用同一 `plan_hash`
+- plan 同时包含 access、operation、effects、subjects、analysis 完整度、containment 请求、semantic scope、工具默认 mode 与安全摘要；不允许 UI、策略或执行层分别重新解析同一调用
+- 文件类工具必须从结构化参数中导出精确 subject；Shell 必须从完整 POSIX 语法树聚合每个子命令、重定向、wrapper 与动态结构；MCP annotation 仅是不可信提示，不完整、冲突或来自第三方时保守降级为 `Unknown/Ask`
+- 通用默认 planner 只适用于静态声明足以完整描述调用的工具；Shell、MCP、Skill、Agent、Web、LSP mutation 等动态工具必须显式声明 V2 plan
+- analysis 不完整、参数/策略/backend/profile/environment 在审批后漂移，或执行时缺少 exact prepared plan，一律 fail closed；risk 只用于呈现，最终 allow/ask/deny 由 effect、策略、containment 和 hard safety 共同决定
 - `egress_audit` 用于工具域内安全出境审计摘要，返回值会进入 durable control state；实现必须先脱敏并限制大小，不能包含原始 secret、文件内容或大 payload
 - `execute` 必须接收 provider 侧的 `call_id` 并原样写回 `ToolResult.call_id`，保证 tool call / result 配对可恢复
 - 文件类内置工具必须对 workspace root 做 canonicalize，并用路径组件判断 confinement；绝对路径、`..`、目标 symlink 或父目录 symlink 指向 workspace 外时必须生成 `External` subject，再由 `permission.external_directory` gate 决定 deny / ask / allow
@@ -728,8 +705,9 @@ pub enum ControlEntry {
 - `PrefixSnapshotCaptured`：记录当前稳定前缀的快照
 - `MemorySnapshotCaptured`：记录 request 使用的 memory/system 消息；后续 request 在 fingerprint 未变时复用该快照，fingerprint 变化时追加新快照，避免静默忽略 `AGENTS.md` 等文件更新
 - `UsageSnapshot`：记录 usage、cost 与 cache token 统计，供 resume 后恢复 session 生命周期累计 stats
-- `ToolApproval`：记录权限策略评估、审批请求、审批结果和 preview 失败，包含 call id、tool name、access、subjects、policy/user decision、reason 与 preview hash
-- `ToolExecution`：记录工具执行 started/completed/failed/interrupted，包含 duration、subjects、changed files、metadata、structured error 与 provider-visible result hash
+- `ToolPermissionPlannedV2` / `ToolPermissionDecisionV2`：记录安全、有界、无原始命令或 secret 的 plan/decision 事实，包含 exact plan hash、effect、subject、analysis、策略来源、containment 和可用会话授权
+- `ToolApproval`：记录与 approval request id、plan hash 和 execution binding hash 绑定的请求、accepted/resolved/expired/stale/cancelled 终态及 preview 事实；控制路由 accepted receipt 到达后 Desktop/TUI 必须立即退出 waiting 状态
+- `ToolExecution`：记录工具执行 started/completed/failed/interrupted，包含同一 plan/binding identity、duration、subjects、changed files、有界 metadata、structured error 与 provider-visible result hash
 - compaction 不再作为 `ControlEntry` 记录：它使用 `CompactionStarted`、`TaskMemoryRecordedV1`、`CompactionAppliedV2` 和 terminal direct-JSON durable event；只有经 lifecycle/sidecar resolver 验证的 V2 boundary 才能影响 request context
 - `Note`：承接不值得升格为独立结构的控制面元数据
 
@@ -1220,7 +1198,12 @@ policy 不兼容时追加失效审计并直接从 portable checkpoint 组装请�
 
 发生 context-window 拒绝也不能仅凭 HTTP status 或错误文本自动重试。唯一启用的 overflow recovery 是官方 OpenAI Responses `https://api.openai.com/v1` 上固定 `gpt-4.1-2025-04-14` snapshot：同一 foreground logical run 必须恰好一条 `context_window_exceeded + ConfirmedNoModelConsumption` durable terminal 且没有 output/side-effect refs；随后对同一冻结 post-compaction target 调用官方 `/responses/input_tokens`，并以该计数、显式 32K output reservation 与 8K safety buffer 完成完整 fit proof。计数本身先写同步、non-generating 的 `InputTokenMeasurement` start/terminal，成功后才允许新的 portable lifecycle；TUI 先刷新 lifecycle，再把仅存在进程内的一个冻结 target 交给一次新的 conversation attempt。alias、兼容 endpoint、普通错误、计数失败、profile drift、多个 physical attempt、任何 crash/restart 均 fail closed，不重发计数、不 apply、不 replay conversation；恢复后的 run 也不具备递归恢复资格。DeepSeek V4 Flash 仍没有本项 provider rejection contract，因此不进入 overflow path。
 
-模型切换不是 mid-turn recovery：busy 状态下 `/model` 直接拒绝；成功切换时强制新建 session。worker 层同样拒绝在 active run 中切换或新建 session，因此不会让一次已发出的 provider 请求跨 provider/model identity 继续或重放。
+模型切换不是 mid-turn recovery：busy 状态下 `/model` 直接拒绝，不改变 route 或运行中的请求；idle
+切换在同一个 durable session 中追加完整 `connection_id/model_id` 与 secret-free
+`ResolvedModelRoute` 的 `SessionModelSelected` 控制事件，从下一次运行生效。该事件是
+provider-native continuation/cache 的隔离边界，边界前 material 不得被新 route 复用；Desktop 与 TUI
+重建 provider worker 时保持原 session id、对话历史和任务状态。每次实际 provider attempt 继续记录精确
+provider/model，saved default 只由独立的显式操作修改。
 
 除此之外，还应加一条和成本直接相关的策略：
 
@@ -1415,11 +1398,11 @@ Permission policy 负责决定一次工具调用是：
 - `ToolAccess` 只表达本地 `Read / Write / Execute`；网络单独使用 `NetworkEffect::Read / Mutate / Unknown` 与 `NetworkPolicy::Allow / Ask / Deny`
 - 本地 `Write / Execute` 由 `permission.mode` 决定：`manual` 默认 ask，`auto-edit` 只自动允许 workspace 文件编辑，`read-only` 拒绝本地写入/执行，`danger-full-access` 只放宽本地轴
 - `NetworkEffect::Read` 始终服从独立 NetworkPolicy；`read-only` 下的 `Mutate / Unknown` 直接拒绝，其他 mode 与 network/source policy 按 `Deny > Ask > Allow` 求交。`NetworkEndpoint` 不得因 `ToolSubjectScope::External` 被误送入只属于 `Path` 的 external-directory gate。plan approval、external-directory override 和 `danger-full-access` 不能覆盖 network/source ask 或 deny；交互用户显式创建的 durable session grant 只可把同一 tool 的只读 `NetworkRequest` Ask facet 降为 Allow，不能覆盖 source Ask、任何 Deny、`Mutate / Unknown` 或不同 tool
-- `ToolApprovalSessionGrant` 持久化获批 facet（local/network）与匹配 scope；缺少任一当前字段的日志直接拒绝。只读 network endpoint 使用 `network_read_tool` scope，允许同一 tool 在 session 内跨 URL 复用，但每个 URL 仍必须重新通过 capability binding、destination guard、durable egress barrier、逐消息 disclosure 与 budget；exact-subject grant 不得在策略 facet 或 scope 漂移后扩大权限
-- `ToolSpec` 保存静态 `network_effect`，动态 adapter 通过 `permission_network_effect` 在最终参数上重新分类；registry 与 scoped registry 必须透传该 hook。通用 MCP tool 投影为本地 `Read + NetworkEffect::Unknown`，本地 stdio/plugin extension process 启动投影为本地 `Execute + NetworkEffect::Unknown`
+- `ToolApprovalSessionGrant` 持久化获批 facet（local/network）与匹配 scope；缺少任一当前字段的日志直接拒绝。只读 network endpoint 使用 `network_read_tool` scope，允许同一 tool 在 session 内跨 URL 复用，但每个 URL 仍必须重新通过 capability binding、destination guard、durable egress barrier、逐消息 disclosure 与 budget；exact-subject grant 不得在策略 facet 或 scope 漂移后扩大权限。命中 exact network facet 的 grant 必须作为当前执行的 network authorization 传播到 tool context，不能只把 policy decision 改为 `Allow` 后丢失执行授权
+- `ToolSpec` 只保存静态声明；每个动态 adapter 通过单一 `permission_plan` 为最终参数生成完整 `ToolPermissionPlanV2` draft，一次性绑定 access、operation、effects、subjects、containment、semantic scope、默认策略和安全摘要；registry 与 scoped registry 只消费并透传这一个 immutable plan contract。通用 MCP tool 投影为本地 `Read + NetworkEffect::Unknown`，本地 stdio/plugin extension process 启动投影为本地 `Execute + NetworkEffect::Unknown`
 - extension process 的网络启动授权使用不可序列化的 run-scoped admission：`Ask` 只有在真实交互审批证据存在时才可越过 spawn boundary；`Deny` 只有 exact backend plan 同时证明 network isolation、process-tree isolation 和 denied network receipt 时才可启动，并在执行后复核 receipt。model-triggered activation 作为本地 `Execute + NetworkEffect::Unknown` 工具走完整 local/network/source permission；配置声明的 eager、direct activation 与 refresh 属于既有 lifecycle management path，不把 `approval_default` 重新解释为启动审批，但仍必须显式携带当前 NetworkPolicy，不能退回隐式 default Allow
 - `ToolAccess` 只接受当前 `read` / `write` / `execute` 值；`access = "network"` 与其他非当前值直接拒绝，不安装容器级转换器
-- `bash` 静态是 `Shell / Execute`，但简单只读 allowlist 命令可通过动态 `permission_access` 走 `Read`；重定向、变量展开、管道、subshell、glob、未知命令、测试/包管理/写操作仍按 `Execute`
+- `bash` 静态是 `Shell / Execute`，但它覆盖单一 `permission_plan`，由结构化 Shell analyzer 把简单只读命令分类为 `Read`，并为重定向、wrapper、pipeline、subshell、dynamic expansion、测试/包管理和写操作生成逐节点 effects 后取最严格 aggregate；parser 不完整或执行边界无法证明时 fail closed
 - `[permission.commands] allow/ask/deny` 在归一化命令文本上做显式匹配，优先级固定为 `deny > ask > allow`；它可以减少已信任命令的重复确认，但不替代 shell classifier、path subject、external-directory gate 或 protected path overlay
 - 命中的 command permission 必须作为结构化 `CommandPermissionMatch` 保留在 permission decision、approval request 和 `ToolApproval` audit entry 中，TUI 审批卡片展示对应 `permission.commands.<group>`、pattern 与命令文本
 - headless run 遇到最终 `ask` 返回结构化 `approval_required` tool error，不静默执行

@@ -25,6 +25,7 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-approval.jsonl");
+    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool));
@@ -44,15 +45,18 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
         )
     })?;
     assert!(matches!(
-        approval_request,
+        &approval_request,
         WorkerMessage::Event(event)
             if matches!(event.as_ref(), RunEvent::ToolApprovalRequested { call, .. } if call.id == "call-1")
     ));
 
-    worker.send(WorkerCommand::ApprovalDecision {
-        call_id: "call-1".to_owned(),
-        approved: true,
-    })?;
+    worker.send(approval_command(
+        "command-approval-once",
+        &session_id,
+        "call-1",
+        approval_request_id(&approval_request),
+        true,
+    ))?;
 
     let approval_resolved = worker.recv_until(|message| {
         matches!(
@@ -95,6 +99,7 @@ fn approval_command_envelope_ignores_duplicate_command_ids() -> Result<()> {
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-approval-command.jsonl");
+    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool));
@@ -106,21 +111,44 @@ fn approval_command_envelope_ignores_duplicate_command_ids() -> Result<()> {
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let _ = worker.recv_until(|message| {
+    let request = worker.recv_until(|message| {
         matches!(
             message,
             WorkerMessage::Event(event)
                 if matches!(event.as_ref(), RunEvent::ToolApprovalRequested { call, .. } if call.id == "call-1")
         )
     })?;
+    let approval_request_id = approval_request_id(&request).to_owned();
 
-    worker.send(approval_command("command-approval-1"))?;
-    worker.send(approval_command("command-approval-1"))?;
+    worker.send(approval_command(
+        "command-approval-1",
+        &session_id,
+        "call-1",
+        &approval_request_id,
+        true,
+    ))?;
+    worker.send(approval_command(
+        "command-approval-1",
+        &session_id,
+        "call-1",
+        &approval_request_id,
+        true,
+    ))?;
 
-    let duplicate_notice = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::Notice(notice) if notice.contains("duplicate command command-approval-1 ignored"))
+    let replayed_receipt = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ApprovalCommandReceipt(receipt)
+                if receipt.command_id == "command-approval-1" && receipt.replayed
+        )
     })?;
-    assert!(matches!(duplicate_notice, WorkerMessage::Notice(_)));
+    assert!(matches!(
+        replayed_receipt,
+        WorkerMessage::ApprovalCommandReceipt(receipt)
+            if receipt.approval_request_id == approval_request_id
+                && receipt.route_state
+                    == crate::runner::WorkerApprovalRouteState::DecisionAccepted
+    ));
 
     let finished =
         worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
@@ -154,6 +182,7 @@ allowed_tools = ["grep"]
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-agent-approval.jsonl");
+    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let mut registry = ToolRegistry::new();
     register_agent_tools_with_workspace(&mut registry, &root_config, &workspace_root)?;
@@ -205,7 +234,7 @@ allowed_tools = ["grep"]
         )
     })?;
     assert!(matches!(
-        approval_request,
+        &approval_request,
         WorkerMessage::Event(event)
             if matches!(
                 event.as_ref(),
@@ -215,10 +244,13 @@ allowed_tools = ["grep"]
             )
     ));
 
-    worker.send(WorkerCommand::ApprovalDecision {
-        call_id: "call-spawn-agent".to_owned(),
-        approved: false,
-    })?;
+    worker.send(approval_command(
+        "command-deny-spawn-agent",
+        &session_id,
+        "call-spawn-agent",
+        approval_request_id(&approval_request),
+        false,
+    ))?;
     let finished =
         worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
     let WorkerMessage::RunFinished { result, entries } = finished else {
@@ -241,16 +273,36 @@ allowed_tools = ["grep"]
     Ok(())
 }
 
-fn approval_command(command_id: &str) -> WorkerCommand {
+fn approval_command(
+    command_id: &str,
+    session_id: &str,
+    call_id: &str,
+    approval_request_id: &str,
+    approved: bool,
+) -> WorkerCommand {
     WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
         command_id,
         "sigil-tui-test",
-        "session-test",
+        session_id,
         WorkerApprovalCommand::Decision {
-            call_id: "call-1".to_owned(),
-            approved: true,
+            call_id: call_id.to_owned(),
+            approval_request_id: approval_request_id.to_owned(),
+            approved,
         },
     ))
+}
+
+fn approval_request_id(message: &WorkerMessage) -> &str {
+    let WorkerMessage::Event(event) = message else {
+        panic!("expected approval request event");
+    };
+    let RunEvent::ToolApprovalRequested {
+        approval_identity, ..
+    } = event.as_ref()
+    else {
+        panic!("expected approval request event");
+    };
+    &approval_identity.approval_request_id
 }
 
 #[test]
@@ -276,7 +328,7 @@ fn approval_handler_denies_when_decision_channel_stays_idle() -> Result<()> {
 
     assert!(matches!(
         approval,
-        ToolApproval::Deny { reason } if reason.contains("approval timed out")
+        ToolApproval::Expired { reason } if reason.contains("approval timed out")
     ));
     Ok(())
 }
@@ -304,7 +356,7 @@ fn approval_handler_with_zero_timeout_denies_immediately() -> Result<()> {
 
     assert!(matches!(
         approval,
-        ToolApproval::Deny { reason } if reason == "approval timed out after 0 seconds"
+        ToolApproval::Expired { reason } if reason == "approval timed out after 0 seconds"
     ));
     Ok(())
 }
@@ -313,15 +365,21 @@ fn approval_handler_with_zero_timeout_denies_immediately() -> Result<()> {
 fn approval_handler_ignores_other_call_ids_until_matching_decision_arrives() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
     let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let (wrong_ack_tx, _wrong_ack_rx) = std::sync::mpsc::sync_channel(1);
     tx.send(ApprovalSignal::Decision {
         call_id: "other-call".to_owned(),
+        approval_request_id: "approval-other".to_owned(),
         approval: ToolApproval::Deny {
             reason: "wrong call".to_owned(),
         },
+        acknowledgement_tx: wrong_ack_tx,
     })?;
+    let (matching_ack_tx, _matching_ack_rx) = std::sync::mpsc::sync_channel(1);
     tx.send(ApprovalSignal::Decision {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-1".to_owned(),
         approval: ToolApproval::Approve,
+        acknowledgement_tx: matching_ack_tx,
     })?;
 
     let approval = handler.approve_tool_call(
@@ -349,11 +407,14 @@ fn approval_handler_ignores_other_call_ids_until_matching_decision_arrives() -> 
 fn approval_handler_forwards_approved_argument_overrides() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
     let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let (acknowledgement_tx, _acknowledgement_rx) = std::sync::mpsc::sync_channel(1);
     tx.send(ApprovalSignal::Decision {
         call_id: "call-spawn".to_owned(),
+        approval_request_id: "approval-spawn".to_owned(),
         approval: ToolApproval::ApproveWithArgs {
             args_json: r#"{"mode":"background"}"#.to_owned(),
         },
+        acknowledgement_tx,
     })?;
 
     let approval = handler.approve_tool_call(
@@ -381,12 +442,70 @@ fn approval_handler_forwards_approved_argument_overrides() -> Result<()> {
 }
 
 #[test]
+fn approval_handler_rejects_stale_request_id_before_accepting_exact_decision() -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
+    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let (stale_ack_tx, stale_ack_rx) = std::sync::mpsc::sync_channel(1);
+    tx.send(ApprovalSignal::Decision {
+        call_id: "call-1".to_owned(),
+        approval_request_id: "approval-stale".to_owned(),
+        approval: ToolApproval::Approve,
+        acknowledgement_tx: stale_ack_tx,
+    })?;
+    let (exact_ack_tx, exact_ack_rx) = std::sync::mpsc::sync_channel(1);
+    tx.send(ApprovalSignal::Decision {
+        call_id: "call-1".to_owned(),
+        approval_request_id: "approval-current".to_owned(),
+        approval: ToolApproval::Approve,
+        acknowledgement_tx: exact_ack_tx,
+    })?;
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let spec = ToolSpec {
+        name: "write_file".to_owned(),
+        description: "write".to_owned(),
+        input_schema: serde_json::json!({"type":"object"}),
+        category: ToolCategory::File,
+        access: sigil_kernel::ToolAccess::Write,
+        network_effect: None,
+        preview: ToolPreviewCapability::Required,
+    };
+    let context = sigil_kernel::ToolApprovalContext {
+        identity: sigil_kernel::ApprovalRequestIdentityV2 {
+            session_id: "session-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            call_id: call.id.clone(),
+            approval_request_id: "approval-current".to_owned(),
+            plan_hash: "plan-1".to_owned(),
+            policy_version: "policy-1".to_owned(),
+            execution_binding_hash: "binding-1".to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        permission_signature: "permission-1".to_owned(),
+        policy_fingerprint: "policy-1".to_owned(),
+        requested_at_ms: 1,
+        expires_at_ms: u64::MAX,
+    };
+
+    let approval = handler.approve_tool_call_with_context(&call, &spec, &context)?;
+
+    assert!(matches!(approval, ToolApproval::Approve));
+    assert!(!stale_ack_rx.recv()?.accepted);
+    assert!(exact_ack_rx.recv()?.accepted);
+    Ok(())
+}
+
+#[test]
 fn approval_denial_is_forwarded_to_active_run() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-approval-deny.jsonl");
+    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool));
@@ -398,7 +517,7 @@ fn approval_denial_is_forwarded_to_active_run() -> Result<()> {
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let _ = worker.recv_until(|message| {
+    let approval_request = worker.recv_until(|message| {
         matches!(
             message,
             WorkerMessage::Event(event)
@@ -406,22 +525,25 @@ fn approval_denial_is_forwarded_to_active_run() -> Result<()> {
         )
     })?;
 
-    worker.send(WorkerCommand::ApprovalDecision {
-        call_id: "call-1".to_owned(),
-        approved: false,
-    })?;
+    worker.send(approval_command(
+        "command-deny-write",
+        &session_id,
+        "call-1",
+        approval_request_id(&approval_request),
+        false,
+    ))?;
 
     let denied = worker.recv_until(|message| {
         matches!(
             message,
             WorkerMessage::Event(event)
-                if matches!(event.as_ref(), RunEvent::ToolApprovalResolved { call_id, approved, reason } if call_id == "call-1" && !approved && reason.as_deref() == Some("denied in TUI"))
+                if matches!(event.as_ref(), RunEvent::ToolApprovalResolved { call_id, approved, reason, .. } if call_id == "call-1" && !approved && reason.as_deref() == Some("denied in TUI"))
         )
     })?;
     assert!(matches!(
         denied,
         WorkerMessage::Event(event)
-            if matches!(event.as_ref(), RunEvent::ToolApprovalResolved { call_id, approved, reason } if call_id == "call-1" && !approved && reason.as_deref() == Some("denied in TUI"))
+            if matches!(event.as_ref(), RunEvent::ToolApprovalResolved { call_id, approved, reason, .. } if call_id == "call-1" && !approved && reason.as_deref() == Some("denied in TUI"))
     ));
 
     let tool_result = worker.recv_until(|message| {
@@ -466,7 +588,7 @@ fn approval_handler_returns_cancel_denial() -> Result<()> {
 
     assert!(matches!(
         approval,
-        ToolApproval::Deny { reason } if reason == "run cancelled from TUI"
+        ToolApproval::Cancelled { reason } if reason == "run cancelled from TUI"
     ));
     Ok(())
 }
@@ -506,20 +628,26 @@ fn approval_decision_without_active_run_reports_error() -> Result<()> {
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-stray-approval.jsonl");
+    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
-    worker.send(WorkerCommand::ApprovalDecision {
-        call_id: "missing-call".to_owned(),
-        approved: true,
-    })?;
-    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    worker.send(approval_command(
+        "command-stray",
+        &session_id,
+        "missing-call",
+        "approval-missing",
+        true,
+    ))?;
+    let error =
+        worker.recv_until(|message| matches!(message, WorkerMessage::ApprovalCommandReceipt(_)))?;
     assert!(matches!(
         error,
-        WorkerMessage::RunFailed(ref text)
-            if text == "received stray approval decision without pending approval"
+        WorkerMessage::ApprovalCommandReceipt(ref receipt)
+            if receipt.call_id == "missing-call"
+                && receipt.route_state == crate::runner::WorkerApprovalRouteState::Rejected
     ));
 
     worker.shutdown()?;

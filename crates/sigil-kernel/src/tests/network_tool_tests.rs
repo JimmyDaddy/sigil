@@ -23,17 +23,24 @@ impl Tool for DynamicNetworkTool {
         }
     }
 
-    fn permission_network_effect(
-        &self,
-        _ctx: &ToolContext,
-        args: &Value,
-    ) -> Result<Option<NetworkEffect>> {
-        match args.get("effect").and_then(Value::as_str) {
-            Some("read") => Ok(Some(NetworkEffect::Read)),
-            Some("mutate") => Ok(Some(NetworkEffect::Mutate)),
-            Some("unknown") => Ok(Some(NetworkEffect::Unknown)),
-            _ => Err(anyhow!("missing supported effect")),
-        }
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let network_effect = match args.get("effect").and_then(Value::as_str) {
+            Some("read") => Some(NetworkEffect::Read),
+            Some("mutate") => Some(NetworkEffect::Mutate),
+            Some("unknown") => Some(NetworkEffect::Unknown),
+            _ => return Err(anyhow!("missing supported effect")),
+        };
+        declared_tool_permission_plan(
+            &self.spec(),
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect,
+                subjects: Vec::new(),
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(
@@ -60,7 +67,7 @@ fn dynamic_call(effect: &str) -> ToolCall {
 }
 
 #[test]
-fn registry_and_scoped_registry_forward_dynamic_network_effect() -> Result<()> {
+fn registry_and_scoped_registry_forward_dynamic_network_effect_in_plan() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(DynamicNetworkTool));
     let scoped = registry.scoped(ToolRegistryScope::from_names_and_prefixes(
@@ -69,17 +76,21 @@ fn registry_and_scoped_registry_forward_dynamic_network_effect() -> Result<()> {
     ));
     let ctx = ToolContext::new(".", 30);
 
-    assert_eq!(
-        registry.permission_network_effect(&ctx, &dynamic_call("read"))?,
-        Some(NetworkEffect::Read)
-    );
-    assert_eq!(
-        scoped.permission_network_effect(&ctx, &dynamic_call("mutate"))?,
-        Some(NetworkEffect::Mutate)
+    assert!(
+        registry
+            .permission_plan(&ctx, &dynamic_call("read"))?
+            .effects
+            .contains(&ToolPermissionEffect::NetworkRead)
     );
     assert!(
         scoped
-            .permission_network_effect(&ctx, &dynamic_call("invalid"))
+            .permission_plan(&ctx, &dynamic_call("mutate"))?
+            .effects
+            .contains(&ToolPermissionEffect::NetworkMutate)
+    );
+    assert!(
+        scoped
+            .permission_plan(&ctx, &dynamic_call("invalid"))
             .is_err()
     );
     Ok(())

@@ -36,6 +36,7 @@ use crate::{
         DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportDoctorReport,
         DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopTaskIntegrationReviewRequest,
         DesktopTaskIntegrationReviewView, DesktopTaskPauseCommandReceipt, DesktopTaskPauseRequest,
+        DesktopTerminalTaskCancelCommandReceipt, DesktopTerminalTaskCancelRequest,
         DesktopToolArtifactAvailability, DesktopToolArtifactPage, DesktopToolArtifactPageEncoding,
         DesktopToolArtifactReadRequest, DesktopToolArtifactSelector, DesktopTranscriptQuery,
         DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
@@ -653,6 +654,57 @@ impl DesktopHttpClient {
         .await
     }
 
+    /// Stops one exact persistent terminal task without reopening its foreground model run.
+    pub async fn cancel_terminal_task(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        task_id: &str,
+        expected_generation: u64,
+    ) -> Result<DesktopTerminalTaskCancelCommandReceipt, DesktopClientError> {
+        for value in [session_id, run_id, task_id] {
+            validate_stream_identity(value)?;
+        }
+        if expected_generation == 0 {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let command = self.command(
+            session_id,
+            None,
+            DesktopTerminalTaskCancelRequest {
+                task_id: task_id.to_owned(),
+                expected_generation,
+            },
+        );
+        let command_id = command.command_id.clone();
+        let client_id = command.client_id.clone();
+        let receipt: DesktopTerminalTaskCancelCommandReceipt = self
+            .post_json(
+                self.route(["runs", run_id, "terminal-cancel"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != command_id
+            || receipt.client_id != client_id
+            || receipt.session_id != session_id
+            || receipt.expected_stream_sequence.is_some()
+            || receipt.run_id != run_id
+            || receipt.terminal_task.task_id != task_id
+            || receipt.terminal_task.generation < expected_generation
+            || !matches!(
+                &receipt.terminal_task.status,
+                crate::DesktopTerminalTaskStatus::Exited { .. }
+                    | crate::DesktopTerminalTaskStatus::Failed { .. }
+                    | crate::DesktopTerminalTaskStatus::Cancelled
+                    | crate::DesktopTerminalTaskStatus::Interrupted
+            )
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(receipt)
+    }
+
     /// Pauses one exact durable Task through the run's foreground control owner.
     pub async fn pause_task(
         &self,
@@ -703,12 +755,35 @@ impl DesktopHttpClient {
         payload: DesktopApprovalDecisionRequest,
     ) -> Result<DesktopApprovalCommandReceipt, DesktopClientError> {
         let command = self.command(session_id, Some(expected_stream_sequence), payload);
-        self.post_json(
-            self.route(["runs", run_id, "approvals", call_id])?,
-            &command,
-            StatusCode::OK,
-        )
-        .await
+        let command_id = command.command_id.clone();
+        let client_id = command.client_id.clone();
+        let approval_request_id = command.payload.approval_request_id.clone();
+        let route = self.route(["runs", run_id, "approvals", call_id])?;
+        let first = self
+            .post_json(route.clone(), &command, StatusCode::OK)
+            .await;
+        // A lost response is ambiguous: the server may already have committed the decision.
+        // Reuse the exact command envelope so the durable command store returns its replayed
+        // receipt instead of submitting a second decision.
+        let receipt: DesktopApprovalCommandReceipt = match first {
+            Err(DesktopClientError::RequestFailed) => {
+                self.post_json(route, &command, StatusCode::OK).await?
+            }
+            result => result?,
+        };
+        if receipt.command_id != command_id
+            || receipt.client_id != client_id
+            || receipt.session_id != session_id
+            || receipt.run_id != run_id
+            || receipt.call_id != call_id
+            || receipt.approval_request_id != approval_request_id
+            || receipt.expected_stream_sequence != Some(expected_stream_sequence)
+            || receipt.decision.run_id != run_id
+            || receipt.decision.call_id != call_id
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        Ok(receipt)
     }
 
     /// Projects the current server-owned verification card for one session.
@@ -1462,9 +1537,6 @@ fn validate_conversation_display_page(
                 .as_deref()
                 .is_some_and(|value| !valid_tool_artifact_ref(value))
                 || persisted_bytes.is_some_and(|bytes| bytes > DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE)
-                || observed_bytes
-                    .zip(*persisted_bytes)
-                    .is_some_and(|(observed, persisted)| observed < persisted)
                 || artifact_ref.is_some() && artifact_availability.is_none()
                 || matches!(
                     artifact_availability,

@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,9 +12,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ControlEntry, ModelMessage, SkillConfig, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillTrustState, Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolMutationTracking, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    SkillTrustState, Tool, ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode,
+    ToolAnalysisStatus, ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking,
+    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec,
+    ToolSubject, ToolSubjectKind, ToolSubjectScope, sha256_hex,
 };
 
 use super::{LOAD_SKILL_TOOL_NAME, SkillDiscoveryReport, discover_skill_index_with_user_dir};
@@ -95,8 +98,74 @@ impl Tool for LoadSkillTool {
         ToolMutationTracking::None
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![skill_subject(required_skill_id(args)?)])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let skill_id = required_skill_id(args)?;
+        let descriptor = self
+            .snapshot
+            .descriptors
+            .iter()
+            .find(|descriptor| {
+                descriptor.id == skill_id && model_visible_skill_descriptor(descriptor)
+            })
+            .ok_or_else(|| anyhow!("skill {skill_id:?} is unavailable for model loading"))?;
+        let content_identity_proven = !descriptor.sha256.trim().is_empty();
+        let mut effects = BTreeSet::from([ToolPermissionEffect::FileRead]);
+        if !content_identity_proven {
+            effects.insert(ToolPermissionEffect::Unknown);
+        }
+        let analysis = if content_identity_proven {
+            ToolAnalysisStatus::Complete
+        } else {
+            ToolAnalysisStatus::Conservative {
+                reasons: vec![ToolAnalysisReason::new(
+                    ToolAnalysisReasonCode::UnresolvedPath,
+                    Some("trusted skill content identity is unavailable".to_owned()),
+                )],
+            }
+        };
+        let semantic_scope = content_identity_proven.then(|| {
+            let mut scope = ToolSemanticScope::new("skill:load", 1);
+            scope.qualifiers.insert(
+                "identity_sha256".to_owned(),
+                sha256_hex(
+                    format!(
+                        "{}\0{}\0{}",
+                        descriptor.id,
+                        descriptor.source.as_str(),
+                        descriptor.sha256
+                    )
+                    .as_bytes(),
+                ),
+            );
+            scope
+        });
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: ToolOperation::LoadSkill,
+            effects,
+            subjects: vec![skill_subject(skill_id)],
+            analysis,
+            containment: Default::default(),
+            semantic_scope,
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([
+                ("planner".to_owned(), "load_skill_v2".to_owned()),
+                (
+                    "skill_source".to_owned(),
+                    descriptor.source.as_str().to_owned(),
+                ),
+                (
+                    "skill_trust".to_owned(),
+                    descriptor.trust.as_str().to_owned(),
+                ),
+            ]),
+            safe_summary: ToolPermissionSummary {
+                title: "Load trusted skill".to_owned(),
+                detail: "Read one trusted reusable workflow into transient run context".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {

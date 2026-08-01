@@ -116,6 +116,8 @@ where
         advance_run_results(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
     );
+    let terminal_lifecycle_advanced =
+        advance_terminal_lifecycle_updates(context.message_tx, context.options, context.state);
     // Consume coalesced projection readiness after the P1 active-run terminal. A projection
     // invalidation becomes a persistent fail-closed state before any new authority work starts.
     let refresh_advanced = matches!(
@@ -131,6 +133,7 @@ where
     match advance_projection_reconciliation(context.message_tx, context.state) {
         ProjectionReconciliationControl::Blocked => {
             return if run_advanced
+                || terminal_lifecycle_advanced
                 || refresh_advanced
                 || oauth_advanced
                 || task_route_diagnostics_advanced
@@ -183,6 +186,7 @@ where
         advance_artifact_gc_start(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
     ) || run_advanced
+        || terminal_lifecycle_advanced
         || refresh_advanced
         || oauth_advanced
         || task_route_diagnostics_advanced
@@ -192,6 +196,131 @@ where
     } else {
         WorkerAdvancementControl::PollCommand
     }
+}
+
+fn advance_terminal_lifecycle_updates(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    options: &AgentRunOptions,
+    state: &mut WorkerLoopState,
+) -> bool {
+    let current_session_scope_id = state
+        .wake_coalescer
+        .current_projection_binding()
+        .map(|binding| binding.session_scope_id);
+    let mut advanced = false;
+    while let Some(routed) = state.readiness.terminal_lifecycle_updates.pop_front() {
+        advanced = true;
+        if current_session_scope_id.as_deref() != Some(routed.session_scope_id.as_str()) {
+            continue;
+        }
+        let entry = routed.update.task;
+        if state
+            .session
+            .terminal_lifecycle_generations
+            .get(&entry.handle.task_id)
+            .is_some_and(|generation| *generation >= entry.generation)
+        {
+            continue;
+        }
+        let identity = TerminalTaskControlIdentity {
+            session_scope_id: routed.session_scope_id.clone(),
+            run_id: routed.run_id.clone(),
+            task_id: entry.handle.task_id.as_str().to_owned(),
+            expected_generation: entry.generation,
+        };
+        state
+            .session
+            .terminal_lifecycle_generations
+            .insert(entry.handle.task_id.clone(), entry.generation);
+        if entry.status.is_active() {
+            state
+                .session
+                .active_terminal_task_ids
+                .insert(entry.handle.task_id.clone());
+            state
+                .session
+                .terminal_task_control_identities
+                .insert(entry.handle.task_id.clone(), identity.clone());
+        } else {
+            state
+                .session
+                .active_terminal_task_ids
+                .remove(&entry.handle.task_id);
+            state
+                .session
+                .terminal_task_control_identities
+                .remove(&entry.handle.task_id);
+        }
+
+        let control = ControlEntry::TerminalTask(entry.clone());
+        if let Some(session) = state.session.current.as_mut() {
+            session.record_durably_appended_controls([control]);
+            if entry.status.is_terminal()
+                && let Some(profile) = terminal_start_execution_profile_for_task(
+                    session.entries(),
+                    &entry.handle.task_id,
+                )
+                && let Err(error) = MutationEventRecorder::new(
+                    match JsonlSessionStore::new(&state.session.log_path) {
+                        Ok(store) => store,
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "failed to open terminal lifecycle mutation recorder for {}: {error:#}",
+                                entry.handle.task_id.as_str()
+                            )));
+                            continue;
+                        }
+                    },
+                )
+                .reconcile_execution_mutation_profile(&options.workspace_root, &profile)
+            {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "failed to reconcile terminal task {} workspace mutation after {}: {error:#}",
+                    entry.handle.task_id.as_str(),
+                    routed.run_id
+                )));
+            }
+            let entries = session.entries().to_vec();
+            let _ = message_tx.send(WorkerMessage::TerminalTaskUpdated {
+                identity,
+                entry,
+                entries,
+            });
+        } else {
+            state.session.detached_durable_controls.push(control);
+            if entry.status.is_terminal() {
+                let durable_entries = JsonlSessionStore::read_entries(&state.session.log_path);
+                match durable_entries {
+                    Ok(entries) => {
+                        if let Some(profile) = terminal_start_execution_profile_for_task(
+                            &entries,
+                            &entry.handle.task_id,
+                        ) && let Ok(store) = JsonlSessionStore::new(&state.session.log_path)
+                            && let Err(error) = MutationEventRecorder::new(store)
+                                .reconcile_execution_mutation_profile(
+                                    &options.workspace_root,
+                                    &profile,
+                                )
+                        {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "failed to reconcile detached terminal task {} workspace mutation after {}: {error:#}",
+                                entry.handle.task_id.as_str(),
+                                routed.run_id
+                            )));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "failed to read terminal task {} mutation profile after {}: {error:#}",
+                            entry.handle.task_id.as_str(),
+                            routed.run_id
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    advanced
 }
 
 fn advance_projection_reconciliation(
@@ -525,8 +654,7 @@ where
     let elicitation_audit_buffer: McpElicitationAuditBuffer =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
-    let run_id = state.run.next_id;
-    state.run.next_id = state.run.next_id.saturating_add(1);
+    let run_id = state.allocate_run_id();
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
     let cancellation_target = RunCancellationTarget::Task {
@@ -780,8 +908,7 @@ where
             let elicitation_audit_buffer: McpElicitationAuditBuffer =
                 Arc::new(std::sync::Mutex::new(Vec::new()));
             elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
-            let run_id = state.run.next_id;
-            state.run.next_id = state.run.next_id.saturating_add(1);
+            let run_id = state.allocate_run_id();
             let url_capability_registrar = run_session.user_url_capability_registrar();
             let image_attachment_resolver = run_session.image_attachment_resolver();
             let cancellation_target = RunCancellationTarget::Task {
@@ -1715,6 +1842,7 @@ where
                     message_tx,
                     Arc::clone(elicitation_handler),
                     &mut state.run.next_id,
+                    &state.terminal_lifecycle_router,
                     frozen_request,
                     format!("overflow-recovery-{}", prepared.source_physical_attempt_id),
                     state.session.tool_artifact_read_budget.clone(),
@@ -2302,36 +2430,6 @@ where
         ..
     } = context;
     if state.run.active.is_none() {
-        if !state.session.active_terminal_task_ids.is_empty()
-            && Instant::now() >= state.refresh.next_terminal_task_refresh_at
-        {
-            state.refresh.next_terminal_task_refresh_at =
-                Instant::now() + TERMINAL_TASK_REFRESH_INTERVAL;
-            let active_terminal_task_ids = state.session.active_terminal_task_ids.clone();
-            match refresh_terminal_task_statuses(
-                runtime,
-                agent.tool_registry(),
-                options,
-                &state.session.log_path,
-                &mut state.session.current,
-                &active_terminal_task_ids,
-            ) {
-                Ok(updates) => {
-                    for (entry, entries) in updates {
-                        state
-                            .session
-                            .active_terminal_task_ids
-                            .remove(&entry.handle.task_id);
-                        let _ =
-                            message_tx.send(WorkerMessage::TerminalTaskUpdated { entry, entries });
-                    }
-                }
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::Notice(error));
-                }
-            }
-        }
-
         let completed_agent_threads = collect_finished_background_agent_runs(
             runtime,
             &state.agent.background_runs,
@@ -2400,6 +2498,7 @@ where
                 message_tx,
                 Arc::clone(elicitation_handler),
                 &mut state.run.next_id,
+                &state.terminal_lifecycle_router,
                 state.session.tool_artifact_read_budget.clone(),
                 continuation_threads,
             );
@@ -2459,6 +2558,7 @@ where
                 message_tx,
                 Arc::clone(elicitation_handler),
                 &mut state.run.next_id,
+                &state.terminal_lifecycle_router,
                 state.session.tool_artifact_read_budget.clone(),
                 continuation_threads,
             );
@@ -2768,6 +2868,7 @@ where
                         Arc::clone(role_provider_builder),
                         &state.session.log_path,
                         &mut state.run.next_id,
+                        &state.terminal_lifecycle_router,
                         tool_artifact_read_budget,
                         candidate,
                     );

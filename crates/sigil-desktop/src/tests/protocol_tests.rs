@@ -22,6 +22,7 @@ fn valid_server_info() -> DesktopServerInfo {
             "live_events": true,
             "approval": true,
             "cancellation": true,
+            "terminal_task_cancel": true,
             "task_pause": true,
             "verification": true,
             "task_integration": true,
@@ -54,7 +55,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
     ));
 
     let mut missing_capability = valid;
-    missing_capability.capabilities.task_pause = false;
+    missing_capability.capabilities.terminal_task_cancel = false;
     assert!(matches!(
         missing_capability.validate(),
         Err("required desktop capability is unavailable")
@@ -82,6 +83,7 @@ fn exact_server_info_rejects_unknown_fields() {
             "live_events": true,
             "approval": true,
             "cancellation": true,
+            "terminal_task_cancel": true,
             "task_pause": true,
             "verification": true,
             "task_integration": true,

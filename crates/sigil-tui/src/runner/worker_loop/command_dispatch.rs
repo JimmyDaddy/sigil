@@ -98,17 +98,6 @@ pub(in crate::runner) enum RunPlanCommand {
         arguments: String,
         reasoning_effort: ReasoningEffort,
     },
-    ApprovalDecision {
-        call_id: String,
-        approved: bool,
-    },
-    ApprovalSessionDecision {
-        call_id: String,
-    },
-    ApprovalDecisionWithArgs {
-        call_id: String,
-        args_json: String,
-    },
     ApprovalCommand(WorkerCommandEnvelope<WorkerApprovalCommand>),
     PauseTask {
         request: sigil_kernel::TaskPauseRequest,
@@ -231,7 +220,7 @@ pub(in crate::runner) enum AgentTaskCommand {
     },
     BackgroundActiveAgent,
     CancelTerminalTask {
-        task_id: String,
+        identity: TerminalTaskControlIdentity,
     },
     CreateTaskFromPlan {
         plan_id: String,
@@ -383,18 +372,6 @@ pub(in crate::runner) fn classify_worker_command(
             arguments,
             reasoning_effort,
         }),
-        WorkerCommand::ApprovalDecision { call_id, approved } => {
-            ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovalDecision { call_id, approved })
-        }
-        WorkerCommand::ApprovalSessionDecision { call_id } => {
-            ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovalSessionDecision { call_id })
-        }
-        WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json } => {
-            ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovalDecisionWithArgs {
-                call_id,
-                args_json,
-            })
-        }
         WorkerCommand::ApprovalCommand(command) => {
             ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovalCommand(command))
         }
@@ -582,8 +559,8 @@ pub(in crate::runner) fn classify_worker_command(
         WorkerCommand::BackgroundActiveAgent => {
             ClassifiedWorkerCommand::AgentTask(AgentTaskCommand::BackgroundActiveAgent)
         }
-        WorkerCommand::CancelTerminalTask { task_id } => {
-            ClassifiedWorkerCommand::AgentTask(AgentTaskCommand::CancelTerminalTask { task_id })
+        WorkerCommand::CancelTerminalTask { identity } => {
+            ClassifiedWorkerCommand::AgentTask(AgentTaskCommand::CancelTerminalTask { identity })
         }
         WorkerCommand::CreateTaskFromPlan {
             plan_id,

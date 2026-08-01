@@ -31,6 +31,16 @@ fn agent_run_result() -> AgentRunResult {
 
 fn approval_message(call_id: &str) -> WorkerMessage {
     WorkerMessage::Event(Box::new(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity(call_id),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: call_id.to_owned(),
             name: "private-tool-canary".to_owned(),
@@ -63,9 +73,23 @@ fn approval_message(call_id: &str) -> WorkerMessage {
 fn approval_resolved_message(call_id: &str) -> WorkerMessage {
     WorkerMessage::Event(Box::new(RunEvent::ToolApprovalResolved {
         call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
         approved: true,
         reason: None,
     }))
+}
+
+fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
+    sigil_kernel::ApprovalRequestIdentityV2 {
+        session_id: "session-attention".to_owned(),
+        run_id: "run-attention".to_owned(),
+        call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
+        plan_hash: "plan-attention".to_owned(),
+        policy_version: "policy-attention".to_owned(),
+        execution_binding_hash: "binding-attention".to_owned(),
+        expires_at_ms: u64::MAX,
+    }
 }
 
 #[test]

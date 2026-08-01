@@ -563,7 +563,7 @@ impl ToolOutputPressureProjectionV1 {
             }
             ControlEntry::ToolApprovalSessionGrant(grant) => {
                 self.apply_signal_to_call(
-                    &grant.call_id,
+                    &grant.source_call_id,
                     ToolOutputSignalEnrichmentV1 {
                         approval_receipt_refs: vec![event_id.to_owned()],
                         ..ToolOutputSignalEnrichmentV1::default()

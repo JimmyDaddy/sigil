@@ -17,7 +17,7 @@ mode = "manual"
 | --- | --- | --- |
 | `read-only` | Exploration and review | Workspace reads and recognized read-only commands can run; writes and mutating or unclassified commands are denied. Network still follows its own policy. |
 | `manual` | Normal interactive work | Reads proceed; changes and commands usually ask. |
-| `auto-edit` | Supervised file editing | Workspace edits can proceed; commands still usually ask. |
+| `auto-edit` | Supervised file editing | Workspace edits can proceed. Recognized workspace validation can proceed only when the selected execution backend proves every requested containment capability; otherwise Sigil asks. |
 | `danger-full-access` | Closely supervised automation | Local access is broad, but network, protected paths, and other hard limits still apply. |
 
 `manual` is the recommended starting point. A specific deny always remains stricter than a broad mode.
@@ -26,7 +26,13 @@ mode = "manual"
 
 Check the summary, path or destination, command, and diff before choosing a decision. A plan or earlier approval is not permission for a different action. Headless `sigil run` cannot open an approval modal; an unresolved `ask` action fails.
 
-Interactive approval surfaces show the safely projected command or tool input and update the recorded card after a decision. **Allow for session** appears only when the policy can derive a bounded grant for equivalent requests; it does not authorize unrelated commands, destinations, or risk classes. Recognized read-only shell structures may run as reads, while mutating or unclassified shell syntax remains subject to the configured command policy.
+Interactive approval surfaces show the safely projected command or tool input, the effects Sigil detected, the affected targets, and any containment capability the current backend cannot prove. Risk labels explain what an action may do; they do not decide approval by themselves. A command can therefore be medium risk and run automatically under proven containment, or require approval when the same containment is unavailable.
+
+After the control route accepts a decision, Desktop and TUI immediately remove the decision buttons and show that execution is resuming. The later execution event changes that state to running. If the server cannot confirm whether the active run received the decision, the surface shows delivery as uncertain, disables duplicate decisions, and converges from the authoritative run snapshot instead of treating the action as pending again. Retrying a temporarily interrupted decision reuses the same exact command id and request identity; an expired request, changed command, changed policy, or changed execution profile must be reviewed again.
+
+**Allow for session** appears only when Sigil can derive a bounded semantic grant for equivalent requests. The grant binds the command family and arguments, subjects, effect ceiling, workspace, policy version, execution backend, containment profile, and environment profile. It does not authorize arbitrary Shell commands, a different validation step, a changed destination, remote mutation, destructive or dynamic code, or a different risk class.
+
+Sigil analyzes POSIX compound Shell commands one child at a time. Operators such as `&&`, `||`, `;`, and pipelines do not make an otherwise recognized validation chain “unknown”. Redirections, wrappers, dangerous flags, dynamic expansion, and nested executors are still evaluated separately; incomplete or unsupported analysis fails closed to `ask` (or `deny` in a headless run).
 
 ## Narrow Command And Path Rules
 
@@ -37,7 +43,7 @@ ask = ["cargo clippy *"]
 deny = ["git push*", "rm *"]
 ```
 
-Prefer a few narrow patterns. When several rules match, deny wins over ask, and ask wins over allow.
+Prefer a few narrow patterns. When several rules match, deny wins over ask, and ask wins over allow. A raw command pattern records user intent; it is not a sandbox. An `allow` pattern cannot override a protected target, dynamic or invalid Shell analysis, unresolved destinations, privilege escalation, or missing mandatory containment.
 
 <!-- public-doc-topic: external-directory -->
 
@@ -85,7 +91,9 @@ profile = "workspace_write"
 fallback = "deny"
 ```
 
-Availability and protection depend on the host, backend, profile, and action. A sandboxed command does not make remote services, MCP servers, plugins, containers, or every process path safe. With `fallback = "deny"`, an unavailable backend stops the action instead of silently running it locally. Run `sigil doctor` after changing execution settings.
+Availability and protection depend on the host, backend, profile, and action. Sigil binds every automatic execution or session grant to the backend's actual capability receipt; requested isolation is never treated as proof by itself. In particular, the current macOS Seatbelt backend does not claim network isolation, so commands that execute workspace code, such as `cargo check`, `cargo test`, or `cargo clippy`, require explicit one-time/session authority unless another selected backend proves the requested network denial. A sandboxed command does not make remote services, MCP servers, plugins, containers, or every process path safe. With `fallback = "deny"`, an unavailable backend stops the action instead of silently running it locally. Run `sigil doctor` after changing execution settings.
+
+Finite checks and builds run through the foreground Shell tool and produce one final result. Persistent servers and interactive programs use an explicit terminal task. Terminal tasks publish readiness, output-generation, exit, cancellation, and interruption changes to Desktop and TUI; an agent that needs to wait uses one event-driven wait instead of repeatedly reading the log. Log reads remain explicit inspection operations.
 
 Verification commands have their own declared behavior and approval needs. Configure them through [Advanced configuration](advanced-configuration.md#verification); field defaults are in [Configuration Reference](configuration-reference.md#permission).
 

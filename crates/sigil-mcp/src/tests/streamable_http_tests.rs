@@ -13,6 +13,7 @@ use serde_json::json;
 use sigil_kernel::{RunCancellationOwner, SecretString};
 
 use super::*;
+use crate::McpToolAnnotations;
 
 #[path = "streamable_http_test_support.rs"]
 mod support;
@@ -320,6 +321,7 @@ async fn streamable_http_cancel_sends_at_most_one_notification_without_replaying
         input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
         output_schema: None,
         task_support: None,
+        annotations: McpToolAnnotations::default(),
     };
     let owner = RunCancellationOwner::new();
     let handle = owner.handle();
@@ -1012,6 +1014,7 @@ fn empty_tool(name: &str) -> McpRemoteTool {
         input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
         output_schema: None,
         task_support: None,
+        annotations: McpToolAnnotations::default(),
     }
 }
 

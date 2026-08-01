@@ -23,28 +23,30 @@ use sigil_kernel::{
     AgentUsageSummary, ApprovalMode, AutoApproveHandler, ChangeSet, ChangeSetFile,
     ChangeSetFileAction, ChangeSetId, ChangeSetRisk, CompactionConfig, CompletionRequest,
     ConnectionId, ControlEntry, ConversationInputQueueId, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DelegationAuthority, DelegationAuthorityRecord, EventHandler, IntegrationBaseRepresentation,
-    IntegrationContentClass, IntegrationEffect, IntegrationObservedEffect, IntegrationPlanId,
-    IntegrationProposalFacts, IntegrationProposalSpec, InteractionMode,
-    IsolatedWorkspaceCleanupStatus, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
-    ModelRef, MultiAgentMode, NetworkPolicy, PermissionConfig, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanId, PlanPermissionGrantedEntry, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRateLimitError,
-    ProviderRequestRejection, ReasoningStreamSupport, ResolvedModelRoute, RootConfig,
-    RunCancellationOwner, RunEvent, Session, SessionConfig, SessionLogEntry, SessionRef,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact,
-    TaskChildChangeSetProposal, TaskChildSessionBatchCommitEnvelope,
-    TaskChildSessionBatchPreparation, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal,
-    TaskIntegrationRunRequest, TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose,
-    TaskParticipantRetryError, TaskParticipantRetryProof, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability,
-    TaskRouteStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry,
-    TaskSynthesisSessionRunRequest, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
-    ToolError, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, UsageStats,
-    VerificationScope, WorkspaceConfig, WriteIsolationMode, build_integration_plan,
-    build_workspace_snapshot, child_session_ref, decode_changeset_only_child_output,
+    DeclaredToolPermissionFacts, DelegationAuthority, DelegationAuthorityRecord, EventHandler,
+    IntegrationBaseRepresentation, IntegrationContentClass, IntegrationEffect,
+    IntegrationObservedEffect, IntegrationPlanId, IntegrationProposalFacts,
+    IntegrationProposalSpec, InteractionMode, IsolatedWorkspaceCleanupStatus, JsonlSessionStore,
+    MemoryConfig, MessageRole, ModelMessage, ModelRef, MultiAgentMode, NetworkPolicy,
+    PermissionConfig, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
+    PlanPermissionGrantedEntry, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderPhysicalAttemptOutcome, ProviderRateLimitError, ProviderRequestRejection,
+    ReasoningStreamSupport, ResolvedModelRoute, RootConfig, RunCancellationOwner, RunEvent,
+    Session, SessionConfig, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildChangeSetArtifact, TaskChildChangeSetProposal,
+    TaskChildSessionBatchCommitEnvelope, TaskChildSessionBatchPreparation,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus,
+    TaskGuidanceAssessmentContext, TaskId, TaskIntegrationProposal, TaskIntegrationRunRequest,
+    TaskIsolationMode, TaskParticipantAttemptId, TaskParticipantPurpose, TaskParticipantRetryError,
+    TaskParticipantRetryProof, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability, TaskRouteStatus, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunRequest,
+    Tool, ToolAccess, ToolAnalysisStatus, ToolCall, ToolCategory, ToolContext, ToolError,
+    ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolPermissionEffect,
+    ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, UsageStats, VerificationScope, WorkspaceConfig, WriteIsolationMode,
+    build_integration_plan, build_workspace_snapshot, child_session_ref,
+    declared_tool_permission_plan, decode_changeset_only_child_output, stable_event_hash,
     stable_workspace_id, task_participant_attempt_id, task_participant_logical_run_id,
     task_participant_session_ref,
 };
@@ -1094,12 +1096,19 @@ impl Tool for ApprovalRouteTool {
         }
     }
 
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Ask))
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access: ToolAccess::Read,
+                operation: ToolOperation::Read,
+                network_effect: None,
+                subjects: Vec::new(),
+                tool_default_mode: Some(ApprovalMode::Ask),
+            },
+        )
     }
 
     async fn execute(
@@ -2879,6 +2888,45 @@ fn planner_runtime_tool_view_exposes_only_bounded_discovery() {
     );
 }
 
+#[test]
+fn planner_discovery_permission_plan_models_read_and_child_lifecycle_effects() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let base = ToolRegistry::new();
+    let registry = planner_tools_with_discovery(&base, 2);
+    let context = ToolContext::new(workspace.path(), 5);
+    let call = ToolCall {
+        id: "discovery-plan".to_owned(),
+        name: REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "probes": [{
+                "probe_id": "runtime",
+                "title": "Inspect runtime",
+                "objective": "Find the runtime ownership boundary",
+                "path_hints": ["crates/sigil-runtime"]
+            }]
+        })
+        .to_string(),
+    };
+    let plan = registry.permission_plan(&context, &call)?;
+    let repeated = registry.permission_plan(&context, &call)?;
+
+    assert_eq!(plan.plan_hash, repeated.plan_hash);
+    assert_eq!(plan.subjects, repeated.subjects);
+    assert_eq!(plan.operation, ToolOperation::SpawnAgent);
+    assert_eq!(plan.analysis, ToolAnalysisStatus::Complete);
+    assert!(plan.effects.contains(&ToolPermissionEffect::FileRead));
+    assert!(plan.effects.contains(&ToolPermissionEffect::AgentLifecycle));
+    assert!(!plan.effects.contains(&ToolPermissionEffect::ProcessControl));
+    assert!(!plan.effects.contains(&ToolPermissionEffect::Unknown));
+    assert_eq!(plan.tool_default_mode, Some(ApprovalMode::Allow));
+    assert_eq!(plan.subjects.len(), 2);
+    assert_eq!(
+        plan.analysis_bindings.get("planner").map(String::as_str),
+        Some("task_discovery_v2")
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn planner_worktree_capability_requires_interactive_git_workspace() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -3187,7 +3235,11 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
     let mut approval = CountingApprovalHandler::default();
 
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(if cfg!(windows) { 10 } else { 2 }),
+        // This is a harness deadlock guard, not a product latency assertion. The provider
+        // assertions below prove that discovery resumes from delivered results without a
+        // polling turn; allow enough wall time for child-session persistence under a fully
+        // parallel workspace test run.
+        std::time::Duration::from_secs(15),
         runner.run_planner_session(
             &mut session,
             TaskPlannerSessionRunRequest {
@@ -3372,7 +3424,10 @@ async fn planner_discovery_rejects_overlapping_batch_without_consuming_valid_ret
             .lock()
             .expect("planner discovery error observation lock should not be poisoned")
             .as_deref()
-            .is_some_and(|error| error.contains("whole_batch_rejected"))
+            .is_some_and(|error| {
+                error.contains(r#""kind":"invalid_input""#)
+                    && error.contains("overlapping path hints")
+            })
     );
     let projection = session.agent_thread_state_projection();
     assert_eq!(projection.threads.len(), 2);
@@ -5837,7 +5892,7 @@ fn child_terminal_facts_treat_unclassified_shell_as_global() -> Result<()> {
         changed_files: vec!["src/lib.rs".to_owned()],
         metadata: ToolResultMeta::default(),
         error: None,
-        model_content_hash: Some("sha256-shell-result".to_owned()),
+        model_content_hash: Some(stable_event_hash(b"shell-result")),
     })))?;
     let mut proposal = decode_changeset_only_child_output(
         r#"{

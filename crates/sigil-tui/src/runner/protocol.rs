@@ -31,7 +31,7 @@ pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationRespons
 pub(crate) type EgressDisclosureReceiptTx =
     oneshot::Sender<Result<DisclosurePresentationReceipt, DisclosurePresentationError>>;
 
-pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 2;
 
 /// Local admission state for a reviewed V2 portable compaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,9 +166,46 @@ impl<T> WorkerCommandEnvelope<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerApprovalCommand {
-    Decision { call_id: String, approved: bool },
-    DecisionForSession { call_id: String },
-    DecisionWithArgs { call_id: String, args_json: String },
+    Decision {
+        call_id: String,
+        approval_request_id: String,
+        approved: bool,
+    },
+    DecisionForSession {
+        call_id: String,
+        approval_request_id: String,
+    },
+    DecisionWithArgs {
+        call_id: String,
+        approval_request_id: String,
+        args_json: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerApprovalDecision {
+    ApproveOnce,
+    ApproveForSession,
+    ApproveWithArgs,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerApprovalRouteState {
+    DecisionAccepted,
+    Rejected,
+    DeliveryUncertain,
+}
+
+/// Typed acknowledgement for one exact TUI approval command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerApprovalCommandReceipt {
+    pub command_id: String,
+    pub approval_request_id: String,
+    pub call_id: String,
+    pub decision: WorkerApprovalDecision,
+    pub route_state: WorkerApprovalRouteState,
+    pub replayed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,22 +301,11 @@ pub enum WorkerCommand {
     PauseTask {
         request: TaskPauseRequest,
     },
-    ApprovalDecision {
-        call_id: String,
-        approved: bool,
-    },
-    ApprovalSessionDecision {
-        call_id: String,
-    },
-    ApprovalDecisionWithArgs {
-        call_id: String,
-        args_json: String,
-    },
     ApprovalCommand(WorkerCommandEnvelope<WorkerApprovalCommand>),
     BackgroundActiveAgent,
     CancelRun,
     CancelTerminalTask {
-        task_id: String,
+        identity: TerminalTaskControlIdentity,
     },
     CloseAgent {
         thread_id: AgentThreadId,
@@ -424,13 +450,19 @@ pub enum WorkerCommand {
     Shutdown,
 }
 
+/// Exact immutable owner identity required to stop one persistent terminal task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTaskControlIdentity {
+    pub session_scope_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub expected_generation: u64,
+}
+
 pub(in crate::runner) fn is_urgent_worker_command(command: &WorkerCommand) -> bool {
     matches!(
         command,
-        WorkerCommand::ApprovalDecision { .. }
-            | WorkerCommand::ApprovalSessionDecision { .. }
-            | WorkerCommand::ApprovalDecisionWithArgs { .. }
-            | WorkerCommand::ApprovalCommand(_)
+        WorkerCommand::ApprovalCommand(_)
             | WorkerCommand::PauseTask { .. }
             | WorkerCommand::CancelRun
             | WorkerCommand::CancelTerminalTask { .. }
@@ -557,6 +589,7 @@ impl std::error::Error for WorkerCommandSendError {}
 pub enum WorkerMessage {
     WorkerReady,
     Event(Box<RunEvent>),
+    ApprovalCommandReceipt(WorkerApprovalCommandReceipt),
     Notice(String),
     RunStarted {
         prompt: String,
@@ -653,6 +686,7 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     TerminalTaskUpdated {
+        identity: TerminalTaskControlIdentity,
         entry: TerminalTaskEntry,
         entries: Vec<SessionLogEntry>,
     },

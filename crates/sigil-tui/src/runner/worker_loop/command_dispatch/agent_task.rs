@@ -79,8 +79,7 @@ where
                 .with_background_runs(state.agent.background_runs.clone());
                 let options = options.clone();
                 let task_result_tx = state.run.result_tx.clone();
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
                     Err(error) => {
@@ -249,8 +248,7 @@ where
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -342,8 +340,7 @@ where
                         continue;
                     }
                 };
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -499,8 +496,7 @@ where
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -607,25 +603,71 @@ where
                     }
                 }
             }
-            AgentTaskCommand::CancelTerminalTask { task_id } => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before cancelling terminal task".to_owned(),
-                    ));
+            AgentTaskCommand::CancelTerminalTask { identity } => {
+                let terminal_task_id = match TerminalTaskId::new(identity.task_id.clone()) {
+                    Ok(task_id) => task_id,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "invalid terminal task identity: {error:#}"
+                        )));
+                        continue;
+                    }
+                };
+                let current_scope = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(Session::session_scope_id);
+                let exact_owner = state
+                    .session
+                    .terminal_task_control_identities
+                    .get(&terminal_task_id)
+                    .is_some_and(|current| current == &identity);
+                if current_scope != Some(identity.session_scope_id.as_str()) || !exact_owner {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "terminal task {} owner changed; refresh before cancelling",
+                        identity.task_id
+                    )));
                     continue;
                 }
+                let Some(terminal_control) = state.terminal_control.clone() else {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "terminal task live owner is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
                 match cancel_terminal_task(
                     runtime,
                     agent.tool_registry().clone(),
+                    &terminal_control,
                     root_config,
                     options,
                     &state.session.log_path,
                     &mut state.session.current,
-                    task_id,
+                    &identity,
                 ) {
                     Ok((entry, entries)) => {
-                        let _ =
-                            message_tx.send(WorkerMessage::TerminalTaskUpdated { entry, entries });
+                        state
+                            .session
+                            .active_terminal_task_ids
+                            .remove(&entry.handle.task_id);
+                        state
+                            .session
+                            .terminal_lifecycle_generations
+                            .insert(entry.handle.task_id.clone(), entry.generation);
+                        state
+                            .session
+                            .terminal_task_control_identities
+                            .remove(&entry.handle.task_id);
+                        let receipt_identity = TerminalTaskControlIdentity {
+                            expected_generation: entry.generation,
+                            ..identity
+                        };
+                        let _ = message_tx.send(WorkerMessage::TerminalTaskUpdated {
+                            identity: receipt_identity,
+                            entry,
+                            entries,
+                        });
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::Notice(error));
@@ -703,8 +745,7 @@ where
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = state.run.next_id;
-                state.run.next_id += 1;
+                let run_id = state.allocate_run_id();
                 let (
                     cancellation_owner,
                     cancellation_recorder,

@@ -485,13 +485,40 @@ impl AppState {
         self.session_log_path = session_log_path;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_name;
-        self.runtime.model_route = entries.iter().find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::SessionIdentity {
-                resolved_model_route: Some(route),
-                ..
-            }) => Some(route.clone()),
-            _ => None,
-        });
+        let (_, projected_provider, projected_model, projected_route) = entries.iter().fold(
+            (
+                false,
+                self.runtime.provider_name.clone(),
+                self.runtime.model_name.clone(),
+                None,
+            ),
+            |(identity_seen, provider, model, route), entry| match entry {
+                SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                    provider_name,
+                    model_name,
+                    resolved_model_route,
+                }) if !identity_seen => (
+                    true,
+                    provider_name.clone(),
+                    model_name.clone(),
+                    resolved_model_route.clone(),
+                ),
+                SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                    provider_name,
+                    model_name,
+                    resolved_model_route,
+                }) if identity_seen => (
+                    true,
+                    provider_name.clone(),
+                    model_name.clone(),
+                    Some(resolved_model_route.clone()),
+                ),
+                _ => (identity_seen, provider, model, route),
+            },
+        );
+        self.runtime.provider_name = projected_provider;
+        self.runtime.model_name = projected_model;
+        self.runtime.model_route = projected_route;
         self.session_id = session_id_from_path(&self.session_log_path)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         self.agent_panel.active_view = super::AgentView::Main;

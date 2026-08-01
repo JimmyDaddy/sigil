@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::DesktopPendingApproval;
+use crate::{
+    DesktopPendingApproval, DesktopSessionGrantUnavailableReason, DesktopTerminalLifecycleView,
+    DesktopTerminalReadinessKind, DesktopTerminalReadinessStatus, DesktopTerminalTaskStatus,
+};
 
 /// Current HTTP protocol-event envelope accepted by the desktop client.
 pub const DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 2;
 /// Current public run-event envelope accepted by the desktop client.
-pub const DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION: u32 = 2;
 
 const MAX_TIMELINE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_MACHINE_LABEL_BYTES: usize = 512;
@@ -130,8 +133,119 @@ pub struct DesktopPublicToolPreview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolSubject {
+    pub normalized: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolAnalysisReason {
+    pub code: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DesktopPublicToolAnalysisStatus {
+    Complete,
+    Conservative {
+        reasons: Vec<DesktopPublicToolAnalysisReason>,
+    },
+    Unsupported {
+        reason: DesktopPublicToolAnalysisReason,
+    },
+    Invalid {
+        reason: DesktopPublicToolAnalysisReason,
+    },
+}
+
+impl DesktopPublicToolAnalysisStatus {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Conservative { .. } => "conservative",
+            Self::Unsupported { .. } => "unsupported",
+            Self::Invalid { .. } => "invalid",
+        }
+    }
+
+    fn reasons(&self) -> Vec<String> {
+        let reasons = match self {
+            Self::Complete => return Vec::new(),
+            Self::Conservative { reasons } => reasons.iter().collect::<Vec<_>>(),
+            Self::Unsupported { reason } | Self::Invalid { reason } => vec![reason],
+        };
+        reasons
+            .into_iter()
+            .take(8)
+            .map(|reason| {
+                reason
+                    .detail
+                    .as_deref()
+                    .map_or_else(|| bounded_text(&reason.code), bounded_text)
+            })
+            .collect()
+    }
+
+    fn reason_codes(&self) -> Vec<String> {
+        let reasons = match self {
+            Self::Complete => return Vec::new(),
+            Self::Conservative { reasons } => reasons.iter().collect::<Vec<_>>(),
+            Self::Unsupported { reason } | Self::Invalid { reason } => vec![reason],
+        };
+        reasons
+            .into_iter()
+            .take(8)
+            .map(|reason| bounded_text(&reason.code))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicExecutionContainment {
+    pub filesystem: String,
+    pub network: String,
+    pub process: String,
+    pub environment: String,
+    pub persistent_process: bool,
+}
+
+impl DesktopPublicExecutionContainment {
+    fn facts(&self) -> Vec<String> {
+        [
+            format!("filesystem={}", bounded_text(&self.filesystem)),
+            format!("network={}", bounded_text(&self.network)),
+            format!("process={}", bounded_text(&self.process)),
+            format!("environment={}", bounded_text(&self.environment)),
+            format!("persistent_process={}", self.persistent_process),
+        ]
+        .into_iter()
+        .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicToolPermissionSummary {
+    pub title: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DesktopPublicPermissionDecisionReason {
+    pub code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPublicControlEvent {
     pub kind: String,
+    #[serde(default)]
+    pub payload: Option<Value>,
 }
 
 /// Typed public event payload.
@@ -220,6 +334,17 @@ pub enum DesktopPublicRunEventKind {
     },
     ApprovalRequested {
         call: DesktopPublicToolCall,
+        session_grant_available: bool,
+        session_grant_unavailable_reason: Option<DesktopSessionGrantUnavailableReason>,
+        #[serde(default)]
+        effects: Vec<String>,
+        analysis: DesktopPublicToolAnalysisStatus,
+        containment: Box<DesktopPublicExecutionContainment>,
+        safe_summary: DesktopPublicToolPermissionSummary,
+        #[serde(default)]
+        decision_reasons: Vec<DesktopPublicPermissionDecisionReason>,
+        #[serde(default)]
+        subjects: Vec<DesktopPublicToolSubject>,
         #[serde(default)]
         operation: Option<String>,
         #[serde(default)]
@@ -227,10 +352,11 @@ pub enum DesktopPublicRunEventKind {
         #[serde(default)]
         snapshot_required: bool,
         #[serde(default)]
-        preview: Option<DesktopPublicToolPreview>,
+        preview: Option<Box<DesktopPublicToolPreview>>,
     },
     ApprovalResolved {
         call_id: String,
+        approval_request_id: String,
         approved: bool,
         #[serde(default)]
         reason: Option<String>,
@@ -240,6 +366,9 @@ pub enum DesktopPublicRunEventKind {
     },
     ToolProgress {
         progress: DesktopPublicToolProgress,
+    },
+    TerminalLifecycle {
+        event: DesktopTerminalLifecycleView,
     },
     Usage {},
     ContinuationState {},
@@ -275,6 +404,7 @@ pub enum DesktopTimelineEventKind {
     ToolStarted,
     ToolCompleted,
     ToolProgress,
+    TerminalLifecycle,
     ToolResult,
     ApprovalRequested,
     ApprovalResolved,
@@ -335,6 +465,23 @@ pub struct DesktopTimelineApproval {
     pub expires_at_ms: u64,
     pub session_grant_available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_grant_unavailable_reason: Option<DesktopSessionGrantUnavailableReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subjects: Vec<String>,
+    pub analysis_status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis_reason_codes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub containment: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_reasons: Vec<String>,
+    pub safe_summary_title: String,
+    pub safe_summary_detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -380,7 +527,48 @@ pub struct DesktopTimelineEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<DesktopTimelineApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_execution: Option<DesktopTimelineToolExecution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<DesktopTimelineTask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_task: Option<DesktopTimelineTerminalTask>,
+}
+
+/// Exact bounded execution transition projected from an opaque public control payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineToolExecution {
+    pub call_id: String,
+    pub tool_name: String,
+    pub status: String,
+}
+
+/// Bounded terminal owner facts safe to forward to the renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineTerminalTask {
+    pub task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_profile: Option<String>,
+    pub generation: u64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    pub readiness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_at_ms: Option<u64>,
+    pub total_output_bytes: u64,
+    pub emitted_at_ms: u64,
 }
 
 impl DesktopProtocolEvent {
@@ -415,6 +603,25 @@ impl DesktopProtocolEvent {
         let assistant_kind = match event {
             DesktopPublicRunEventKind::AssistantMessage { message } => {
                 message.assistant_kind.as_deref().map(bounded_text)
+            }
+            _ => None,
+        };
+        let terminal_task = match event {
+            DesktopPublicRunEventKind::TerminalLifecycle { event } => {
+                Some(DesktopTimelineTerminalTask::try_from(event)?)
+            }
+            _ => None,
+        };
+        let approval_request_id = match event {
+            DesktopPublicRunEventKind::ApprovalResolved {
+                approval_request_id,
+                ..
+            } => Some(bounded_machine_label(approval_request_id)?),
+            _ => None,
+        };
+        let tool_execution = match event {
+            DesktopPublicRunEventKind::Control { control } => {
+                project_tool_execution_control(control)?
             }
             _ => None,
         };
@@ -517,6 +724,12 @@ impl DesktopProtocolEvent {
                 Some(bounded_text(&progress.call_id)),
                 Some(bounded_text(&progress.status)),
             ),
+            DesktopPublicRunEventKind::TerminalLifecycle { event } => (
+                DesktopTimelineEventKind::TerminalLifecycle,
+                None,
+                Some(bounded_machine_label(&event.task_id)?),
+                terminal_task.as_ref().map(|task| task.status.clone()),
+            ),
             DesktopPublicRunEventKind::ToolResult { result } => (
                 DesktopTimelineEventKind::ToolResult,
                 Some(bounded_text(&result.content)),
@@ -531,6 +744,7 @@ impl DesktopProtocolEvent {
             ),
             DesktopPublicRunEventKind::ApprovalResolved {
                 call_id,
+                approval_request_id: _,
                 approved,
                 reason,
             } => (
@@ -601,7 +815,10 @@ impl DesktopProtocolEvent {
             assistant_kind,
             tool_input,
             approval,
+            approval_request_id,
+            tool_execution,
             task,
+            terminal_task,
         })
     }
 
@@ -655,8 +872,19 @@ impl DesktopProtocolEvent {
         if projected_tool_name != Some(guard.tool_name.as_str()) {
             return Err(DesktopProtocolEventError::InvalidApproval);
         }
+        if guard.session_grant_available != guard.session_grant_unavailable_reason.is_none() {
+            return Err(DesktopProtocolEventError::InvalidApproval);
+        }
         let DesktopPublicRunEventKind::ApprovalRequested {
             call,
+            session_grant_available,
+            session_grant_unavailable_reason,
+            effects,
+            analysis,
+            containment,
+            safe_summary,
+            decision_reasons,
+            subjects,
             operation,
             risk,
             snapshot_required,
@@ -665,6 +893,11 @@ impl DesktopProtocolEvent {
         else {
             return Err(DesktopProtocolEventError::InvalidApproval);
         };
+        if guard.session_grant_available != *session_grant_available
+            || guard.session_grant_unavailable_reason != *session_grant_unavailable_reason
+        {
+            return Err(DesktopProtocolEventError::InvalidApproval);
+        }
         Ok(DesktopTimelineApproval {
             call_id: bounded_machine_label(&guard.call_id)?,
             tool_name: bounded_machine_label(&guard.tool_name)?,
@@ -673,6 +906,34 @@ impl DesktopProtocolEvent {
             policy_version: bounded_machine_label(&guard.policy_version)?,
             expires_at_ms: guard.expires_at_ms,
             session_grant_available: guard.session_grant_available,
+            session_grant_unavailable_reason: guard.session_grant_unavailable_reason,
+            effects: effects
+                .iter()
+                .take(16)
+                .map(|effect| bounded_text(effect))
+                .collect(),
+            subjects: subjects
+                .iter()
+                .take(16)
+                .map(|subject| bounded_text(&subject.normalized))
+                .collect(),
+            analysis_status: analysis.status().to_owned(),
+            analysis_reason_codes: analysis.reason_codes(),
+            analysis_reasons: analysis.reasons(),
+            containment: containment.facts(),
+            decision_reasons: decision_reasons
+                .iter()
+                .take(8)
+                .map(|reason| {
+                    if reason.detail.trim().is_empty() {
+                        bounded_text(&reason.code)
+                    } else {
+                        bounded_text(&reason.detail)
+                    }
+                })
+                .collect(),
+            safe_summary_title: bounded_text(&safe_summary.title),
+            safe_summary_detail: bounded_text(&safe_summary.detail),
             tool_input: project_tool_input(call),
             operation: operation.as_deref().map(bounded_text),
             risk: risk.as_deref().map(bounded_text),
@@ -684,6 +945,238 @@ impl DesktopProtocolEvent {
             preview_body: preview.as_ref().map(|preview| bounded_text(&preview.body)),
         })
     }
+}
+
+impl TryFrom<&DesktopTerminalLifecycleView> for DesktopTimelineTerminalTask {
+    type Error = DesktopProtocolEventError;
+
+    fn try_from(event: &DesktopTerminalLifecycleView) -> Result<Self, Self::Error> {
+        let (status, exit_code, failure_reason) = match &event.status {
+            DesktopTerminalTaskStatus::Starting => ("starting", None, None),
+            DesktopTerminalTaskStatus::Running => ("running", None, None),
+            DesktopTerminalTaskStatus::Exited { exit_code } => ("exited", *exit_code, None),
+            DesktopTerminalTaskStatus::Failed { reason } => {
+                ("failed", None, Some(bounded_text(reason)))
+            }
+            DesktopTerminalTaskStatus::Cancelled => ("cancelled", None, None),
+            DesktopTerminalTaskStatus::Interrupted => ("interrupted", None, None),
+        };
+        let (readiness, readiness_kind, readiness_failure_reason, ready_at_ms) =
+            match &event.readiness {
+                DesktopTerminalReadinessStatus::None => ("none", None, None, None),
+                DesktopTerminalReadinessStatus::Waiting { kind } => (
+                    "waiting",
+                    Some(terminal_readiness_kind(*kind).to_owned()),
+                    None,
+                    None,
+                ),
+                DesktopTerminalReadinessStatus::Ready { kind, ready_at_ms } => (
+                    "ready",
+                    Some(terminal_readiness_kind(*kind).to_owned()),
+                    None,
+                    Some(*ready_at_ms),
+                ),
+                DesktopTerminalReadinessStatus::Failed { kind, reason } => (
+                    "failed",
+                    Some(terminal_readiness_kind(*kind).to_owned()),
+                    Some(bounded_text(reason)),
+                    None,
+                ),
+                DesktopTerminalReadinessStatus::TimedOut { kind } => (
+                    "timed_out",
+                    Some(terminal_readiness_kind(*kind).to_owned()),
+                    None,
+                    None,
+                ),
+            };
+        Ok(Self {
+            task_id: bounded_machine_label(&event.task_id)?,
+            execution_backend: event
+                .execution_backend
+                .map(|backend| backend.as_str().to_owned()),
+            sandbox_profile: event
+                .sandbox_profile
+                .map(|profile| profile.as_str().to_owned()),
+            generation: event.generation,
+            status: status.to_owned(),
+            exit_code,
+            failure_reason,
+            readiness: readiness.to_owned(),
+            readiness_kind,
+            readiness_failure_reason,
+            ready_at_ms,
+            total_output_bytes: event.total_output_bytes,
+            emitted_at_ms: event.emitted_at_ms,
+        })
+    }
+}
+
+const fn terminal_readiness_kind(kind: DesktopTerminalReadinessKind) -> &'static str {
+    match kind {
+        DesktopTerminalReadinessKind::None => "none",
+        DesktopTerminalReadinessKind::OutputContains => "output_contains",
+        DesktopTerminalReadinessKind::OutputRegex => "output_regex",
+    }
+}
+
+impl DesktopPendingApproval {
+    /// Projects one server-owned pending approval snapshot into the same bounded timeline shape as
+    /// its durable SSE event. Raw tool arguments and preview bodies are intentionally unavailable.
+    pub fn into_timeline(
+        self,
+        workspace_id: &str,
+        renderer_session_id: &str,
+        run_id: &str,
+    ) -> Result<DesktopTimelineEvent, DesktopProtocolEventError> {
+        let call_id = bounded_machine_label(&self.call_id)?;
+        let tool_name = bounded_machine_label(&self.tool_name)?;
+        let approval_request_id = bounded_machine_label(&self.approval_request_id)?;
+        let tool_call_hash = bounded_machine_label(&self.tool_call_hash)?;
+        let policy_version = bounded_machine_label(&self.policy_version)?;
+        if self.session_grant_available != self.session_grant_unavailable_reason.is_none()
+            || self.display.event_sequence == 0
+            || self.display.effects.len() > 16
+            || self.display.subjects.len() > 16
+            || self.display.analysis_reason_codes.len() > 8
+            || self.display.analysis_reasons.len() > 8
+            || self.display.containment.len() > 8
+            || self.display.decision_reasons.len() > 8
+        {
+            return Err(DesktopProtocolEventError::InvalidApproval);
+        }
+        let subjects = self
+            .display
+            .subjects
+            .iter()
+            .map(|subject| {
+                subject.workspace_label.as_deref().map_or_else(
+                    || {
+                        format!(
+                            "{} · {}",
+                            bounded_text(&subject.kind),
+                            bounded_text(&subject.scope)
+                        )
+                    },
+                    bounded_text,
+                )
+            })
+            .collect();
+        let sequence = self.display.event_sequence;
+        Ok(DesktopTimelineEvent {
+            workspace_id: bounded_machine_label(workspace_id)?,
+            session_id: bounded_machine_label(renderer_session_id)?,
+            run_id: bounded_machine_label(run_id)?,
+            sequence,
+            run_sequence: sequence.to_string(),
+            replayable: false,
+            replay_id: None,
+            provisional_id: None,
+            kind: DesktopTimelineEventKind::ApprovalRequested,
+            text: None,
+            item_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.clone()),
+            status: Some("waiting".to_owned()),
+            assistant_kind: None,
+            tool_input: None,
+            approval: Some(DesktopTimelineApproval {
+                call_id,
+                tool_name,
+                approval_request_id,
+                tool_call_hash,
+                policy_version,
+                expires_at_ms: self.expires_at_ms,
+                session_grant_available: self.session_grant_available,
+                session_grant_unavailable_reason: self.session_grant_unavailable_reason,
+                effects: self
+                    .display
+                    .effects
+                    .iter()
+                    .map(|value| bounded_text(value))
+                    .collect(),
+                subjects,
+                analysis_status: bounded_text(&self.display.analysis_status),
+                analysis_reason_codes: self
+                    .display
+                    .analysis_reason_codes
+                    .iter()
+                    .map(|value| bounded_text(value))
+                    .collect(),
+                analysis_reasons: self
+                    .display
+                    .analysis_reasons
+                    .iter()
+                    .map(|value| bounded_text(value))
+                    .collect(),
+                containment: self
+                    .display
+                    .containment
+                    .iter()
+                    .map(|value| bounded_text(value))
+                    .collect(),
+                decision_reasons: self
+                    .display
+                    .decision_reasons
+                    .iter()
+                    .map(|value| bounded_text(value))
+                    .collect(),
+                safe_summary_title: bounded_text(&self.display.safe_summary_title),
+                safe_summary_detail: bounded_text(&self.display.safe_summary_detail),
+                tool_input: None,
+                operation: self.display.operation.as_deref().map(bounded_text),
+                risk: self.display.risk.as_deref().map(bounded_text),
+                snapshot_required: self.display.snapshot_required,
+                preview_title: None,
+                preview_summary: None,
+                preview_body: None,
+            }),
+            approval_request_id: None,
+            tool_execution: None,
+            task: None,
+            terminal_task: None,
+        })
+    }
+}
+
+fn project_tool_execution_control(
+    control: &DesktopPublicControlEvent,
+) -> Result<Option<DesktopTimelineToolExecution>, DesktopProtocolEventError> {
+    if control.kind != "tool_execution" {
+        return Ok(None);
+    }
+    // Durable public control events deliberately redact their payload before
+    // persistence. A kind-only `tool_execution` event is therefore a valid
+    // replay fact, but it cannot be projected into the richer renderer DTO.
+    // Keep the generic control event flowing so later durable events (including
+    // the assistant final and run terminal) are not stranded behind it.
+    let Some(payload) = control.payload.as_ref() else {
+        return Ok(None);
+    };
+    let execution = payload
+        .get("tool_execution")
+        .ok_or(DesktopProtocolEventError::InvalidControl)?;
+    let call_id = execution
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or(DesktopProtocolEventError::InvalidControl)?;
+    let tool_name = execution
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .ok_or(DesktopProtocolEventError::InvalidControl)?;
+    let status = execution
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|status| {
+            matches!(
+                *status,
+                "started" | "completed" | "failed" | "cancelled" | "interrupted"
+            )
+        })
+        .ok_or(DesktopProtocolEventError::InvalidControl)?;
+    Ok(Some(DesktopTimelineToolExecution {
+        call_id: bounded_machine_label(call_id)?,
+        tool_name: bounded_machine_label(tool_name)?,
+        status: status.to_owned(),
+    }))
 }
 
 fn project_tool_input(call: &DesktopPublicToolCall) -> Option<String> {
@@ -932,6 +1425,8 @@ pub enum DesktopProtocolEventError {
     InvalidPayload,
     #[error("desktop approval event is invalid")]
     InvalidApproval,
+    #[error("desktop control event is invalid")]
+    InvalidControl,
 }
 
 #[cfg(test)]

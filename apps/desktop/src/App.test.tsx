@@ -93,7 +93,7 @@ const defaultRunContext: RunContext = {
       reasoningEffortBinding: "effort-binding-deepseek-v4-pro",
     },
   ],
-  modelSelection: "fresh_session",
+  modelSelection: "same_session",
   modelSelectionBinding: "model-binding-deepseek-v4-flash",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -312,6 +312,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     continuity: continuity ?? (async () => ({
       durableFrontier: { throughStreamSequence: 0 },
       foregroundOwner: simulatedOwner,
+      retainedTerminalRuns: [],
       recoveryActions: [],
     })),
     conversationQueue: async (_workspaceId, sessionId) => ({
@@ -451,6 +452,23 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       permissionMode: "manual",
       streamSequence: 1,
     }),
+    cancelTerminalTask: async (_workspaceId, sessionId, runId, taskId, expectedGeneration) => ({
+      commandId: "terminal-cancel-test",
+      clientId: "desktop-test",
+      sessionId,
+      runId,
+      terminalTask: {
+        taskId,
+        executionBackend: "local_pty" as const,
+        sandboxProfile: "workspace_write" as const,
+        generation: expectedGeneration + 1,
+        status: "cancelled",
+        readiness: "none",
+        totalOutputBytes: 0,
+        emittedAtMs: 2,
+      },
+      replayed: false,
+    }),
     pauseTask: async (_workspaceId, sessionId, runId) => ({
       id: runId,
       sessionId,
@@ -458,10 +476,20 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       permissionMode: "manual",
       streamSequence: 2,
     }),
-    resolveApproval: async (_workspaceId, _sessionId, runId, approval, approve) => ({
+    resolveApproval: async (_workspaceId, sessionId, runId, approval, decision) => ({
+      commandId: "approval-command-test",
+      clientId: "desktop-test",
+      sessionId,
       runId,
       callId: approval.callId,
-      decision: approve ? "approved" : "denied",
+      approvalRequestId: approval.approvalRequestId,
+      expectedStreamSequence: 1,
+      decision: decision === "deny"
+        ? "denied"
+        : decision === "approve_session" ? "approved_for_session" : "approved",
+      routeState: "decision_accepted",
+      registryRevision: 2,
+      replayed: false,
     }),
     verification: async () => {
       throw new Error("no verification projection");
@@ -487,6 +515,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       throw new Error("no Intent Drop preview");
     },
     subscribeRunEvents: async () => () => undefined,
+    subscribeRunApprovalSnapshots: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     subscribeAppearance: async () => () => undefined,
     subscribeUpdate: async () => () => undefined,
@@ -1998,7 +2027,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByRole("status", { name: "Opening conversation…" })).toBeNull();
   });
 
-  it("retries the exact failed conversation without refreshing the catalog", async () => {
+  it("refreshes the catalog before retrying a still-ready failed conversation", async () => {
     const user = userEvent.setup();
     const entry = {
       sessionRef: "retry.jsonl",
@@ -2037,7 +2066,45 @@ describe("desktop workspace and history shell", () => {
       sessionId: entry.sessionId,
       label: entry.title,
     });
-    expect(catalog).toHaveBeenCalledTimes(1);
+    expect(catalog).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops retrying when a failed conversation refreshes as an invalid source", async () => {
+    const user = userEvent.setup();
+    const readyEntry = {
+      sessionRef: "incompatible.jsonl",
+      sessionId: "durable-incompatible",
+      sourceState: "ready" as const,
+      sourceBytes: 512,
+      sourceModifiedAtUnixMs: 1_784_419_200_000,
+      title: "Incompatible conversation",
+      userMessageCount: 1,
+      assistantMessageCount: 1,
+      toolResultCount: 0,
+      pinned: false,
+    };
+    const invalidEntry = {
+      ...readyEntry,
+      sessionId: undefined,
+      sourceState: "invalid" as const,
+      sourceDiagnostic: "invalid_event_stream" as const,
+    };
+    const catalog = vi.fn()
+      .mockResolvedValueOnce({ ...emptyCatalog, entries: [readyEntry] })
+      .mockResolvedValueOnce({ ...emptyCatalog, generation: 2, entries: [invalidEntry] });
+    const openSession = vi.fn(async () => Promise.reject(new Error("not ready")));
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog,
+      openSession,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Incompatible conversation/ }));
+
+    expect(await screen.findByText("Conversation history refreshed because the list changed.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry conversation" })).toBeNull();
+    expect(openSession).toHaveBeenCalledTimes(1);
+    expect(catalog).toHaveBeenCalledTimes(2);
   });
 
   it("previews and executes selected conversation mutations through the batch contract", async () => {
@@ -2296,6 +2363,7 @@ describe("desktop workspace and history shell", () => {
     await act(async () => {
       resolveContinuity?.({
         durableFrontier: { throughStreamSequence: 0 },
+        retainedTerminalRuns: [],
         recoveryActions: [],
       });
     });
@@ -2696,6 +2764,7 @@ describe("desktop workspace and history shell", () => {
           runId: "run-active",
           ownerRevision: `sha256:${"a".repeat(64)}`,
         },
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current", "continue_read_only"],
       }),
       conversationQueue,
@@ -2806,11 +2875,13 @@ describe("desktop workspace and history shell", () => {
           runId: "run-after-idle",
           ownerRevision: `sha256:${"f".repeat(64)}`,
         },
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current", "continue_read_only"],
       };
       const continuity = vi.fn()
         .mockResolvedValueOnce({
           durableFrontier: { throughStreamSequence: 0 },
+          retainedTerminalRuns: [],
           recoveryActions: [],
         })
         .mockImplementationOnce(() => new Promise<ConversationContinuity>((resolve) => {
@@ -2918,10 +2989,12 @@ describe("desktop workspace and history shell", () => {
           runId: "run-stale",
           ownerRevision: `sha256:${"b".repeat(64)}`,
         },
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current", "continue_read_only"],
       })
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 5 },
+        retainedTerminalRuns: [],
         recoveryActions: [],
       });
     const attachRun = vi.fn(async () => Promise.reject({
@@ -2964,12 +3037,17 @@ describe("desktop workspace and history shell", () => {
     const owner = (runId: string, revision: string): ConversationContinuity => ({
       durableFrontier: { throughStreamSequence: 9 },
       foregroundOwner: { runId, ownerRevision: `sha256:${revision.repeat(64)}` },
+      retainedTerminalRuns: [],
       recoveryActions: ["retry_current", "continue_read_only"],
     });
     const continuity = vi.fn()
       .mockResolvedValueOnce(owner("run-before-race", "d"))
       .mockResolvedValueOnce(owner("run-after-race", "e"))
-      .mockResolvedValueOnce({ durableFrontier: { throughStreamSequence: 10 }, recoveryActions: [] });
+      .mockResolvedValueOnce({
+        durableFrontier: { throughStreamSequence: 10 },
+        retainedTerminalRuns: [],
+        recoveryActions: [],
+      });
     const attachRun = vi.fn(async (_workspaceId, input) => ({
       run: {
         id: input.runId,
@@ -3021,10 +3099,12 @@ describe("desktop workspace and history shell", () => {
           runId: "run-unreachable",
           ownerRevision: `sha256:${"c".repeat(64)}`,
         },
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current", "continue_read_only"],
       })
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 8 },
+        retainedTerminalRuns: [],
         recoveryActions: [],
       });
     render(<App bridge={bridgeWith({
@@ -3127,6 +3207,7 @@ describe("desktop workspace and history shell", () => {
           runId: "run-bounded-recovery",
           ownerRevision: `sha256:${"a".repeat(64)}`,
         },
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current", "continue_read_only"],
       }),
       attachRun: async () => Promise.reject({
@@ -3170,6 +3251,7 @@ describe("desktop workspace and history shell", () => {
           runId: "run-action-recovery",
           ownerRevision: `sha256:${"b".repeat(64)}`,
         },
+        retainedTerminalRuns: [],
         recoveryActions: ["open_another_workspace", "open_diagnostics", "show_details"],
       }),
       attachRun: async () => Promise.reject({
@@ -3714,6 +3796,7 @@ describe("desktop workspace and history shell", () => {
     const user = userEvent.setup();
     const continuity = vi.fn(async (): Promise<ConversationContinuity> => ({
       durableFrontier: { throughStreamSequence: 2 },
+      retainedTerminalRuns: [],
       recoveryActions: [],
     }));
     let eventSubscriptionCount = 0;
@@ -3845,6 +3928,7 @@ describe("desktop workspace and history shell", () => {
     }));
     const continuity = vi.fn(async (): Promise<ConversationContinuity> => ({
       durableFrontier: { throughStreamSequence: completed ? 1 : 0 },
+      retainedTerminalRuns: [],
       recoveryActions: [],
     }));
     render(<App bridge={bridgeWith({
@@ -3891,15 +3975,18 @@ describe("desktop workspace and history shell", () => {
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 0 },
         foregroundOwner: owner,
+        retainedTerminalRuns: [],
         recoveryActions: [],
       })
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 0 },
         foregroundOwner: owner,
+        retainedTerminalRuns: [],
         recoveryActions: [],
       })
       .mockResolvedValue({
         durableFrontier: { throughStreamSequence: 2 },
+        retainedTerminalRuns: [],
         recoveryActions: [],
       });
     let displayCall = 0;
@@ -4035,15 +4122,18 @@ describe("desktop workspace and history shell", () => {
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 1 },
         foregroundOwner: owner,
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current"],
       })
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 1 },
         foregroundOwner: owner,
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current"],
       })
       .mockResolvedValue({
         durableFrontier: { throughStreamSequence: 3 },
+        retainedTerminalRuns: [],
         recoveryActions: ["retry_current"],
       });
     const display = vi.fn()
@@ -4271,12 +4361,12 @@ describe("desktop workspace and history shell", () => {
     expect(selectedEffortBinding).toBe("effort-binding-deepseek-v4-flash");
   });
 
-  it("creates a fresh exact-route conversation before starting a cross-provider run", async () => {
+  it("starts a cross-provider run in the current conversation", async () => {
     const user = userEvent.setup();
     const selectedModels: Array<RunContext["modelRef"] | undefined> = [];
     const runSelections: Array<{
       sessionId: string;
-      modelName?: string;
+      modelRef?: RunContext["modelRef"];
       binding?: string;
       effort?: string;
       effortBinding?: string;
@@ -4324,8 +4414,8 @@ describe("desktop workspace and history shell", () => {
         ...defaultRunContext,
         modelOptions: [defaultRunContext.modelOptions[0], gatewayOption],
       }),
-      createSession: async (_workspaceId, _label, modelRef) => {
-        selectedModels.push(modelRef);
+      createSession: async () => {
+        selectedModels.push(undefined);
         return {
           id: `http-session-${selectedModels.length}`,
           label: "New conversation",
@@ -4337,14 +4427,14 @@ describe("desktop workspace and history shell", () => {
         sessionId,
         _prompt,
         permissionMode,
-        modelName,
+        modelRef,
         modelSelectionBinding,
         reasoningEffort,
         reasoningEffortBinding,
       ) => {
         runSelections.push({
           sessionId,
-          modelName,
+          modelRef,
           binding: modelSelectionBinding,
           effort: reasoningEffort,
           effortBinding: reasoningEffortBinding,
@@ -4373,17 +4463,14 @@ describe("desktop workspace and history shell", () => {
     await user.type(composer, "Continue with pro");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(selectedModels).toEqual([
-      undefined,
-      {
+    expect(selectedModels).toEqual([undefined]);
+    expect(runSelections).toEqual([{
+      sessionId: "http-session-1",
+      modelRef: {
         connectionId: "gateway-team",
         modelId: "deepseek-v4-flash",
       },
-    ]);
-    expect(runSelections).toEqual([{
-      sessionId: "http-session-2",
-      modelName: undefined,
-      binding: undefined,
+      binding: "model-binding-deepseek-v4-flash",
       effort: "max",
       effortBinding: "effort-binding-gateway-flash",
     }]);
@@ -4577,15 +4664,18 @@ describe("desktop workspace and history shell", () => {
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 1 },
         foregroundOwner: owner,
+        retainedTerminalRuns: [],
         recoveryActions: [],
       })
       .mockResolvedValueOnce({
         durableFrontier: { throughStreamSequence: 1 },
         foregroundOwner: owner,
+        retainedTerminalRuns: [],
         recoveryActions: [],
       })
       .mockResolvedValue({
         durableFrontier: { throughStreamSequence: 3 },
+        retainedTerminalRuns: [],
         recoveryActions: [],
       });
     let displayCall = 0;
@@ -4795,9 +4885,23 @@ describe("desktop workspace and history shell", () => {
         eventListener = listener;
         return () => undefined;
       },
-      resolveApproval: async (_workspaceId, _sessionId, runId, approval, decision) => {
+      resolveApproval: async (_workspaceId, sessionId, runId, approval, decision) => {
         approvedCall = `${runId}:${approval.approvalRequestId}:${decision}`;
-        return { runId, callId: approval.callId, decision: decision === "deny" ? "denied" : "approved" };
+        return {
+          commandId: "approval-command-1",
+          clientId: "desktop-test",
+          sessionId,
+          runId,
+          callId: approval.callId,
+          approvalRequestId: approval.approvalRequestId,
+          expectedStreamSequence: 3,
+          decision: decision === "deny"
+            ? "denied"
+            : decision === "approve_session" ? "approved_for_session" : "approved",
+          routeState: "decision_accepted",
+          registryRevision: 4,
+          replayed: false,
+        };
       },
       cancelRun: async (_workspaceId, sessionId, runId) => {
         cancelledRun = runId;
@@ -4842,6 +4946,13 @@ describe("desktop workspace and history shell", () => {
           policyVersion: "policy-1",
           expiresAtMs: 4_102_444_800_000,
           sessionGrantAvailable: true,
+          effects: ["file_write", "execute_workspace_code"],
+          subjects: ["workspace:README.md"],
+          analysisStatus: "complete",
+          containment: ["filesystem=workspace_write", "network=deny"],
+          decisionReasons: ["workspace code execution requires an explicit decision"],
+          safeSummaryTitle: "Edit one file",
+          safeSummaryDetail: "Writes README.md inside the workspace",
           operation: "edit_file",
           risk: "medium",
           snapshotRequired: true,
@@ -4854,6 +4965,11 @@ describe("desktop workspace and history shell", () => {
 
     const approvalTitle = await screen.findByText("Edit one file");
     const approvalDock = approvalTitle.closest("section") as HTMLElement;
+    expect(within(approvalDock).getByText("file_write, execute_workspace_code")).toBeTruthy();
+    expect(within(approvalDock).getByText("workspace:README.md")).toBeTruthy();
+    expect(within(approvalDock).getByText("filesystem=workspace_write · network=deny")).toBeTruthy();
+    await user.click(within(approvalDock).getByText("Why this decision is required"));
+    expect(within(approvalDock).getByText("workspace code execution requires an explicit decision")).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Verification" })).toBeNull();
     expect(screen.getByRole("button", { name: "Open verification: passed" }).hasAttribute("disabled")).toBe(true);
     expect(document.activeElement).toBe(approvalDock);
@@ -4861,6 +4977,10 @@ describe("desktop workspace and history shell", () => {
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     await user.click(screen.getByRole("button", { name: "Allow for session" }));
     expect(approvedCall).toBe("run-1:approval-1:approve_session");
+    expect(await screen.findByText("Approval accepted")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Allow for session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
     act(() => {
       eventListener?.({
         workspaceId: workspace.id,
@@ -4871,11 +4991,41 @@ describe("desktop workspace and history shell", () => {
         replayable: true,
         kind: "approval_resolved",
         itemId: "call-1",
+        approvalRequestId: "approval-1",
         status: "approved",
       });
     });
     expect(screen.queryByText("Edit one file")).toBeNull();
     expect(document.activeElement).toBe(screen.getByLabelText("Message Sigil"));
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 5, runSequence: "5",
+        replayable: true,
+        kind: "approval_requested",
+        itemId: "call-2",
+        toolName: "bash",
+        approval: {
+          callId: "call-2",
+          toolName: "bash",
+          approvalRequestId: "approval-2",
+          toolCallHash: "hash-2",
+          policyVersion: "policy-1",
+          expiresAtMs: 4_102_444_800_000,
+          sessionGrantAvailable: false,
+          sessionGrantUnavailableReason: { code: "risk_not_grantable" },
+          safeSummaryTitle: "Run unknown command",
+          safeSummaryDetail: "Runs one high-risk command",
+          risk: "high",
+          snapshotRequired: false,
+        },
+      });
+    });
+    const unavailableApproval = (await screen.findByText("Run unknown command")).closest("section") as HTMLElement;
+    expect(within(unavailableApproval).getByText("Session approval is unavailable at this request's risk level.")).toBeTruthy();
+    expect(within(unavailableApproval).queryByRole("button", { name: "Allow for session" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Stop run" }));
     await waitFor(() => expect(cancelledRun).toBe("run-1"));
     expect(screen.queryByText("Requesting cancellation…")).toBeNull();
@@ -5216,6 +5366,238 @@ describe("desktop workspace and history shell", () => {
       { taskId: "task-pause-1", planVersion: 7 },
     ));
     expect(cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("stops a persistent terminal task with its exact run and generation binding", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const cancelTerminalTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      runId: string,
+      taskId: string,
+      expectedGeneration: number,
+    ) => ({
+      commandId: "terminal-cancel-1",
+      clientId: "desktop-test",
+      sessionId,
+      runId,
+      terminalTask: {
+        taskId,
+        generation: expectedGeneration + 1,
+        status: "cancelled" as const,
+        readiness: "ready" as const,
+        readinessKind: "output_contains" as const,
+        readyAtMs: 5,
+        totalOutputBytes: 24,
+        emittedAtMs: 7,
+      },
+      replayed: false,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      cancelTerminalTask,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(await readyComposer(), "Start the persistent development server");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    act(() => eventListener?.({
+      workspaceId: workspace.id,
+      sessionId: "http-session-new",
+      runId: "run-1",
+      sequence: 4,
+      runSequence: "4",
+      replayable: true,
+      kind: "terminal_lifecycle",
+      itemId: "terminal-dev-server",
+      status: "running",
+      terminalTask: {
+        taskId: "terminal-dev-server",
+        executionBackend: "local_pty",
+        sandboxProfile: "workspace_write",
+        generation: 3,
+        status: "running",
+        readiness: "ready",
+        readinessKind: "output_contains",
+        readyAtMs: 3,
+        totalOutputBytes: 12,
+        emittedAtMs: 4,
+      },
+    }));
+
+    expect(await screen.findByText("local pty")).toBeTruthy();
+    expect(screen.getByText("workspace write")).toBeTruthy();
+
+    await user.click(await screen.findByRole("button", { name: "Stop task" }));
+    await waitFor(() => expect(cancelTerminalTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "run-1",
+      "terminal-dev-server",
+      3,
+    ));
+    expect(await screen.findByText("Cancelled")).toBeTruthy();
+  });
+
+  it("keeps terminal lifecycle updates from an older run after a successor starts", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      continuity: async () => ({
+        durableFrontier: { throughStreamSequence: 0 },
+        retainedTerminalRuns: [],
+        recoveryActions: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(await readyComposer(), "Start a development server");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+
+    const event = (overrides: Partial<TimelineEvent>): TimelineEvent => ({
+      workspaceId: workspace.id,
+      sessionId: "http-session-new",
+      runId: "run-1",
+      sequence: 1,
+      runSequence: "1",
+      replayable: true,
+      kind: "other",
+      ...overrides,
+    });
+    act(() => {
+      eventListener?.(event({
+        kind: "terminal_lifecycle",
+        itemId: "terminal-successor",
+        terminalTask: {
+          taskId: "terminal-successor",
+          generation: 1,
+          status: "running",
+          readiness: "ready",
+          readinessKind: "output_contains",
+          readyAtMs: 1,
+          totalOutputBytes: 8,
+          emittedAtMs: 1,
+        },
+      }));
+      eventListener?.(event({ kind: "run_finished", runSequence: "2", sequence: 2 }));
+      eventListener?.(event({
+        runId: "run-2",
+        kind: "run_started",
+        runSequence: "1",
+        sequence: 3,
+      }));
+      eventListener?.(event({
+        kind: "terminal_lifecycle",
+        itemId: "terminal-successor",
+        runSequence: "3",
+        sequence: 4,
+        terminalTask: {
+          taskId: "terminal-successor",
+          generation: 2,
+          status: "exited",
+          exitCode: 0,
+          readiness: "ready",
+          readinessKind: "output_contains",
+          readyAtMs: 1,
+          totalOutputBytes: 16,
+          emittedAtMs: 3,
+        },
+      }));
+    });
+
+    await waitFor(() => expect(
+      document.querySelector('[data-terminal-task-id="terminal-successor"]')
+        ?.getAttribute("data-terminal-task-status"),
+    ).toBe("exited"));
+  });
+
+  it("hydrates retained terminal owners from continuity and keeps stop control available", async () => {
+    const user = userEvent.setup();
+    const cancelTerminalTask = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      runId: string,
+      taskId: string,
+      expectedGeneration: number,
+    ) => ({
+      commandId: "terminal-hydrated-cancel",
+      clientId: "desktop-test",
+      sessionId,
+      runId,
+      terminalTask: {
+        taskId,
+        generation: expectedGeneration + 1,
+        status: "cancelled" as const,
+        readiness: "ready" as const,
+        readinessKind: "output_contains" as const,
+        readyAtMs: 4,
+        totalOutputBytes: 12,
+        emittedAtMs: 5,
+      },
+      replayed: false,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      continuity: async () => ({
+        durableFrontier: { throughStreamSequence: 7 },
+        retainedTerminalRuns: [{
+          runId: "run-retained-terminal",
+          terminalTasks: [{
+            taskId: "terminal-retained",
+            generation: 7,
+            status: "running",
+            readiness: "ready",
+            readinessKind: "output_contains",
+            readyAtMs: 4,
+            totalOutputBytes: 12,
+            emittedAtMs: 4,
+          }],
+        }],
+        recoveryActions: [],
+      }),
+      cancelTerminalTask,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.click(await screen.findByRole("button", { name: "Stop task" }));
+    await waitFor(() => expect(cancelTerminalTask).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "run-retained-terminal",
+      "terminal-retained",
+      7,
+    ));
+    expect(await screen.findByText("Cancelled")).toBeTruthy();
   });
 
   it("accepts the exact integration review and continues only after parent verification", async () => {

@@ -16,6 +16,14 @@ fn approval_request_stores_preview() -> Result<()> {
 fn read_only_network_approval_exposes_session_grant_scope() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-webfetch"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: true,
+        session_grant_unavailable_reason: None,
         call: ToolCall {
             id: "call-webfetch".to_owned(),
             name: "webfetch".to_owned(),
@@ -56,6 +64,63 @@ fn read_only_network_approval_exposes_session_grant_scope() -> Result<()> {
         app.approval_preview_lines()
             .join("\n")
             .contains("session_grant=read-only network access for this tool")
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_uses_kernel_session_grant_availability_without_recomputing_facets() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-webfetch-exact"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
+        call: ToolCall {
+            id: "call-webfetch-exact".to_owned(),
+            name: "webfetch".to_owned(),
+            args_json: r#"{"source_id":"src_1"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "webfetch".to_owned(),
+            description: "Fetch a page".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Search,
+            access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Read),
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: vec![sigil_kernel::ToolSubject {
+            kind: sigil_kernel::ToolSubjectKind::NetworkEndpoint,
+            original: "https://example.com/docs".to_owned(),
+            normalized: "https://example.com/docs".to_owned(),
+            canonical_path: None,
+            scope: sigil_kernel::ToolSubjectScope::External,
+        }],
+        network_effect: Some(sigil_kernel::NetworkEffect::Read),
+        local_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        network_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        operation: sigil_kernel::ToolOperation::NetworkRequest,
+        risk: sigil_kernel::PermissionRisk::High,
+        subject_zones: vec![sigil_kernel::PathTrustZone::Unknown],
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        preview: None,
+    })?;
+
+    let pending = app.approval.pending.as_ref().expect("pending approval");
+    assert!(!pending.session_grant_available);
+    assert_eq!(
+        ApprovalAction::order(pending.session_grant_available),
+        &[ApprovalAction::AllowOnce, ApprovalAction::Deny]
     );
     Ok(())
 }
@@ -121,6 +186,16 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
         )),
     ]);
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-mcp-1"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-mcp-1".to_owned(),
             name: "remote_tool".to_owned(),
@@ -176,6 +251,16 @@ fn terminal_input_approval_modal_explains_task_without_echoing_input() -> Result
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-terminal-input"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-terminal-input".to_owned(),
             name: "terminal_input".to_owned(),
@@ -317,6 +402,16 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     for (operation, expected) in operations {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.handle(RunEvent::ToolApprovalRequested {
+            approval_identity: test_approval_identity("call-meta"),
+            effects: std::collections::BTreeSet::new(),
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: sigil_kernel::ExecutionContainmentRequest::default(),
+            safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+            decision_reasons: Vec::new(),
+            session_grant_available: false,
+            session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            }),
             call: ToolCall {
                 id: "call-meta".to_owned(),
                 name: "meta_tool".to_owned(),
@@ -349,6 +444,16 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-risk"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-risk".to_owned(),
             name: "risk_tool".to_owned(),
@@ -426,6 +531,16 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     ] {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.handle(RunEvent::ToolApprovalRequested {
+            approval_identity: test_approval_identity("call-confirmation"),
+            effects: std::collections::BTreeSet::new(),
+            analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+            containment: sigil_kernel::ExecutionContainmentRequest::default(),
+            safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+            decision_reasons: Vec::new(),
+            session_grant_available: false,
+            session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            }),
             call: ToolCall {
                 id: "call-confirmation".to_owned(),
                 name: "confirmation_tool".to_owned(),
@@ -500,6 +615,16 @@ fn approval_modal_view_includes_affected_diagnostics_summary() -> Result<()> {
 fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-change-set"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-change-set".to_owned(),
             name: "apply_changeset".to_owned(),
@@ -598,6 +723,16 @@ fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let external_path = Path::new("/tmp/sigil-outside.txt").to_path_buf();
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-external-1"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-external-1".to_owned(),
             name: "read_file".to_owned(),
@@ -649,14 +784,14 @@ fn approval_keys_emit_allow_and_deny_actions() -> Result<()> {
     let allow = app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?;
     assert!(matches!(
         allow,
-        Some(AppAction::ApprovalDecision { call_id, approved })
+        Some(AppAction::ApprovalDecision { call_id, approved, .. })
             if call_id == "call-1" && approved
     ));
 
     let deny = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
     assert!(matches!(
         deny,
-        Some(AppAction::ApprovalDecision { call_id, approved })
+        Some(AppAction::ApprovalDecision { call_id, approved, .. })
             if call_id == "call-1" && !approved
     ));
     Ok(())
@@ -666,6 +801,16 @@ fn approval_keys_emit_allow_and_deny_actions() -> Result<()> {
 fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-spawn-agent"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-spawn-agent".to_owned(),
             name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
@@ -703,7 +848,10 @@ fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
     let lines = app.approval_preview_lines().join("\n");
     assert!(lines.contains("B background"));
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))?;
-    let Some(AppAction::ApprovalDecisionWithArgs { call_id, args_json }) = action else {
+    let Some(AppAction::ApprovalDecisionWithArgs {
+        call_id, args_json, ..
+    }) = action
+    else {
         panic!("expected approval decision with rewritten args");
     };
     assert_eq!(call_id, "call-spawn-agent");
@@ -728,7 +876,7 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     let allow = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         allow,
-        Some(AppAction::ApprovalDecision { call_id, approved })
+        Some(AppAction::ApprovalDecision { call_id, approved, .. })
             if call_id == "call-1" && approved
     ));
 
@@ -737,7 +885,7 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     let deny = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         deny,
-        Some(AppAction::ApprovalDecision { call_id, approved })
+        Some(AppAction::ApprovalDecision { call_id, approved, .. })
             if call_id == "call-1" && !approved
     ));
     assert!(
@@ -764,7 +912,7 @@ fn approval_enter_can_choose_session_grant_when_available() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::ApprovalSessionDecision { call_id }) if call_id == "call-1"
+        Some(AppAction::ApprovalSessionDecision { call_id, .. }) if call_id == "call-1"
     ));
     Ok(())
 }
@@ -880,6 +1028,7 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
 
     app.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
         approved: false,
         reason: Some("policy denied".to_owned()),
     })?;
@@ -894,6 +1043,7 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
         approved: true,
         reason: None,
     })?;
@@ -937,6 +1087,16 @@ fn approval_preview_handles_empty_preview_body_and_slash_shortcut() -> Result<()
 fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-plain-1"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+            code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+        }),
         call: ToolCall {
             id: "call-plain-1".to_owned(),
             name: "write_file".to_owned(),

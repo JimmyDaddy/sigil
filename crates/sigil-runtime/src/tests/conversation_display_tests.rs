@@ -13,9 +13,10 @@ use sigil_kernel::{
     SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
     TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
     TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolArtifactSensitivity, ToolArtifactStore,
-    ToolCall, ToolOperation, ToolResult, ToolResultMeta, ToolResultRecordedV2,
-    conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
+    ToolApprovalDecisionReceiptV2, ToolApprovalEntry, ToolApprovalTerminalStatusV2,
+    ToolApprovalUserDecision, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolOperation,
+    ToolResult, ToolResultMeta, ToolResultRecordedV2, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
 };
 
 use crate::conversation_display::{
@@ -40,17 +41,46 @@ fn approval_entry(
     action: ToolApprovalAuditAction,
     user_decision: Option<ToolApprovalUserDecision>,
 ) -> ToolApprovalEntry {
+    let call_id = "approval-call".to_owned();
+    let plan_hash = sigil_kernel::stable_event_hash("approval-plan");
+    let decision_receipt = (action == ToolApprovalAuditAction::DecisionAccepted).then(|| {
+        ToolApprovalDecisionReceiptV2 {
+            approval_request_id: "approval-display".to_owned(),
+            decision: user_decision.expect("accepted approval fixture has a decision"),
+            accepted_at_ms: 1_000,
+        }
+    });
+    let terminal_status =
+        (action == ToolApprovalAuditAction::Resolved).then_some(match user_decision {
+            Some(ToolApprovalUserDecision::Approved) => ToolApprovalTerminalStatusV2::Approved,
+            Some(ToolApprovalUserDecision::ApprovedForSession) => {
+                ToolApprovalTerminalStatusV2::ApprovedForSession
+            }
+            Some(ToolApprovalUserDecision::Denied) | None => ToolApprovalTerminalStatusV2::Denied,
+        });
     ToolApprovalEntry {
+        schema_version: sigil_kernel::TOOL_APPROVAL_AUDIT_SCHEMA_VERSION,
+        identity: sigil_kernel::ApprovalRequestIdentityV2 {
+            session_id: "session-display".to_owned(),
+            run_id: "run-display".to_owned(),
+            call_id: call_id.clone(),
+            approval_request_id: "approval-display".to_owned(),
+            plan_hash: plan_hash.clone(),
+            policy_version: "policy-display".to_owned(),
+            execution_binding_hash: plan_hash.clone(),
+            expires_at_ms: u64::MAX,
+        },
+        plan_hash,
         action,
-        call_id: "approval-call".to_owned(),
+        call_id,
         tool_name: "bash".to_owned(),
         access: ToolAccess::Execute,
         network_effect: None,
         local_policy_decision: ApprovalMode::Ask,
         network_policy_decision: ApprovalMode::Allow,
         source_policy_decision: ApprovalMode::Allow,
-        operation: Some(ToolOperation::ExecuteUnknownCommand),
-        risk: Some(PermissionRisk::Medium),
+        operation: ToolOperation::ExecuteUnknownCommand,
+        risk: PermissionRisk::Medium,
         subjects: Vec::new(),
         subject_zones: Vec::new(),
         policy_decision: ApprovalMode::Ask,
@@ -58,11 +88,12 @@ fn approval_entry(
         confirmation: None,
         snapshot_required: false,
         command_permission_matches: Vec::new(),
-        allow_source: None,
-        grant_call_id: None,
+        decision_reasons: Vec::new(),
         user_decision,
         reason: None,
         preview_hash: None,
+        decision_receipt,
+        terminal_status,
     }
 }
 
@@ -426,7 +457,7 @@ fn terminal_must_match_the_unique_durable_final_for_its_active_run() -> Result<(
 }
 
 #[test]
-fn approval_resolution_reconciles_the_live_slot_and_durable_request() -> Result<()> {
+fn approval_phases_form_one_reconciliation_chain() -> Result<()> {
     let (_temp, store, mut session) = durable_session()?;
     let scope = session.session_scope_id().to_owned();
     let recorder = session.conversation_run_lifecycle_recorder()?;
@@ -434,6 +465,10 @@ fn approval_resolution_reconciles_the_live_slot_and_durable_request() -> Result<
     session.append_control(ControlEntry::ToolApproval(approval_entry(
         ToolApprovalAuditAction::Requested,
         None,
+    )))?;
+    session.append_control(ControlEntry::ToolApproval(approval_entry(
+        ToolApprovalAuditAction::DecisionAccepted,
+        Some(ToolApprovalUserDecision::Approved),
     )))?;
     session.append_control(ControlEntry::ToolApproval(approval_entry(
         ToolApprovalAuditAction::Resolved,
@@ -446,7 +481,7 @@ fn approval_resolution_reconciles_the_live_slot_and_durable_request() -> Result<
         .iter()
         .filter(|item| item.kind == ConversationDisplayItemKindV1::Approval)
         .collect::<Vec<_>>();
-    assert_eq!(approvals.len(), 2);
+    assert_eq!(approvals.len(), 3);
     let live_id = conversation_live_provisional_id(
         &scope,
         "run-approval",
@@ -460,10 +495,14 @@ fn approval_resolution_reconciles_the_live_slot_and_durable_request() -> Result<
     );
     assert_eq!(
         approvals[1].reconciles.as_deref(),
-        Some(&[approvals[0].display_id.clone(), live_id][..])
+        Some(&[approvals[0].display_id.clone(), live_id.clone()][..])
+    );
+    assert_eq!(
+        approvals[2].reconciles.as_deref(),
+        Some(&[approvals[1].display_id.clone(), live_id.clone()][..])
     );
     assert!(
-        approvals[1]
+        approvals[2]
             .reconciles
             .as_ref()
             .expect("resolved approval reconciliation")

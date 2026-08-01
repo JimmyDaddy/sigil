@@ -20,6 +20,7 @@ const CATALOG_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 const CATALOG_FUTURE_CLOCK_SKEW_SECS: u64 = 5 * 60;
 const CATALOG_CACHE_MAX_BYTES: usize = 1024 * 1024;
 const CATALOG_SWEEP_MAX_ENTRIES: usize = 8_192;
+const CATALOG_ATOMIC_TEMP_GRACE_SECS: u64 = 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +199,9 @@ pub(super) fn sweep_catalog_cache(cache_root: &Path) -> Result<()> {
                     remove_catalog_cache_entry(cache_root, &connection_id, file_name.as_os_str());
                 continue;
             }
+            if catalog_atomic_temp_is_recent(file_name.as_os_str(), &metadata) {
+                continue;
+            }
             let Some(fingerprint) = file_name
                 .to_str()
                 .and_then(|name| name.strip_suffix(".json"))
@@ -212,6 +216,35 @@ pub(super) fn sweep_catalog_cache(cache_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn catalog_atomic_temp_is_recent(file_name: &std::ffi::OsStr, metadata: &fs::Metadata) -> bool {
+    let Some(name) = file_name.to_str() else {
+        return false;
+    };
+    let Some(body) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((target, nonce)) = body.rsplit_once('.') else {
+        return false;
+    };
+    if !target.ends_with(".json")
+        || nonce.len() != 32
+        || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let now = SystemTime::now();
+    match now.duration_since(modified) {
+        Ok(age) => age.as_secs() <= CATALOG_ATOMIC_TEMP_GRACE_SECS,
+        Err(error) => error.duration().as_secs() <= CATALOG_FUTURE_CLOCK_SKEW_SECS,
+    }
 }
 
 pub(super) fn cache_age_secs(cache: &CachedCatalog) -> u64 {
@@ -251,8 +284,18 @@ fn secure_catalog_tree(cache_root: &Path, connection_id: &str) -> Result<()> {
             Ok(_) => validate_catalog_directory(&current, false)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 validate_catalog_path_ancestors(&current)?;
-                fs::create_dir(&current)
-                    .with_context(|| format!("failed to create {}", current.display()))?;
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // Another workspace server may be publishing the same connection-scoped
+                        // cache tree. Treat that race as success only after validating the winner.
+                        validate_catalog_directory(&current, false)?;
+                    }
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("failed to create {}", current.display()));
+                    }
+                }
                 validate_catalog_path_ancestors(&current)?;
             }
             Err(error) => return Err(error.into()),

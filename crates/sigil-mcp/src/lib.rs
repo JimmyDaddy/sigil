@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalMode, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EXTENSION_ENVIRONMENT_POLICY_VERSION,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EXTENSION_ENVIRONMENT_POLICY_VERSION,
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
     ExecutionSandboxProfile, ExtensionProcessLaunchError, ExtensionProcessLaunchPhase,
     ExtensionProcessLifecycleAudit, ExtensionProcessLifecycleStatus, McpServerConfig,
@@ -19,10 +19,10 @@ use sigil_kernel::{
     NetworkEffect, NetworkPolicy, ProcessEnvironmentPolicy, ProviderCapabilities,
     ResolvedProcessEnvironment, SecretRedactor, Tool, ToolAccess, ToolArtifactDescriptorV1,
     ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolEffect,
-    ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolOperation, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, VerificationScope,
-    WorkspaceMutationScan, resolve_extension_process_environment, safe_persistence_json_value,
-    validate_extension_process_network_admission,
+    ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolPermissionPlanDraft,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
+    safe_persistence_json_value, validate_extension_process_network_admission,
 };
 use tokio::{
     io::{AsyncReadExt, BufReader},
@@ -41,6 +41,7 @@ mod framing; // bounded newline-delimited JSON stdio framing.
 mod lifecycle; // server startup, activation, and registry reporting.
 mod name; // provider-visible MCP tool name normalization.
 mod output; // bounded MCP tool output and egress summaries.
+mod permission; // annotation-aware V2 permission classification and safe identity binding.
 mod process; // local process launch contracts and stderr handling.
 mod process_group; // direct Unix process-group signalling and liveness checks.
 mod prompts; // prompt-backed MCP tool adapter.
@@ -83,7 +84,7 @@ use process::{
 use prompts::{McpPromptTool, McpPromptToolKind};
 use resources::{McpResourceTool, McpResourceToolKind};
 use roots::{canonical_root, file_uri, root_name};
-use tools::{McpTool, McpToolDescriptor};
+use tools::{McpTool, McpToolDescriptor, stdio_mcp_permission_inputs};
 
 #[cfg(test)]
 use tools::mcp_transport_fingerprint;
@@ -113,6 +114,10 @@ pub use lifecycle::{
     register_mcp_tools_with_report,
 };
 pub use name::{McpToolName, mcp_provider_tool_name_candidate, mcp_provider_tool_name_prefix};
+pub use permission::{
+    McpPermissionBinding, McpPermissionClassification, McpPermissionTransport, McpToolAnnotations,
+    classify_mcp_permission, mcp_permission_fingerprint, mcp_tool_permission_plan,
+};
 pub use process::{
     LocalMcpProcessLauncher, McpDeclarationLaunchMetadata, McpProcessClass, McpProcessCoverage,
     McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,

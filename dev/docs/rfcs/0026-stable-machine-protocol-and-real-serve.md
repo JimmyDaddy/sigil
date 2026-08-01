@@ -189,6 +189,13 @@ P26.4C 在 listener bind 前使用独立、单 writer、原子替换的 durable 
 
 `Last-Event-ID` replay 不能只依赖进程内 buffer。Adapter 必须维护 crash-safe、bounded 的 durable protocol journal，或从同一 durable session evidence 确定性重建 cursor；进程内 bus 只负责 transient live fan-out。SSE route 必须先 replay durable suffix，再持续订阅 live events，不能返回有限 body 后立即关闭。
 
+protocol journal 只是一份可重建的 replay projection。当前 namespace 的文件若出现 malformed JSON、schema/event
+不兼容、非 canonical SafePersist 内容、超出 event/journal/stream 容量等内容错误，production server 必须在持有路径
+ownership 的前提下将原文件隔离，并以空 replay window 继续启动；session truth 与 durable command store 不得被删除或
+改写。旧 namespace 不读取、不迁移。锁冲突、路径 ownership 异常和普通 filesystem I/O 仍 fail closed。durable
+command store 也必须继续 fail closed，因为清空 command identity 可能重复执行有副作用的 command，不能套用 replay
+projection 的恢复策略。
+
 P26.4C 的 listener 在 replay 前先订阅 live bus，发送 retained durable suffix 后继续输出匹配 run 的 transient/durable event，直到 run terminal、client disconnect、明确 live lag 或 server shutdown。live lag 输出 `stream_gap` 后关闭，client 用最后一个 durable cursor 重连；不为 transient event 伪造 replay id。listener 用 owned `JoinSet` 收割连接任务；graceful shutdown 先关闭 socket 与新 command 准入，再通过正常 cooperative cancellation 取消 active run，等待 production driver owner idle，最后关闭并 join SSE/HTTP connections。只有全部 owner 已释放才返回成功。
 
 P26.4B 使用持久化 high-watermark 与 retained suffix：Unix 原子替换在 temp file sync、rename 和 parent-directory sync 全部成功后才允许 live publish；Windows 使用 replace-existing + write-through 的原生替换语义。同一路径由进程独占 lease 防止双 writer。被裁剪的 cursor 返回显式 `cursor_expired`，不能把不完整 suffix 伪装成连续历史；terminal stream watermark 随 retained terminal event 一起滚动回收，active stream identity 超出容量则 fail closed。cursor 绑定 durable session scope 与 adapter run id，避免 process-local adapter session id 在重启后复用造成 stream collision。

@@ -14,7 +14,12 @@ use super::{
 
 impl AppState {
     pub fn approval_preview_lines(&self) -> Vec<String> {
-        let Some(pending) = &self.approval.pending else {
+        let Some(pending) = self
+            .approval
+            .pending
+            .as_ref()
+            .filter(|pending| pending.actions_available())
+        else {
             return self.session_view_lines();
         };
 
@@ -140,17 +145,21 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> Option<Option<AppAction>> {
-        if let Some(pending) = &self.approval.pending {
+        if let Some(pending) = &self.approval.pending
+            && pending.actions_available()
+        {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     return Some(Some(AppAction::ApprovalDecision {
                         call_id: pending.call.id.clone(),
+                        approval_request_id: pending.approval_request_id.clone(),
                         approved: true,
                     }));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
                     return Some(Some(AppAction::ApprovalDecision {
                         call_id: pending.call.id.clone(),
+                        approval_request_id: pending.approval_request_id.clone(),
                         approved: false,
                     }));
                 }
@@ -161,6 +170,7 @@ impl AppState {
                     ) {
                         return Some(Some(AppAction::ApprovalDecisionWithArgs {
                             call_id: pending.call.id.clone(),
+                            approval_request_id: pending.approval_request_id.clone(),
                             args_json,
                         }));
                     }
@@ -173,19 +183,31 @@ impl AppState {
                     return Some(Some(match selected {
                         super::ApprovalAction::AllowOnce => AppAction::ApprovalDecision {
                             call_id: pending.call.id.clone(),
+                            approval_request_id: pending.approval_request_id.clone(),
                             approved: true,
                         },
                         super::ApprovalAction::AllowSession => AppAction::ApprovalSessionDecision {
                             call_id: pending.call.id.clone(),
+                            approval_request_id: pending.approval_request_id.clone(),
                         },
                         super::ApprovalAction::Deny => AppAction::ApprovalDecision {
                             call_id: pending.call.id.clone(),
+                            approval_request_id: pending.approval_request_id.clone(),
                             approved: false,
                         },
                     }));
                 }
                 _ => {}
             }
+        }
+
+        if self
+            .approval
+            .pending
+            .as_ref()
+            .is_some_and(|pending| !pending.actions_available())
+        {
+            return None;
         }
 
         if self.approval.pending.is_none() || key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -273,6 +295,9 @@ impl AppState {
 
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
         let pending = self.approval.pending.as_ref()?;
+        if !pending.actions_available() {
+            return None;
+        }
         let access_label = approval_pending_access_label(pending);
         let source_agent = self.pending_approval_source_agent(&pending.call.id);
         let shell_preview =
@@ -287,6 +312,12 @@ impl AppState {
                 access_label,
                 risk: pending.risk,
                 policy_label: approval_policy_label(pending),
+                effects: pending.effects.clone(),
+                subjects: pending.subjects.clone(),
+                analysis: pending.analysis.clone(),
+                containment: pending.containment.clone(),
+                safe_summary: pending.safe_summary.clone(),
+                decision_reasons: pending.decision_reasons.clone(),
                 preview_title: shell_preview
                     .as_ref()
                     .map(|preview| preview.title.clone())
@@ -313,6 +344,7 @@ impl AppState {
                     .selected_action
                     .normalized(pending.session_grant_available),
                 session_grant_available: pending.session_grant_available,
+                session_grant_unavailable_reason: pending.session_grant_unavailable_reason,
             });
         };
 
@@ -411,6 +443,12 @@ impl AppState {
             access_label,
             risk: pending.risk,
             policy_label: approval_policy_label(pending),
+            effects: pending.effects.clone(),
+            subjects: pending.subjects.clone(),
+            analysis: pending.analysis.clone(),
+            containment: pending.containment.clone(),
+            safe_summary: pending.safe_summary.clone(),
+            decision_reasons: pending.decision_reasons.clone(),
             preview_title: shell_preview
                 .as_ref()
                 .map(|preview| preview.title.clone())
@@ -432,6 +470,7 @@ impl AppState {
                 .selected_action
                 .normalized(pending.session_grant_available),
             session_grant_available: pending.session_grant_available,
+            session_grant_unavailable_reason: pending.session_grant_unavailable_reason,
         })
     }
 
@@ -544,7 +583,7 @@ impl AppState {
     }
 
     pub(super) fn toggle_approval_metadata(&mut self) -> bool {
-        if self.approval.pending.is_none() {
+        if !self.approval.has_actionable_pending() {
             return false;
         }
         self.approval.metadata_collapsed = !self.approval.metadata_collapsed;
@@ -561,7 +600,7 @@ impl AppState {
     }
 
     pub(super) fn cycle_approval_diff_mode(&mut self) -> bool {
-        if self.approval.pending.is_none() {
+        if !self.approval.has_actionable_pending() {
             return false;
         }
         self.approval.diff_mode = self.approval.diff_mode.next();
@@ -734,7 +773,10 @@ fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPrev
     let grant_line = if pending.session_grant_available {
         format!("Session grant: {grant}")
     } else {
-        "Session grant: not available for this call.".to_owned()
+        format!(
+            "Session grant: not available because {}.",
+            super::session_grant_unavailable_reason_label(pending.session_grant_unavailable_reason)
+        )
     };
     let mut summary = vec![command.to_owned(), format!("Access: {access}")];
     if let Some(command_rule) = command_rule {
@@ -770,9 +812,12 @@ fn approval_terminal_input_preview(pending: &PendingApproval) -> Option<ShellApp
     let access = approval_shell_access_summary(pending);
     let command_rule = approval_command_permission_summary(&pending.command_permission_matches);
     let grant_line = if pending.session_grant_available {
-        "Session grant: allow input to this terminal task for this session."
+        "Session grant: allow input to this terminal task for this session.".to_owned()
     } else {
-        "Session grant: not available for this call."
+        format!(
+            "Session grant: not available because {}.",
+            super::session_grant_unavailable_reason_label(pending.session_grant_unavailable_reason)
+        )
     };
     let mut summary = vec![
         format!("Terminal task: {task_id}"),
@@ -783,7 +828,7 @@ fn approval_terminal_input_preview(pending: &PendingApproval) -> Option<ShellApp
         summary.push(format!("Rule: {command_rule}"));
     }
     summary.push("Reason: Sends stdin to a running terminal task.".to_owned());
-    summary.push(grant_line.to_owned());
+    summary.push(grant_line);
     Some(ShellApprovalPreview {
         title: "Send terminal input".to_owned(),
         summary: summary.join("\n"),
@@ -924,6 +969,8 @@ fn approval_operation_label(operation: ToolOperation) -> &'static str {
         ToolOperation::ExecuteUnknownCommand => "run command",
         ToolOperation::ExecuteDestructiveCommand => "run destructive command",
         ToolOperation::SendTerminalInput => "send terminal input",
+        ToolOperation::ResizeTerminalTask => "resize terminal task",
+        ToolOperation::CancelTerminalTask => "cancel terminal task",
         ToolOperation::NetworkRequest => "network request",
         ToolOperation::SpawnAgent => "spawn agent",
         ToolOperation::MessageAgent => "message agent",

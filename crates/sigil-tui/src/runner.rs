@@ -7,18 +7,21 @@ mod mcp_event_bridge;
 mod protocol;
 mod session_flow;
 mod spawn;
+mod terminal_lifecycle_bridge;
 mod worker_event;
 mod worker_loop;
 
+#[cfg(test)]
+pub(crate) use protocol::WorkerApprovalDecision;
 pub(crate) use protocol::{
     EgressDisclosureReceiptTx, McpElicitationResponseTx, WorkerApprovalCommand,
-    WorkerCommandEnvelope,
+    WorkerApprovalRouteState, WorkerCommandEnvelope,
 };
 pub use protocol::{
-    McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, ToolArtifactDisplayReadFailure,
-    ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionApplySource,
-    V2CompactionPreviewState, V2CompactionReview, V2ContinuityPreview, WorkerCommand,
-    WorkerCommandSender, WorkerMessage,
+    McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
+    ToolArtifactDisplayReadFailure, ToolOutputShrinkPreview, V2CompactionAdmission,
+    V2CompactionApplySource, V2CompactionPreviewState, V2CompactionReview, V2ContinuityPreview,
+    WorkerApprovalCommandReceipt, WorkerCommand, WorkerCommandSender, WorkerMessage,
 };
 pub use spawn::spawn_agent_worker;
 pub use worker_loop::{

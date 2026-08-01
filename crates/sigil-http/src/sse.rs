@@ -11,8 +11,8 @@ use sigil_runtime::conversation_display::{
 use thiserror::Error as ThisError;
 use tokio::sync::broadcast;
 
+use crate::HttpPendingApproval;
 use crate::journal::HttpDurableProtocolJournal;
-use crate::{HTTP_APPROVAL_POLICY_VERSION, HttpPendingApproval};
 
 /// SSE event name used for public run events.
 pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
@@ -184,20 +184,20 @@ impl HttpProtocolEvent {
     pub fn view(&self) -> HttpProtocolEventView {
         match self.event_class {
             HttpProtocolEventClass::Durable => {
-                HttpProtocolEventView::Durable(HttpDurableEventView {
+                HttpProtocolEventView::Durable(Box::new(HttpDurableEventView {
                     schema_version: self.schema_version,
                     replay_id: self.replay_id.clone().unwrap_or_default(),
                     approval_request: self.approval_request.clone(),
                     provisional_id: self.provisional_id.clone(),
                     run_event: self.run_event.clone(),
-                })
+                }))
             }
             HttpProtocolEventClass::Transient => {
-                HttpProtocolEventView::Transient(HttpTransientEventView {
+                HttpProtocolEventView::Transient(Box::new(HttpTransientEventView {
                     schema_version: self.schema_version,
                     provisional_id: self.provisional_id.clone(),
                     run_event: self.run_event.clone(),
-                })
+                }))
             }
         }
     }
@@ -205,11 +205,26 @@ impl HttpProtocolEvent {
     pub(crate) fn has_valid_approval_metadata(&self) -> bool {
         match (&self.approval_request, &self.run_event.event) {
             (None, _) => true,
-            (Some(approval), PublicRunEventKind::ApprovalRequested { call, spec, .. }) => {
+            (
+                Some(approval),
+                PublicRunEventKind::ApprovalRequested {
+                    approval_identity,
+                    call,
+                    spec,
+                    ..
+                },
+            ) => {
                 self.is_durable()
                     && approval.call_id == call.id
                     && approval.tool_name == spec.name
+                    && approval.approval_request_id == approval_identity.approval_request_id
+                    && approval.policy_version == approval_identity.policy_version
+                    && approval.expires_at_ms == approval_identity.expires_at_ms
+                    && approval_identity.session_id == self.run_event.session_id
+                    && approval_identity.run_id == self.run_event.run_id
+                    && approval_identity.call_id == call.id
                     && approval_guard_is_persistence_safe(approval)
+                    && approval.display.event_sequence == self.run_event.sequence
             }
             (Some(_), _) => false,
         }
@@ -275,6 +290,7 @@ fn protocol_provisional_id(
         | PublicRunEventKind::ReasoningDelta { .. }
         | PublicRunEventKind::Usage { .. }
         | PublicRunEventKind::ContinuationState { .. }
+        | PublicRunEventKind::TerminalLifecycle { .. }
         | PublicRunEventKind::Control { .. }
         | PublicRunEventKind::Notice { .. } => None,
     };
@@ -285,14 +301,72 @@ fn protocol_provisional_id(
 
 fn approval_guard_is_persistence_safe(approval: &HttpPendingApproval) -> bool {
     approval.expires_at_ms > 0
-        && approval.policy_version == HTTP_APPROVAL_POLICY_VERSION
-        && approval
-            .approval_request_id
-            .strip_prefix("http-approval-v1:")
-            .is_some_and(is_lower_hex_sha256)
+        && !approval.policy_version.is_empty()
+        && approval.policy_version.len() <= 256
+        && safe_persistence_text(&approval.policy_version) == approval.policy_version
+        && !approval.approval_request_id.is_empty()
+        && approval.approval_request_id.len() <= 256
+        && safe_persistence_text(&approval.approval_request_id) == approval.approval_request_id
         && is_lower_hex_sha256(&approval.tool_call_hash)
         && safe_persistence_text(&approval.call_id) == approval.call_id
         && safe_persistence_text(&approval.tool_name) == approval.tool_name
+        && approval_display_is_persistence_safe(&approval.display)
+}
+
+fn approval_display_is_persistence_safe(display: &crate::HttpPendingApprovalDisplay) -> bool {
+    display.event_sequence > 0
+        && display.effects.len() <= 16
+        && display.subjects.len() <= 16
+        && display.analysis_reason_codes.len() <= 8
+        && display.analysis_reasons.len() <= 8
+        && display.containment.len() <= 8
+        && display.decision_reasons.len() <= 8
+        && safe_bounded_approval_fact(&display.analysis_status)
+        && safe_bounded_approval_fact(&display.safe_summary_title)
+        && safe_bounded_approval_fact(&display.safe_summary_detail)
+        && display
+            .effects
+            .iter()
+            .all(|value| safe_bounded_approval_fact(value))
+        && display
+            .analysis_reason_codes
+            .iter()
+            .all(|value| safe_bounded_approval_fact(value))
+        && display
+            .analysis_reasons
+            .iter()
+            .all(|value| safe_bounded_approval_fact(value))
+        && display
+            .containment
+            .iter()
+            .all(|value| safe_bounded_approval_fact(value))
+        && display
+            .decision_reasons
+            .iter()
+            .all(|value| safe_bounded_approval_fact(value))
+        && display
+            .operation
+            .as_deref()
+            .is_none_or(safe_bounded_approval_fact)
+        && display
+            .risk
+            .as_deref()
+            .is_none_or(safe_bounded_approval_fact)
+        && display.subjects.iter().all(|subject| {
+            safe_bounded_approval_fact(&subject.kind)
+                && safe_bounded_approval_fact(&subject.scope)
+                && subject.workspace_label.as_deref().is_none_or(|label| {
+                    safe_bounded_approval_fact(label)
+                        && !std::path::Path::new(label).is_absolute()
+                        && !std::path::Path::new(label)
+                            .components()
+                            .any(|component| matches!(component, std::path::Component::ParentDir))
+                })
+        })
+}
+
+fn safe_bounded_approval_fact(value: &str) -> bool {
+    value.len() <= 2_048 && safe_persistence_text(value) == value
 }
 
 fn is_lower_hex_sha256(value: &str) -> bool {
@@ -411,9 +485,12 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
             project_tool_call_for_http_persistence(call);
         }
         PublicRunEventKind::ApprovalRequested {
+            analysis,
             call,
             command_permission_matches,
             confirmation,
+            decision_reasons,
+            safe_summary,
             spec,
             subjects,
             preview,
@@ -422,6 +499,24 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
             project_tool_call_for_http_persistence(call);
             spec.description = safe_persistence_text(&spec.description);
             spec.input_schema = safe_persistence_json_value(std::mem::take(&mut spec.input_schema));
+            safe_summary.title = safe_persistence_text(&safe_summary.title);
+            safe_summary.detail = safe_persistence_text(&safe_summary.detail);
+            for reason in decision_reasons {
+                reason.code = safe_persistence_text(&reason.code);
+                reason.detail = safe_persistence_text(&reason.detail);
+            }
+            match analysis {
+                sigil_kernel::ToolAnalysisStatus::Complete => {}
+                sigil_kernel::ToolAnalysisStatus::Conservative { reasons } => {
+                    for reason in reasons {
+                        reason.detail = reason.detail.as_deref().map(safe_persistence_text);
+                    }
+                }
+                sigil_kernel::ToolAnalysisStatus::Unsupported { reason }
+                | sigil_kernel::ToolAnalysisStatus::Invalid { reason } => {
+                    reason.detail = reason.detail.as_deref().map(safe_persistence_text);
+                }
+            }
             for subject in subjects {
                 subject.original = safe_persistence_text(&subject.original);
                 subject.normalized = safe_persistence_text(&subject.normalized);
@@ -491,6 +586,7 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
             control.kind = safe_persistence_text(&control.kind);
             control.payload = None;
         }
+        PublicRunEventKind::TerminalLifecycle { .. } => {}
         PublicRunEventKind::RunCancelled
         | PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
@@ -517,8 +613,8 @@ fn project_tool_call_for_http_persistence(call: &mut ToolCall) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event_class")]
 pub enum HttpProtocolEventView {
-    Durable(HttpDurableEventView),
-    Transient(HttpTransientEventView),
+    Durable(Box<HttpDurableEventView>),
+    Transient(Box<HttpTransientEventView>),
 }
 
 /// Replayable event view with a cursor suitable for SSE `Last-Event-ID`.
@@ -664,6 +760,9 @@ pub enum HttpEventPublishError {
     /// HTTP approval guard material did not match the public approval event.
     #[error("http protocol approval metadata does not match its run event")]
     ApprovalMetadata,
+    /// The adapter could not register approval routing under the allocated event sequence.
+    #[error("http protocol approval registration failed: {message}")]
+    ApprovalRegistration { message: String },
 }
 
 /// Errors returned while receiving a transient live event.
@@ -765,6 +864,18 @@ impl HttpProtocolEventBuffer {
             .cloned()
             .collect())
     }
+
+    fn latest_run_sequence(&self, session_id: &str, run_id: &str) -> Option<u64> {
+        self.events
+            .lock()
+            .expect("http protocol event buffer lock should not be poisoned")
+            .iter()
+            .filter(|event| {
+                event.run_event.session_id == session_id && event.run_event.run_id == run_id
+            })
+            .map(|event| event.run_event.sequence)
+            .max()
+    }
 }
 
 /// Bounded live event bus for local clients.
@@ -776,8 +887,15 @@ impl HttpProtocolEventBuffer {
 pub struct HttpLiveEventBus {
     buffer: HttpProtocolEventBuffer,
     durable_journal: Option<std::sync::Arc<HttpDurableProtocolJournal>>,
+    publication_lock: Mutex<()>,
     latest_sequences: Mutex<BTreeMap<HttpRunSequenceKey, u64>>,
-    sender: broadcast::Sender<HttpProtocolEvent>,
+    sender: broadcast::Sender<HttpLiveBusMessage>,
+}
+
+#[derive(Debug, Clone)]
+enum HttpLiveBusMessage {
+    Event(Box<HttpProtocolEvent>),
+    StreamClosed { session_id: String, run_id: String },
 }
 
 impl HttpLiveEventBus {
@@ -789,6 +907,7 @@ impl HttpLiveEventBus {
         Self {
             buffer: HttpProtocolEventBuffer::new(),
             durable_journal: None,
+            publication_lock: Mutex::new(()),
             latest_sequences: Mutex::new(BTreeMap::new()),
             sender,
         }
@@ -805,6 +924,7 @@ impl HttpLiveEventBus {
         Self {
             buffer: HttpProtocolEventBuffer::new(),
             durable_journal: Some(journal),
+            publication_lock: Mutex::new(()),
             latest_sequences: Mutex::new(BTreeMap::new()),
             sender,
         }
@@ -833,7 +953,24 @@ impl HttpLiveEventBus {
         &self,
         event: PublicRunEvent,
     ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
-        self.publish_run_event_with_approval(event, None)
+        self.publish_run_event_with_policy(event, None, false, false)
+    }
+
+    /// Publishes a foreground terminal while retaining the stream for owned terminal tasks.
+    pub fn publish_run_event_with_stream_continuation(
+        &self,
+        event: PublicRunEvent,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_run_event_with_policy(event, None, true, false)
+    }
+
+    /// Publishes the final terminal-task lifecycle and closes a retained stream atomically in the
+    /// durable journal before notifying live subscribers.
+    pub fn publish_run_event_and_close_stream(
+        &self,
+        event: PublicRunEvent,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_run_event_with_policy(event, None, false, true)
     }
 
     /// Publishes a run event with adapter-owned guard material for an approval request.
@@ -847,6 +984,37 @@ impl HttpLiveEventBus {
         event: PublicRunEvent,
         approval_request: Option<HttpPendingApproval>,
     ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_run_event_with_policy(event, approval_request, false, false)
+    }
+
+    fn publish_run_event_with_policy(
+        &self,
+        event: PublicRunEvent,
+        approval_request: Option<HttpPendingApproval>,
+        keep_stream_open: bool,
+        close_stream_after_event: bool,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        self.publish_run_event_with_policy_locked(
+            event,
+            approval_request,
+            keep_stream_open,
+            close_stream_after_event,
+        )
+    }
+
+    fn publish_run_event_with_policy_locked(
+        &self,
+        event: PublicRunEvent,
+        approval_request: Option<HttpPendingApproval>,
+        keep_stream_open: bool,
+        close_stream_after_event: bool,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
         let mut event = HttpProtocolEvent::from_run_event(event).map_err(|error| {
             HttpEventPublishError::Cursor {
                 message: error.to_string(),
@@ -859,11 +1027,14 @@ impl HttpLiveEventBus {
         if event.is_durable()
             && let Some(journal) = &self.durable_journal
         {
-            journal
-                .append(event.clone())
-                .map_err(|error| HttpEventPublishError::Journal {
-                    message: error.to_string(),
-                })?;
+            let result = if close_stream_after_event {
+                journal.append_and_close_stream(event.clone())
+            } else {
+                journal.append_with_stream_continuation(event.clone(), keep_stream_open)
+            };
+            result.map_err(|error| HttpEventPublishError::Journal {
+                message: error.to_string(),
+            })?;
         }
         if self.durable_journal.is_none() {
             self.buffer
@@ -886,7 +1057,8 @@ impl HttpLiveEventBus {
             .latest_sequences
             .lock()
             .expect("http live sequence watermark lock should not be poisoned");
-        if terminal {
+        let stream_closed = close_stream_after_event || (terminal && !keep_stream_open);
+        if stream_closed {
             latest_sequences.remove(&sequence_key);
         } else {
             latest_sequences
@@ -895,8 +1067,132 @@ impl HttpLiveEventBus {
                 .or_insert(event.run_event.sequence);
         }
         drop(latest_sequences);
-        let _ = self.sender.send(event.clone());
+        let _ = self
+            .sender
+            .send(HttpLiveBusMessage::Event(Box::new(event.clone())));
+        if stream_closed {
+            let _ = self.sender.send(HttpLiveBusMessage::StreamClosed {
+                session_id: event.run_event.session_id.clone(),
+                run_id: event.run_event.run_id.clone(),
+            });
+        }
         Ok(event)
+    }
+
+    /// Allocates the next public sequence under the bus publication lock, then publishes the
+    /// event. Production adapters use this for every event source so foreground output and
+    /// out-of-band terminal lifecycle callbacks cannot race sequence allocation.
+    pub fn publish_next_run_event(
+        &self,
+        event: PublicRunEvent,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_next_run_event_with_policy(event, None, false, false)
+    }
+
+    /// Allocates and publishes a foreground terminal while retaining its owned terminal stream.
+    pub fn publish_next_run_event_with_stream_continuation(
+        &self,
+        event: PublicRunEvent,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_next_run_event_with_policy(event, None, true, false)
+    }
+
+    /// Allocates and publishes the final lifecycle while atomically closing the retained stream.
+    pub fn publish_next_run_event_and_close_stream(
+        &self,
+        event: PublicRunEvent,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_next_run_event_with_policy(event, None, false, true)
+    }
+
+    /// Allocates an approval sequence and lets the caller bind that sequence into the durable
+    /// protocol projection before publication. The production adapter pre-registers routing
+    /// state before entering this publication lock, which keeps registry and event-bus lock order
+    /// acyclic while ensuring subscribers never observe an unroutable approval.
+    pub fn publish_next_run_event_with_approval<F>(
+        &self,
+        mut event: PublicRunEvent,
+        register: F,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError>
+    where
+        F: FnOnce(u64) -> Result<HttpPendingApproval, HttpEventPublishError>,
+    {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        let latest = self
+            .latest_run_sequence(&event.session_id, &event.run_id)
+            .map_err(|error| HttpEventPublishError::Journal {
+                message: error.to_string(),
+            })?
+            .unwrap_or(0);
+        event.sequence = latest.saturating_add(1);
+        let approval_request = register(event.sequence)?;
+        self.publish_run_event_with_policy_locked(event, Some(approval_request), false, false)
+    }
+
+    fn publish_next_run_event_with_policy(
+        &self,
+        mut event: PublicRunEvent,
+        approval_request: Option<HttpPendingApproval>,
+        keep_stream_open: bool,
+        close_stream_after_event: bool,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        let latest = self
+            .latest_run_sequence(&event.session_id, &event.run_id)
+            .map_err(|error| HttpEventPublishError::Journal {
+                message: error.to_string(),
+            })?
+            .unwrap_or(0);
+        event.sequence = latest.saturating_add(1);
+        self.publish_run_event_with_policy_locked(
+            event,
+            approval_request,
+            keep_stream_open,
+            close_stream_after_event,
+        )
+    }
+
+    /// Closes a stream retained past the foreground terminal after every terminal task settles.
+    pub fn close_run_stream(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<(), HttpEventPublishError> {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        if let Some(journal) = &self.durable_journal {
+            journal.close_stream(session_id, run_id).map_err(|error| {
+                HttpEventPublishError::Journal {
+                    message: error.to_string(),
+                }
+            })?;
+        }
+        self.latest_sequences
+            .lock()
+            .expect("http live sequence watermark lock should not be poisoned")
+            .remove(&HttpRunSequenceKey {
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+            });
+        let _ = self.sender.send(HttpLiveBusMessage::StreamClosed {
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+        });
+        Ok(())
     }
 
     /// Reads the latest published per-run sequence without exposing replay payloads.
@@ -925,11 +1221,35 @@ impl HttpLiveEventBus {
             .transpose()
             .map_err(|_| HttpProtocolReplayError::JournalUnavailable)?
             .flatten();
-        Ok(match (live, durable) {
-            (Some(live), Some(durable)) => Some(live.max(durable)),
-            (Some(sequence), None) | (None, Some(sequence)) => Some(sequence),
-            (None, None) => None,
-        })
+        let buffered = self
+            .durable_journal
+            .is_none()
+            .then(|| self.buffer.latest_run_sequence(session_id, run_id))
+            .flatten();
+        Ok([live, durable, buffered].into_iter().flatten().max())
+    }
+
+    /// Returns whether the exact run stream remains open for later owner-published events.
+    pub fn run_stream_accepts_events(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<bool, HttpProtocolReplayError> {
+        if let Some(journal) = &self.durable_journal {
+            return journal
+                .stream_accepts_events(session_id, run_id)
+                .map(|accepts| accepts.unwrap_or(false))
+                .map_err(|_| HttpProtocolReplayError::JournalUnavailable);
+        }
+        self.latest_sequences
+            .lock()
+            .map_err(|_| HttpProtocolReplayError::JournalUnavailable)
+            .map(|sequences| {
+                sequences.contains_key(&HttpRunSequenceKey {
+                    session_id: session_id.to_owned(),
+                    run_id: run_id.to_owned(),
+                })
+            })
     }
 
     #[cfg(test)]
@@ -971,7 +1291,12 @@ impl HttpLiveEventBus {
 
 /// Subscriber for bounded local live events.
 pub struct HttpLiveEventSubscriber {
-    receiver: broadcast::Receiver<HttpProtocolEvent>,
+    receiver: broadcast::Receiver<HttpLiveBusMessage>,
+}
+
+pub(crate) enum HttpRunStreamReceive {
+    Event(Box<HttpProtocolEvent>),
+    StreamClosed { session_id: String, run_id: String },
 }
 
 impl HttpLiveEventSubscriber {
@@ -981,12 +1306,30 @@ impl HttpLiveEventSubscriber {
     ///
     /// Returns `Lagged` when bounded live capacity dropped events, or `Closed` when the bus closes.
     pub async fn recv(&mut self) -> Result<HttpProtocolEvent, HttpLiveEventRecvError> {
-        self.receiver.recv().await.map_err(|error| match error {
-            broadcast::error::RecvError::Closed => HttpLiveEventRecvError::Closed,
-            broadcast::error::RecvError::Lagged(dropped) => {
-                HttpLiveEventRecvError::Lagged { dropped }
+        loop {
+            match self.receiver.recv().await.map_err(map_live_recv_error)? {
+                HttpLiveBusMessage::Event(event) => return Ok(*event),
+                HttpLiveBusMessage::StreamClosed { .. } => {}
             }
-        })
+        }
+    }
+
+    pub(crate) async fn recv_run_stream(
+        &mut self,
+    ) -> Result<HttpRunStreamReceive, HttpLiveEventRecvError> {
+        match self.receiver.recv().await.map_err(map_live_recv_error)? {
+            HttpLiveBusMessage::Event(event) => Ok(HttpRunStreamReceive::Event(event)),
+            HttpLiveBusMessage::StreamClosed { session_id, run_id } => {
+                Ok(HttpRunStreamReceive::StreamClosed { session_id, run_id })
+            }
+        }
+    }
+}
+
+fn map_live_recv_error(error: broadcast::error::RecvError) -> HttpLiveEventRecvError {
+    match error {
+        broadcast::error::RecvError::Closed => HttpLiveEventRecvError::Closed,
+        broadcast::error::RecvError::Lagged(dropped) => HttpLiveEventRecvError::Lagged { dropped },
     }
 }
 
@@ -1100,6 +1443,7 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::ToolResult { .. }
         | PublicRunEventKind::Usage { .. }
         | PublicRunEventKind::ContinuationState { .. }
+        | PublicRunEventKind::TerminalLifecycle { .. }
         | PublicRunEventKind::Control { .. }
         | PublicRunEventKind::AssistantMessage { .. }
         | PublicRunEventKind::Notice { .. } => HttpProtocolEventClass::Durable,

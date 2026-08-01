@@ -1,4 +1,5 @@
 use super::*;
+use crate::McpToolAnnotations;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct McpRemoteTool {
@@ -11,6 +12,8 @@ pub struct McpRemoteTool {
     pub output_schema: Option<Value>,
     #[serde(default, rename = "taskSupport")]
     pub task_support: Option<String>,
+    #[serde(default, skip_serializing_if = "McpToolAnnotations::is_empty")]
+    pub annotations: McpToolAnnotations,
 }
 
 impl<'de> Deserialize<'de> for McpRemoteTool {
@@ -37,6 +40,8 @@ impl<'de> Deserialize<'de> for McpRemoteTool {
             task_support: Option<String>,
             #[serde(default)]
             execution: Option<Execution>,
+            #[serde(default)]
+            annotations: McpToolAnnotations,
         }
 
         let wire = WireTool::deserialize(deserializer)?;
@@ -52,6 +57,7 @@ impl<'de> Deserialize<'de> for McpRemoteTool {
             input_schema: wire.input_schema,
             output_schema: wire.output_schema,
             task_support,
+            annotations: wire.annotations,
         })
     }
 }

@@ -253,6 +253,14 @@ impl Default for ApprovalState {
     }
 }
 
+impl ApprovalState {
+    pub(crate) fn has_actionable_pending(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(PendingApproval::actions_available)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SessionBrowserState {
     pub(crate) history: Vec<SessionHistoryEntry>,

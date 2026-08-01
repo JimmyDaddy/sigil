@@ -1127,6 +1127,18 @@ fn url_spans(value: &str) -> Vec<(usize, usize)> {
         while end < bytes.len() && !url_token_delimiter(bytes[end]) {
             end += 1;
         }
+        // `safe_display_url` deliberately renders a redacted query as the literal
+        // `?[redacted]`. Square brackets are otherwise URL token delimiters so Markdown links
+        // remain bounded, but stopping before this exact marker made the safe projection
+        // non-idempotent: every later projection saw only the trailing `?`, emitted a fresh
+        // marker, and left the previous marker behind. Consume only the projection-owned query
+        // marker (including duplicates written by an older non-idempotent projection) so one
+        // canonical pass collapses it back to exactly one marker.
+        if value[start..end].contains('?') {
+            while value[end..].starts_with("[redacted]") {
+                end += "[redacted]".len();
+            }
+        }
         while end > start && matches!(bytes[end - 1], b'.' | b',' | b'!' | b';') {
             end -= 1;
         }

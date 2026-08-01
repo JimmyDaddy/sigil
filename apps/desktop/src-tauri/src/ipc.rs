@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sigil_desktop::{
     DesktopAgentActivityStatus, DesktopAgentActivityView, DesktopAgentHandoffStatus,
-    DesktopApplicationClientAction, DesktopApprovalDecisionRecord,
+    DesktopApplicationClientAction, DesktopApprovalCommandReceipt as NativeApprovalCommandReceipt,
     DesktopCheckpointRestoreReview as NativeCheckpointRestoreReview,
     DesktopCompactionAdmission as NativeCompactionAdmission,
     DesktopCompactionReview as NativeCompactionReview, DesktopContextWindowSource,
@@ -44,7 +44,7 @@ use sigil_desktop::{
     DesktopSessionTranscriptPage, DesktopSupportCheck, DesktopSupportDoctorReport,
     DesktopSupportEnvironment, DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
     DesktopTaskIntegrationAcceptanceView, DesktopTaskIntegrationReviewRequest,
-    DesktopTaskIntegrationReviewView, DesktopTimelineEvent,
+    DesktopTaskIntegrationReviewView, DesktopTimelineEvent, DesktopTimelineTerminalTask,
     DesktopToolArtifactAvailability as NativeToolArtifactAvailability,
     DesktopToolArtifactPage as NativeToolArtifactPage,
     DesktopToolArtifactPageEncoding as NativeToolArtifactPageEncoding,
@@ -601,7 +601,7 @@ pub(crate) struct DesktopProviderModelRefInput {
     pub(crate) model_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProviderModelRefSummary {
     pub(crate) connection_id: String,
@@ -788,7 +788,15 @@ pub(crate) struct DesktopConversationContinuity {
     pub(crate) durable_frontier: DesktopDurableFrontierSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) foreground_owner: Option<DesktopForegroundRunOwnerSummary>,
+    pub(crate) retained_terminal_runs: Vec<DesktopRetainedTerminalRunSummary>,
     pub(crate) recovery_actions: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopRetainedTerminalRunSummary {
+    pub(crate) run_id: String,
+    pub(crate) terminal_tasks: Vec<DesktopTimelineTerminalTask>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1538,7 +1546,7 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
     pub(crate) prompt: String,
     pub(crate) permission_mode: DesktopPermissionMode,
-    pub(crate) model_name: Option<String>,
+    pub(crate) model_ref: Option<DesktopProviderModelRefSummary>,
     pub(crate) model_selection_binding: Option<String>,
     pub(crate) reasoning_effort: Option<DesktopReasoningEffort>,
     pub(crate) reasoning_effort_binding: Option<String>,
@@ -1767,6 +1775,28 @@ pub(crate) struct DesktopRunCancelInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopTerminalTaskCancelInput {
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    pub(crate) task_id: String,
+    pub(crate) expected_generation: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopTerminalTaskCancelSummary {
+    pub(crate) command_id: String,
+    pub(crate) client_id: String,
+    pub(crate) session_id: String,
+    pub(crate) run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) terminal_task: DesktopTimelineTerminalTask,
+    pub(crate) replayed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopTaskPauseInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
@@ -1798,9 +1828,20 @@ pub(crate) enum DesktopApprovalActionInput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopApprovalDecisionSummary {
+    pub(crate) command_id: String,
+    pub(crate) client_id: String,
+    pub(crate) session_id: String,
     pub(crate) run_id: String,
     pub(crate) call_id: String,
+    pub(crate) approval_request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_stream_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation_id: Option<String>,
     pub(crate) decision: &'static str,
+    pub(crate) route_state: &'static str,
+    pub(crate) registry_revision: u64,
+    pub(crate) replayed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2058,9 +2099,11 @@ impl From<DesktopSessionSnapshot> for DesktopSessionSummary {
     }
 }
 
-impl From<sigil_desktop::DesktopSessionContinuityView> for DesktopConversationContinuity {
-    fn from(value: sigil_desktop::DesktopSessionContinuityView) -> Self {
-        Self {
+impl TryFrom<sigil_desktop::DesktopSessionContinuityView> for DesktopConversationContinuity {
+    type Error = sigil_desktop::DesktopProtocolEventError;
+
+    fn try_from(value: sigil_desktop::DesktopSessionContinuityView) -> Result<Self, Self::Error> {
+        Ok(Self {
             durable_frontier: DesktopDurableFrontierSummary {
                 through_stream_sequence: value.durable_frontier.through_stream_sequence,
             },
@@ -2070,6 +2113,20 @@ impl From<sigil_desktop::DesktopSessionContinuityView> for DesktopConversationCo
                     owner_revision: owner.owner_revision,
                 }
             }),
+            retained_terminal_runs: value
+                .retained_terminal_runs
+                .into_iter()
+                .map(|run| {
+                    Ok(DesktopRetainedTerminalRunSummary {
+                        run_id: run.id,
+                        terminal_tasks: run
+                            .terminal_tasks
+                            .iter()
+                            .map(DesktopTimelineTerminalTask::try_from)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             recovery_actions: value
                 .recovery_actions
                 .into_iter()
@@ -2087,7 +2144,7 @@ impl From<sigil_desktop::DesktopSessionContinuityView> for DesktopConversationCo
                     }
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -2990,7 +3047,7 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                 })
                 .collect(),
             model_selection: match value.model_selection {
-                DesktopModelSelectionPolicy::FreshSession => "fresh_session",
+                DesktopModelSelectionPolicy::SameSession => "same_session",
             },
             model_selection_binding: value.model_selection_binding,
             default_permission_mode: permission_mode_label(value.default_permission_mode),
@@ -3113,18 +3170,31 @@ fn reasoning_effort_label(value: DesktopReasoningEffort) -> &'static str {
     }
 }
 
-impl From<DesktopApprovalDecisionRecord> for DesktopApprovalDecisionSummary {
-    fn from(value: DesktopApprovalDecisionRecord) -> Self {
+impl From<NativeApprovalCommandReceipt> for DesktopApprovalDecisionSummary {
+    fn from(value: NativeApprovalCommandReceipt) -> Self {
         Self {
+            command_id: value.command_id,
+            client_id: value.client_id,
+            session_id: value.session_id,
             run_id: value.run_id,
             call_id: value.call_id,
-            decision: match value.decision {
+            approval_request_id: value.approval_request_id,
+            expected_stream_sequence: value.expected_stream_sequence,
+            correlation_id: value.correlation_id,
+            decision: match value.decision.decision {
                 sigil_desktop::DesktopApprovalRecordedDecision::Approved => "approved",
                 sigil_desktop::DesktopApprovalRecordedDecision::ApprovedForSession => {
                     "approved_for_session"
                 }
                 sigil_desktop::DesktopApprovalRecordedDecision::Denied => "denied",
             },
+            route_state: match value.route_state {
+                sigil_desktop::DesktopApprovalRouteState::DecisionAccepted => "decision_accepted",
+                sigil_desktop::DesktopApprovalRouteState::DeliveryUncertain => "delivery_uncertain",
+                sigil_desktop::DesktopApprovalRouteState::Terminal => "terminal",
+            },
+            registry_revision: value.registry_revision,
+            replayed: value.replayed,
         }
     }
 }

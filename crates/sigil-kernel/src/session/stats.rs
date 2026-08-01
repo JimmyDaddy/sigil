@@ -103,6 +103,89 @@ pub(super) fn interrupted_tool_executions(entries: &[SessionLogEntry]) -> Vec<To
         .collect()
 }
 
+pub(super) fn unresolved_tool_approvals(
+    entries: &[SessionLogEntry],
+    recovered_at_ms: u64,
+) -> Vec<ToolApprovalEntry> {
+    let mut open = BTreeMap::<String, (ToolApprovalEntry, Option<ToolApprovalUserDecision>)>::new();
+    let mut started_calls = BTreeMap::<String, ()>::new();
+
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval)) => {
+                let request_id = approval.identity.approval_request_id.clone();
+                match approval.action {
+                    ToolApprovalAuditAction::Requested => {
+                        open.insert(request_id, (approval.clone(), None));
+                    }
+                    ToolApprovalAuditAction::DecisionAccepted => {
+                        if let Some(pending) = open.get_mut(&request_id) {
+                            pending.0 = approval.clone();
+                            pending.1 = approval.user_decision;
+                        }
+                    }
+                    ToolApprovalAuditAction::Resolved => {
+                        open.remove(&request_id);
+                    }
+                    ToolApprovalAuditAction::PreviewFailed => {}
+                }
+            }
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.status == ToolExecutionStatus::Started =>
+            {
+                started_calls.insert(execution.call_id.clone(), ());
+            }
+            _ => {}
+        }
+    }
+
+    open
+        .into_values()
+        .map(|(mut approval, accepted)| {
+            let execution_started = started_calls.contains_key(&approval.call_id);
+            let (user_decision, terminal_status, reason) = match accepted {
+                Some(ToolApprovalUserDecision::Denied) => (
+                    Some(ToolApprovalUserDecision::Denied),
+                    ToolApprovalTerminalStatusV2::Denied,
+                    "accepted denial was reconciled after session restart",
+                ),
+                Some(ToolApprovalUserDecision::Approved) if execution_started => (
+                    Some(ToolApprovalUserDecision::Approved),
+                    ToolApprovalTerminalStatusV2::Approved,
+                    "accepted approval was reconciled from execution-start evidence",
+                ),
+                Some(ToolApprovalUserDecision::ApprovedForSession) if execution_started => (
+                    Some(ToolApprovalUserDecision::ApprovedForSession),
+                    ToolApprovalTerminalStatusV2::ApprovedForSession,
+                    "accepted session approval was reconciled from execution-start evidence",
+                ),
+                Some(ToolApprovalUserDecision::Approved)
+                | Some(ToolApprovalUserDecision::ApprovedForSession) => (
+                    None,
+                    ToolApprovalTerminalStatusV2::Stale,
+                    "accepted approval was invalidated before execution started during session restart",
+                ),
+                None if recovered_at_ms >= approval.identity.expires_at_ms => (
+                    None,
+                    ToolApprovalTerminalStatusV2::Expired,
+                    "approval request expired before session recovery",
+                ),
+                None => (
+                    None,
+                    ToolApprovalTerminalStatusV2::Cancelled,
+                    "approval request was interrupted by session restart",
+                ),
+            };
+            approval.action = ToolApprovalAuditAction::Resolved;
+            approval.user_decision = user_decision;
+            approval.reason = Some(reason.to_owned());
+            approval.decision_receipt = None;
+            approval.terminal_status = Some(terminal_status);
+            approval
+        })
+        .collect()
+}
+
 pub(super) fn interrupted_tool_execution_profiles(
     entries: &[SessionLogEntry],
 ) -> Vec<ExecutionMutationProfile> {
@@ -192,10 +275,13 @@ pub(super) fn session_identity_from_entries(
             }) if identity.is_none() => {
                 identity = Some((provider_name.clone(), model_name.clone()));
             }
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected { model_name })
-                if identity.is_some() =>
-            {
-                if let Some((_, current_model)) = identity.as_mut() {
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                provider_name,
+                model_name,
+                ..
+            }) if identity.is_some() => {
+                if let Some((current_provider, current_model)) = identity.as_mut() {
+                    *current_provider = provider_name.clone();
                     *current_model = model_name.clone();
                 }
             }
@@ -208,13 +294,25 @@ pub(super) fn session_identity_from_entries(
 pub(super) fn session_resolved_route_from_entries(
     entries: &[SessionLogEntry],
 ) -> Option<ResolvedModelRoute> {
-    let route = entries.iter().find_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::SessionIdentity {
-            resolved_model_route,
-            ..
-        }) => resolved_model_route.clone(),
-        _ => None,
-    })?;
+    let mut route = None;
+    let mut identity_seen = false;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route,
+                ..
+            }) if !identity_seen => {
+                identity_seen = true;
+                route = resolved_model_route.clone();
+            }
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                resolved_model_route,
+                ..
+            }) if identity_seen => route = Some(resolved_model_route.clone()),
+            _ => {}
+        }
+    }
+    let route = route?;
     let (_, final_model) = session_identity_from_entries(entries)?;
     (route.model_ref.model_id == final_model).then_some(route)
 }

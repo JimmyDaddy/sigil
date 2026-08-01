@@ -8,6 +8,17 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- Shell permissions now use one immutable, structured plan across policy, approval, audit, and
+  execution. Compound validation commands are classified per child command; dangerous flags,
+  redirections, dynamic syntax, protected targets, and missing sandbox capabilities continue to
+  fail closed. Exact, containment-bound session grants reduce repeated approval without widening
+  access to unrelated commands.
+- Approval decisions now converge from the exact command receipt in both Desktop and TUI instead
+  of waiting solely for a later live event. Accepted, resolving, execution-started, stale,
+  expired, uncertain, and terminal states are distinct and protected against older receipts.
+- Finite commands now use the foreground Shell path exclusively. Persistent and interactive work
+  uses explicit terminal tasks with readiness and event-driven waits; the runtime no longer uses
+  periodic terminal status discovery or asks the model to poll unchanged logs.
 - Release tags now build TUI/npm bytes once and freeze a commit-bound candidate manifest in the
   draft. Final publication reuses those admitted tarballs instead of rebuilding, while the release
   doctor and Desktop upload command bind versions, tag/main/CI, updater keys, signatures,

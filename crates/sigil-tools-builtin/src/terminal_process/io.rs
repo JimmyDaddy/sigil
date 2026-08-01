@@ -9,7 +9,7 @@ pub(super) enum TerminalOutputStream {
 const CAPTURE_TERMINATION_FAILED: u8 = 1;
 const CAPTURE_TERMINATION_OUTPUT_LIMIT: u8 = 2;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct TerminalCaptureLedger {
     stdout_observed_bytes: AtomicU64,
     stdout_written_bytes: AtomicU64,
@@ -17,17 +17,34 @@ pub(super) struct TerminalCaptureLedger {
     stderr_written_bytes: AtomicU64,
     termination: AtomicU8,
     limit_bytes: AtomicU64,
+    lifecycle: Option<TerminalLifecycleOwner>,
 }
 
 impl TerminalCaptureLedger {
-    fn record_observed(&self, stream: TerminalOutputStream, bytes: u64) {
+    pub(super) fn with_lifecycle(lifecycle: TerminalLifecycleOwner) -> Self {
+        Self {
+            lifecycle: Some(lifecycle),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn mark_terminal(&self, entry: &TerminalTaskEntry) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.mark_terminal(entry.status.clone(), entry.output_total_bytes);
+        }
+    }
+
+    fn record_observed(&self, stream: TerminalOutputStream, bytes: &[u8]) {
         let observed = match stream {
             TerminalOutputStream::Stdout => &self.stdout_observed_bytes,
             TerminalOutputStream::Stderr => &self.stderr_observed_bytes,
         };
         let _ = observed.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            Some(current.saturating_add(bytes))
+            Some(current.saturating_add(bytes.len() as u64))
         });
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.observe_output(bytes);
+        }
     }
 
     fn record_written(&self, stream: TerminalOutputStream, bytes: u64) {
@@ -395,7 +412,7 @@ pub(super) fn capture_pty_reader(
             );
         }
         observed_bytes = observed_bytes.saturating_add(read as u64);
-        capture_ledger.record_observed(stream, read as u64);
+        capture_ledger.record_observed(stream, &buffer[..read]);
         let remaining_stream = limits.stream_bytes.saturating_sub(written_bytes);
         let remaining_combined = limits.combined_bytes.saturating_sub(written_bytes);
         let allowed = read.min(remaining_stream.min(remaining_combined) as usize);
@@ -537,7 +554,7 @@ where
             break;
         }
         observed_bytes = observed_bytes.saturating_add(read as u64);
-        capture_ledger.record_observed(stream, read as u64);
+        capture_ledger.record_observed(stream, &buffer[..read]);
         let mut combined = output_file.lock().await;
         let remaining_stream = limits.stream_bytes.saturating_sub(written_bytes);
         let remaining_combined = combined.limit_bytes.saturating_sub(combined.written_bytes);
@@ -645,9 +662,50 @@ pub(super) async fn open_append_file(path: &Path) -> Result<File> {
 pub(super) async fn write_task_meta(path: &Path, entry: &TerminalTaskEntry) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(entry).context("failed to serialize terminal task meta")?;
-    fs::write(path, bytes)
+    let write_lock = task_meta_write_lock(path);
+    let _write_guard = write_lock.lock().await;
+    if let Ok(stored) = fs::read(path).await
+        && let Ok(stored) = serde_json::from_slice::<TerminalTaskEntry>(&stored)
+        && terminal_task_meta_is_newer_or_equivalent(&stored, entry)
+    {
+        return Ok(());
+    }
+
+    let path = path.to_path_buf();
+    task::spawn_blocking(move || sigil_kernel::atomic_publish_private_file(&path, &bytes))
         .await
-        .with_context(|| format!("failed to write {}", path.display()))
+        .context("terminal task meta write task failed")??;
+    Ok(())
+}
+
+fn terminal_task_meta_is_newer_or_equivalent(
+    stored: &TerminalTaskEntry,
+    candidate: &TerminalTaskEntry,
+) -> bool {
+    if stored.status.is_terminal() && !candidate.status.is_terminal() {
+        return true;
+    }
+    let stored_version = (stored.generation, stored.updated_at_ms);
+    let candidate_version = (candidate.generation, candidate.updated_at_ms);
+    stored_version > candidate_version
+        || (stored_version == candidate_version
+            && (stored.status.is_terminal() || !candidate.status.is_terminal()))
+}
+
+fn task_meta_write_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: std::sync::LazyLock<StdMutex<BTreeMap<PathBuf, std::sync::Weak<Mutex<()>>>>> =
+        std::sync::LazyLock::new(|| StdMutex::new(BTreeMap::new()));
+
+    let mut locks = LOCKS
+        .lock()
+        .expect("terminal task meta write lock registry poisoned");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
 }
 
 #[cfg(unix)]

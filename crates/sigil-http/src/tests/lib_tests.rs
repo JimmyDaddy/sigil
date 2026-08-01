@@ -11,11 +11,15 @@ use std::{
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    AssistantMessageKind, ControlEntry, EgressDataCategory, EgressDisclosureKind,
-    EgressNetworkRoute, EvidenceScope, IntegrationPlanId, IntegrationPromotionStatus,
-    JsonlSessionStore, ModelMessage, PreEgressDisclosure, PublicRunEvent, PublicRunEventKind,
-    Session, SessionLogEntry, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskStepId,
-    TaskVerificationRerunRequest, ToolApprovalUserDecision, ToolExecutionId, ToolProgressEvent,
+    ApprovalRequestIdentityV2, AssistantMessageKind, ControlEntry, EgressDataCategory,
+    EgressDisclosureKind, EgressNetworkRoute, EvidenceScope, IntegrationPlanId,
+    IntegrationPromotionStatus, JsonlSessionStore, ModelMessage, PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+    PreEgressDisclosure, PublicRunEvent, PublicRunEventKind, Session, SessionLogEntry, TaskId,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskStepId, TaskVerificationRerunRequest,
+    TerminalLifecycleEvent, TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskId,
+    TerminalTaskStatus, ToolAccess, ToolAnalysisStatus, ToolApprovalSessionGrantUnavailableReason,
+    ToolApprovalSessionGrantUnavailableReasonCode, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolExecutionId, ToolPreviewCapability, ToolProgressEvent, ToolSpec,
     VerificationProductAction, VerificationProductEvidence, VerificationProductView,
     VerificationRecommendationKind, VerificationVerdict,
 };
@@ -28,49 +32,58 @@ use tokio::{
     sync::oneshot,
 };
 
+use super::production_driver::record_run_terminal_and_reconcile_stream;
 use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
     HTTP_RUN_EVENT_SSE_NAME, HTTP_SERVER_INFO_SCHEMA_VERSION,
     HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION, HttpApplicationExtensionCatalog,
     HttpApplicationModelOption, HttpApprovalCommandReceipt, HttpApprovalDecision,
-    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCheckpointRestoreConflictReason, HttpCommandEnvelope,
-    HttpCompactionAdmission, HttpCompactionEconomics, HttpCompactionReceipt, HttpCompactionReview,
-    HttpContextWindowSource, HttpConversationDisplayCheckpointConflictReason,
-    HttpConversationDisplayContent, HttpConversationDisplayDriverError,
-    HttpConversationDisplayItem, HttpConversationDisplayItemKind,
-    HttpConversationDisplayMessageRole, HttpConversationDisplayOrder, HttpConversationDisplayPage,
-    HttpConversationDisplaySource, HttpConversationDisplayStatus,
-    HttpConversationLiveProvisionalAnchor, HttpConversationQueueBlockedReason,
-    HttpConversationQueueCommandAction, HttpConversationQueueCommandActionKind,
-    HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
-    HttpConversationQueueDriverCommand, HttpConversationQueueDriverError,
-    HttpConversationQueueGeneration, HttpConversationQueueItem, HttpConversationQueueItemKind,
-    HttpConversationQueueItemStatus, HttpConversationQueuePromptMaterial,
-    HttpConversationQueueView, HttpConversationRecoveryCommandAction,
-    HttpConversationRecoveryDriverCommand, HttpConversationRecoveryDriverError,
-    HttpConversationRecoveryDriverOutput, HttpConversationRecoveryView, HttpDurableCommandStore,
-    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpDurableSessionFrontier,
-    HttpForegroundRunOwner, HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind,
-    HttpIntentDropExecution, HttpIntentDropPreview, HttpIntentDropRequest,
-    HttpIntentStackDriverError, HttpIntentStackView, HttpLiveEventBus, HttpLiveEventRecvError,
-    HttpLocalServer, HttpModelSelectionPolicy, HttpPendingApproval, HttpPermissionMode,
-    HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
-    HttpProtocolReplayError, HttpProtocolVersionError, HttpProviderModelRef,
-    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError,
-    HttpRunCancelRequest, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
-    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-    HttpServerConfig, HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
-    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
-    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
-    HttpSupportContext, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
-    HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView, HttpToolArtifactPage,
-    HttpToolArtifactPageEncoding, HttpToolArtifactReadDriverError, HttpToolArtifactReadRequest,
-    HttpToolArtifactSelector, HttpTranscriptAssistantKind, HttpTranscriptRole,
-    HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
+    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpApprovalLifecycleState,
+    HttpApprovalRouteState, HttpAuthConfig, HttpAuthError, HttpAuthValidator,
+    HttpCheckpointRestoreConflictReason, HttpCommandEnvelope, HttpCompactionAdmission,
+    HttpCompactionEconomics, HttpCompactionReceipt, HttpCompactionReview, HttpContextWindowSource,
+    HttpConversationDisplayCheckpointConflictReason, HttpConversationDisplayContent,
+    HttpConversationDisplayDriverError, HttpConversationDisplayItem,
+    HttpConversationDisplayItemKind, HttpConversationDisplayMessageRole,
+    HttpConversationDisplayOrder, HttpConversationDisplayPage, HttpConversationDisplaySource,
+    HttpConversationDisplayStatus, HttpConversationLiveProvisionalAnchor,
+    HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
+    HttpConversationQueueCommandActionKind, HttpConversationQueueCommandReceipt,
+    HttpConversationQueueCommandRequest, HttpConversationQueueDriverCommand,
+    HttpConversationQueueDriverError, HttpConversationQueueGeneration, HttpConversationQueueItem,
+    HttpConversationQueueItemKind, HttpConversationQueueItemStatus,
+    HttpConversationQueuePromptMaterial, HttpConversationQueueView,
+    HttpConversationRecoveryCommandAction, HttpConversationRecoveryDriverCommand,
+    HttpConversationRecoveryDriverError, HttpConversationRecoveryDriverOutput,
+    HttpConversationRecoveryView, HttpDurableCommandStore, HttpDurableEgressDisclosureJournal,
+    HttpDurableProtocolJournal, HttpDurableSessionFrontier, HttpForegroundRunOwner,
+    HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind, HttpIntentDropExecution,
+    HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackDriverError, HttpIntentStackView,
+    HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
+    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpProviderModelRef, HttpQueuedRunAdmission,
+    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
+    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpRunDriverTerminalTaskCancel, HttpRunEventSequencer, HttpRunSnapshot, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
+    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
+    HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationLaneView,
+    HttpTaskIntegrationReviewView, HttpTerminalLifecycleView, HttpTerminalTaskCancelRequest,
+    HttpToolArtifactPage, HttpToolArtifactPageEncoding, HttpToolArtifactReadDriverError,
+    HttpToolArtifactReadRequest, HttpToolArtifactSelector, HttpTranscriptAssistantKind,
+    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
     public_run_event_to_sse,
 };
+
+fn unavailable_session_grant_reason() -> Option<ToolApprovalSessionGrantUnavailableReason> {
+    Some(ToolApprovalSessionGrantUnavailableReason {
+        code: ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+    })
+}
 
 #[tokio::test]
 async fn support_routes_require_auth_and_expose_only_the_redacted_projection() {
@@ -1499,7 +1512,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
         HttpRunStartRequest {
             prompt: "hello from desktop".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
-            model_name: None,
+            model_ref: None,
             model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
@@ -1553,7 +1566,7 @@ async fn local_server_routes_typed_task_continuation_through_run_start() {
         HttpRunStartRequest {
             prompt: String::new(),
             permission_mode: Some(HttpPermissionMode::Manual),
-            model_name: None,
+            model_ref: None,
             model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
@@ -2215,7 +2228,7 @@ async fn local_server_projects_typed_run_context() {
                 reasoning_effort_binding: Some("effort-binding-pro".to_owned()),
             },
         ],
-        model_selection: HttpModelSelectionPolicy::FreshSession,
+        model_selection: HttpModelSelectionPolicy::SameSession,
         model_selection_binding: "model-binding".to_owned(),
         default_permission_mode: HttpPermissionMode::Manual,
         available_permission_modes: vec![
@@ -2257,7 +2270,7 @@ async fn local_server_projects_typed_run_context() {
         body["model_options"][1]["reasoning_effort_binding"],
         "effort-binding-pro"
     );
-    assert_eq!(body["model_selection"], "fresh_session");
+    assert_eq!(body["model_selection"], "same_session");
     assert_eq!(body["model_selection_binding"], "model-binding");
     assert_eq!(body["default_permission_mode"], "manual");
     assert_eq!(body["available_permission_modes"][2], "auto-edit");
@@ -2610,7 +2623,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
         HttpRunStartRequest {
             prompt: "approval needed".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
-            model_name: None,
+            model_ref: None,
             model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
@@ -2699,7 +2712,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         HttpRunStartRequest {
             prompt: "run desktop smoke".to_owned(),
             permission_mode: Some(HttpPermissionMode::Manual),
-            model_name: None,
+            model_ref: None,
             model_selection_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
@@ -3043,6 +3056,410 @@ async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_event
 }
 
 #[tokio::test]
+async fn local_sse_keeps_a_foreground_terminal_stream_open_until_terminal_tasks_settle() {
+    let (address, shutdown, driver, registry, event_bus) =
+        spawn_test_http_server_with_registry_and_events().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("persistent terminal stream", HttpPermissionMode::ReadOnly),
+        )
+        .expect("run should start");
+    driver.set_session_frontier(1);
+    let owner_revision = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("run should own the session")
+        .owner_revision;
+    event_bus
+        .publish_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "persistent terminal stream".to_owned(),
+            },
+        ))
+        .expect("durable start should publish");
+
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("SSE client should connect");
+    stream
+        .write_all(
+            http_run_events_get(
+                &format!("/runs/{}/events", run.id),
+                Some("secret-token"),
+                &session.id,
+                &owner_revision,
+                None,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("SSE request should write");
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 4_096];
+    while !String::from_utf8_lossy(&received).contains("run_started") {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("replay should arrive before timeout")
+            .expect("replay should read");
+        assert!(read > 0);
+        received.extend_from_slice(&chunk[..read]);
+    }
+
+    event_bus
+        .publish_run_event_with_stream_continuation(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            2,
+            PublicRunEventKind::RunFinished {
+                final_text: "foreground finished".to_owned(),
+            },
+        ))
+        .expect("foreground terminal should retain the event stream");
+    while !String::from_utf8_lossy(&received).contains("run_finished") {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("foreground terminal should arrive")
+            .expect("foreground terminal should read");
+        assert!(read > 0, "retained stream must not close at RunFinished");
+        received.extend_from_slice(&chunk[..read]);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.read(&mut chunk))
+            .await
+            .is_err(),
+        "retained stream should stay live after the foreground terminal"
+    );
+
+    event_bus
+        .publish_run_event_and_close_stream(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            3,
+            PublicRunEventKind::TerminalLifecycle {
+                event: TerminalLifecycleEvent {
+                    task_id: TerminalTaskId::new("terminal-stream").expect("terminal task id"),
+                    execution_backend: None,
+                    sandbox_profile: None,
+                    generation: 2,
+                    status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+                    readiness: TerminalReadinessStatus::None,
+                    total_output_bytes: 0,
+                    emitted_at_ms: 30,
+                },
+            },
+        ))
+        .expect("final lifecycle should close the retained stream");
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut received))
+        .await
+        .expect("final lifecycle should close SSE")
+        .expect("SSE tail should read");
+    let received = String::from_utf8(received).expect("SSE response should be UTF-8");
+    assert!(received.contains("terminal_lifecycle"));
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_sse_closes_when_foreground_terminal_reconciles_after_final_task_event() {
+    let (address, shutdown, driver, registry, event_bus) =
+        spawn_test_http_server_with_registry_and_events().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("terminal close race", HttpPermissionMode::ReadOnly),
+        )
+        .expect("run should start");
+    driver.set_session_frontier(1);
+    let owner_revision = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("run should own the session")
+        .owner_revision;
+    event_bus
+        .publish_next_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "terminal close race".to_owned(),
+            },
+        ))
+        .expect("run start should publish");
+    let running = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-close-race").expect("terminal task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 1,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::None,
+        total_output_bytes: 0,
+        emitted_at_ms: 10,
+    };
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &running, |_, close_stream| {
+            assert!(!close_stream);
+            event_bus
+                .publish_next_run_event(PublicRunEvent::new(
+                    &session.durable_session_scope_id,
+                    &run.id,
+                    1,
+                    PublicRunEventKind::TerminalLifecycle {
+                        event: running.clone(),
+                    },
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("running lifecycle should publish");
+    event_bus
+        .publish_next_run_event_with_stream_continuation(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunFinished {
+                final_text: "foreground finished".to_owned(),
+            },
+        ))
+        .expect("foreground terminal should retain the stream");
+
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("SSE client should connect");
+    stream
+        .write_all(
+            http_run_events_get(
+                &format!("/runs/{}/events", run.id),
+                Some("secret-token"),
+                &session.id,
+                &owner_revision,
+                None,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("SSE request should write");
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 4_096];
+    while !String::from_utf8_lossy(&received).contains("run_finished") {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("foreground terminal should replay")
+            .expect("foreground terminal should read");
+        assert!(
+            read > 0,
+            "retained stream must stay open through RunFinished"
+        );
+        received.extend_from_slice(&chunk[..read]);
+    }
+
+    let exited = TerminalLifecycleEvent {
+        generation: 2,
+        status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+        emitted_at_ms: 20,
+        ..running
+    };
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &exited, |_, close_stream| {
+            assert!(
+                !close_stream,
+                "the foreground registry terminal has not committed yet"
+            );
+            event_bus
+                .publish_next_run_event(PublicRunEvent::new(
+                    &session.durable_session_scope_id,
+                    &run.id,
+                    1,
+                    PublicRunEventKind::TerminalLifecycle {
+                        event: exited.clone(),
+                    },
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("final lifecycle should publish first");
+    while !String::from_utf8_lossy(&received).contains("\"generation\":2") {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("final lifecycle should arrive")
+            .expect("final lifecycle should read");
+        assert!(read > 0, "stream must still be open before reconciliation");
+        received.extend_from_slice(&chunk[..read]);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.read(&mut chunk))
+            .await
+            .is_err(),
+        "listener should be blocked after consuming the final lifecycle"
+    );
+
+    record_run_terminal_and_reconcile_stream(
+        &registry,
+        &event_bus,
+        &session.durable_session_scope_id,
+        &run.id,
+        HttpRunTerminalOutcome::Finished,
+    )
+    .expect("foreground terminal should close and signal the retained stream");
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut received))
+        .await
+        .expect("run-scoped close signal should wake the blocked SSE listener")
+        .expect("SSE should close cleanly");
+    assert_eq!(
+        registry.get_run(&run.id).expect("run snapshot").status,
+        HttpRunStatus::Finished
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_sse_drains_ordered_terminal_events_before_the_close_marker() {
+    let (address, shutdown, driver, registry, event_bus) =
+        spawn_test_http_server_with_registry_and_events().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("terminal close ordering", HttpPermissionMode::ReadOnly),
+        )
+        .expect("run should start");
+    driver.set_session_frontier(1);
+    let owner_revision = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project")
+        .foreground_owner
+        .expect("run should own the session")
+        .owner_revision;
+    event_bus
+        .publish_next_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "terminal close ordering".to_owned(),
+            },
+        ))
+        .expect("run start should publish");
+
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("SSE client should connect");
+    stream
+        .write_all(
+            http_run_events_get(
+                &format!("/runs/{}/events", run.id),
+                Some("secret-token"),
+                &session.id,
+                &owner_revision,
+                None,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("SSE request should write");
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 4_096];
+    while !String::from_utf8_lossy(&received).contains("run_started") {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("run start should replay")
+            .expect("run start should read");
+        assert!(read > 0);
+        received.extend_from_slice(&chunk[..read]);
+    }
+
+    let running = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-close-ordering").expect("terminal task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 1,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::None,
+        total_output_bytes: 0,
+        emitted_at_ms: 10,
+    };
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &running, |_, close_stream| {
+            assert!(!close_stream);
+            event_bus
+                .publish_next_run_event(PublicRunEvent::new(
+                    &session.durable_session_scope_id,
+                    &run.id,
+                    1,
+                    PublicRunEventKind::TerminalLifecycle {
+                        event: running.clone(),
+                    },
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("running lifecycle should publish");
+    event_bus
+        .publish_next_run_event_with_stream_continuation(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunFinished {
+                final_text: "foreground finished".to_owned(),
+            },
+        ))
+        .expect("foreground terminal should retain the stream");
+    let exited = TerminalLifecycleEvent {
+        generation: 2,
+        status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+        emitted_at_ms: 20,
+        ..running
+    };
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &exited, |_, close_stream| {
+            assert!(!close_stream);
+            event_bus
+                .publish_next_run_event(PublicRunEvent::new(
+                    &session.durable_session_scope_id,
+                    &run.id,
+                    1,
+                    PublicRunEventKind::TerminalLifecycle {
+                        event: exited.clone(),
+                    },
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("final lifecycle should publish");
+    record_run_terminal_and_reconcile_stream(
+        &registry,
+        &event_bus,
+        &session.durable_session_scope_id,
+        &run.id,
+        HttpRunTerminalOutcome::Finished,
+    )
+    .expect("reconciliation should enqueue an ordered close marker");
+
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut received))
+        .await
+        .expect("ordered close marker should terminate SSE")
+        .expect("SSE should close cleanly");
+    let received = String::from_utf8(received).expect("SSE response should be UTF-8");
+    let finished_at = received
+        .find("run_finished")
+        .expect("RunFinished must arrive");
+    let final_lifecycle_at = received
+        .find("\"generation\":2")
+        .unwrap_or_else(|| panic!("the final terminal lifecycle must arrive; received={received}"));
+    assert!(
+        finished_at < final_lifecycle_at,
+        "the close marker must preserve protocol publication order"
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn graceful_shutdown_reaps_idle_connections_cancels_runs_and_stops_command_admission() {
     let driver = Arc::new(RecordingRunDriver::default());
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
@@ -3331,6 +3748,18 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             ["oneOf"][0]["$ref"],
         "#/components/schemas/ForegroundRunOwner"
     );
+    assert_eq!(
+        document["components"]["schemas"]["ApprovalCommandReceipt"]["properties"]["route_state"]["$ref"],
+        "#/components/schemas/ApprovalRouteState"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ApprovalRouteState"]["enum"],
+        json!(["decision_accepted", "delivery_uncertain", "terminal"])
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ApprovalDecisionRecord"]["properties"]["decision"]["enum"],
+        json!(["approved", "approved_for_session", "denied"])
+    );
     assert!(
         document["paths"]["/sessions/{session_id}/transcript"]["get"]["responses"]["200"]
             .is_object()
@@ -3425,7 +3854,7 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert_eq!(
         document["components"]["schemas"]["RunContextView"]["properties"]["model_selection"]["enum"]
             [0],
-        "fresh_session"
+        "same_session"
     );
     assert!(
         document["components"]["schemas"]["ProviderCredentialSource"]["enum"]
@@ -3777,7 +4206,10 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
     assert_eq!(data["schema_version"], HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
     assert_eq!(data["event_class"], "transient");
     assert_eq!(data.get("replay_id"), None);
-    assert_eq!(data["run_event"]["schema_version"], 1);
+    assert_eq!(
+        data["run_event"]["schema_version"],
+        PUBLIC_RUN_EVENT_SCHEMA_VERSION
+    );
     assert_eq!(data["run_event"]["session_id"], "session-1");
     assert_eq!(data["run_event"]["run_id"], "run-1");
     assert_eq!(data["run_event"]["sequence"], 12);
@@ -3787,6 +4219,422 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
         sse.encode(),
         format!("event: run_event\ndata: {}\n\n", sse.data())
     );
+}
+
+#[test]
+fn terminal_lifecycle_event_serializes_as_typed_durable_sse() {
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        13,
+        PublicRunEventKind::TerminalLifecycle {
+            event: TerminalLifecycleEvent {
+                task_id: TerminalTaskId::new("terminal-1").expect("task id"),
+                execution_backend: Some(sigil_kernel::TerminalExecutionBackendKind::LocalPty),
+                sandbox_profile: Some(sigil_kernel::ExecutionSandboxProfile::WorkspaceWrite),
+                generation: 4,
+                status: TerminalTaskStatus::Running,
+                readiness: TerminalReadinessStatus::Ready {
+                    kind: TerminalReadinessKind::OutputContains,
+                    ready_at_ms: 40,
+                },
+                total_output_bytes: 128,
+                emitted_at_ms: 41,
+            },
+        },
+    );
+
+    let sse = public_run_event_to_sse(&event).expect("terminal event should serialize");
+    let data: Value = serde_json::from_str(sse.data()).expect("sse data should be json");
+    assert_eq!(data["event_class"], "durable");
+    assert_eq!(data["run_event"]["event"]["type"], "terminal_lifecycle");
+    assert_eq!(data["run_event"]["event"]["event"]["generation"], 4);
+    assert_eq!(
+        data["run_event"]["event"]["event"]["execution_backend"],
+        "local_pty"
+    );
+    assert_eq!(
+        data["run_event"]["event"]["event"]["sandbox_profile"],
+        "workspace_write"
+    );
+    assert_eq!(
+        data["run_event"]["event"]["event"]["readiness"]["state"],
+        "ready"
+    );
+    assert_eq!(sse.id(), Some("sigil-http-run-v1:session-1:run-1:13"));
+}
+
+#[test]
+fn run_snapshot_projects_only_newer_terminal_generations() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("terminal route", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    let mut event = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-1").expect("task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 1,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Waiting {
+            kind: TerminalReadinessKind::OutputRegex,
+        },
+        total_output_bytes: 64,
+        emitted_at_ms: 10,
+    };
+    let sequence = registry
+        .record_terminal_lifecycle(&run.id, &event)
+        .expect("terminal lifecycle should project")
+        .expect("new generation should advance the stream");
+    assert_eq!(
+        registry
+            .record_terminal_lifecycle(&run.id, &event)
+            .expect("duplicate generation should be idempotent"),
+        None
+    );
+    event.generation = 2;
+    event.readiness = TerminalReadinessStatus::Ready {
+        kind: TerminalReadinessKind::OutputRegex,
+        ready_at_ms: 20,
+    };
+    event.emitted_at_ms = 20;
+    assert_eq!(
+        registry
+            .record_terminal_lifecycle(&run.id, &event)
+            .expect("newer generation should project"),
+        Some(sequence + 1)
+    );
+
+    let snapshot = registry.get_run(&run.id).expect("run snapshot");
+    assert_eq!(snapshot.terminal_tasks.len(), 1);
+    assert_eq!(snapshot.terminal_tasks[0].generation, 2);
+    assert!(matches!(
+        snapshot.terminal_tasks[0].readiness,
+        TerminalReadinessStatus::Ready { .. }
+    ));
+}
+
+#[test]
+fn terminal_lifecycle_publication_failure_does_not_consume_generation_or_sequence() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("terminal publication retry", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    let event = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-retry").expect("task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 1,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Waiting {
+            kind: TerminalReadinessKind::OutputRegex,
+        },
+        total_output_bytes: 0,
+        emitted_at_ms: 10,
+    };
+    let before = registry.get_run(&run.id).expect("run snapshot");
+
+    let failed = registry.record_terminal_lifecycle_with_publication(&run.id, &event, |_, _| {
+        Err("protocol journal unavailable".to_owned())
+    });
+    assert!(matches!(
+        failed,
+        Err(HttpRegistryError::DriverRejected {
+            operation: "publish terminal lifecycle",
+            ..
+        })
+    ));
+    assert_eq!(
+        registry.get_run(&run.id).expect("run snapshot"),
+        before,
+        "failed durable publication must not consume registry generation or sequence"
+    );
+
+    let sequence = registry
+        .record_terminal_lifecycle_with_publication(&run.id, &event, |_, _| Ok(()))
+        .expect("same generation should remain retryable")
+        .expect("same generation should publish after recovery");
+    assert_eq!(sequence, before.stream_sequence + 1);
+}
+
+#[test]
+fn run_terminal_reconciliation_failure_leaves_the_terminal_transition_retryable() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("terminal reconciliation retry", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+
+    let failed = registry.record_run_terminal_with_reconciliation(
+        &run.id,
+        HttpRunTerminalOutcome::Finished,
+        || Err("protocol journal unavailable".to_owned()),
+    );
+    assert!(matches!(
+        failed,
+        Err(HttpRegistryError::DriverRejected {
+            operation: "reconcile terminal run stream",
+            ..
+        })
+    ));
+    assert_eq!(
+        registry.get_run(&run.id).expect("run snapshot").status,
+        HttpRunStatus::Running,
+        "a failed durable close must not commit the process-local terminal"
+    );
+
+    let retried = registry
+        .record_run_terminal_with_reconciliation(&run.id, HttpRunTerminalOutcome::Finished, || {
+            Ok(())
+        })
+        .expect("the same terminal transition should remain retryable");
+    assert_eq!(retried.status, HttpRunStatus::Finished);
+}
+
+#[test]
+fn terminal_lifecycle_continues_after_foreground_run_terminal() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("background task outlives turn", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    registry
+        .record_run_terminal(&run.id, HttpRunTerminalOutcome::Finished)
+        .expect("foreground run should finish");
+    let event = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-after-run").expect("task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 2,
+        status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+        readiness: TerminalReadinessStatus::Ready {
+            kind: TerminalReadinessKind::OutputRegex,
+            ready_at_ms: 20,
+        },
+        total_output_bytes: 128,
+        emitted_at_ms: 30,
+    };
+
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &event, |_, close_stream| {
+            assert!(
+                close_stream,
+                "the last terminal task must close an already-terminal foreground stream"
+            );
+            Ok(())
+        })
+        .expect("terminal owner should outlive foreground run")
+        .expect("newer generation should advance the stream");
+    let snapshot = registry.get_run(&run.id).expect("run snapshot");
+    assert_eq!(snapshot.status, HttpRunStatus::Finished);
+    assert_eq!(snapshot.terminal_tasks.len(), 1);
+    assert_eq!(
+        snapshot.terminal_tasks[0].status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    );
+}
+
+#[test]
+fn run_terminal_reconciles_stream_when_final_terminal_lifecycle_won_the_race() {
+    let temp = tempfile::tempdir().expect("temporary directory should create");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 16)
+            .expect("protocol journal should open"),
+    );
+    let event_bus = HttpLiveEventBus::with_durable_journal(16, protocol_journal);
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("terminal race", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    let running = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-race").expect("task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 1,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Ready {
+            kind: TerminalReadinessKind::OutputContains,
+            ready_at_ms: 10,
+        },
+        total_output_bytes: 32,
+        emitted_at_ms: 10,
+    };
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &running, |_, close_stream| {
+            assert!(!close_stream);
+            event_bus
+                .publish_next_run_event(PublicRunEvent::new(
+                    &session.durable_session_scope_id,
+                    &run.id,
+                    1,
+                    PublicRunEventKind::TerminalLifecycle {
+                        event: running.clone(),
+                    },
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("running lifecycle should publish");
+    event_bus
+        .publish_next_run_event_with_stream_continuation(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            },
+        ))
+        .expect("foreground terminal should retain the owned stream");
+
+    let exited = TerminalLifecycleEvent {
+        generation: 2,
+        status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+        emitted_at_ms: 20,
+        ..running
+    };
+    registry
+        .record_terminal_lifecycle_with_publication(&run.id, &exited, |_, close_stream| {
+            assert!(
+                !close_stream,
+                "the foreground registry terminal has not committed yet"
+            );
+            event_bus
+                .publish_next_run_event(PublicRunEvent::new(
+                    &session.durable_session_scope_id,
+                    &run.id,
+                    1,
+                    PublicRunEventKind::TerminalLifecycle {
+                        event: exited.clone(),
+                    },
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .expect("final lifecycle should publish before foreground terminal");
+    assert!(
+        event_bus
+            .run_stream_accepts_events(&session.durable_session_scope_id, &run.id)
+            .expect("stream watermark should read")
+    );
+
+    record_run_terminal_and_reconcile_stream(
+        &registry,
+        &event_bus,
+        &session.durable_session_scope_id,
+        &run.id,
+        HttpRunTerminalOutcome::Finished,
+    )
+    .expect("foreground terminal should reconcile the already-terminal owner");
+    assert!(
+        !event_bus
+            .run_stream_accepts_events(&session.durable_session_scope_id, &run.id)
+            .expect("stream watermark should read")
+    );
+}
+
+#[test]
+fn terminal_cancel_is_generation_bound_and_available_after_foreground_terminal() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("persistent terminal control", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    let running = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-cancel").expect("task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 3,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Ready {
+            kind: TerminalReadinessKind::OutputContains,
+            ready_at_ms: 20,
+        },
+        total_output_bytes: 10,
+        emitted_at_ms: 20,
+    };
+    registry
+        .record_terminal_lifecycle(&run.id, &running)
+        .expect("running task should project");
+    registry
+        .record_run_terminal(&run.id, HttpRunTerminalOutcome::Finished)
+        .expect("foreground run should finish");
+    let snapshot = registry.get_run(&run.id).expect("run snapshot");
+    let command = HttpCommandEnvelope::new(
+        "terminal-cancel-command",
+        "desktop-client",
+        &session.id,
+        HttpTerminalTaskCancelRequest {
+            task_id: "terminal-cancel".to_owned(),
+            expected_generation: 3,
+        },
+    )
+    .with_expected_stream_sequence(snapshot.stream_sequence);
+
+    let receipt = registry
+        .cancel_terminal_task_command(&run.id, command.clone())
+        .expect("terminal cancellation should route after foreground terminal");
+    assert_eq!(receipt.terminal_task.status, TerminalTaskStatus::Cancelled);
+    assert_eq!(driver.terminal_cancels().len(), 1);
+    assert!(
+        registry
+            .cancel_terminal_task_command(&run.id, command)
+            .expect("same command identity should replay before lifecycle projection catches up")
+            .replayed
+    );
+    assert_eq!(driver.terminal_cancels().len(), 1);
+
+    let cancelled = TerminalLifecycleEvent {
+        task_id: running.task_id,
+        execution_backend: running.execution_backend,
+        sandbox_profile: running.sandbox_profile,
+        generation: receipt.terminal_task.generation,
+        status: TerminalTaskStatus::Cancelled,
+        readiness: receipt.terminal_task.readiness.clone(),
+        total_output_bytes: receipt.terminal_task.total_output_bytes,
+        emitted_at_ms: receipt.terminal_task.emitted_at_ms,
+    };
+    registry
+        .record_terminal_lifecycle(&run.id, &cancelled)
+        .expect("cancelled owner state should project");
+    let retry_snapshot = registry.get_run(&run.id).expect("run snapshot");
+    let retry = HttpCommandEnvelope::new(
+        "terminal-cancel-command-retry",
+        "desktop-client",
+        &session.id,
+        HttpTerminalTaskCancelRequest {
+            task_id: "terminal-cancel".to_owned(),
+            expected_generation: cancelled.generation,
+        },
+    )
+    .with_expected_stream_sequence(retry_snapshot.stream_sequence);
+    assert!(
+        registry
+            .cancel_terminal_task_command(&run.id, retry)
+            .expect("terminal cancellation retry should be idempotent")
+            .replayed
+    );
+    assert_eq!(driver.terminal_cancels().len(), 1);
 }
 
 #[test]
@@ -4918,11 +5766,11 @@ async fn live_event_bus_reports_lag_without_corrupting_durable_replay() {
         "session-1",
         "run-1",
         3,
-        PublicRunEventKind::RunFinished {
-            final_text: "done".to_owned(),
+        PublicRunEventKind::Notice {
+            message: "durable checkpoint".to_owned(),
         },
     ))
-    .expect("finish event should publish");
+    .expect("durable notice should publish");
 
     assert!(matches!(
         subscriber.recv().await,
@@ -4972,6 +5820,118 @@ fn live_event_bus_releases_completed_run_watermarks() {
     }
 
     assert_eq!(bus.active_sequence_watermark_len(), 0);
+}
+
+#[test]
+fn live_event_bus_serializes_next_sequence_allocation_across_event_sources() {
+    let bus = Arc::new(HttpLiveEventBus::new(32));
+    let mut workers = Vec::new();
+    for worker in 0..16_u64 {
+        let bus = Arc::clone(&bus);
+        workers.push(std::thread::spawn(move || {
+            bus.publish_next_run_event(PublicRunEvent::new(
+                "session-sequenced",
+                "run-sequenced",
+                worker.saturating_add(100),
+                PublicRunEventKind::Notice {
+                    message: format!("source-{worker}"),
+                },
+            ))
+            .expect("central publication sequence should allocate")
+            .run_event
+            .sequence
+        }));
+    }
+    let mut sequences = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("publication worker should join"))
+        .collect::<Vec<_>>();
+    sequences.sort_unstable();
+    assert_eq!(sequences, (1..=16).collect::<Vec<_>>());
+}
+
+#[test]
+fn live_event_bus_binds_approval_display_to_the_allocated_public_sequence() {
+    let bus = HttpLiveEventBus::new(8);
+    bus.publish_next_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        99,
+        PublicRunEventKind::Notice {
+            message: "interleaved lifecycle".to_owned(),
+        },
+    ))
+    .expect("first event should allocate");
+    let call = ToolCall {
+        id: "call-approval-sequence".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: r#"{"path":"README.md"}"#.to_owned(),
+    };
+    let spec = ToolSpec {
+        name: "write_file".to_owned(),
+        description: "write a file".to_owned(),
+        input_schema: json!({"type":"object"}),
+        category: ToolCategory::File,
+        access: ToolAccess::Write,
+        network_effect: None,
+        preview: ToolPreviewCapability::Required,
+    };
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        1,
+        PublicRunEventKind::ApprovalRequested {
+            approval_identity: ApprovalRequestIdentityV2 {
+                session_id: "session-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                call_id: call.id.clone(),
+                approval_request_id: approval_request_id(&call.id),
+                plan_hash: "a".repeat(64),
+                policy_version: policy_version(),
+                execution_binding_hash: "b".repeat(64),
+                expires_at_ms: u64::MAX,
+            },
+            session_grant_available: false,
+            session_grant_unavailable_reason: unavailable_session_grant_reason(),
+            effects: Default::default(),
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            safe_summary: Default::default(),
+            decision_reasons: Vec::new(),
+            call: call.clone(),
+            spec,
+            subjects: Vec::new(),
+            network_effect: None,
+            local_policy_decision: None,
+            network_policy_decision: None,
+            source_policy_decision: None,
+            operation: None,
+            risk: None,
+            subject_zones: Vec::new(),
+            confirmation: None,
+            snapshot_required: false,
+            command_permission_matches: Vec::new(),
+            preview: None,
+        },
+    );
+    let published = bus
+        .publish_next_run_event_with_approval(event, |sequence| {
+            let mut pending = pending_approval(&call.id, &call.name);
+            pending.tool_call_hash = "c".repeat(64);
+            pending.display.event_sequence = sequence;
+            pending.display.analysis_status = "complete".to_owned();
+            Ok(pending)
+        })
+        .expect("approval should bind its allocated sequence");
+    assert_eq!(published.run_event.sequence, 2);
+    assert_eq!(
+        published
+            .approval_request
+            .expect("approval guard should publish")
+            .display
+            .event_sequence,
+        2
+    );
 }
 
 #[test]
@@ -5141,6 +6101,22 @@ fn continuity_probe_combines_durable_frontier_with_exact_owner_revision() {
         owner.owner_revision
     );
 
+    let retained_terminal = TerminalLifecycleEvent {
+        task_id: TerminalTaskId::new("terminal-continuity").expect("task id"),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 3,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Ready {
+            kind: TerminalReadinessKind::OutputContains,
+            ready_at_ms: 10,
+        },
+        total_output_bytes: 32,
+        emitted_at_ms: 10,
+    };
+    registry
+        .record_terminal_lifecycle(&first.id, &retained_terminal)
+        .expect("persistent terminal should project");
     registry
         .record_run_terminal(&first.id, HttpRunTerminalOutcome::Interrupted)
         .expect("terminal should release owner");
@@ -5148,6 +6124,15 @@ fn continuity_probe_combines_durable_frontier_with_exact_owner_revision() {
         registry.admit_run_event_stream(&session.id, &first.id, &owner.owner_revision),
         Err(HttpRegistryError::RunNoLongerForeground { .. })
     ));
+    let retained = registry
+        .session_continuity(&session.id)
+        .expect("retained terminal continuity should project");
+    assert_eq!(retained.retained_terminal_runs.len(), 1);
+    assert_eq!(retained.retained_terminal_runs[0].id, first.id);
+    assert_eq!(
+        retained.retained_terminal_runs[0].terminal_tasks,
+        vec![HttpTerminalLifecycleView::from(&retained_terminal)]
+    );
     let second = registry
         .start_run(
             &session.id,
@@ -5165,6 +6150,95 @@ fn continuity_probe_combines_durable_frontier_with_exact_owner_revision() {
         .expect("new owner should exist");
     assert_eq!(next_owner.run_id, second.id);
     assert_ne!(next_owner.owner_revision, owner.owner_revision);
+}
+
+#[test]
+fn continuity_probe_prioritizes_active_terminal_owners_over_recent_history() {
+    const RETENTION_LIMIT: usize = 16;
+
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    driver.set_session_frontier(1);
+    let active_owner = registry
+        .start_run(
+            &session.id,
+            run_start("old active terminal owner", HttpPermissionMode::Manual),
+        )
+        .expect("active terminal owner run should start");
+    registry
+        .record_terminal_lifecycle(
+            &active_owner.id,
+            &TerminalLifecycleEvent {
+                task_id: TerminalTaskId::new("old-active-terminal").expect("terminal task id"),
+                execution_backend: None,
+                sandbox_profile: None,
+                generation: 1,
+                status: TerminalTaskStatus::Running,
+                readiness: TerminalReadinessStatus::None,
+                total_output_bytes: 0,
+                emitted_at_ms: 1,
+            },
+        )
+        .expect("active terminal should project");
+    registry
+        .record_run_terminal(&active_owner.id, HttpRunTerminalOutcome::Finished)
+        .expect("foreground owner should finish");
+
+    let mut terminal_history_ids = Vec::new();
+    for index in 0..RETENTION_LIMIT {
+        let history = registry
+            .start_run(
+                &session.id,
+                run_start(
+                    &format!("terminal history {index}"),
+                    HttpPermissionMode::Manual,
+                ),
+            )
+            .expect("terminal history run should start");
+        registry
+            .record_terminal_lifecycle(
+                &history.id,
+                &TerminalLifecycleEvent {
+                    task_id: TerminalTaskId::new(format!("terminal-history-{index}"))
+                        .expect("terminal task id"),
+                    execution_backend: None,
+                    sandbox_profile: None,
+                    generation: 1,
+                    status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+                    readiness: TerminalReadinessStatus::None,
+                    total_output_bytes: 0,
+                    emitted_at_ms: 10 + index as u64,
+                },
+            )
+            .expect("terminal history should project");
+        registry
+            .record_run_terminal(&history.id, HttpRunTerminalOutcome::Finished)
+            .expect("terminal history should finish");
+        terminal_history_ids.push(history.id);
+    }
+
+    let continuity = registry
+        .session_continuity(&session.id)
+        .expect("continuity should project");
+    let retained_ids = continuity
+        .retained_terminal_runs
+        .iter()
+        .map(|run| run.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(retained_ids.len(), RETENTION_LIMIT);
+    assert!(retained_ids.contains(&active_owner.id.as_str()));
+    assert!(
+        !retained_ids.contains(&terminal_history_ids[0].as_str()),
+        "the oldest settled history should yield capacity to an older active owner"
+    );
+    assert!(
+        retained_ids.contains(
+            &terminal_history_ids
+                .last()
+                .expect("terminal history")
+                .as_str()
+        )
+    );
 }
 
 #[tokio::test]
@@ -5616,26 +6690,39 @@ fn driver_panics_quarantine_tentative_start_cancel_and_approval_state() {
             run_start("approval panic", HttpPermissionMode::Manual),
         )
         .expect("run should start");
-    approval_registry
+    let waiting = approval_registry
         .register_approval_request(&approval_run.id, pending_approval("call-1", "write_file"))
         .expect("approval should be pending");
     approval_driver.observe_approval(Arc::new(|_approval| panic!("approval driver panic")));
+    let approval_command = HttpCommandEnvelope::new(
+        "approval-panic-command",
+        "desktop-client",
+        &approval_session.id,
+        approval_decision("call-1", HttpApprovalDecision::Approve, None),
+    )
+    .with_expected_stream_sequence(waiting.stream_sequence);
+    let receipt = approval_registry
+        .submit_approval_command(&approval_run.id, "call-1", approval_command.clone())
+        .expect("ambiguous approval delivery should return a typed uncertain receipt");
     assert_eq!(
-        approval_registry.submit_approval_decision(
-            &approval_run.id,
-            "call-1",
-            approval_decision("call-1", HttpApprovalDecision::Approve, None),
-        ),
-        Err(HttpRegistryError::DriverPanicked {
-            operation: "approval",
-            run_id: approval_run.id.clone(),
-        })
+        receipt.route_state,
+        HttpApprovalRouteState::DeliveryUncertain
     );
+    assert_eq!(receipt.registry_revision, waiting.stream_sequence + 1);
+    let replay = approval_registry
+        .submit_approval_command(&approval_run.id, "call-1", approval_command)
+        .expect("the same command id should replay the uncertain receipt");
+    assert!(replay.replayed);
+    assert_eq!(
+        replay.route_state,
+        HttpApprovalRouteState::DeliveryUncertain
+    );
+    assert_eq!(replay.registry_revision, receipt.registry_revision);
     let approval_state = approval_registry
         .get_run(&approval_run.id)
         .expect("uncertain approval should remain inspectable");
     assert_eq!(approval_state.status, HttpRunStatus::ExecutionUncertain);
-    assert!(approval_state.pending_approval_call_ids.is_empty());
+    assert!(approval_state.pending_approvals.is_empty());
 }
 
 #[test]
@@ -5838,7 +6925,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
             HttpRunStartRequest {
                 prompt: "hello".to_owned(),
                 permission_mode: None,
-                model_name: None,
+                model_ref: None,
                 model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
@@ -5864,6 +6951,11 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     let prompt = format!("{}{}", "x".repeat(120), "tail");
 
     let mut request = run_start(&prompt, HttpPermissionMode::Manual);
+    request.model_ref = Some(HttpProviderModelRef {
+        connection_id: "gateway-team".to_owned(),
+        model_id: "gpt-5".to_owned(),
+    });
+    request.model_selection_binding = Some("model-binding".to_owned());
     request.reasoning_effort = Some(HttpReasoningEffort::High);
     request.reasoning_effort_binding = Some("effort-binding".to_owned());
     let run = registry
@@ -5875,7 +6967,7 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     assert_eq!(run.status, HttpRunStatus::Running);
     assert_eq!(run.permission_mode, HttpPermissionMode::Manual);
     assert_eq!(run.prompt_preview, format!("{}...", "x".repeat(120)));
-    assert!(run.pending_approval_call_ids.is_empty());
+    assert!(run.pending_approvals.is_empty());
     assert_eq!(
         registry
             .get_session(&session.id)
@@ -5889,6 +6981,17 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     assert_eq!(starts[0].session.id, session.id);
     assert_eq!(starts[0].run.status, HttpRunStatus::Starting);
     assert_eq!(starts[0].prompt, prompt);
+    assert_eq!(
+        starts[0].model_ref,
+        Some(HttpProviderModelRef {
+            connection_id: "gateway-team".to_owned(),
+            model_id: "gpt-5".to_owned(),
+        })
+    );
+    assert_eq!(
+        starts[0].model_selection_binding.as_deref(),
+        Some("model-binding")
+    );
     assert_eq!(
         starts[0].run.reasoning_effort,
         Some(HttpReasoningEffort::High)
@@ -5906,7 +7009,7 @@ fn task_continuation_uses_the_foreground_run_control_plane() {
     let request = HttpRunStartRequest {
         prompt: String::new(),
         permission_mode: Some(HttpPermissionMode::Manual),
-        model_name: None,
+        model_ref: None,
         model_selection_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
@@ -6333,11 +7436,11 @@ fn approval_requests_and_decisions_are_routed_in_order() {
         .register_approval_request(&run.id, pending_approval("call-b", "bash"))
         .expect("approval should be registered");
     assert_eq!(waiting.status, HttpRunStatus::WaitingForApproval);
-    assert_eq!(waiting.pending_approval_call_ids, vec!["call-b"]);
+    assert_eq!(pending_call_ids(&waiting), vec!["call-b"]);
     let waiting = registry
         .register_approval_request(&run.id, pending_approval("call-a", "read_file"))
         .expect("second approval should be registered");
-    assert_eq!(waiting.pending_approval_call_ids, vec!["call-a", "call-b"]);
+    assert_eq!(pending_call_ids(&waiting), vec!["call-a", "call-b"]);
 
     let approved = registry
         .submit_approval_decision(
@@ -6359,12 +7462,29 @@ fn approval_requests_and_decisions_are_routed_in_order() {
             reason: Some("read-only".to_owned()),
         }
     );
-    assert_eq!(
-        registry
-            .get_run(&run.id)
-            .expect("run should be readable")
-            .pending_approval_call_ids,
-        vec!["call-b"]
+    let accepted_snapshot = registry.get_run(&run.id).expect("run should be readable");
+    assert_eq!(pending_call_ids(&accepted_snapshot), vec!["call-b"]);
+    assert!(
+        accepted_snapshot
+            .approval_lifecycles
+            .iter()
+            .any(|lifecycle| {
+                lifecycle.approval.call_id == "call-a"
+                    && lifecycle.approval.approval_request_id == approval_request_id("call-a")
+                    && lifecycle.state == HttpApprovalLifecycleState::DecisionAccepted
+            })
+    );
+    let resolved_snapshot = registry
+        .record_approval_resolution(&run.id, "call-a", &approval_request_id("call-a"), true)
+        .expect("exact approval resolution should be recoverable");
+    assert!(
+        resolved_snapshot
+            .approval_lifecycles
+            .iter()
+            .any(|lifecycle| {
+                lifecycle.approval.call_id == "call-a"
+                    && lifecycle.state == HttpApprovalLifecycleState::Resolved
+            })
     );
 
     let denied = registry
@@ -6422,6 +7542,7 @@ fn approval_command_deduplicates_retries_and_audits_client_fields() {
             session_id: session.id.clone(),
             run_id: run.id.clone(),
             call_id: "call-1".to_owned(),
+            approval_request_id: "approval-call-1".to_owned(),
             expected_stream_sequence: Some(waiting.stream_sequence),
             correlation_id: Some("event-approval-1".to_owned()),
             decision: HttpApprovalDecisionRecord {
@@ -6430,6 +7551,8 @@ fn approval_command_deduplicates_retries_and_audits_client_fields() {
                 decision: ToolApprovalUserDecision::Approved,
                 reason: None,
             },
+            route_state: HttpApprovalRouteState::DecisionAccepted,
+            registry_revision: waiting.stream_sequence + 1,
             replayed: false,
         }
     );
@@ -6532,10 +7655,7 @@ fn approval_command_rejects_stale_stream_sequence() {
         })
     );
     assert_eq!(
-        registry
-            .get_run(&run.id)
-            .expect("run should be readable")
-            .pending_approval_call_ids,
+        pending_call_ids(&registry.get_run(&run.id).expect("run should be readable")),
         vec!["call-1"]
     );
     assert!(driver.approvals().is_empty());
@@ -6642,10 +7762,11 @@ fn approval_command_rejects_unavailable_session_grant_without_consuming_request(
         })
     );
     assert_eq!(
-        registry
-            .get_run(&run.id)
-            .expect("run should remain readable")
-            .pending_approval_call_ids,
+        pending_call_ids(
+            &registry
+                .get_run(&run.id)
+                .expect("run should remain readable")
+        ),
         vec!["call-1"]
     );
     assert!(driver.approvals().is_empty());
@@ -6677,10 +7798,7 @@ fn approval_command_rejects_expired_request_without_consuming_pending_call() {
         })
     );
     assert_eq!(
-        registry
-            .get_run(&run.id)
-            .expect("run should be readable")
-            .pending_approval_call_ids,
+        pending_call_ids(&registry.get_run(&run.id).expect("run should be readable")),
         vec!["call-1"]
     );
     assert!(driver.approvals().is_empty());
@@ -6706,7 +7824,7 @@ fn start_does_not_overwrite_approval_registered_by_driver() {
         .expect("start should complete");
 
     assert_eq!(run.status, HttpRunStatus::WaitingForApproval);
-    assert_eq!(run.pending_approval_call_ids, vec!["call-1"]);
+    assert_eq!(pending_call_ids(&run), vec!["call-1"]);
 }
 
 #[test]
@@ -6855,7 +7973,7 @@ fn approval_driver_failure_keeps_pending_call() {
             run_start("needs approval", HttpPermissionMode::Manual),
         )
         .expect("run should start");
-    registry
+    let waiting = registry
         .register_approval_request(&run.id, pending_approval("call-1", "write_file"))
         .expect("approval should be pending");
     driver.reject_next_approval("approval channel closed");
@@ -6872,13 +7990,9 @@ fn approval_driver_failure_keeps_pending_call() {
             message: "approval channel closed".to_owned(),
         })
     );
-    assert_eq!(
-        registry
-            .get_run(&run.id)
-            .expect("run should be readable")
-            .pending_approval_call_ids,
-        vec!["call-1"]
-    );
+    let restored = registry.get_run(&run.id).expect("run should be readable");
+    assert_eq!(pending_call_ids(&restored), vec!["call-1"]);
+    assert_eq!(restored.stream_sequence, waiting.stream_sequence + 1);
 }
 
 #[test]
@@ -6886,7 +8000,7 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let start = HttpRunStartRequest {
         prompt: "hello".to_owned(),
         permission_mode: Some(HttpPermissionMode::ReadOnly),
-        model_name: None,
+        model_ref: None,
         model_selection_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
@@ -7001,7 +8115,7 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
     HttpRunStartRequest {
         prompt: prompt.to_owned(),
         permission_mode: Some(permission_mode),
-        model_name: None,
+        model_ref: None,
         model_selection_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
@@ -7020,7 +8134,21 @@ fn pending_approval(call_id: &str, tool_name: &str) -> HttpPendingApproval {
         policy_version: policy_version(),
         expires_at_ms: u64::MAX,
         session_grant_available: false,
+        session_grant_unavailable_reason: unavailable_session_grant_reason(),
+        display: crate::HttpPendingApprovalDisplay {
+            event_sequence: 1,
+            safe_summary_title: tool_name.to_owned(),
+            safe_summary_detail: "Pending approval".to_owned(),
+            ..Default::default()
+        },
     }
+}
+
+fn pending_call_ids(run: &HttpRunSnapshot) -> Vec<&str> {
+    run.pending_approvals
+        .iter()
+        .map(|approval| approval.call_id.as_str())
+        .collect()
 }
 
 fn approval_decision(
@@ -7415,6 +8543,7 @@ struct RecordingRunDriver {
     starts: Mutex<Vec<HttpRunDriverStart>>,
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
     pauses: Mutex<Vec<HttpRunDriverTaskPause>>,
+    terminal_cancels: Mutex<Vec<HttpRunDriverTerminalTaskCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
     next_start_error: Mutex<Option<String>>,
     next_binding_error: Mutex<Option<String>>,
@@ -7469,6 +8598,10 @@ impl RecordingRunDriver {
 
     fn pauses(&self) -> Vec<HttpRunDriverTaskPause> {
         lock(&self.pauses).clone()
+    }
+
+    fn terminal_cancels(&self) -> Vec<HttpRunDriverTerminalTaskCancel> {
+        lock(&self.terminal_cancels).clone()
     }
 
     fn approvals(&self) -> Vec<HttpRunDriverApproval> {
@@ -7674,6 +8807,23 @@ impl HttpRunDriver for RecordingRunDriver {
         }
         lock(&self.pauses).push(pause);
         Ok(())
+    }
+
+    fn cancel_terminal_task(
+        &self,
+        cancel: HttpRunDriverTerminalTaskCancel,
+    ) -> Result<HttpTerminalLifecycleView, HttpRunDriverError> {
+        lock(&self.terminal_cancels).push(cancel.clone());
+        Ok(HttpTerminalLifecycleView {
+            task_id: cancel.task_id,
+            execution_backend: None,
+            sandbox_profile: None,
+            generation: cancel.expected_generation.saturating_add(1),
+            status: TerminalTaskStatus::Cancelled,
+            readiness: TerminalReadinessStatus::None,
+            total_output_bytes: 0,
+            emitted_at_ms: 100,
+        })
     }
 
     fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError> {

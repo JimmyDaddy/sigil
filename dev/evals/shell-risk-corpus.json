@@ -1,0 +1,167 @@
+{
+  "schema_version": 2,
+  "cases": [
+    {
+      "id": "git-status",
+      "command": "git status --short",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_read_only_command",
+      "required_effects": ["file_read", "execute_trusted_binary"],
+      "expected_approval_class": "low",
+      "expected_policy": { "manual": "allow", "auto_edit": "allow", "danger_full_access": "allow", "risk": "low" }
+    },
+    {
+      "id": "cargo-fmt-check",
+      "command": "cargo fmt --all --check",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_workspace_check_command",
+      "required_effects": ["file_read", "execute_trusted_binary"],
+      "expected_approval_class": "low",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "allow", "risk": "medium" }
+    },
+    {
+      "id": "cargo-check",
+      "command": "cargo check --workspace",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_workspace_check_command",
+      "required_effects": ["file_read", "execute_workspace_code"],
+      "expected_approval_class": "medium",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "allow", "risk": "medium" }
+    },
+    {
+      "id": "cargo-test",
+      "command": "cargo test -p sigil-kernel",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_workspace_check_command",
+      "required_effects": ["file_read", "execute_workspace_code"],
+      "expected_approval_class": "medium",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "allow", "risk": "medium" }
+    },
+    {
+      "id": "read-file",
+      "command": "cat Cargo.toml",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_read_only_command",
+      "required_effects": ["file_read", "execute_trusted_binary"],
+      "expected_approval_class": "low",
+      "expected_policy": { "manual": "allow", "auto_edit": "allow", "danger_full_access": "allow", "risk": "low" }
+    },
+    {
+      "id": "read-only-pipeline",
+      "command": "cat Cargo.toml | head -20",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_read_only_command",
+      "required_effects": ["file_read", "execute_trusted_binary"],
+      "expected_approval_class": "low",
+      "expected_policy": { "manual": "allow", "auto_edit": "allow", "danger_full_access": "allow", "risk": "low" }
+    },
+    {
+      "id": "static-overwrite",
+      "command": "printf changed > result.txt",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_destructive_command",
+      "required_effects": ["file_write"],
+      "expected_approval_class": "destructive",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "destructive" }
+    },
+    {
+      "id": "runtime-scratch-overwrite",
+      "command": "printf changed > \"$SIGIL_SCRATCH_DIR/result.txt\"",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_destructive_command",
+      "required_effects": ["file_write"],
+      "expected_approval_class": "destructive",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "destructive" }
+    },
+    {
+      "id": "sandbox-tmpdir-workspace-check",
+      "command": "cargo check --target-dir \"$TMPDIR/build\"",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_workspace_check_command",
+      "required_effects": ["file_read", "execute_workspace_code"],
+      "expected_approval_class": "medium",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "allow", "risk": "medium" }
+    },
+    {
+      "id": "find-delete",
+      "command": "find . -type f -delete",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_destructive_command",
+      "required_effects": ["file_delete"],
+      "expected_approval_class": "destructive",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "destructive" }
+    },
+    {
+      "id": "recursive-delete",
+      "command": "rm -rf target",
+      "expected_analysis": "conservative",
+      "expected_operation": "execute_destructive_command",
+      "required_effects": ["file_delete"],
+      "expected_approval_class": "destructive",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "destructive" }
+    },
+    {
+      "id": "remote-mutation",
+      "command": "git push origin main",
+      "expected_analysis": "conservative",
+      "expected_operation": "execute_unknown_command",
+      "required_effects": ["network_mutate", "remote_mutation"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "high" }
+    },
+    {
+      "id": "privilege-escalation",
+      "command": "sudo ls",
+      "expected_analysis": "conservative",
+      "expected_operation": "execute_unknown_command",
+      "required_effects": ["privilege_escalation"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "high" }
+    },
+    {
+      "id": "dynamic-substitution",
+      "command": "echo $(whoami)",
+      "expected_analysis": "conservative",
+      "expected_operation": "execute_unknown_command",
+      "required_effects": ["execute_dynamic_code"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "high" }
+    },
+    {
+      "id": "pipe-to-shell",
+      "command": "printf payload | sh",
+      "expected_analysis": "conservative",
+      "expected_operation": "execute_unknown_command",
+      "required_effects": ["execute_dynamic_code"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "high" }
+    },
+    {
+      "id": "unsupported-shell-wrapper",
+      "command": "fish -c 'git status'",
+      "expected_analysis": "conservative",
+      "expected_operation": "execute_unknown_command",
+      "required_effects": ["execute_dynamic_code"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "high" }
+    },
+    {
+      "id": "invalid-quote",
+      "command": "echo '",
+      "expected_analysis": "invalid",
+      "expected_operation": "execute_unknown_command",
+      "required_effects": ["unknown"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "ask", "risk": "high" }
+    },
+    {
+      "id": "external-worktree",
+      "command": "git -C .. status --short",
+      "expected_analysis": "complete",
+      "expected_operation": "execute_read_only_command",
+      "required_effects": ["file_read", "execute_trusted_binary"],
+      "expected_approval_class": "high",
+      "expected_policy": { "manual": "deny", "auto_edit": "deny", "danger_full_access": "deny", "risk": "low" }
+    }
+  ]
+}

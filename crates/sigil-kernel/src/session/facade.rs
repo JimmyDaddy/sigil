@@ -294,16 +294,20 @@ impl Session {
         model_name: impl Into<String>,
         entries: Vec<SessionLogEntry>,
     ) -> Self {
+        let fallback_provider_name = provider_name.into();
+        let fallback_model_name = model_name.into();
         let session_scope_id = uuid::Uuid::new_v4().to_string();
         let (mut entries, audit_needed) = validated_recovered_entries(&session_scope_id, entries);
         if audit_needed {
             entries.push(unsafe_external_recovery_audit_entry());
         }
         let stats = session_stats_from_entries(&entries);
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .unwrap_or((fallback_provider_name, fallback_model_name));
         Self {
             session_scope_id,
-            provider_name: provider_name.into(),
-            model_name: model_name.into(),
+            provider_name,
+            model_name,
             resolved_model_route: session_resolved_route_from_entries(&entries),
             entries,
             store: None,
@@ -378,8 +382,11 @@ impl Session {
     pub fn append(&mut self, entry: SessionLogEntry) -> Result<()> {
         match &entry {
             SessionLogEntry::ToolResultV2(result) => result.validate()?,
-            SessionLogEntry::Control(ControlEntry::ToolArtifactRead(receipt)) => {
-                receipt.validate()?;
+            SessionLogEntry::Control(control) => {
+                control.validate_durable_contract()?;
+                if let ControlEntry::ToolArtifactRead(receipt) = control {
+                    receipt.validate()?;
+                }
             }
             _ => {}
         }
@@ -580,6 +587,9 @@ impl Session {
         if controls.is_empty() {
             bail!("control append batch must not be empty");
         }
+        controls
+            .iter()
+            .try_for_each(ControlEntry::validate_durable_contract)?;
         let entries = controls
             .into_iter()
             .map(SessionLogEntry::Control)
@@ -601,6 +611,7 @@ impl Session {
         &mut self,
         control: ControlEntry,
     ) -> Result<Option<StoredEvent>> {
+        control.validate_durable_contract()?;
         let entry = SessionLogEntry::Control(control);
         let event = self
             .store
@@ -1030,22 +1041,33 @@ impl Session {
         self.resolved_model_route.as_ref()
     }
 
-    /// Selects the provider model used by subsequent runs without forking the durable session.
+    /// Selects the exact provider route used by subsequent runs without forking the session.
     ///
     /// The selection is append-only. Provider-native continuation material written before this
     /// boundary is intentionally excluded from future requests because it may be model-specific.
-    pub fn select_model(&mut self, model_name: impl Into<String>) -> Result<()> {
-        let model_name = model_name.into();
-        if model_name.trim().is_empty() {
-            bail!("session model selection must not be empty");
+    pub fn select_model_route(
+        &mut self,
+        provider_name: impl Into<String>,
+        resolved_model_route: ResolvedModelRoute,
+    ) -> Result<()> {
+        let provider_name = provider_name.into();
+        if provider_name.trim().is_empty() {
+            bail!("session provider selection must not be empty");
         }
-        if model_name == self.model_name {
+        let model_name = resolved_model_route.model_ref.model_id.clone();
+        if provider_name == self.provider_name
+            && self.resolved_model_route.as_ref() == Some(&resolved_model_route)
+        {
             return Ok(());
         }
         self.append_control(ControlEntry::SessionModelSelected {
+            provider_name: provider_name.clone(),
             model_name: model_name.clone(),
+            resolved_model_route: resolved_model_route.clone(),
         })?;
+        self.provider_name = provider_name;
         self.model_name = model_name;
+        self.resolved_model_route = Some(resolved_model_route);
         Ok(())
     }
 
@@ -1178,12 +1200,15 @@ impl Session {
     }
 
     pub fn latest_prefix_snapshot(&self) -> Option<PrefixSnapshot> {
-        self.entries.iter().rev().find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot)) => {
-                Some(snapshot.clone())
-            }
-            _ => None,
-        })
+        self.entries_after_latest_model_selection()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot)) => {
+                    Some(snapshot.clone())
+                }
+                _ => None,
+            })
     }
 
     pub fn latest_memory_snapshot(&self) -> Option<MemorySnapshot> {

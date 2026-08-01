@@ -383,7 +383,7 @@ const runContext: RunContext = {
       reasoningEffortBinding: "catalog-effort-binding-gateway",
     },
   ],
-  modelSelection: "fresh_session",
+  modelSelection: "same_session",
   modelSelectionBinding: "catalog-model-binding",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -610,6 +610,7 @@ export function createCatalogWorkbenchBridge(
         runId: attachment.run.id,
         ownerRevision: `sha256:${"c".repeat(64)}`,
       },
+      retainedTerminalRuns: [],
       recoveryActions: ["retry_current", "continue_read_only"],
     }),
     conversationQueue: async (_workspaceId, sessionId) => ({
@@ -703,6 +704,21 @@ export function createCatalogWorkbenchBridge(
       permissionMode: "manual",
       streamSequence: 4,
     }),
+    cancelTerminalTask: async (_workspaceId, sessionId, runId, taskId, expectedGeneration) => ({
+      commandId: "catalog-terminal-cancel",
+      clientId: "desktop-catalog",
+      sessionId,
+      runId,
+      terminalTask: {
+        taskId,
+        generation: expectedGeneration + 1,
+        status: "cancelled",
+        readiness: "none",
+        totalOutputBytes: 0,
+        emittedAtMs: Date.now(),
+      },
+      replayed: false,
+    }),
     pauseTask: async (_workspaceId, sessionId, runId) => ({
       id: runId,
       sessionId,
@@ -710,10 +726,20 @@ export function createCatalogWorkbenchBridge(
       permissionMode: "manual",
       streamSequence: 5,
     }),
-    resolveApproval: async (_workspaceId, _sessionId, runId, request, approve) => ({
+    resolveApproval: async (_workspaceId, sessionId, runId, request, decision) => ({
+      commandId: "workbench-approval-command",
+      clientId: "desktop-workbench",
+      sessionId,
       runId,
       callId: request.callId,
-      decision: approve ? "approved" : "denied",
+      approvalRequestId: request.approvalRequestId,
+      expectedStreamSequence: 1,
+      decision: decision === "deny"
+        ? "denied"
+        : decision === "approve_session" ? "approved_for_session" : "approved",
+      routeState: "decision_accepted",
+      registryRevision: 2,
+      replayed: false,
     }),
     verification: async () => verification,
     rerunVerification: async () => ({ ...verification, verdict: "passed", status: "passed" }),
@@ -735,6 +761,7 @@ export function createCatalogWorkbenchBridge(
       throw new Error("no Intent Drop preview");
     },
     subscribeRunEvents: async () => () => undefined,
+    subscribeRunApprovalSnapshots: async () => () => undefined,
     subscribeRunStreamStatus: async () => () => undefined,
     subscribeAppearance: async () => () => undefined,
     subscribeUpdate: async () => () => undefined,

@@ -280,7 +280,14 @@ fn detail_info_rail_usage_lines(app: &AppState) -> Vec<String> {
 }
 
 fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
-    let mut controls = global_control_hints(app.runtime.is_busy && app.approval.pending.is_none());
+    let mut controls = global_control_hints(
+        app.runtime.is_busy
+            && !app
+                .approval
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.actions_available()),
+    );
     if app.selected_timeline_text().is_some() {
         controls.retain(|hint| !hint.starts_with("Ctrl-C:"));
         controls.insert(0, "Ctrl-C: copy selection".to_owned());
@@ -926,7 +933,12 @@ impl FooterViewModel {
     fn from_app(app: &AppState) -> Self {
         Self {
             phase: app.run_phase(),
-            is_busy: app.runtime.is_busy && app.approval.pending.is_none(),
+            is_busy: app.runtime.is_busy
+                && !app
+                    .approval
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.actions_available()),
             run_label: footer_run_label(app),
             hints: footer_hints(app),
             context_label: app.context_usage_line(),
@@ -950,12 +962,20 @@ fn footer_hints(app: &AppState) -> String {
     if app.pending_plan_approval().is_some() {
         return format!("{agent} · Enter create and run task · Esc discard");
     }
-    if app.approval.pending.is_some() {
-        let session = app
-            .approval
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.session_grant_available);
+    if let Some(pending) = &app.approval.pending {
+        if !pending.actions_available() {
+            let state = match &pending.presentation_state {
+                crate::app::ApprovalPresentationState::Pending => unreachable!(),
+                crate::app::ApprovalPresentationState::DecisionAccepted { .. } => {
+                    "approval decision accepted; resuming run"
+                }
+                crate::app::ApprovalPresentationState::DeliveryUncertain { .. } => {
+                    "approval delivery uncertain; waiting for authoritative state"
+                }
+            };
+            return format!("{agent} · {state} · Esc input");
+        }
+        let session = pending.session_grant_available;
         let shortcut_hint = if session {
             "Shortcuts: Tab switch · Enter select · Y allow once · N deny"
         } else {

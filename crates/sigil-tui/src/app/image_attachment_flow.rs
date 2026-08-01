@@ -21,7 +21,7 @@ impl AppState {
             && !self.has_modal()
             && !self.is_setup_mode()
             && !self.is_config_mode()
-            && self.approval.pending.is_none()
+            && !self.approval.has_actionable_pending()
             && self.composer.queue_edit_target.is_none()
     }
 

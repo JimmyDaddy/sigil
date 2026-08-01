@@ -515,6 +515,28 @@ impl MutationEventRecorder {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::TerminalLifecycleSink for MutationEventRecorder {
+    async fn publish(&self, update: crate::TerminalLifecycleUpdateV2) -> Result<()> {
+        if update.task.handle.task_id != update.event.task_id
+            || update.task.generation != update.event.generation
+            || update.task.status != update.event.status
+            || update.task.readiness != update.event.readiness
+        {
+            bail!("terminal lifecycle update does not match its exact owner snapshot");
+        }
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            store.append(&crate::SessionLogEntry::Control(
+                crate::ControlEntry::TerminalTask(update.task),
+            ))
+        })
+        .await
+        .context("terminal lifecycle append worker failed")??;
+        Ok(())
+    }
+}
+
 fn lock_is_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()

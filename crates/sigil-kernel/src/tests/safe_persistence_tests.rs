@@ -279,6 +279,21 @@ fn safe_persistence_json_recursively_redacts_secret_keys_and_url_queries() {
 }
 
 #[test]
+fn safe_persistence_url_query_projection_is_idempotent() {
+    let raw = "read https://example.test/report?token=super-secret now";
+    let canonical = "read https://example.test/report?[redacted] now";
+
+    assert_eq!(safe_persistence_text(raw), canonical);
+    assert_eq!(safe_persistence_text(canonical), canonical);
+    assert_eq!(
+        safe_persistence_text(
+            "read https://example.test/report?[redacted][redacted][redacted] now"
+        ),
+        canonical
+    );
+}
+
+#[test]
 fn safe_persistence_one_shot_tool_call_complete_is_capped() {
     let error = project_tool_call_for_persistence(ToolCall {
         id: "call-large".to_owned(),

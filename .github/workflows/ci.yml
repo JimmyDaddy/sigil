@@ -12,6 +12,7 @@ on:
       - ".github/workflows/release.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "fuzz/**"
       - "apps/desktop/**"
       - "crates/**"
       - "rust-toolchain.toml"
@@ -69,6 +70,7 @@ on:
       - ".github/workflows/release.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "fuzz/**"
       - "apps/desktop/**"
       - "crates/**"
       - "rust-toolchain.toml"
@@ -242,6 +244,9 @@ jobs:
 
       - name: cargo check --locked
         run: cargo check --locked
+
+      - name: Compile Shell permission-plan fuzz target
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bin shell_permission_plan
 
       - name: Check updater release verifier
         run: >-

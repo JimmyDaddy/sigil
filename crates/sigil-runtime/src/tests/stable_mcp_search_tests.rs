@@ -252,6 +252,7 @@ fn fixture(
             input_schema: schema,
             output_schema: None,
             task_support: Some("forbidden".to_owned()),
+            annotations: sigil_mcp::McpToolAnnotations::default(),
         },
         outcome,
         calls: AtomicUsize::new(0),

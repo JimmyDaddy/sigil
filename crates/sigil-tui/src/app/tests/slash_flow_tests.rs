@@ -743,7 +743,7 @@ fn effort_command_updates_runtime_effort_and_worker_submit_uses_it() -> Result<(
 }
 
 #[test]
-fn model_command_switches_runtime_model_and_starts_fresh_session() -> Result<()> {
+fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -755,10 +755,22 @@ fn model_command_switches_runtime_model_and_starts_fresh_session() -> Result<()>
 
     assert!(matches!(
         action,
-        Some(AppAction::StartNewModelSession { .. })
+        Some(AppAction::RuntimeConfigUpdated { .. })
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
-    assert_ne!(app.session_id, previous_session_id);
+    assert_eq!(app.session_id, previous_session_id);
+    assert!(app.session_browser.current_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                provider_name,
+                model_name,
+                resolved_model_route,
+            }) if provider_name == "deepseek"
+                && model_name == "deepseek-v4-pro"
+                && resolved_model_route.model_ref.model_id == "deepseek-v4-pro"
+        )
+    }));
     assert!(
         app.timeline
             .iter()
@@ -1363,10 +1375,10 @@ fn slash_selector_executes_selected_model_candidate() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::StartNewModelSession { .. })
+        Some(AppAction::RuntimeConfigUpdated { .. })
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
-    assert_ne!(app.session_id, previous_session_id);
+    assert_eq!(app.session_id, previous_session_id);
     Ok(())
 }
 

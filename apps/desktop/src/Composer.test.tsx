@@ -51,7 +51,7 @@ const context: RunContext = {
       reasoningEffortBinding: "effort-binding-pro",
     },
   ],
-  modelSelection: "fresh_session",
+  modelSelection: "same_session",
   modelSelectionBinding: "model-binding",
   defaultPermissionMode: "manual",
   availablePermissionModes: ["read-only", "manual", "auto-edit", "danger-full-access"],
@@ -363,7 +363,7 @@ function renderComposer(overrides: {
 }
 
 describe("structured composer", () => {
-  it("labels provider-unconfirmed exact models and keeps them selectable", async () => {
+  it("keeps callable unverified models selectable without an unactionable warning", async () => {
     const onModelChange = vi.fn();
     const unverifiedContext: RunContext = {
       ...context,
@@ -377,9 +377,10 @@ describe("structured composer", () => {
 
     const model = screen.getByRole("combobox", { name: "Model" });
     const unverified = within(model).getByRole("option", {
-      name: /DeepSeek 1.*DeepSeek V4 Pro.*Not confirmed by provider/,
+      name: /DeepSeek 1.*DeepSeek V4 Pro/,
     }) as HTMLOptionElement;
     expect(unverified.disabled).toBe(false);
+    expect(unverified.textContent).not.toMatch(/Not confirmed by provider/);
 
     await userEvent.setup().selectOptions(
       model,

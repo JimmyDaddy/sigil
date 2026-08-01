@@ -17,6 +17,13 @@ fn test_workspace(name: &str) -> PathBuf {
     path
 }
 
+fn http_server_state_root(workspace: &Path, state_version: &str) -> PathBuf {
+    workspace
+        .join("state/workspaces")
+        .join(sigil_runtime::workspace_id_for_root(workspace))
+        .join(state_version)
+}
+
 fn write_config(path: &Path, base_url: &str) {
     let workspace = path.parent().expect("config should have a parent");
     let config = format!(
@@ -504,6 +511,82 @@ fn desktop_server_starts_first_run_without_config_and_exposes_empty_provider_set
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 
+#[test]
+fn desktop_server_ignores_incompatible_previous_protocol_state_namespace() {
+    let workspace = test_workspace("desktop-incompatible-previous-protocol-state");
+    let config_path = workspace.join("sigil.toml");
+    let token = "desktop-incompatible-previous-state-token";
+    write_config(&config_path, "http://127.0.0.1:1");
+    let previous_root = http_server_state_root(&workspace, "http-server-v3");
+    fs::create_dir_all(&previous_root).expect("previous state root should create");
+    let previous_journal = previous_root.join("protocol-events.json");
+    let incompatible_state = br#"{"schema_version":3,"events":[{"legacy":true}]}"#;
+    fs::write(&previous_journal, incompatible_state)
+        .expect("incompatible previous journal should write");
+
+    let server = spawn_desktop_serve(&workspace, &config_path, token);
+
+    assert!(
+        http_server_state_root(&workspace, "http-server-v4")
+            .join("protocol-events.json")
+            .is_file(),
+        "current server state should use a fresh namespace"
+    );
+    assert_eq!(
+        fs::read(&previous_journal).expect("previous journal should remain readable"),
+        incompatible_state,
+        "starting the current server must not migrate or rewrite incompatible state"
+    );
+
+    let output = close_desktop_owner_and_wait(server);
+    assert_eq!(output.status.code(), Some(0));
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[test]
+fn desktop_server_isolates_invalid_current_protocol_replay_state() {
+    let workspace = test_workspace("desktop-invalid-current-protocol-state");
+    let config_path = workspace.join("sigil.toml");
+    let token = "desktop-invalid-current-state-token";
+    write_config(&config_path, "http://127.0.0.1:1");
+    let server_root = http_server_state_root(&workspace, "http-server-v4");
+    fs::create_dir_all(&server_root).expect("current state root should create");
+    let journal_path = server_root.join("protocol-events.json");
+    let invalid_state = br#"{"schema_version":3,"events":[{"invalid":true}],"high_watermarks":[]}"#;
+    fs::write(&journal_path, invalid_state).expect("invalid current journal should write");
+
+    let server = spawn_desktop_serve(&workspace, &config_path, token);
+
+    let rebuilt: serde_json::Value = serde_json::from_slice(
+        &fs::read(&journal_path).expect("rebuilt journal should remain readable"),
+    )
+    .expect("rebuilt journal should be valid JSON");
+    assert_eq!(rebuilt["schema_version"], 3);
+    assert_eq!(rebuilt["events"], serde_json::json!([]));
+    let quarantined = fs::read_dir(&server_root)
+        .expect("server state directory should remain readable")
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("protocol-events.json.invalid-")
+        })
+        .expect("invalid replay journal should be isolated");
+    assert_eq!(
+        fs::read(quarantined.path()).expect("isolated replay journal should remain readable"),
+        invalid_state
+    );
+
+    let output = close_desktop_owner_and_wait(server);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("invalid HTTP replay state was isolated and rebuilt")
+    );
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_launcher_supervises_real_server_and_closes_owner_channel() {
     let workspace = test_workspace("desktop-launcher");
@@ -543,6 +626,41 @@ async fn desktop_launcher_supervises_real_server_and_closes_owner_channel() {
         .expect("owner pipe should gracefully stop the real server");
     assert_eq!(report.kind, sigil_desktop::DesktopShutdownKind::Graceful);
     assert_eq!(report.exit_code, Some(0));
+    assert!(report.success);
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_launcher_classifies_a_workspace_service_lease_conflict() {
+    let workspace = test_workspace("desktop-launcher-busy-state");
+    let config_path = workspace.join("sigil.toml");
+    write_config(&config_path, "http://127.0.0.1:1");
+    let request = sigil_desktop::DesktopLaunchRequest::new(
+        env!("CARGO_BIN_EXE_sigil"),
+        &config_path,
+        &workspace,
+    );
+    let launcher = sigil_desktop::DesktopLauncher::default();
+    let first = launcher
+        .launch(request.clone())
+        .await
+        .expect("first desktop server should own workspace state");
+
+    let second = launcher
+        .launch(request)
+        .await
+        .expect_err("second desktop server should not share workspace state leases");
+    assert!(matches!(
+        second,
+        sigil_desktop::DesktopLaunchError::StartupRejected(
+            sigil_desktop::DesktopStartupFailure::WorkspaceBusy
+        )
+    ));
+
+    let report = first
+        .shutdown()
+        .await
+        .expect("first desktop server should stop cleanly");
     assert!(report.success);
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
@@ -963,7 +1081,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
             sigil_desktop::DesktopRunStartRequest {
                 prompt: "answer from the fixture".to_owned(),
                 permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
-                model_name: None,
+                model_ref: None,
                 model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
@@ -1376,7 +1494,7 @@ fn serve_process_rejects_unsafe_startup_before_creating_listener_state() {
             "{name} must not claim that a listener started"
         );
         assert!(
-            !workspace.join("state/http-server-v2").exists(),
+            !http_server_state_root(&workspace, "http-server-v4").exists(),
             "{name} must fail before creating listener state"
         );
     }

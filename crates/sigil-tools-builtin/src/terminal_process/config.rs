@@ -123,6 +123,17 @@ impl TerminalExecutionConfig {
             .map(|shell| shell.unwrap_or_else(|| self.default_shell.clone()))
     }
 
+    pub(crate) fn permission_backend_binding(&self) -> String {
+        format!(
+            "configured:{}:profile={}:fallback={}:requires_sandbox={}:network_allowed={}",
+            self.backend.as_str(),
+            self.profile.as_str(),
+            self.fallback.as_str(),
+            self.requires_sandbox,
+            self.network_allowed
+        )
+    }
+
     pub(super) fn resolve_pty_execution(
         &self,
         resolved_cwd: &Path,
@@ -371,6 +382,79 @@ impl TerminalStartRequest {
     }
 }
 
+/// Readiness condition evaluated from the bounded terminal output stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TerminalReadinessCondition {
+    #[default]
+    None,
+    OutputContains {
+        value: String,
+        timeout: Duration,
+    },
+    OutputRegex {
+        value: String,
+        timeout: Duration,
+    },
+}
+
+impl TerminalReadinessCondition {
+    #[must_use]
+    pub fn kind(&self) -> TerminalReadinessKind {
+        match self {
+            Self::None => TerminalReadinessKind::None,
+            Self::OutputContains { .. } => TerminalReadinessKind::OutputContains,
+            Self::OutputRegex { .. } => TerminalReadinessKind::OutputRegex,
+        }
+    }
+
+    #[must_use]
+    pub fn timeout(&self) -> Option<Duration> {
+        match self {
+            Self::None => None,
+            Self::OutputContains { timeout, .. } | Self::OutputRegex { timeout, .. } => {
+                Some(*timeout)
+            }
+        }
+    }
+}
+
+/// Exact live owner snapshot for one terminal task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TerminalTaskSnapshot {
+    pub entry: TerminalTaskEntry,
+    pub generation: u64,
+    pub readiness: TerminalReadinessStatus,
+}
+
+/// Event-driven lifecycle condition used by `terminal_wait`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalWaitCondition {
+    StatusChange,
+    Exit,
+    OutputContains(String),
+    OutputRegex(String),
+    Readiness,
+}
+
+/// Stable outcome returned by an event-driven terminal wait.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalWaitOutcome {
+    ConditionMet,
+    Timeout,
+    OwnerShutdown,
+    Cancelled,
+}
+
+/// Result of one event-driven terminal lifecycle wait.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TerminalWaitResult {
+    pub outcome: TerminalWaitOutcome,
+    pub snapshot: TerminalTaskSnapshot,
+}
+
 /// Workspace-relative and absolute artifact paths for one terminal task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -398,6 +482,8 @@ pub struct TerminalTaskArtifacts {
 #[serde(rename_all = "snake_case")]
 pub struct TerminalReadResult {
     pub task_id: TerminalTaskId,
+    pub generation: u64,
+    pub readiness: TerminalReadinessStatus,
     pub offset: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u64>,
@@ -407,6 +493,7 @@ pub struct TerminalReadResult {
     pub returned_bytes: u64,
     pub total_bytes: u64,
     pub truncated: bool,
+    pub no_change: bool,
 }
 
 /// Result for data written to a running terminal task stdin.
@@ -425,6 +512,8 @@ pub struct TerminalTaskPermissionContext {
     pub command: String,
     pub cwd: PathBuf,
     pub shell: String,
+    /// Runtime-owned scratch root injected when the terminal task was started.
+    pub scratch_root: Option<PathBuf>,
 }
 
 /// Result for a terminal task resize operation.

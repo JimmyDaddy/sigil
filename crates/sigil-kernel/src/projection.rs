@@ -1196,8 +1196,8 @@ impl DispatchTraceProjection {
         trace.latest_local_policy_decision = Some(entry.local_policy_decision);
         trace.latest_network_policy_decision = Some(entry.network_policy_decision);
         trace.latest_source_policy_decision = Some(entry.source_policy_decision);
-        trace.latest_operation = entry.operation;
-        trace.latest_risk = entry.risk;
+        trace.latest_operation = Some(entry.operation);
+        trace.latest_risk = Some(entry.risk);
         trace.subject_count = entry.subjects.len() as u64;
         trace.external_subject_count = external_subject_count(&entry.subjects);
         trace.status = dispatch_status_from_approval(entry.action, entry.user_decision);
@@ -1624,7 +1624,12 @@ fn apply_control_entry_to_session_list(
             projection.provider_name = Some(provider_name.clone());
             projection.model_name = Some(model_name.clone());
         }
-        ControlEntry::SessionModelSelected { model_name } => {
+        ControlEntry::SessionModelSelected {
+            provider_name,
+            model_name,
+            ..
+        } => {
+            projection.provider_name = Some(provider_name.clone());
             projection.model_name = Some(model_name.clone());
         }
         ControlEntry::ConversationInputPromoted(promotion) => {

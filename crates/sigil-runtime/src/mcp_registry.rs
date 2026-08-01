@@ -9,6 +9,7 @@ use crate::mcp_declaration::declarations_by_effective_name;
 pub struct RuntimeToolSurface {
     pub registry: ToolRegistry,
     pub context_resolver: crate::context::RequestContextResolver,
+    pub terminal_control: sigil_tools_builtin::TerminalTaskControlHandle,
 }
 
 /// Read-through source for the latest durable plugin trust projection.
@@ -315,6 +316,8 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<ToolRegistry> {
+    let terminal_lifecycle_sink =
+        Arc::new(mutation_recorder.clone()) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
     Ok(build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
         provider_capabilities,
@@ -322,6 +325,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
         Some(mutation_recorder),
+        Some(terminal_lifecycle_sink),
         workspace_trust,
         network_admission,
     )
@@ -348,6 +352,31 @@ pub async fn build_tool_surface_with_mutation_recorder_and_workspace_trust_and_n
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<RuntimeToolSurface> {
+    let terminal_lifecycle_sink =
+        Arc::new(mutation_recorder.clone()) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
+    build_tool_surface_with_terminal_lifecycle(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        mutation_recorder,
+        workspace_trust,
+        network_admission,
+        terminal_lifecycle_sink,
+    )
+    .await
+}
+
+/// Builds the runtime tool surface with a session/run-bound terminal lifecycle route.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_tool_surface_with_terminal_lifecycle(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    mutation_recorder: MutationEventRecorder,
+    workspace_trust: WorkspaceTrust,
+    network_admission: ExtensionProcessNetworkAdmission,
+    terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
         provider_capabilities,
@@ -355,6 +384,7 @@ pub async fn build_tool_surface_with_mutation_recorder_and_workspace_trust_and_n
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
         Some(mutation_recorder),
+        Some(terminal_lifecycle_sink),
         workspace_trust,
         network_admission,
     )
@@ -424,6 +454,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         elicitation_handler,
         runtime_event_handler,
         mutation_recorder,
+        None,
         workspace_trust,
         network_admission,
     )
@@ -439,17 +470,19 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     mutation_recorder: Option<MutationEventRecorder>,
+    terminal_lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let mut registry = ToolRegistry::new();
-    let code_intelligence = register_local_tools(
+    let (code_intelligence, terminal_control) = register_local_tools(
         &mut registry,
         root_config,
         workspace_root.clone(),
         workspace_trust,
+        terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
     )?;
     let context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -482,6 +515,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     Ok(RuntimeToolSurface {
         registry,
         context_resolver,
+        terminal_control,
     })
 }
 
@@ -554,14 +588,101 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust(
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     workspace_trust: WorkspaceTrust,
 ) -> Result<RuntimeToolSurface> {
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+        None,
+    )
+}
+
+/// Builds the lazy-MCP tool surface with a session/run-bound terminal lifecycle route.
+///
+/// This is the event-driven TUI entrypoint: terminal tools retain their exact process owner while
+/// lifecycle generations are delivered through `terminal_lifecycle_sink`; no periodic status
+/// worker is installed.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as
+/// [`build_tool_surface_without_eager_mcp_with_workspace_trust`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+    terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+) -> Result<RuntimeToolSurface> {
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+        Some(RuntimeTerminalLifecycleRoute::Bound(
+            terminal_lifecycle_sink,
+        )),
+    )
+}
+
+/// Builds the lazy-MCP tool surface with terminal routes frozen from each exact tool context.
+///
+/// Unlike a mutable process-global route, the factory receives the immutable session scope,
+/// logical run id, and durable recorder that authorized the individual `terminal_start` call.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+    terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
+) -> Result<RuntimeToolSurface> {
+    build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+        Some(RuntimeTerminalLifecycleRoute::Factory(
+            terminal_lifecycle_factory,
+        )),
+    )
+}
+
+enum RuntimeTerminalLifecycleRoute {
+    Bound(Arc<dyn sigil_kernel::TerminalLifecycleSink>),
+    Factory(Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_terminal_lifecycle(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+    terminal_lifecycle_route: Option<RuntimeTerminalLifecycleRoute>,
+) -> Result<RuntimeToolSurface> {
     let _declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let mut registry = ToolRegistry::new();
-    let code_intelligence = register_local_tools(
+    let (code_intelligence, terminal_control) = register_local_tools(
         &mut registry,
         root_config,
         workspace_root.clone(),
         workspace_trust,
+        terminal_lifecycle_route,
     )?;
     let context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -576,6 +697,7 @@ pub fn build_tool_surface_without_eager_mcp_with_workspace_trust(
     Ok(RuntimeToolSurface {
         registry,
         context_resolver,
+        terminal_control,
     })
 }
 
@@ -894,22 +1016,46 @@ fn register_local_tools(
     root_config: &RootConfig,
     workspace_root: PathBuf,
     workspace_trust: WorkspaceTrust,
-) -> Result<Option<sigil_code_intel::CodeIntelligenceService>> {
+    terminal_lifecycle_route: Option<RuntimeTerminalLifecycleRoute>,
+) -> Result<(
+    Option<sigil_code_intel::CodeIntelligenceService>,
+    sigil_tools_builtin::TerminalTaskControlHandle,
+)> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let execution_backend = build_configured_execution_backend(root_config)?;
-    sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_and_execution_config(
-        registry,
-        sigil_tools_builtin::BuiltinToolPaths {
-            changesets_root: paths.changesets_root.clone(),
-            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
-            terminal_tasks_root: paths.terminal_tasks_root.clone(),
-            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
-            scratch_root: paths.scratch_root.clone(),
-            scratch_label: "cache/tmp".to_owned(),
-        },
-        execution_backend,
-        &root_config.execution,
-    );
+    let builtin_paths = sigil_tools_builtin::BuiltinToolPaths {
+        changesets_root: paths.changesets_root.clone(),
+        changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+        terminal_tasks_root: paths.terminal_tasks_root.clone(),
+        terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+        scratch_root: paths.scratch_root.clone(),
+        scratch_label: "cache/tmp".to_owned(),
+    };
+    let terminal_control = match terminal_lifecycle_route {
+        Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
+            sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
+                registry,
+                builtin_paths,
+                execution_backend,
+                &root_config.execution,
+                factory,
+            )
+        }
+        route => {
+            let sink = match route {
+                Some(RuntimeTerminalLifecycleRoute::Bound(sink)) => Some(sink),
+                Some(RuntimeTerminalLifecycleRoute::Factory(_)) => unreachable!(),
+                None => None,
+            };
+            sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+                registry,
+                builtin_paths,
+                execution_backend,
+                &root_config.execution,
+                sink,
+            )
+        }
+    };
     let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust(
         registry,
         &root_config.code_intelligence,
@@ -923,7 +1069,7 @@ fn register_local_tools(
         user_config_dir.as_deref(),
         &root_config.skills,
     );
-    Ok(code_intelligence)
+    Ok((code_intelligence, terminal_control))
 }
 
 /// Builds the execution backend configured for tools and verification checks.
@@ -1560,52 +1706,48 @@ impl Tool for McpActivateServerTool {
         sigil_kernel::ToolMutationTracking::None
     }
 
-    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
-        Ok(ToolOperation::NetworkRequest)
-    }
-
-    fn permission_access(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
-        let server_name = required_server_name(args)?;
-        Ok(self
-            .lazy_server(server_name)
-            .filter(|server| server.streamable_http().is_some())
-            .map_or(ToolAccess::Execute, |_| ToolAccess::Read))
-    }
-
-    fn permission_network_effect(
+    fn permission_plan(
         &self,
         ctx: &ToolContext,
         args: &Value,
-    ) -> Result<Option<NetworkEffect>> {
+    ) -> Result<sigil_kernel::ToolPermissionPlanDraft> {
         let server_name = required_server_name(args)?;
-        let Some(server) = self.lazy_server(server_name) else {
-            return Ok(Some(NetworkEffect::Unknown));
-        };
-        Ok(mcp_server_process_network_effect(
-            &self.root_config.execution,
-            &self.workspace_root,
-            server,
-            ctx.network_policy(),
-        ))
-    }
-
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        let server_name = required_server_name(args)?;
-        let Some(server) = self.lazy_server(server_name) else {
-            return Ok(vec![mcp_server_subject(server_name)]);
-        };
-        mcp_server_process_subjects(server, &self.workspace_root)
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        let server_name = required_server_name(args)?;
-        Ok(self
-            .lazy_server(server_name)
-            .map(|server| server.trust.approval_default))
+        let (access, network_effect, subjects, tool_default_mode) =
+            if let Some(server) = self.lazy_server(server_name) {
+                (
+                    if server.streamable_http().is_some() {
+                        ToolAccess::Read
+                    } else {
+                        ToolAccess::Execute
+                    },
+                    mcp_server_process_network_effect(
+                        &self.root_config.execution,
+                        &self.workspace_root,
+                        server,
+                        ctx.network_policy(),
+                    ),
+                    mcp_server_process_subjects(server, &self.workspace_root)?,
+                    Some(server.trust.approval_default),
+                )
+            } else {
+                (
+                    ToolAccess::Execute,
+                    Some(NetworkEffect::Unknown),
+                    vec![mcp_server_subject(server_name)],
+                    None,
+                )
+            };
+        sigil_kernel::declared_tool_permission_plan(
+            &self.spec(),
+            args,
+            sigil_kernel::DeclaredToolPermissionFacts {
+                access,
+                operation: ToolOperation::NetworkRequest,
+                network_effect,
+                subjects,
+                tool_default_mode,
+            },
+        )
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {

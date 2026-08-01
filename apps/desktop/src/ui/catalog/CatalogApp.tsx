@@ -276,7 +276,15 @@ function FixtureSurface({
       {fixture.approval === undefined ? null : (
         <>
           <textarea className="sr-only" ref={composerRef} aria-label="Catalog composer" />
-          <ApprovalDock approval={fixture.approval} busy={false} composerRef={composerRef} onDecision={() => undefined} />
+          <ApprovalDock
+            approval={fixture.approval}
+            phase="pending"
+            busy={false}
+            composerRef={composerRef}
+            onDecision={() => undefined}
+            onOpenSettings={() => undefined}
+            onOpenSupport={() => undefined}
+          />
         </>
       )}
       {fixture.verification === undefined ? null : (

@@ -66,7 +66,7 @@ pub(crate) struct IntentStackModalView {
 
 impl AppState {
     pub(super) fn open_intent_stack_modal(&mut self) -> Option<AppAction> {
-        if self.approval.pending.is_some() {
+        if self.approval.has_actionable_pending() {
             self.last_notice =
                 Some("finish the pending approval before opening Intent Stack".to_owned());
             return None;

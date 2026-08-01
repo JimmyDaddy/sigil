@@ -25,7 +25,7 @@ import type {
   SkillBinding,
   SkillCatalogEntry,
 } from "./types";
-import { type Translate, useLocale } from "./i18n";
+import { useLocale } from "./i18n";
 import { Icon } from "./ui/icons";
 import { Button, Dialog, IconButton, Popover, Select, TextArea, Tooltip } from "./ui/primitives";
 
@@ -360,27 +360,18 @@ export function Composer({
       ? optionConnection
       : `${optionProvider} · ${optionConnection}`;
     const routeIdentity = `${route} · ${identity}`;
-    return option.availability === "available"
-      ? routeIdentity
-      : option.availability === "unverified"
-        ? `${routeIdentity} · ${t("modelCatalogUnconfirmed")}`
-        : `${routeIdentity} · ${t("unavailable")}`;
+    return option.availability === "configured_unavailable"
+      ? `${routeIdentity} · ${t("unavailable")}`
+      : routeIdentity;
   };
   const selectedModelValue = modelOption === undefined ? "" : modelOptionValue(modelOption);
   const modelTooltip = runContext === undefined
     ? modelName
-    : modelOption?.availability === "unverified"
-      ? t("modelHintUnconfirmed", {
-        connection: connectionLabel,
-        provider: providerLabel,
-        model: modelOption.modelName,
-        source: modelProvenanceLabel(modelOption.provenance, t),
-      })
-      : t("modelHint", {
-        connection: connectionLabel,
-        provider: providerLabel,
-        model: modelOption?.modelName ?? modelName,
-      });
+    : t("modelHint", {
+      connection: connectionLabel,
+      provider: providerLabel,
+      model: modelOption?.modelName ?? modelName,
+    });
   const selectableModelCount = modelOptions.filter(
     (option) => modelOptionCanBeSelected(option, providerConnections),
   ).length;
@@ -717,19 +708,6 @@ function composerActivityCopy(state: ComposerActivityState, t: ReturnType<typeof
       return { label: t("composerActivityConnectionError"), detail: t("composerActivityConnectionErrorDetail") };
     case "finalizing":
       return { label: t("composerActivityFinalizing"), detail: t("composerActivityFinalizingDetail") };
-  }
-}
-
-function modelProvenanceLabel(
-  provenance: ModelOption["provenance"],
-  t: Translate,
-): string {
-  switch (provenance) {
-    case "remote": return t("modelProvenance_remote");
-    case "cache": return t("modelProvenance_cache");
-    case "bundled": return t("modelProvenance_bundled");
-    case "configured": return t("modelProvenance_configured");
-    case "manual": return t("modelProvenance_manual");
   }
 }
 

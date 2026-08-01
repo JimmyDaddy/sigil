@@ -9,7 +9,6 @@ use sigil_kernel::{
 use std::sync::Arc;
 
 use super::{
-    super::worker_event::WorkerWakeCoalescer,
     super::{
         WorkerCommand,
         worker_loop::{
@@ -18,6 +17,10 @@ use super::{
             classify_worker_command, task_completion_progress_for_active_task, transition_session,
             validate_task_pause_request,
         },
+    },
+    super::{
+        terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
+        worker_event::WorkerWakeCoalescer,
     },
     common::{PlannedProvider, routed_session_identity, routed_test_root_config, test_root_config},
 };
@@ -59,14 +62,18 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
         provider_capabilities(),
     );
     let session = Session::new("planned", "planned-model");
+    let (event_tx, _event_rx) = std::sync::mpsc::channel();
+    let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
 
     let state = WorkerLoopState::new(
         session_log_path.clone(),
         Some(session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
-        std::sync::mpsc::channel().0,
-        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
+        event_tx.clone(),
+        WorkerWakeCoalescer::new(event_tx, None),
+        terminal_lifecycle_router,
+        None,
     );
 
     assert_eq!(state.session.log_path, session_log_path);
@@ -91,7 +98,7 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
             .is_empty()
     );
     assert!(state.agent.last_task_completion_progress.batch.is_none());
-    assert!(state.processed_worker_command_ids.is_empty());
+    assert!(state.approval_command_receipts.is_empty());
     Ok(())
 }
 
@@ -410,13 +417,17 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         PlannedProvider::new(Vec::new()),
         ToolRegistry::new(),
     ));
+    let (event_tx, _event_rx) = std::sync::mpsc::channel();
+    let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
     let mut state = WorkerLoopState::new(
-        current_path,
+        current_path.clone(),
         Some(current_session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
-        std::sync::mpsc::channel().0,
-        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
+        event_tx.clone(),
+        WorkerWakeCoalescer::new(event_tx, None),
+        terminal_lifecycle_router,
+        None,
     );
     let queue_id = ConversationInputQueueId::new("queue_1")?;
     state
@@ -572,13 +583,17 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
         PlannedProvider::new(Vec::new()),
         ToolRegistry::new(),
     ));
+    let (event_tx, _event_rx) = std::sync::mpsc::channel();
+    let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
     let mut state = WorkerLoopState::new(
-        current_path,
+        current_path.clone(),
         Some(current_session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
-        std::sync::mpsc::channel().0,
-        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
+        event_tx.clone(),
+        WorkerWakeCoalescer::new(event_tx, None),
+        terminal_lifecycle_router,
+        None,
     );
     let queue_id = ConversationInputQueueId::new("fork_queue")?;
     state
@@ -697,13 +712,17 @@ allowed_tools = ["grep"]
         temp.path(),
     )?;
     let agent = Arc::new(Agent::new(PlannedProvider::new(Vec::new()), tool_registry));
+    let (event_tx, _event_rx) = std::sync::mpsc::channel();
+    let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
     let mut state = WorkerLoopState::new(
-        current_path,
+        current_path.clone(),
         Some(current_session),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
-        std::sync::mpsc::channel().0,
-        WorkerWakeCoalescer::new(std::sync::mpsc::channel().0, None),
+        event_tx.clone(),
+        WorkerWakeCoalescer::new(event_tx, None),
+        terminal_lifecycle_router,
+        None,
     );
     let (message_tx, _message_rx) = std::sync::mpsc::channel();
 

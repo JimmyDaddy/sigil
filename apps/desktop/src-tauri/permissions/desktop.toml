@@ -45,8 +45,8 @@ commands.allow = ["desktop_create_session", "desktop_open_session", "desktop_ren
 
 [[permission]]
 identifier = "allow-desktop-run"
-description = "Allows the main local window to start, reattach, or cooperatively cancel one run through the authenticated local server."
-commands.allow = ["desktop_start_run", "desktop_attach_run", "desktop_cancel_run"]
+description = "Allows the main local window to start, reattach, cooperatively cancel one run, or cancel one exact generation-bound persistent terminal task through the authenticated local server."
+commands.allow = ["desktop_start_run", "desktop_attach_run", "desktop_cancel_run", "desktop_cancel_terminal_task"]
 
 [[permission]]
 identifier = "allow-desktop-task-control"

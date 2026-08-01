@@ -12,6 +12,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, stream};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, ApprovalHandler, ApprovalMode,
@@ -19,8 +20,8 @@ use sigil_kernel::{
     MemoryConfig, MessageRole, NoopEventHandler, PermissionConfig, Provider, ProviderCapabilities,
     ProviderChunk, ReasoningEffort, ReasoningStreamSupport, Session, SessionLogEntry, SkillConfig,
     SkillDescriptor, SkillIndexSnapshot, SkillRunMode, SkillSource, SkillTrustState, Tool,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResultStatus,
+    ToolAnalysisStatus, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolContext,
+    ToolErrorKind, ToolOperation, ToolPermissionEffect, ToolRegistry, ToolResultStatus,
 };
 
 use super::{
@@ -1055,12 +1056,7 @@ async fn load_skill_agent_permission_modes_allow_ask_and_deny() -> Result<()> {
     assert!(allow_output.outcome.tool_errors.is_empty());
     assert_skill_loaded(&allow_session);
     assert_request_has_loaded_skill_body(&allow_requests);
-    assert_approval_audit(
-        &allow_session,
-        ToolApprovalAuditAction::PolicyEvaluated,
-        ApprovalMode::Allow,
-        None,
-    );
+    assert_permission_decision(&allow_session, ApprovalMode::Allow);
 
     let ask_workspace = tempfile::tempdir()?;
     write_load_skill_fixture(ask_workspace.path());
@@ -1079,11 +1075,18 @@ async fn load_skill_agent_permission_modes_allow_ask_and_deny() -> Result<()> {
     assert!(ask_output.outcome.tool_errors.is_empty());
     assert_skill_loaded(&ask_session);
     assert_request_has_loaded_skill_body(&ask_requests);
+    assert_permission_decision(&ask_session, ApprovalMode::Ask);
     assert_approval_audit(
         &ask_session,
         ToolApprovalAuditAction::Requested,
         ApprovalMode::Ask,
         None,
+    );
+    assert_approval_audit(
+        &ask_session,
+        ToolApprovalAuditAction::DecisionAccepted,
+        ApprovalMode::Ask,
+        Some(ToolApprovalUserDecision::Approved),
     );
     assert_approval_audit(
         &ask_session,
@@ -1112,13 +1115,44 @@ async fn load_skill_agent_permission_modes_allow_ask_and_deny() -> Result<()> {
     }));
     assert_no_skill_loaded(&deny_session);
     assert_request_omits_loaded_skill_body(&deny_requests);
-    assert_approval_audit(
-        &deny_session,
-        ToolApprovalAuditAction::Resolved,
-        ApprovalMode::Deny,
-        Some(ToolApprovalUserDecision::Denied),
-    );
+    assert_permission_decision(&deny_session, ApprovalMode::Deny);
+    assert_no_approval_audit(&deny_session);
 
+    Ok(())
+}
+
+#[test]
+fn load_skill_permission_plan_binds_trusted_content_without_claiming_execution() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    write_load_skill_fixture(workspace.path());
+    let discovered = discover_skill_index(workspace.path(), &SkillConfig::default())?;
+    let tool = super::LoadSkillTool::new(workspace.path().to_path_buf(), discovered.snapshot);
+    let context = ToolContext::new(workspace.path(), 5);
+    let args = json!({ "id": "repo-review" });
+    let plan = tool.permission_plan(&context, &args)?;
+    let repeated = tool.permission_plan(&context, &args)?;
+
+    assert_eq!(plan, repeated);
+    assert_eq!(plan.operation, ToolOperation::LoadSkill);
+    assert_eq!(plan.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(
+        plan.effects,
+        std::collections::BTreeSet::from([ToolPermissionEffect::FileRead])
+    );
+    assert!(!plan.effects.contains(&ToolPermissionEffect::Unknown));
+    assert_eq!(plan.tool_default_mode, None);
+    assert_eq!(plan.subjects.len(), 1);
+    assert_eq!(plan.subjects[0].normalized, "skill:repo-review");
+    assert_eq!(
+        plan.analysis_bindings.get("planner").map(String::as_str),
+        Some("load_skill_v2")
+    );
+    let scope = plan
+        .semantic_scope
+        .expect("trusted content has stable scope");
+    assert_eq!(scope.family, "skill:load");
+    assert!(scope.qualifiers.contains_key("identity_sha256"));
+    assert!(!plan.safe_summary.detail.contains("repo-review"));
     Ok(())
 }
 
@@ -1673,6 +1707,29 @@ fn assert_approval_audit(
                     && approval.action == action
                     && approval.policy_decision == policy_decision
                     && approval.user_decision == user_decision
+        )
+    }));
+}
+
+fn assert_no_approval_audit(session: &Session) {
+    assert!(session.entries().iter().all(|entry| {
+        !matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-load-skill"
+                    && approval.tool_name == LOAD_SKILL_TOOL_NAME
+        )
+    }));
+}
+
+fn assert_permission_decision(session: &Session, policy_decision: ApprovalMode) {
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-load-skill"
+                    && decision.tool_name == LOAD_SKILL_TOOL_NAME
+                    && decision.policy_decision == policy_decision
         )
     }));
 }

@@ -19,10 +19,10 @@ use sigil_desktop::{
     DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
     DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
     DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
-    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopTaskContinuationRequest,
-    DesktopToolArtifactReadRequest, DesktopToolArtifactSelector as NativeToolArtifactSelector,
-    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
-    DesktopWorkspaceSummary,
+    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopStartupFailure,
+    DesktopTaskContinuationRequest, DesktopTimelineTerminalTask, DesktopToolArtifactReadRequest,
+    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptQuery,
+    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -57,10 +57,10 @@ use crate::{
         DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
         DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTaskContinuationInput,
         DesktopTaskIntegrationAcceptInput, DesktopTaskIntegrationAcceptanceSummary,
-        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopToolArtifactPage,
-        DesktopToolArtifactReadInput, DesktopToolArtifactSelector, DesktopTranscriptPage,
-        DesktopTranscriptRequest, DesktopVerificationRerunInput, DesktopVerificationSummary,
-        DesktopWorkspaceSelection,
+        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopTerminalTaskCancelInput,
+        DesktopTerminalTaskCancelSummary, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
+        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
+        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -689,11 +689,16 @@ pub(crate) async fn desktop_continuity(
         .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
-    client
+    let continuity = client
         .continuity(&session_id)
         .await
-        .map(Into::into)
-        .map_err(project_client_error)
+        .map_err(project_client_error)?;
+    DesktopConversationContinuity::try_from(continuity).map_err(|_| {
+        DesktopCommandError::new(
+            "continuity_projection_invalid",
+            "The retained terminal state could not be projected safely. Refresh the conversation.",
+        )
+    })
 }
 
 #[tauri::command]
@@ -982,7 +987,12 @@ pub(crate) async fn desktop_start_run(
             DesktopRunStartRequest {
                 prompt: input.prompt,
                 permission_mode: input.permission_mode,
-                model_name: input.model_name,
+                model_ref: input.model_ref.map(|model_ref| {
+                    sigil_desktop::DesktopProviderModelRef {
+                        connection_id: model_ref.connection_id,
+                        model_id: model_ref.model_id,
+                    }
+                }),
                 model_selection_binding: input.model_selection_binding,
                 reasoning_effort: input.reasoning_effort,
                 reasoning_effort_binding: input.reasoning_effort_binding,
@@ -1051,7 +1061,7 @@ pub(crate) async fn desktop_continue_task(
             DesktopRunStartRequest {
                 prompt: String::new(),
                 permission_mode: input.permission_mode,
-                model_name: None,
+                model_ref: None,
                 model_selection_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
@@ -1168,6 +1178,59 @@ pub(crate) async fn desktop_cancel_run(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_cancel_terminal_task(
+    workspace_id: String,
+    input: DesktopTerminalTaskCancelInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopTerminalTaskCancelSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    for value in [
+        input.session_id.as_str(),
+        input.run_id.as_str(),
+        input.task_id.as_str(),
+    ] {
+        validate_session_id(value)?;
+    }
+    if input.expected_generation == 0 {
+        return Err(DesktopCommandError::new(
+            "invalid_terminal_task_cancel",
+            "The terminal task cancellation binding is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let receipt = client
+        .cancel_terminal_task(
+            &input.session_id,
+            &input.run_id,
+            &input.task_id,
+            input.expected_generation,
+        )
+        .await
+        .map_err(project_client_error)?;
+    let terminal_task =
+        DesktopTimelineTerminalTask::try_from(&receipt.terminal_task).map_err(|_| {
+            DesktopCommandError::new(
+                "invalid_terminal_task_receipt",
+                "The workspace service returned an invalid terminal task receipt.",
+            )
+        })?;
+    Ok(DesktopTerminalTaskCancelSummary {
+        command_id: receipt.command_id,
+        client_id: receipt.client_id,
+        session_id: receipt.session_id,
+        run_id: receipt.run_id,
+        correlation_id: receipt.correlation_id,
+        terminal_task,
+        replayed: receipt.replayed,
+    })
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_pause_task(
     workspace_id: String,
     input: DesktopTaskPauseInput,
@@ -1280,7 +1343,7 @@ pub(crate) async fn desktop_resolve_approval(
             },
         )
         .await
-        .map(|receipt| receipt.decision.into())
+        .map(DesktopApprovalDecisionSummary::from)
         .map_err(project_client_error)
 }
 
@@ -2403,6 +2466,39 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
             "The workspace identity conflicts with another open workspace.",
         )
         .with_recovery_actions([
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
+        DesktopWorkspaceManagerError::Launch(DesktopLaunchError::StartupRejected(
+            DesktopStartupFailure::WorkspaceBusy,
+        )) => DesktopCommandError::new(
+            "workspace_server_busy",
+            "Another Sigil process is using this workspace service state. Close the other process and retry.",
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
+        DesktopWorkspaceManagerError::Launch(DesktopLaunchError::StartupRejected(
+            DesktopStartupFailure::AdapterStateInvalid,
+        )) => DesktopCommandError::new(
+            "workspace_server_state_invalid",
+            "The local workspace service state is invalid and could not be repaired automatically.",
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
+            DesktopRecoveryAction::OpenAnotherWorkspace,
+            DesktopRecoveryAction::ShowDetails,
+        ]),
+        DesktopWorkspaceManagerError::Launch(DesktopLaunchError::StartupRejected(
+            DesktopStartupFailure::LoopbackUnavailable,
+        )) => DesktopCommandError::new(
+            "workspace_server_loopback_unavailable",
+            "The local workspace service could not open a loopback connection. Check local network controls and retry.",
+        )
+        .with_recovery_actions([
+            DesktopRecoveryAction::RetryCurrent,
             DesktopRecoveryAction::OpenAnotherWorkspace,
             DesktopRecoveryAction::ShowDetails,
         ]),

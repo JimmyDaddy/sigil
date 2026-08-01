@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,14 +9,16 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalMode, DEFAULT_WEB_URL_CAPABILITY_TTL_MS, EgressBindingOrigin, EgressDataCategory,
+    DEFAULT_WEB_URL_CAPABILITY_TTL_MS, EgressBindingOrigin, EgressDataCategory,
     EgressDisclosureKind, EgressDisclosurePresenter, EgressNetworkRoute, NetworkEffect,
     NetworkPolicy, PreEgressDisclosure, QueryEgressStarted, QueryEgressTerminalStatus, RootConfig,
-    SecretString, Tool, ToolAccess, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
-    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, UserUrlCapabilityRegistration, WebBudgetReservationKind,
-    WebBudgetReservationRequest, WebQueryEgressClass, WebSearchFailureClass, WebSearchMcpConfig,
-    WebSearchRoute, WebTaskTreeBudget, WebUrlProvenanceKind,
+    SecretString, Tool, ToolAccess, ToolAnalysisStatus, ToolCategory, ToolContext, ToolEgressAudit,
+    ToolErrorKind, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSemanticScope, ToolSpec, ToolSubject, UserUrlCapabilityRegistration,
+    WebBudgetReservationKind, WebBudgetReservationRequest, WebQueryEgressClass,
+    WebSearchFailureClass, WebSearchMcpConfig, WebSearchRoute, WebTaskTreeBudget,
+    WebUrlProvenanceKind,
 };
 use sigil_mcp::{
     McpRemoteTool, McpSearchAdapterKind, McpStableSearchEligibility, classify_mcp_search_binding,
@@ -82,51 +85,78 @@ impl Tool for WebSearchTool {
         }
     }
 
-    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
-        Ok(ToolOperation::NetworkRequest)
-    }
-
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        if let Some(binding) = &self.root_config.web.search_mcp {
-            let provider_name = mcp_provider_tool_name_candidate(
-                &binding.server,
-                &binding.tool,
-                self.provider_tool_name_max_chars,
-            );
-            let mut subjects = vec![ToolSubject::mcp_tool(provider_name)];
-            if let Some(server) = self
-                .root_config
-                .mcp_servers
-                .iter()
-                .find(|server| server.name == binding.server)
-            {
-                subjects.push(ToolSubject::mcp_trust_class(
-                    server.name.clone(),
-                    server.trust.trust_class.as_str(),
-                ));
-            }
-            return Ok(subjects);
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .ok_or_else(|| anyhow!("websearch query must be a non-empty string"))?;
+        if query.chars().count() > self.root_config.web.max_query_chars
+            || query.len() > self.root_config.web.max_query_bytes
+        {
+            return Err(anyhow!("websearch query exceeds configured limits"));
         }
-        Ok(vec![ToolSubject::mcp_tool("builtin:exa-anonymous")])
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(self
-            .root_config
-            .web
-            .search_mcp
-            .as_ref()
-            .and_then(|binding| {
-                self.root_config
+        if let Some(max_results) = args.get("max_results").and_then(Value::as_u64)
+            && !(1..=10).contains(&max_results)
+        {
+            return Err(anyhow!("websearch max_results must be between 1 and 10"));
+        }
+        let (route, subjects, tool_default_mode) =
+            if let Some(binding) = &self.root_config.web.search_mcp {
+                let provider_name = mcp_provider_tool_name_candidate(
+                    &binding.server,
+                    &binding.tool,
+                    self.provider_tool_name_max_chars,
+                );
+                let server = self
+                    .root_config
                     .mcp_servers
                     .iter()
-                    .find(|server| server.name == binding.server)
-            })
-            .map(|server| server.trust.approval_default))
+                    .find(|server| server.name == binding.server);
+                let mut subjects = vec![ToolSubject::mcp_tool(provider_name)];
+                if let Some(server) = server {
+                    subjects.push(ToolSubject::mcp_trust_class(
+                        server.name.clone(),
+                        server.trust.trust_class.as_str(),
+                    ));
+                }
+                (
+                    "configured_mcp",
+                    subjects,
+                    server.map(|server| server.trust.approval_default),
+                )
+            } else {
+                (
+                    "bundled_exa",
+                    vec![ToolSubject::mcp_tool("builtin:exa-anonymous")],
+                    None,
+                )
+            };
+        let mut semantic_scope = ToolSemanticScope::new("network_read:websearch", 1);
+        semantic_scope
+            .qualifiers
+            .insert("route".to_owned(), route.to_owned());
+        Ok(ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: ToolOperation::NetworkRequest,
+            effects: BTreeSet::from([ToolPermissionEffect::NetworkRead]),
+            subjects,
+            analysis: ToolAnalysisStatus::Complete,
+            containment: Default::default(),
+            semantic_scope: Some(semantic_scope),
+            tool_default_mode,
+            analysis_bindings: BTreeMap::from([
+                ("planner".to_owned(), "websearch_v2".to_owned()),
+                ("network_route".to_owned(), route.to_owned()),
+            ]),
+            safe_summary: ToolPermissionSummary {
+                title: "Search the web".to_owned(),
+                detail: "Send one bounded query to the configured search service".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
@@ -334,6 +364,7 @@ impl WebSearchTool {
             input_schema: spec.input_schema,
             output_schema: None,
             task_support: None,
+            annotations: sigil_mcp::McpToolAnnotations::default(),
         };
         if !matches!(
             classify_mcp_search_binding("configured", &descriptor, &[]),

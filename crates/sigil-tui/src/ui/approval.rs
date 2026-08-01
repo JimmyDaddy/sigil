@@ -5,11 +5,16 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
-use sigil_kernel::SyntaxThemeId;
+use sigil_kernel::{
+    EnvironmentContainment, ExecutionContainmentRequest, FilesystemContainment, NetworkContainment,
+    PermissionDecisionReason, PermissionDecisionSource, ProcessContainment, SyntaxThemeId,
+    ToolAnalysisReasonCode, ToolAnalysisStatus, ToolPermissionEffect, ToolSubject,
+};
 
 use crate::app::{
     AppState, ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary,
     ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
+    session_grant_unavailable_reason_label,
 };
 
 use super::{
@@ -298,6 +303,14 @@ fn approval_header_lines_with_palette(
         }));
     }
 
+    if !view.metadata_collapsed {
+        lines.extend(approval_permission_metadata_lines(
+            view,
+            max_content_width,
+            palette,
+        ));
+    }
+
     let change_count = view.changed_files.len().max(view.file_rows.len());
     lines.push(Line::from(vec![
         Span::styled("files", Style::default().fg(palette.text_muted)),
@@ -322,6 +335,273 @@ fn approval_header_lines_with_palette(
         ),
     ]));
     lines
+}
+
+fn approval_permission_metadata_lines(
+    view: &ApprovalModalView,
+    max_content_width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let summary = if view.safe_summary.detail.trim().is_empty() {
+        view.safe_summary.title.trim().to_owned()
+    } else if view.safe_summary.title.trim().is_empty() {
+        view.safe_summary.detail.trim().to_owned()
+    } else {
+        format!(
+            "{} — {}",
+            view.safe_summary.title.trim(),
+            view.safe_summary.detail.trim()
+        )
+    };
+    let effects = if view.effects.is_empty() {
+        "none".to_owned()
+    } else {
+        view.effects
+            .iter()
+            .map(|effect| permission_effect_label(*effect))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let subjects = bounded_subject_summary(&view.subjects);
+    let analysis = analysis_status_label(&view.analysis);
+    let containment = containment_label(&view.containment);
+    let decisions = bounded_decision_reason_summary(&view.decision_reasons);
+    let session_grant = if view.session_grant_available {
+        "available for equivalent policy-bounded requests".to_owned()
+    } else {
+        format!(
+            "unavailable because {}",
+            session_grant_unavailable_reason_label(view.session_grant_unavailable_reason)
+        )
+    };
+
+    let mut lines = [
+        ("summary", summary),
+        ("effects", format!("{effects}  subjects {subjects}")),
+        ("analysis", format!("{analysis}  containment {containment}")),
+        ("decisions", decisions),
+        ("session grant", session_grant),
+    ]
+    .into_iter()
+    .map(|(label, value)| {
+        Line::from(vec![
+            Span::styled(format!("{label} "), Style::default().fg(palette.text_muted)),
+            Span::styled(
+                bounded_metadata_text(&value, max_content_width.saturating_sub(label.len() + 1)),
+                Style::default().fg(palette.text_secondary),
+            ),
+        ])
+    })
+    .collect::<Vec<_>>();
+    if let Some(hint) = analysis_recovery_hint(&view.analysis) {
+        lines.push(Line::from(vec![
+            Span::styled("recovery ", Style::default().fg(palette.text_muted)),
+            Span::styled(hint, Style::default().fg(palette.accent_info)),
+        ]));
+    }
+    lines
+}
+
+fn analysis_recovery_hint(analysis: &ToolAnalysisStatus) -> Option<&'static str> {
+    let unsupported_shell_syntax = match analysis {
+        ToolAnalysisStatus::Unsupported { reason } | ToolAnalysisStatus::Invalid { reason } => {
+            matches!(
+                reason.code,
+                ToolAnalysisReasonCode::UnsupportedSyntax | ToolAnalysisReasonCode::InvalidSyntax
+            )
+        }
+        ToolAnalysisStatus::Conservative { reasons } => reasons.iter().any(|reason| {
+            matches!(
+                reason.code,
+                ToolAnalysisReasonCode::UnsupportedSyntax | ToolAnalysisReasonCode::InvalidSyntax
+            )
+        }),
+        ToolAnalysisStatus::Complete => false,
+    };
+    unsupported_shell_syntax.then_some(
+        "unsupported shell dialect; run /doctor, then review terminal settings in /config",
+    )
+}
+
+fn bounded_metadata_text(value: &str, max_chars: usize) -> String {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut chars = value.chars();
+    let bounded = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() && max_chars > 1 {
+        format!(
+            "{}…",
+            bounded.chars().take(max_chars - 1).collect::<String>()
+        )
+    } else {
+        bounded
+    }
+}
+
+fn permission_effect_label(effect: ToolPermissionEffect) -> &'static str {
+    match effect {
+        ToolPermissionEffect::FileRead => "file_read",
+        ToolPermissionEffect::FileWrite => "file_write",
+        ToolPermissionEffect::FileDelete => "file_delete",
+        ToolPermissionEffect::ExecuteTrustedBinary => "execute_trusted_binary",
+        ToolPermissionEffect::ExecuteWorkspaceCode => "execute_workspace_code",
+        ToolPermissionEffect::ExecuteDynamicCode => "execute_dynamic_code",
+        ToolPermissionEffect::NetworkRead => "network_read",
+        ToolPermissionEffect::NetworkMutate => "network_mutate",
+        ToolPermissionEffect::NetworkUnknown => "network_unknown",
+        ToolPermissionEffect::AgentLifecycle => "agent_lifecycle",
+        ToolPermissionEffect::ProcessControl => "process_control",
+        ToolPermissionEffect::PrivilegeEscalation => "privilege_escalation",
+        ToolPermissionEffect::PersistenceChange => "persistence_change",
+        ToolPermissionEffect::RemoteMutation => "remote_mutation",
+        ToolPermissionEffect::CredentialAccess => "credential_access",
+        ToolPermissionEffect::ExternalApplicationControl => "external_application_control",
+        ToolPermissionEffect::Unknown => "unknown",
+    }
+}
+
+fn bounded_subject_summary(subjects: &[ToolSubject]) -> String {
+    if subjects.is_empty() {
+        return "none".to_owned();
+    }
+    let mut groups = std::collections::BTreeMap::<String, usize>::new();
+    for subject in subjects {
+        *groups
+            .entry(format!(
+                "{}({})",
+                subject.kind.as_str(),
+                subject.scope.as_str()
+            ))
+            .or_default() += 1;
+    }
+    groups
+        .into_iter()
+        .take(4)
+        .map(|(label, count)| {
+            if count == 1 {
+                label
+            } else {
+                format!("{label}×{count}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn analysis_status_label(status: &ToolAnalysisStatus) -> String {
+    match status {
+        ToolAnalysisStatus::Complete => "complete".to_owned(),
+        ToolAnalysisStatus::Conservative { reasons } => format!(
+            "conservative ({})",
+            reasons
+                .iter()
+                .take(3)
+                .map(|reason| analysis_reason_code_label(reason.code))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ToolAnalysisStatus::Unsupported { reason } => {
+            format!("unsupported ({})", analysis_reason_code_label(reason.code))
+        }
+        ToolAnalysisStatus::Invalid { reason } => {
+            format!("invalid ({})", analysis_reason_code_label(reason.code))
+        }
+    }
+}
+
+fn analysis_reason_code_label(code: ToolAnalysisReasonCode) -> &'static str {
+    match code {
+        ToolAnalysisReasonCode::UnknownProgram => "unknown_program",
+        ToolAnalysisReasonCode::DynamicCommand => "dynamic_command",
+        ToolAnalysisReasonCode::UnsupportedSyntax => "unsupported_syntax",
+        ToolAnalysisReasonCode::InvalidSyntax => "invalid_syntax",
+        ToolAnalysisReasonCode::AnalysisLimitExceeded => "analysis_limit_exceeded",
+        ToolAnalysisReasonCode::UnresolvedPath => "unresolved_path",
+        ToolAnalysisReasonCode::UnresolvedExecutable => "unresolved_executable",
+        ToolAnalysisReasonCode::UnprovenContainment => "unproven_containment",
+    }
+}
+
+fn containment_label(containment: &ExecutionContainmentRequest) -> String {
+    format!(
+        "fs {} · network {} · process {} · env {} · persistent {}",
+        filesystem_containment_label(containment.filesystem),
+        network_containment_label(containment.network),
+        process_containment_label(containment.process),
+        environment_containment_label(containment.environment),
+        if containment.persistent_process {
+            "yes"
+        } else {
+            "no"
+        }
+    )
+}
+
+fn filesystem_containment_label(value: FilesystemContainment) -> &'static str {
+    match value {
+        FilesystemContainment::Unspecified => "unspecified",
+        FilesystemContainment::WorkspaceReadOnly => "workspace_read_only",
+        FilesystemContainment::WorkspaceWrite => "workspace_write",
+        FilesystemContainment::WorkspaceAndScratch => "workspace_and_scratch",
+    }
+}
+
+fn network_containment_label(value: NetworkContainment) -> &'static str {
+    match value {
+        NetworkContainment::Unspecified => "unspecified",
+        NetworkContainment::Deny => "deny",
+        NetworkContainment::ReadOnly => "read_only",
+        NetworkContainment::Allow => "allow",
+    }
+}
+
+fn process_containment_label(value: ProcessContainment) -> &'static str {
+    match value {
+        ProcessContainment::Unspecified => "unspecified",
+        ProcessContainment::OwnedTree => "owned_tree",
+        ProcessContainment::Isolated => "isolated",
+    }
+}
+
+fn environment_containment_label(value: EnvironmentContainment) -> &'static str {
+    match value {
+        EnvironmentContainment::Unspecified => "unspecified",
+        EnvironmentContainment::Restricted => "restricted",
+        EnvironmentContainment::UserInherited => "user_inherited",
+    }
+}
+
+fn bounded_decision_reason_summary(reasons: &[PermissionDecisionReason]) -> String {
+    if reasons.is_empty() {
+        return "none".to_owned();
+    }
+    reasons
+        .iter()
+        .take(3)
+        .map(|reason| {
+            format!(
+                "{}/{}",
+                decision_source_label(reason.source),
+                reason.code.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn decision_source_label(source: PermissionDecisionSource) -> &'static str {
+    match source {
+        PermissionDecisionSource::HardSafety => "hard_safety",
+        PermissionDecisionSource::ManagedRule => "managed_rule",
+        PermissionDecisionSource::DelegatedRule => "delegated_rule",
+        PermissionDecisionSource::UserRule => "user_rule",
+        PermissionDecisionSource::SessionGrant => "session_grant",
+        PermissionDecisionSource::SandboxSubstitution => "sandbox_substitution",
+        PermissionDecisionSource::PermissionModeDefault => "permission_mode_default",
+        PermissionDecisionSource::ToolDefault => "tool_default",
+    }
 }
 
 fn approval_risk_label(risk: sigil_kernel::PermissionRisk) -> &'static str {

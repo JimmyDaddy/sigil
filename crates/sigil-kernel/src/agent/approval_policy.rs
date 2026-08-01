@@ -2,10 +2,12 @@ use std::path::Path;
 
 use crate::{
     ControlEntry, PlanApprovalExpiry, PlanPermissionGrantedEntry, Session, SessionLogEntry,
-    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolSubjectAudit,
+    TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, ToolApprovalSessionGrantEntry,
+    ToolApprovalSessionGrantExpiry, ToolPermissionPlanV2, ToolSubjectAudit,
     permission::{
-        ApprovalMode, InteractionMode, PermissionDecision, PermissionRisk,
-        ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope,
+        ApprovalMode, InteractionMode, PermissionDecision, PermissionDecisionReason,
+        PermissionDecisionSource, PermissionRisk, ToolApprovalSessionGrantFacet,
+        ToolApprovalSessionGrantScope, tool_approval_session_grant_available_for_plan,
         tool_approval_session_grant_shape,
     },
     tool::{ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope},
@@ -74,10 +76,12 @@ pub(super) fn interactive_external_directory_approval_override(
 
 pub(super) fn tool_session_grant_decision_override(
     session: &Session,
-    tool_name: &str,
+    plan: &ToolPermissionPlanV2,
+    policy_version: &str,
     mut decision: PermissionDecision,
 ) -> (PermissionDecision, Option<ToolApprovalSessionGrantEntry>) {
-    if decision.mode != ApprovalMode::Ask || tool_approval_session_grant_shape(&decision).is_none()
+    if decision.mode != ApprovalMode::Ask
+        || !tool_approval_session_grant_available_for_plan(&decision, plan)
     {
         return (decision, None);
     }
@@ -85,7 +89,7 @@ pub(super) fn tool_session_grant_decision_override(
         let SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant)) = entry else {
             return None;
         };
-        session_grant_covers_decision(grant, tool_name, &decision).then(|| grant.clone())
+        session_grant_covers_decision(grant, plan, policy_version, &decision).then(|| grant.clone())
     });
     if let Some(grant) = matching_grant.as_ref() {
         for facet in &grant.facets {
@@ -98,6 +102,11 @@ pub(super) fn tool_session_grant_decision_override(
                 }
             }
         }
+        decision.reasons.push(PermissionDecisionReason {
+            source: PermissionDecisionSource::SessionGrant,
+            code: "session_grant_v2_match".to_owned(),
+            detail: format!("bounded session grant {} matched", grant.grant_id),
+        });
         decision.recompute_mode();
     }
     (decision, matching_grant)
@@ -105,19 +114,28 @@ pub(super) fn tool_session_grant_decision_override(
 
 pub(super) fn session_grant_covers_decision(
     grant: &ToolApprovalSessionGrantEntry,
-    tool_name: &str,
+    plan: &ToolPermissionPlanV2,
+    policy_version: &str,
     decision: &PermissionDecision,
 ) -> bool {
     let Some(shape) = tool_approval_session_grant_shape(decision) else {
         return false;
     };
-    grant.expires == ToolApprovalSessionGrantExpiry::Session
-        && grant.tool_name == tool_name
-        && grant.access == decision.access
-        && grant.network_effect == decision.network_effect
-        && grant.operation == decision.operation
+    let Some(containment_binding) = plan.session_grant_containment_binding() else {
+        return false;
+    };
+    grant.schema_version == TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION
+        && grant.expires == ToolApprovalSessionGrantExpiry::Session
+        && grant.tool_name == plan.tool_name
+        && plan.analysis.is_complete()
+        && !plan.has_non_grantable_effect()
+        && plan.semantic_scope.as_ref() == Some(&grant.semantic_scope)
+        && plan.effects.is_subset(&grant.effect_ceiling)
+        && decision.risk <= grant.risk_ceiling
         && grant.facets == shape.facets
         && grant.scope == shape.scope
+        && grant.containment_binding == containment_binding
+        && grant.policy_version == policy_version
         && match grant.scope {
             ToolApprovalSessionGrantScope::ExactSubjects => {
                 grant_subjects_match_decision(&grant.subjects, &decision.subjects)
@@ -126,7 +144,7 @@ pub(super) fn session_grant_covers_decision(
                 !grant.subjects.is_empty()
                     && grant.subjects.iter().all(|subject| {
                         subject.kind == ToolSubjectKind::NetworkEndpoint
-                            && !subject.normalized.trim().is_empty()
+                            && !subject.identity_sha256.trim().is_empty()
                     })
                     && decision.subjects.iter().all(|subject| {
                         subject.kind == ToolSubjectKind::NetworkEndpoint
@@ -157,21 +175,10 @@ fn grant_subjects_match_decision(
 }
 
 fn grant_subject_key(subject: &ToolSubjectAudit) -> Option<(String, String, String)> {
-    let value = if subject.kind == ToolSubjectKind::McpTrustClass {
-        let original = subject.original.trim();
-        (!original.is_empty()).then_some(original)?
-    } else {
-        match subject.scope {
-            ToolSubjectScope::External => subject.canonical_path.as_deref().or_else(|| {
-                let normalized = subject.normalized.trim();
-                (!normalized.is_empty()).then_some(normalized)
-            })?,
-            ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
-                let normalized = subject.normalized.trim();
-                (!normalized.is_empty()).then_some(normalized)?
-            }
-        }
-    };
+    let value = subject.identity_sha256.trim();
+    if value.is_empty() {
+        return None;
+    }
     Some((
         subject.kind.as_str().to_owned(),
         subject.scope.as_str().to_owned(),
@@ -180,25 +187,8 @@ fn grant_subject_key(subject: &ToolSubjectAudit) -> Option<(String, String, Stri
 }
 
 fn decision_subject_key(subject: &ToolSubject) -> Option<(String, String, String)> {
-    let value = if subject.kind == ToolSubjectKind::McpTrustClass {
-        let original = subject.original.trim();
-        (!original.is_empty()).then(|| original.to_owned())?
-    } else {
-        match subject.scope {
-            ToolSubjectScope::External => subject
-                .canonical_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .or_else(|| {
-                    let normalized = subject.normalized.trim();
-                    (!normalized.is_empty()).then(|| normalized.to_owned())
-                })?,
-            ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
-                let normalized = subject.normalized.trim();
-                (!normalized.is_empty()).then(|| normalized.to_owned())?
-            }
-        }
-    };
+    let audited = ToolSubjectAudit::from(subject);
+    let value = audited.identity_sha256;
     Some((
         subject.kind.as_str().to_owned(),
         subject.scope.as_str().to_owned(),

@@ -43,6 +43,13 @@ INTEGRATION_FINAL_CANARY = "ORCHESTRATION-PTY-INTEGRATION-FINAL-6842"
 INTEGRATION_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-6820"
 INTEGRATION_PATHS = ("integration-a.txt", "integration-b.txt")
 INTEGRATION_TOOL_CALL_IDS = ("integration-write-a", "integration-write-b")
+TERMINAL_FINAL_CANARY = "ORCHESTRATION-PTY-TERMINAL-FINAL-7953"
+TERMINAL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-7931"
+TERMINAL_TASK_ID = "orchestration-pty-terminal"
+TERMINAL_START_TOOL_CALL_ID = "terminal-start-call"
+TERMINAL_CANCEL_TOOL_CALL_ID = "terminal-cancel-call"
+TERMINAL_READY_CANARY = "ORCHESTRATION-PTY-TERMINAL-READY-8174"
+TERMINAL_PROGRESS_CANARY = "ORCHESTRATION-PTY-TERMINAL-PROGRESS-9285"
 READ_STEP_IDS = ("inspect_kernel", "inspect_runtime")
 READ_STEP_TITLES = ("Inspect kernel route", "Inspect runtime route")
 PLAN_ARGS = json.dumps(
@@ -147,6 +154,43 @@ INTEGRATION_PLAN_ARGS = json.dumps(
     },
     separators=(",", ":"),
 )
+TERMINAL_PLAN_ARGS = json.dumps(
+    {
+        "plan_version": 1,
+        "status": "accepted",
+        "steps": [
+            {
+                "step_id": "terminal_lifecycle",
+                "title": "Exercise persistent terminal lifecycle",
+                "role": "executor",
+                "mode": "write",
+                "isolation": "sequential_workspace_write",
+            }
+        ],
+    },
+    separators=(",", ":"),
+)
+TERMINAL_START_ARGS = json.dumps(
+    {
+        "task_id": TERMINAL_TASK_ID,
+        "command": (
+            f"printf '{TERMINAL_READY_CANARY}\\n'; "
+            f"printf '{TERMINAL_PROGRESS_CANARY}\\n'; "
+            "while :; do sleep 1; done"
+        ),
+        "mode": "background",
+        "readiness": {
+            "kind": "output_contains",
+            "value": TERMINAL_READY_CANARY,
+            "timeout_secs": 5,
+        },
+    },
+    separators=(",", ":"),
+)
+TERMINAL_CANCEL_ARGS = json.dumps(
+    {"task_id": TERMINAL_TASK_ID},
+    separators=(",", ":"),
+)
 
 
 INTEGRATION_WRITE_ARGS = tuple(
@@ -170,9 +214,17 @@ class SessionAudit:
     approval_final_answer_count: int
     continue_final_answer_count: int
     integration_final_answer_count: int
+    terminal_final_answer_count: int
     task_final_count: int
     approval_route_resolved_count: int
     approved_tool_call_count: int
+    terminal_approval_route_resolved_count: int
+    approved_terminal_start_count: int
+    terminal_start_completed_count: int
+    terminal_cancel_completed_count: int
+    terminal_task_statuses: tuple[str, ...]
+    terminal_readiness_states: tuple[str, ...]
+    terminal_max_output_bytes: int
     paused_task_run_count: int
     interrupted_step_count: int
     cancelled_task_run_count: int
@@ -181,6 +233,7 @@ class SessionAudit:
     promoted_integration_count: int
     parent_verification_count: int
     failed_run_count: int
+    cancelled_run_count: int
 
 
 @dataclasses.dataclass
@@ -274,6 +327,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     3: CONTINUE_PLAN_ARGS,
                     4: CANCEL_PLAN_ARGS,
                     5: INTEGRATION_PLAN_ARGS,
+                    6: TERMINAL_PLAN_ARGS,
                 }.get(request_number)
                 if arguments is None:
                     raise AcceptanceError(
@@ -320,12 +374,27 @@ class FixtureHandler(BaseHTTPRequestHandler):
                         "write_file",
                         INTEGRATION_WRITE_ARGS[index],
                     )
+            elif kind == "terminal:start":
+                self._send_tool_call(
+                    TERMINAL_START_TOOL_CALL_ID,
+                    "terminal_start",
+                    TERMINAL_START_ARGS,
+                )
+            elif kind == "terminal:after_start":
+                self._send_tool_call(
+                    TERMINAL_CANCEL_TOOL_CALL_ID,
+                    "terminal_cancel",
+                    TERMINAL_CANCEL_ARGS,
+                )
+            elif kind == "terminal:after_cancel":
+                self._send_text("persistent terminal lifecycle completed")
             elif kind == "synthesis":
                 final = {
                     1: FINAL_CANARY,
                     2: APPROVAL_FINAL_CANARY,
                     3: CONTINUE_FINAL_CANARY,
                     4: INTEGRATION_FINAL_CANARY,
+                    5: TERMINAL_FINAL_CANARY,
                 }.get(request_number)
                 if final is None:
                     raise AcceptanceError(
@@ -522,6 +591,12 @@ def classify_request(payload: object) -> str:
         return "integration:step:a"
     if "Step: integrate_b" in text and "Role: subagent_write" in text:
         return "integration:step:b"
+    if "Step: terminal_lifecycle" in text and "Role: executor" in text:
+        if has_tool_result(payload, TERMINAL_CANCEL_TOOL_CALL_ID):
+            return "terminal:after_cancel"
+        if has_tool_result(payload, TERMINAL_START_TOOL_CALL_ID):
+            return "terminal:after_start"
+        return "terminal:start"
     raise AcceptanceError("provider request does not match a production orchestration role")
 
 
@@ -570,6 +645,9 @@ allow_write_subagents = true
 [permission]
 mode = "manual"
 
+[permission.tools]
+terminal_cancel = "allow"
+
 [[permission.rules]]
 tool_name = "write_file"
 subject_glob = "integration-*.txt"
@@ -599,9 +677,17 @@ def read_session_audit(path: Path) -> SessionAudit:
     approval_final_answer_count = 0
     continue_final_answer_count = 0
     integration_final_answer_count = 0
+    terminal_final_answer_count = 0
     task_final_count = 0
     approval_route_resolved_count = 0
     approved_tool_call_count = 0
+    terminal_approval_route_resolved_count = 0
+    approved_terminal_start_count = 0
+    terminal_start_completed_count = 0
+    terminal_cancel_completed_count = 0
+    terminal_task_statuses: set[str] = set()
+    terminal_readiness_states: set[str] = set()
+    terminal_max_output_bytes = 0
     paused_task_run_count = 0
     interrupted_step_count = 0
     cancelled_task_run_count = 0
@@ -611,6 +697,7 @@ def read_session_audit(path: Path) -> SessionAudit:
     parent_verification_count = 0
     approval_child_refs: set[str] = set()
     failed_run_count = 0
+    cancelled_run_count = 0
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         record = json.loads(raw_line)
         event_type = record.get("event_type")
@@ -619,8 +706,12 @@ def read_session_audit(path: Path) -> SessionAudit:
         payload = record.get("payload")
         if not isinstance(payload, dict):
             continue
-        if event_type == "run_finalized" and payload.get("run_status") != "completed":
-            failed_run_count += 1
+        if event_type == "run_finalized":
+            outcome = payload.get("outcome")
+            if outcome == "cancelled" and payload.get("cleanup_complete") is True:
+                cancelled_run_count += 1
+            else:
+                failed_run_count += 1
         entry = payload.get("session_log_entry")
         if not isinstance(entry, dict):
             continue
@@ -637,6 +728,8 @@ def read_session_audit(path: Path) -> SessionAudit:
                 continue_final_answer_count += 1
             elif assistant.get("content") == INTEGRATION_FINAL_CANARY:
                 integration_final_answer_count += 1
+            elif assistant.get("content") == TERMINAL_FINAL_CANARY:
+                terminal_final_answer_count += 1
         control = entry.get("control")
         if not isinstance(control, dict):
             continue
@@ -666,12 +759,14 @@ def read_session_audit(path: Path) -> SessionAudit:
         if isinstance(control.get("task_parent_verification_recorded"), dict):
             parent_verification_count += 1
         approval_route = control.get("task_subagent_approval_route")
-        if (
-            isinstance(approval_route, dict)
-            and approval_route.get("status") == "resolved"
-            and approval_route.get("call_id") == APPROVAL_TOOL_CALL_ID
-        ):
-            approval_route_resolved_count += 1
+        if isinstance(approval_route, dict) and approval_route.get("status") == "resolved":
+            call_id = approval_route.get("call_id")
+            if call_id == APPROVAL_TOOL_CALL_ID:
+                approval_route_resolved_count += 1
+            elif call_id == TERMINAL_START_TOOL_CALL_ID:
+                terminal_approval_route_resolved_count += 1
+            else:
+                continue
             child_ref = approval_route.get("child_session_ref")
             relative = child_ref.get("path") if isinstance(child_ref, dict) else None
             if isinstance(relative, str):
@@ -687,10 +782,50 @@ def read_session_audit(path: Path) -> SessionAudit:
             if (
                 isinstance(approval, dict)
                 and approval.get("action") == "resolved"
-                and approval.get("call_id") == APPROVAL_TOOL_CALL_ID
                 and approval.get("user_decision") == "approved"
             ):
-                approved_tool_call_count += 1
+                call_id = approval.get("call_id")
+                if call_id == APPROVAL_TOOL_CALL_ID:
+                    approved_tool_call_count += 1
+                elif call_id == TERMINAL_START_TOOL_CALL_ID:
+                    approved_terminal_start_count += 1
+            execution = control.get("tool_execution") if isinstance(control, dict) else None
+            if isinstance(execution, dict) and execution.get("status") == "completed":
+                call_id = execution.get("call_id")
+                tool_name = execution.get("tool_name")
+                if (
+                    call_id == TERMINAL_START_TOOL_CALL_ID
+                    and tool_name == "terminal_start"
+                ):
+                    terminal_start_completed_count += 1
+                elif (
+                    call_id == TERMINAL_CANCEL_TOOL_CALL_ID
+                    and tool_name == "terminal_cancel"
+                ):
+                    terminal_cancel_completed_count += 1
+            terminal_task = control.get("terminal_task") if isinstance(control, dict) else None
+            handle = terminal_task.get("handle") if isinstance(terminal_task, dict) else None
+            if not (
+                isinstance(handle, dict)
+                and handle.get("task_id") == TERMINAL_TASK_ID
+            ):
+                continue
+            status = terminal_task.get("status")
+            status_state = status.get("state") if isinstance(status, dict) else None
+            if isinstance(status_state, str):
+                terminal_task_statuses.add(status_state)
+            readiness = terminal_task.get("readiness")
+            readiness_state = (
+                readiness.get("state") if isinstance(readiness, dict) else None
+            )
+            if isinstance(readiness_state, str):
+                terminal_readiness_states.add(readiness_state)
+            output_total_bytes = terminal_task.get("output_total_bytes")
+            if isinstance(output_total_bytes, int):
+                terminal_max_output_bytes = max(
+                    terminal_max_output_bytes,
+                    output_total_bytes,
+                )
     return SessionAudit(
         event_counts=counts,
         completed_steps=tuple(completed_steps),
@@ -698,9 +833,19 @@ def read_session_audit(path: Path) -> SessionAudit:
         approval_final_answer_count=approval_final_answer_count,
         continue_final_answer_count=continue_final_answer_count,
         integration_final_answer_count=integration_final_answer_count,
+        terminal_final_answer_count=terminal_final_answer_count,
         task_final_count=task_final_count,
         approval_route_resolved_count=approval_route_resolved_count,
         approved_tool_call_count=approved_tool_call_count,
+        terminal_approval_route_resolved_count=(
+            terminal_approval_route_resolved_count
+        ),
+        approved_terminal_start_count=approved_terminal_start_count,
+        terminal_start_completed_count=terminal_start_completed_count,
+        terminal_cancel_completed_count=terminal_cancel_completed_count,
+        terminal_task_statuses=tuple(sorted(terminal_task_statuses)),
+        terminal_readiness_states=tuple(sorted(terminal_readiness_states)),
+        terminal_max_output_bytes=terminal_max_output_bytes,
         paused_task_run_count=paused_task_run_count,
         interrupted_step_count=interrupted_step_count,
         cancelled_task_run_count=cancelled_task_run_count,
@@ -709,6 +854,7 @@ def read_session_audit(path: Path) -> SessionAudit:
         promoted_integration_count=promoted_integration_count,
         parent_verification_count=parent_verification_count,
         failed_run_count=failed_run_count,
+        cancelled_run_count=cancelled_run_count,
     )
 
 
@@ -835,6 +981,10 @@ def validate_continue_audit(audit: SessionAudit, fixture: FixtureState) -> None:
 def validate_cancel_audit(audit: SessionAudit, fixture: FixtureState) -> None:
     if audit.cancelled_task_run_count != 1:
         raise AcceptanceError("cancelled task did not persist exactly one cancelled terminal")
+    if audit.cancelled_run_count != 1:
+        raise AcceptanceError("cancelled task did not finalize exactly one cancelled run")
+    if audit.failed_run_count != 0:
+        raise AcceptanceError("cancelled task finalized with a hard failure")
     if audit.completed_steps.count("cancel_in_flight") != 0:
         raise AcceptanceError("cancelled in-flight step was incorrectly committed")
     if audit.task_final_count != 3:
@@ -860,6 +1010,69 @@ def validate_integration_audit(audit: SessionAudit, fixture: FixtureState) -> No
         raise AcceptanceError("integration step B did not run one tool turn and one final turn")
     if fixture.request_counts.get("synthesis") != 4:
         raise AcceptanceError("reviewed integration synthesis did not run exactly once")
+
+
+def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
+    if audit.event_counts.get("task_handoff_requested") != 6:
+        raise AcceptanceError("terminal phase did not append its model-owned handoff")
+    if audit.event_counts.get("task_handoff_resolved") != 6:
+        raise AcceptanceError("terminal phase did not resolve its task handoff")
+    if audit.completed_steps.count("terminal_lifecycle") != 1:
+        raise AcceptanceError("terminal lifecycle step did not complete exactly once")
+    if (
+        audit.terminal_approval_route_resolved_count != 1
+        or audit.approved_terminal_start_count != 1
+    ):
+        raise AcceptanceError(
+            "terminal_start approval was not durably resolved once in parent and child"
+        )
+    if (
+        audit.terminal_start_completed_count != 1
+        or audit.terminal_cancel_completed_count != 1
+    ):
+        raise AcceptanceError(
+            "terminal_start and terminal_cancel must each complete exactly once"
+        )
+    if not {"running", "cancelled"}.issubset(audit.terminal_task_statuses):
+        raise AcceptanceError(
+            "terminal lifecycle did not durably progress from running to cancelled"
+        )
+    if "ready" not in audit.terminal_readiness_states:
+        raise AcceptanceError("terminal readiness was not durably satisfied")
+    expected_output_bytes = len(TERMINAL_READY_CANARY) + len(TERMINAL_PROGRESS_CANARY) + 2
+    if audit.terminal_max_output_bytes < expected_output_bytes:
+        raise AcceptanceError("terminal lifecycle did not durably report output progress")
+    if audit.terminal_final_answer_count != 1 or audit.task_final_count != 5:
+        raise AcceptanceError("terminal task did not commit one unique parent final")
+    if audit.failed_run_count != 0:
+        raise AcceptanceError("terminal task finalized with a failure")
+    if audit.cancelled_run_count != 1:
+        raise AcceptanceError("terminal phase lost the prior user-cancelled run terminal")
+    expected_requests = {
+        "conversation": 6,
+        "planner": 6,
+        f"read:{READ_STEP_IDS[0]}": 1,
+        f"read:{READ_STEP_IDS[1]}": 1,
+        "write:request": 1,
+        "write:after_tool": 1,
+        "continue:step": 2,
+        "cancel:step": 1,
+        "integration:step:a": 2,
+        "integration:step:b": 2,
+        "terminal:start": 1,
+        "terminal:after_start": 1,
+        "terminal:after_cancel": 1,
+        "synthesis": 5,
+        "title": 1,
+    }
+    if fixture.request_counts != expected_requests:
+        raise AcceptanceError(
+            f"unexpected terminal provider request distribution {fixture.request_counts}"
+        )
+    if fixture.protocol_errors:
+        raise AcceptanceError(
+            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
+        )
 
 
 def wait_for_fixture_request(
@@ -1222,6 +1435,38 @@ def main() -> int:
             if (workspace / path).read_text(encoding="utf-8") != expected:
                 raise AcceptanceError(f"reviewed integration did not promote {path}")
 
+        submit_user_prompt(runner, TERMINAL_USER_PROMPT)
+        runner.wait_until(
+            lambda text: "Review Tool Call" in text
+            and "terminal_start" in text
+            and TERMINAL_READY_CANARY in text,
+            deadline.remaining(),
+            "structured terminal_start approval",
+            final_screen=True,
+        )
+        runner.send("y")
+        session_path, terminal_audit = wait_for_audit(
+            session_dir,
+            runner,
+            lambda value: value.terminal_final_answer_count == 1
+            and value.task_final_count == 5
+            and "cancelled" in value.terminal_task_statuses,
+            deadline.remaining(),
+        )
+        terminal_screen = runner.wait_until(
+            lambda text: TERMINAL_FINAL_CANARY in text
+            and TERMINAL_TASK_ID in text
+            and "status: cancelled" in text
+            and "Thinking..." not in text
+            and "Replying..." not in text,
+            deadline.remaining(),
+            "settled terminal lifecycle final answer and terminal state",
+            final_screen=True,
+        )
+        if terminal_screen.count(TERMINAL_FINAL_CANARY) != 1:
+            raise AcceptanceError("TUI rendered the terminal task final more than once")
+        validate_terminal_audit(terminal_audit, fixture)
+
         runner.quit(timeout=deadline.remaining(10.0))
         runner.stop()
         runner = None
@@ -1251,7 +1496,23 @@ def main() -> int:
                 "reviewed_integration_promotion_count": (
                     integration_audit.promoted_integration_count
                 ),
-                "completed_task_count": integration_audit.task_final_count,
+                "approved_terminal_start_count": (
+                    terminal_audit.approved_terminal_start_count
+                ),
+                "terminal_start_completed_count": (
+                    terminal_audit.terminal_start_completed_count
+                ),
+                "terminal_cancel_completed_count": (
+                    terminal_audit.terminal_cancel_completed_count
+                ),
+                "terminal_readiness_ready": (
+                    "ready" in terminal_audit.terminal_readiness_states
+                ),
+                "terminal_output_progress_bytes": (
+                    terminal_audit.terminal_max_output_bytes
+                ),
+                "terminal_terminal_state": "cancelled",
+                "completed_task_count": terminal_audit.task_final_count,
                 "route_kill_switch_count": audit.event_counts.get(
                     "orchestration_route_disabled",
                     0,

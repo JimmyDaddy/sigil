@@ -16,7 +16,7 @@ use sigil_runtime::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 use tempfile::tempdir;
 
 use super::{
-    super::{WorkerCommand, WorkerMessage},
+    super::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerMessage},
     common::{
         PlannedProvider, StreamPlan, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, test_root_config,
@@ -422,6 +422,7 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
         match &message {
             WorkerMessage::Event(event) => {
                 if let RunEvent::ToolApprovalRequested {
+                    approval_identity,
                     call,
                     subjects,
                     operation,
@@ -429,10 +430,16 @@ fn accepted_plan_intents_run_in_parallel_promote_reload_and_drop_through_worker_
                 } = event.as_ref()
                 {
                     unexpected_approvals.push(format!("{}:{operation:?}:{subjects:?}", call.id));
-                    worker.send(WorkerCommand::ApprovalDecision {
-                        call_id: call.id.clone(),
-                        approved: true,
-                    })?;
+                    worker.send(WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
+                        format!("intent-dogfood-{}", approval_identity.approval_request_id),
+                        "sigil-tui-test",
+                        session_log_path.display().to_string(),
+                        WorkerApprovalCommand::Decision {
+                            call_id: call.id.clone(),
+                            approval_request_id: approval_identity.approval_request_id.clone(),
+                            approved: true,
+                        },
+                    )))?;
                 }
             }
             WorkerMessage::TaskRunFinished { .. } | WorkerMessage::RunFailed(_) => break message,

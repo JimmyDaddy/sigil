@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -6,9 +10,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, PreparedToolExecution, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking, ToolPreparation, ToolPreview,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectScope, WorkspaceTrust,
+    ToolAnalysisStatus, ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking,
+    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
+    ToolPreparation, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope, WorkspaceTrust,
 };
 
 use crate::{
@@ -139,8 +144,12 @@ impl Tool for CodeSymbolsTool {
         ToolMutationTracking::None
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![self.path_subject(required_string(args, "path")?)?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        code_read_permission_plan(
+            "code_symbols",
+            args,
+            vec![self.path_subject(required_string(args, "path")?)?],
+        )
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -194,8 +203,12 @@ impl Tool for CodeWorkspaceSymbolsTool {
         ToolMutationTracking::None
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![workspace_subject(self.service.workspace_root())?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        code_read_permission_plan(
+            "code_workspace_symbols",
+            args,
+            vec![workspace_subject(self.service.workspace_root())?],
+        )
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -234,8 +247,12 @@ impl Tool for CodeDefinitionTool {
         ToolMutationTracking::None
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![self.path_subject(required_string(args, "path")?)?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        code_read_permission_plan(
+            "code_definition",
+            args,
+            vec![self.path_subject(required_string(args, "path")?)?],
+        )
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -286,8 +303,12 @@ impl Tool for CodeReferencesTool {
         ToolMutationTracking::None
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![self.path_subject(required_string(args, "path")?)?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        code_read_permission_plan(
+            "code_references",
+            args,
+            vec![self.path_subject(required_string(args, "path")?)?],
+        )
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -347,8 +368,12 @@ impl Tool for CodeActionsTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![self.path_subject(required_string(args, "path")?)?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        code_read_permission_plan(
+            "code_actions",
+            args,
+            vec![self.path_subject(required_string(args, "path")?)?],
+        )
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -422,8 +447,17 @@ impl Tool for CodeActionTool {
         ToolMutationTracking::Controlled
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![workspace_subject(self.service.workspace_root())?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        required_string(args, "path")?;
+        required_u64(args, "line")?;
+        required_u64(args, "character")?;
+        Ok(prepared_code_mutation_permission_plan(
+            ToolOperation::EditFile,
+            "Apply LSP code action",
+            "Prepare an exact workspace edit, then apply it after diff approval",
+            "code_action_v2",
+            vec![workspace_subject(self.service.workspace_root())?],
+        ))
     }
 
     async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
@@ -494,8 +528,18 @@ impl Tool for CodeRenameTool {
         ToolMutationTracking::Controlled
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![workspace_subject(self.service.workspace_root())?])
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
+        required_string(args, "path")?;
+        required_u64(args, "line")?;
+        required_u64(args, "character")?;
+        required_string(args, "new_name")?;
+        Ok(prepared_code_mutation_permission_plan(
+            ToolOperation::RenamePath,
+            "Rename code symbol",
+            "Prepare exact workspace rename edits, then apply them after diff approval",
+            "code_rename_v2",
+            vec![workspace_subject(self.service.workspace_root())?],
+        ))
     }
 
     async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
@@ -574,12 +618,13 @@ impl Tool for CodeDiagnosticsTool {
         ToolMutationTracking::None
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let paths = string_array(args, "paths")?;
-        paths
+        let subjects = paths
             .iter()
             .map(|path| self.path_subject(path))
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        code_read_permission_plan("code_diagnostics", args, subjects)
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -991,6 +1036,76 @@ fn path_subject(service: &CodeIntelligenceService, requested: &str) -> Result<To
         Some(path),
         ToolSubjectScope::Workspace,
     ))
+}
+
+fn code_read_permission_plan(
+    tool_name: &str,
+    args: &Value,
+    subjects: Vec<ToolSubject>,
+) -> Result<ToolPermissionPlanDraft> {
+    let mut semantic_scope = ToolSemanticScope::new(format!("{tool_name}:read"), 1);
+    semantic_scope.qualifiers.insert(
+        "args_sha256".to_owned(),
+        sigil_kernel::stable_event_hash(&serde_json::to_vec(args)?),
+    );
+    Ok(ToolPermissionPlanDraft {
+        access: ToolAccess::Read,
+        operation: ToolOperation::Read,
+        effects: BTreeSet::from([ToolPermissionEffect::FileRead]),
+        subjects,
+        analysis: ToolAnalysisStatus::Complete,
+        containment: Default::default(),
+        semantic_scope: Some(semantic_scope),
+        tool_default_mode: None,
+        analysis_bindings: BTreeMap::from([(
+            "planner".to_owned(),
+            "code_intelligence_v2".to_owned(),
+        )]),
+        safe_summary: ToolPermissionSummary {
+            title: tool_name.to_owned(),
+            detail: "read operation".to_owned(),
+            step_count: 1,
+            workspace_code_steps: 0,
+        },
+    })
+}
+
+fn prepared_code_mutation_permission_plan(
+    operation: ToolOperation,
+    title: &str,
+    detail: &str,
+    planner: &str,
+    subjects: Vec<ToolSubject>,
+) -> ToolPermissionPlanDraft {
+    ToolPermissionPlanDraft {
+        access: ToolAccess::Write,
+        operation,
+        effects: BTreeSet::from([
+            ToolPermissionEffect::FileRead,
+            ToolPermissionEffect::FileWrite,
+        ]),
+        subjects,
+        analysis: ToolAnalysisStatus::Complete,
+        containment: Default::default(),
+        // The asynchronous preparation phase replaces the broad workspace subject with exact
+        // target subjects and binds the prepared content digest. Until then, do not offer a
+        // reusable semantic grant for a dynamic LSP response.
+        semantic_scope: None,
+        tool_default_mode: None,
+        analysis_bindings: BTreeMap::from([
+            ("planner".to_owned(), planner.to_owned()),
+            (
+                "target_binding".to_owned(),
+                "prepared_exact_subjects".to_owned(),
+            ),
+        ]),
+        safe_summary: ToolPermissionSummary {
+            title: title.to_owned(),
+            detail: detail.to_owned(),
+            step_count: 1,
+            workspace_code_steps: 0,
+        },
+    }
 }
 
 fn workspace_subject(workspace_root: &std::path::Path) -> Result<ToolSubject> {

@@ -29,6 +29,8 @@ pub(super) async fn read_terminal_output_log(
     let next_offset = start + returned_bytes;
     Ok(TerminalReadResult {
         task_id,
+        generation: 0,
+        readiness: TerminalReadinessStatus::None,
         offset: start,
         next_offset: (next_offset < total_bytes).then_some(next_offset),
         latest_entry: None,
@@ -36,6 +38,7 @@ pub(super) async fn read_terminal_output_log(
         returned_bytes,
         total_bytes,
         truncated: next_offset < total_bytes,
+        no_change: returned_bytes == 0,
     })
 }
 

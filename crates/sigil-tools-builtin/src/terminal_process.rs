@@ -16,8 +16,12 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sigil_kernel::terminal_task::{
+    TerminalLifecycleEvent, TerminalReadinessKind, TerminalReadinessStatus,
+};
 use sigil_kernel::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupReceipt,
     ExecutionCleanupStatus, ExecutionConfig, ExecutionRequest, ExecutionSandboxFallback,
@@ -29,26 +33,27 @@ use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
     process::{Child as TokioChild, Command},
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, mpsc, oneshot, watch},
     task::{self, JoinHandle},
     time::{Duration, sleep, timeout},
 };
 
-use crate::constants::HARD_TERMINAL_READ_LIMIT_BYTES;
+use crate::constants::{HARD_TERMINAL_READ_LIMIT_BYTES, SIGIL_SCRATCH_DIR_ENV};
 use crate::execution_backends::{
     LinuxBubblewrapExecutionBackend, MacosSeatbeltExecutionBackend,
     ensure_linux_bubblewrap_available, ensure_macos_seatbelt_available, find_executable_on_path,
     linux_bubblewrap_args, macos_seatbelt_workspace_write_profile,
 };
-use crate::path::{
-    absolute_path_from, canonical_workspace_root, lexically_normalize_path, resolve_existing_prefix,
-};
+#[cfg(test)]
+use crate::path::resolve_existing_prefix;
+use crate::path::{absolute_path_from, canonical_workspace_root, lexically_normalize_path};
 use crate::process_owner::ProcessTreeOwnerGuard;
 use crate::shell_runtime::ResolvedShell;
 
 mod config; // public DTOs and terminal execution policy.
 mod cwd; // workspace-confined terminal cwd resolution.
 mod io; // process/PTY log capture and artifact file I/O.
+mod lifecycle; // owner generation, readiness matching, and event-driven waits.
 mod manager; // task registry, lifecycle entrypoints, and permissions.
 mod output; // bounded output reads, previews, and hashes.
 mod worker; // process/PTY worker loops, cancellation, and finalization.
@@ -65,6 +70,7 @@ use io::{
     configure_process_group, create_empty_log_files, join_pty_read_thread, open_append_file,
     spawn_capture_task, spawn_pty_input_thread, spawn_pty_read_thread, write_task_meta,
 };
+use lifecycle::TerminalLifecycleOwner;
 use manager::{CancelCommand, TerminalTaskStartPlan};
 use output::{LogSummary, current_epoch_ms, read_terminal_output_log, summarize_log};
 use worker::{
@@ -109,7 +115,7 @@ impl PtyIoControl {
 #[cfg(test)]
 use io::{capture_pty_reader, capture_stream, is_pty_eof_error};
 #[cfg(test)]
-use manager::{ManagedTerminalTask, TerminalTaskControl};
+use manager::{ManagedTerminalTask, TerminalTaskControl, should_publish_lifecycle_event};
 #[cfg(test)]
 use worker::{
     PtyWaitOutcome, cancel_child, finalize_terminal_task, pty_status_after_cleanup_drain,
@@ -120,8 +126,9 @@ use worker::{
 pub use config::{
     MAX_TERMINAL_INPUT_BYTES, TERMINAL_TASK_ARTIFACT_ROOT, TerminalBackendKind,
     TerminalExecutionConfig, TerminalInputResult, TerminalPtySize, TerminalReadResult,
-    TerminalResizeResult, TerminalStartRequest, TerminalTaskArtifacts,
-    TerminalTaskPermissionContext,
+    TerminalReadinessCondition, TerminalResizeResult, TerminalStartRequest, TerminalTaskArtifacts,
+    TerminalTaskPermissionContext, TerminalTaskSnapshot, TerminalWaitCondition,
+    TerminalWaitOutcome, TerminalWaitResult,
 };
 pub use manager::TerminalProcessManager;
 

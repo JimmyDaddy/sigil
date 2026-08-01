@@ -247,18 +247,30 @@ impl AttentionController {
             }
             WorkerMessage::Event(event) | WorkerMessage::AgentThreadEvent { event, .. } => {
                 match event.as_ref() {
-                    RunEvent::ToolApprovalRequested { call, .. } => {
+                    RunEvent::ToolApprovalRequested {
+                        call,
+                        approval_identity,
+                        ..
+                    } => {
                         self.queue_signal(
                             AttentionSignal::ApprovalRequired,
-                            AttentionKey::Approval(identity_hash(&[call.id.as_bytes()])),
+                            AttentionKey::Approval(identity_hash(&[
+                                call.id.as_bytes(),
+                                approval_identity.approval_request_id.as_bytes(),
+                            ])),
                             now,
                         );
                     }
-                    RunEvent::ToolApprovalResolved { call_id, .. } => {
+                    RunEvent::ToolApprovalResolved {
+                        call_id,
+                        approval_request_id,
+                        ..
+                    } => {
                         self.last_emitted
-                            .remove(&AttentionKey::Approval(identity_hash(
-                                &[call_id.as_bytes()],
-                            )));
+                            .remove(&AttentionKey::Approval(identity_hash(&[
+                                call_id.as_bytes(),
+                                approval_request_id.as_bytes(),
+                            ])));
                     }
                     _ => {}
                 }

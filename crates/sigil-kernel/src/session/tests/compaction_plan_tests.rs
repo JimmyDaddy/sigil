@@ -45,30 +45,11 @@ fn small_adaptive_policy() -> AdaptiveTailPolicyV3 {
 }
 
 fn requested_tool_approval(call_id: &str) -> ControlEntry {
-    ControlEntry::ToolApproval(ToolApprovalEntry {
-        action: ToolApprovalAuditAction::Requested,
-        call_id: call_id.to_owned(),
-        tool_name: "shell".to_owned(),
-        access: crate::ToolAccess::Read,
-        network_effect: None,
-        local_policy_decision: crate::ApprovalMode::Ask,
-        network_policy_decision: crate::ApprovalMode::Allow,
-        source_policy_decision: crate::ApprovalMode::Allow,
-        operation: None,
-        risk: None,
-        subjects: Vec::new(),
-        subject_zones: Vec::new(),
-        policy_decision: crate::ApprovalMode::Ask,
-        external_directory_required: false,
-        confirmation: None,
-        snapshot_required: false,
-        command_permission_matches: Vec::new(),
-        allow_source: None,
-        grant_call_id: None,
-        user_decision: None,
-        reason: None,
-        preview_hash: None,
-    })
+    ControlEntry::ToolApproval(ToolApprovalEntry::test_fixture(
+        ToolApprovalAuditAction::Requested,
+        call_id,
+        "shell",
+    ))
 }
 #[test]
 fn adaptive_compaction_preview_is_read_only_and_reports_the_exact_fold_plan() -> Result<()> {

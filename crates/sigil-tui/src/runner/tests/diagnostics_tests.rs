@@ -8,11 +8,12 @@ use std::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, ApprovalMode, ControlEntry, JsonlSessionStore, LanguageServerConfig, PermissionConfig,
-    PermissionDecision, Provider, RunEvent, Session, SessionLogEntry, Tool, ToolAccess, ToolCall,
-    ToolCategory, ToolContext, ToolErrorKind, ToolExecutionStatus, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec,
-    ToolSubject, ToolSubjectScope,
+    Agent, ApprovalMode, ControlEntry, DeclaredToolPermissionFacts, JsonlSessionStore,
+    LanguageServerConfig, PermissionConfig, PermissionDecision, Provider, RunEvent, Session,
+    SessionLogEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
+    ToolExecutionStatus, ToolOperation, ToolPermissionPlanDraft, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec, ToolSubject,
+    ToolSubjectScope, declared_tool_permission_plan,
 };
 use tempfile::tempdir;
 
@@ -97,31 +98,31 @@ impl Tool for DiagnosticsTestTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<Vec<ToolSubject>> {
-        self.subjects
+        args: &serde_json::Value,
+    ) -> anyhow::Result<ToolPermissionPlanDraft> {
+        let subjects = self
+            .subjects
             .clone()
-            .map_err(|error| anyhow!(error.to_owned()))
-    }
-
-    fn permission_access(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<ToolAccess> {
-        self.dynamic_access
-            .map_err(|error| anyhow!(error.to_owned()))
-    }
-
-    fn permission_operation(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<ToolOperation> {
-        self.operation.map_err(|error| anyhow!(error.to_owned()))
+            .map_err(|error| anyhow!(error.to_owned()))?;
+        let access = self
+            .dynamic_access
+            .map_err(|error| anyhow!(error.to_owned()))?;
+        let operation = self.operation.map_err(|error| anyhow!(error.to_owned()))?;
+        let spec = self.spec();
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access,
+                operation,
+                network_effect: spec.network_effect,
+                subjects,
+                tool_default_mode: None,
+            },
+        )
     }
 
     async fn execute(
@@ -232,8 +233,19 @@ fn check_changed_files_runs_real_code_diagnostics_and_audits_control_state() -> 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
         entry,
+        SessionLogEntry::Control(ControlEntry::ToolPermissionPlannedV2(plan))
+            if plan.tool_name == "code_diagnostics"
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+            if decision.tool_name == "code_diagnostics"
+                && decision.policy_decision == ApprovalMode::Allow
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
         SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-            if approval.tool_name == "code_diagnostics" && approval.reason.is_none()
+            if approval.tool_name == "code_diagnostics"
     )));
     assert!(entries.iter().any(|entry| matches!(
         entry,
@@ -241,13 +253,29 @@ fn check_changed_files_runs_real_code_diagnostics_and_audits_control_state() -> 
             if execution.tool_name == "code_diagnostics"
                 && execution.status == ToolExecutionStatus::Started
     )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-            if execution.tool_name == "code_diagnostics"
-                && execution.status == ToolExecutionStatus::Completed
-                && execution.model_content_hash.is_none()
-    )));
+    let completed = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.tool_name == "code_diagnostics"
+                    && execution.status == ToolExecutionStatus::Completed =>
+            {
+                Some(execution.as_ref())
+            }
+            _ => None,
+        })
+        .expect("completed diagnostics audit");
+    assert!(completed.model_content_hash.as_deref().is_some_and(|hash| {
+        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }));
+    assert!(
+        completed
+            .metadata
+            .details
+            .get("code_intelligence")
+            .is_none()
+    );
+    assert!(completed.metadata.details.get("details_sha256").is_some());
     assert!(
         !entries
             .iter()
@@ -820,8 +848,14 @@ fn check_changed_files_diagnostics_honors_permission_policy_blocks() -> Result<(
     assert_eq!(tool_error_kind(&result), ToolErrorKind::ApprovalRequired);
     assert!(session.entries().iter().any(|entry| matches!(
         entry,
+        SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+            if decision.tool_name == "code_diagnostics"
+                && decision.policy_decision == ApprovalMode::Ask
+    )));
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
         SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-            if approval.policy_decision == ApprovalMode::Ask
+            if approval.tool_name == "code_diagnostics"
     )));
     Ok(())
 }
@@ -866,7 +900,7 @@ fn check_changed_files_diagnostics_converts_execute_failures_to_internal_tool_er
     let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
-        DiagnosticsTestTool::new(ToolAccess::Execute, ExecutePlan::Err("tool exploded"))
+        DiagnosticsTestTool::new(ToolAccess::Read, ExecutePlan::Err("tool exploded"))
             .with_subjects(vec![ToolSubject::path("src/main.rs", "src/main.rs")]),
     ));
 

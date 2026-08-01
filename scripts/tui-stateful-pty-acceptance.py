@@ -975,7 +975,6 @@ mode = "auto-edit"
 
 [compaction]
 enabled = true
-tail_messages = 2
 
 [terminal]
 keyboard_enhancement = "off"

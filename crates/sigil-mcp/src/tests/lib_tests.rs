@@ -30,6 +30,53 @@ use super::{
     unsupported_mcp_runtime_event_handler,
 };
 
+#[test]
+fn stdio_tool_descriptor_preserves_permission_annotations() {
+    let descriptor: super::McpToolDescriptor = serde_json::from_value(json!({
+        "name": "write_record",
+        "inputSchema": {"type": "object"},
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        }
+    }))
+    .expect("descriptor");
+    assert_eq!(descriptor.annotations.read_only_hint, Some(false));
+    assert_eq!(descriptor.annotations.destructive_hint, Some(false));
+    assert_eq!(descriptor.annotations.idempotent_hint, Some(true));
+    assert_eq!(descriptor.annotations.open_world_hint, Some(true));
+}
+
+#[test]
+fn production_mcp_tools_expose_only_native_permission_plans() {
+    for source in [
+        include_str!("../tools.rs"),
+        include_str!("../prompts.rs"),
+        include_str!("../resources.rs"),
+    ] {
+        assert_eq!(source.matches("fn permission_plan(").count(), 1);
+        for legacy in [
+            "fn permission_subjects(",
+            "fn permission_access(",
+            "fn permission_network_effect(",
+            "fn permission_operation(",
+            "fn permission_default_mode(",
+            ".permission_subjects(",
+            ".permission_access(",
+            ".permission_network_effect(",
+            ".permission_operation(",
+            ".permission_default_mode(",
+        ] {
+            assert!(
+                !source.contains(legacy),
+                "production MCP adapter must not depend on legacy {legacy}"
+            );
+        }
+    }
+}
+
 macro_rules! set_mcp_server_config_field {
     ($config:ident, command, $value:expr) => {
         let sigil_kernel::McpServerTransportConfig::Stdio { command, .. } = &mut $config.transport
@@ -1034,34 +1081,41 @@ while True:
         .spec_for("mcp__fake__echo")
         .expect("expected provider-visible MCP tool");
     assert_eq!(spec.category, ToolCategory::Mcp);
-    assert_eq!(spec.access, ToolAccess::Read);
+    assert_eq!(spec.access, ToolAccess::Execute);
     assert_eq!(
         spec.network_effect,
         Some(sigil_kernel::NetworkEffect::Unknown)
     );
-    assert_eq!(
-        registry.permission_operation(
-            &ToolContext::new(temp.path().to_path_buf(), 5),
-            &sigil_kernel::ToolCall {
-                id: "call-operation".to_owned(),
-                name: "mcp__fake__echo".to_owned(),
-                args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
-            },
-        )?,
-        sigil_kernel::ToolOperation::NetworkRequest
+    let context = ToolContext::new(temp.path().to_path_buf(), 5);
+    let call = sigil_kernel::ToolCall {
+        id: "call-plan".to_owned(),
+        name: "mcp__fake__echo".to_owned(),
+        args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
+    };
+    let plan = registry.permission_plan(&context, &call)?;
+    let repeated = registry.permission_plan(&context, &call)?;
+    assert_eq!(plan.plan_hash, repeated.plan_hash);
+    assert_eq!(plan.operation, sigil_kernel::ToolOperation::NetworkRequest);
+    assert!(matches!(
+        plan.analysis,
+        sigil_kernel::ToolAnalysisStatus::Conservative { .. }
+    ));
+    assert!(
+        plan.effects
+            .contains(&sigil_kernel::ToolPermissionEffect::Unknown)
     );
+    assert_eq!(
+        plan.analysis_bindings
+            .get("execution_backend")
+            .map(String::as_str),
+        Some("mcp_stdio_v2")
+    );
+    assert!(plan.session_grant_containment_binding().is_some());
     assert!(registry.spec_for("echo").is_none());
     assert!(registry.spec_for("mcp__fake__resources_list").is_none());
     assert!(registry.spec_for("mcp__fake__resources_read").is_none());
 
-    let subjects = registry.permission_subjects(
-        &ToolContext::new(temp.path().to_path_buf(), 5),
-        &sigil_kernel::ToolCall {
-            id: "call-subject".to_owned(),
-            name: "mcp__fake__echo".to_owned(),
-            args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
-        },
-    )?;
+    let subjects = &plan.subjects;
     assert_eq!(subjects.len(), 2);
     assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
     assert_eq!(subjects[0].normalized, "mcp__fake__echo");
@@ -1071,15 +1125,7 @@ while True:
     assert_eq!(subjects[1].normalized, "mcp_trust_class:third_party");
     assert_eq!(subjects[1].scope, ToolSubjectScope::Unknown);
 
-    let default_mode = registry.permission_default_mode(
-        &ToolContext::new(temp.path().to_path_buf(), 5),
-        &sigil_kernel::ToolCall {
-            id: "call-default".to_owned(),
-            name: "mcp__fake__echo".to_owned(),
-            args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
-        },
-    )?;
-    assert_eq!(default_mode, Some(ApprovalMode::Allow));
+    assert_eq!(plan.tool_default_mode, Some(ApprovalMode::Allow));
 
     let egress = registry
         .egress_audit(
@@ -1788,25 +1834,16 @@ while True:
     );
 
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &sigil_kernel::ToolCall {
-                id: "call-resource-operation".to_owned(),
-                name: "mcp__docs__resources_read".to_owned(),
-                args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
-            },
-        )?,
-        sigil_kernel::ToolOperation::NetworkRequest
-    );
-    let subjects = registry.permission_subjects(
-        &ctx,
-        &sigil_kernel::ToolCall {
-            id: "call-resource-subjects".to_owned(),
-            name: "mcp__docs__resources_read".to_owned(),
-            args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
-        },
-    )?;
+    let permission_call = sigil_kernel::ToolCall {
+        id: "call-resource-plan".to_owned(),
+        name: "mcp__docs__resources_read".to_owned(),
+        args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+    };
+    let plan = registry.permission_plan(&ctx, &permission_call)?;
+    let repeated = registry.permission_plan(&ctx, &permission_call)?;
+    assert_eq!(plan.plan_hash, repeated.plan_hash);
+    assert_eq!(plan.operation, sigil_kernel::ToolOperation::NetworkRequest);
+    let subjects = &plan.subjects;
     assert_eq!(subjects.len(), 2);
     assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
     assert_eq!(subjects[0].normalized, "mcp__docs__resources_read");
@@ -1814,15 +1851,7 @@ while True:
     assert!(subjects[1].original.starts_with("docs:self_hosted:sha256:"));
     assert_eq!(subjects[1].normalized, "mcp_trust_class:self_hosted");
 
-    let default_mode = registry.permission_default_mode(
-        &ctx,
-        &sigil_kernel::ToolCall {
-            id: "call-resource-default".to_owned(),
-            name: "mcp__docs__resources_read".to_owned(),
-            args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
-        },
-    )?;
-    assert_eq!(default_mode, Some(ApprovalMode::Allow));
+    assert_eq!(plan.tool_default_mode, Some(ApprovalMode::Allow));
 
     let egress = registry
         .egress_audit(
@@ -2167,17 +2196,15 @@ while True:
     assert!(registry.spec_for("mcp__prompts__prompts_get").is_some());
 
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
-    assert_eq!(
-        registry.permission_operation(
-            &ctx,
-            &sigil_kernel::ToolCall {
-                id: "call-prompt-operation".to_owned(),
-                name: "mcp__prompts__prompts_get".to_owned(),
-                args_json: r#"{"name":"story_seed"}"#.to_owned(),
-            },
-        )?,
-        sigil_kernel::ToolOperation::NetworkRequest
-    );
+    let permission_call = sigil_kernel::ToolCall {
+        id: "call-prompt-plan".to_owned(),
+        name: "mcp__prompts__prompts_get".to_owned(),
+        args_json: r#"{"name":"story_seed"}"#.to_owned(),
+    };
+    let plan = registry.permission_plan(&ctx, &permission_call)?;
+    let repeated = registry.permission_plan(&ctx, &permission_call)?;
+    assert_eq!(plan.plan_hash, repeated.plan_hash);
+    assert_eq!(plan.operation, sigil_kernel::ToolOperation::NetworkRequest);
     let list = registry
         .execute(
             ctx.clone(),
@@ -2192,14 +2219,7 @@ while True:
     assert_eq!(list.metadata.details["mcp"]["kind"], "prompt");
     assert_eq!(list.metadata.details["mcp"]["operation"], "prompts/list");
 
-    let subjects = registry.permission_subjects(
-        &ctx,
-        &sigil_kernel::ToolCall {
-            id: "call-prompt-subjects".to_owned(),
-            name: "mcp__prompts__prompts_get".to_owned(),
-            args_json: r#"{"name":"story_seed"}"#.to_owned(),
-        },
-    )?;
+    let subjects = &plan.subjects;
     assert_eq!(subjects.len(), 2);
     assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
     assert_eq!(subjects[0].normalized, "mcp__prompts__prompts_get");
@@ -2210,15 +2230,7 @@ while True:
             .starts_with("prompts:self_hosted:sha256:")
     );
 
-    let default_mode = registry.permission_default_mode(
-        &ctx,
-        &sigil_kernel::ToolCall {
-            id: "call-prompt-default".to_owned(),
-            name: "mcp__prompts__prompts_get".to_owned(),
-            args_json: r#"{"name":"story_seed"}"#.to_owned(),
-        },
-    )?;
-    assert_eq!(default_mode, Some(ApprovalMode::Ask));
+    assert_eq!(plan.tool_default_mode, Some(ApprovalMode::Ask));
 
     let egress = registry
         .egress_audit(

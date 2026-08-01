@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     mutation::{ExecutionMutationProfile, MutationEventRecorder, WorkspaceMutationScan},
     permission::{ApprovalMode, NetworkPolicy, ToolOperation, infer_tool_operation},
+    permission_plan::{
+        ExecutionContainmentRequest, ToolAnalysisStatus, ToolPermissionEffect,
+        ToolPermissionPlanDraft, ToolPermissionPlanV2, ToolPermissionSummary,
+    },
     provider::ModelMessage,
     session::{
         ControlEntry, ToolArtifactAvailability, ToolArtifactCaptureSink, ToolArtifactDescriptorV1,
@@ -405,6 +409,7 @@ pub struct ToolContext {
     egress_audit_recorder: Option<crate::EgressAuditRecorder>,
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     session_scope_id: Option<String>,
+    logical_run_id: Option<String>,
     tool_artifact_store: Option<ToolArtifactStore>,
     tool_artifact_read_budget: Option<ToolArtifactReadBudgetV1>,
     tool_artifact_source_authorizations:
@@ -414,6 +419,7 @@ pub struct ToolContext {
     network_policy: NetworkPolicy,
     explicit_network_approval: bool,
     approved_subjects: Vec<ToolSubject>,
+    prepared_permission_plan: Option<Arc<ToolPermissionPlanV2>>,
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
     cancellation: Option<crate::RunCancellationHandle>,
@@ -435,6 +441,7 @@ impl std::fmt::Debug for ToolContext {
                 &self.user_url_capability_registrar.is_some(),
             )
             .field("session_scope_id", &self.session_scope_id)
+            .field("logical_run_id", &self.logical_run_id)
             .field("tool_artifact_store", &self.tool_artifact_store.is_some())
             .field(
                 "tool_artifact_read_budget",
@@ -449,6 +456,10 @@ impl std::fmt::Debug for ToolContext {
             .field("network_policy", &self.network_policy)
             .field("explicit_network_approval", &self.explicit_network_approval)
             .field("approved_subjects", &self.approved_subjects.len())
+            .field(
+                "prepared_permission_plan",
+                &self.prepared_permission_plan.is_some(),
+            )
             .field("progress_sink", &self.progress_sink.is_some())
             .field("cancellation", &self.cancellation.is_some())
             .field(
@@ -476,6 +487,7 @@ impl ToolContext {
             egress_audit_recorder: None,
             user_url_capability_registrar: None,
             session_scope_id: None,
+            logical_run_id: None,
             tool_artifact_store: None,
             tool_artifact_read_budget: None,
             tool_artifact_source_authorizations: Arc::new(BTreeMap::new()),
@@ -484,6 +496,7 @@ impl ToolContext {
             network_policy: NetworkPolicy::Allow,
             explicit_network_approval: false,
             approved_subjects: Vec::new(),
+            prepared_permission_plan: None,
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
             cancellation: None,
@@ -562,6 +575,38 @@ impl ToolContext {
     #[must_use]
     pub fn session_scope_id(&self) -> Option<&str> {
         self.session_scope_id.as_deref()
+    }
+
+    /// Installs the exact host-owned logical run identity for run-scoped tool routes.
+    #[must_use]
+    pub(crate) fn with_logical_run_id(mut self, logical_run_id: impl Into<String>) -> Self {
+        self.logical_run_id = Some(logical_run_id.into());
+        self
+    }
+
+    /// Returns the exact host-owned logical run identity, when execution came through the agent
+    /// loop.
+    #[must_use]
+    pub fn logical_run_id(&self) -> Option<&str> {
+        self.logical_run_id.as_deref()
+    }
+
+    /// Installs the exact permission plan revalidated immediately before execution.
+    ///
+    /// Host adapters that execute a user-authorized tool outside the agent loop must persist the
+    /// same plan before calling this method. Carrying a plan here does not grant permission; it
+    /// only binds the execution boundary and tool receipt to the authority already established by
+    /// the host.
+    #[must_use]
+    pub fn with_prepared_permission_plan(mut self, plan: ToolPermissionPlanV2) -> Self {
+        self.prepared_permission_plan = Some(Arc::new(plan));
+        self
+    }
+
+    /// Returns the immutable plan whose hash was authorized for this execution.
+    #[must_use]
+    pub fn prepared_permission_plan(&self) -> Option<&ToolPermissionPlanV2> {
+        self.prepared_permission_plan.as_deref()
     }
 
     #[must_use]
@@ -2096,6 +2141,103 @@ impl ToolLifecycleOwner {
     }
 }
 
+fn declared_permission_effects(
+    access: ToolAccess,
+    operation: ToolOperation,
+    network_effect: Option<NetworkEffect>,
+) -> BTreeSet<ToolPermissionEffect> {
+    let mut effects = BTreeSet::new();
+    match access {
+        ToolAccess::Read => {
+            effects.insert(ToolPermissionEffect::FileRead);
+        }
+        ToolAccess::Write => {
+            effects.insert(ToolPermissionEffect::FileWrite);
+        }
+        ToolAccess::Execute => {
+            effects.insert(match operation {
+                ToolOperation::ExecuteReadOnlyCommand => ToolPermissionEffect::ExecuteTrustedBinary,
+                ToolOperation::ExecuteWorkspaceCheckCommand => {
+                    ToolPermissionEffect::ExecuteWorkspaceCode
+                }
+                ToolOperation::SendTerminalInput
+                | ToolOperation::ResizeTerminalTask
+                | ToolOperation::CancelTerminalTask => ToolPermissionEffect::ProcessControl,
+                _ => ToolPermissionEffect::Unknown,
+            });
+        }
+    }
+    if matches!(
+        operation,
+        ToolOperation::DeleteFile
+            | ToolOperation::DeleteDirectory
+            | ToolOperation::RecursiveDelete
+            | ToolOperation::ExecuteDestructiveCommand
+    ) {
+        effects.insert(ToolPermissionEffect::FileDelete);
+    }
+    match network_effect {
+        Some(NetworkEffect::Read) => {
+            effects.insert(ToolPermissionEffect::NetworkRead);
+        }
+        Some(NetworkEffect::Mutate) => {
+            effects.insert(ToolPermissionEffect::NetworkMutate);
+        }
+        Some(NetworkEffect::Unknown) => {
+            effects.insert(ToolPermissionEffect::NetworkUnknown);
+        }
+        None => {}
+    }
+    effects
+}
+
+/// Complete deterministic facts used by typed tools with a single declared permission plan.
+#[derive(Debug, Clone)]
+pub struct DeclaredToolPermissionFacts {
+    pub access: ToolAccess,
+    pub operation: ToolOperation,
+    pub network_effect: Option<NetworkEffect>,
+    pub subjects: Vec<ToolSubject>,
+    pub tool_default_mode: Option<ApprovalMode>,
+}
+
+/// Builds one V2 draft from a typed tool's already-decoded facts.
+///
+/// Dynamic tools should parse their arguments once, construct this value, and avoid exposing
+/// parallel permission methods that can drift or repeat argument analysis.
+pub fn declared_tool_permission_plan(
+    spec: &ToolSpec,
+    args: &Value,
+    facts: DeclaredToolPermissionFacts,
+) -> Result<ToolPermissionPlanDraft> {
+    let mut semantic_scope =
+        crate::ToolSemanticScope::new(format!("{}:{}", spec.name, facts.operation.as_str()), 1);
+    semantic_scope.qualifiers.insert(
+        "args_sha256".to_owned(),
+        crate::event::canonical_json_content_hash(args)?,
+    );
+    Ok(ToolPermissionPlanDraft {
+        access: facts.access,
+        operation: facts.operation,
+        effects: declared_permission_effects(facts.access, facts.operation, facts.network_effect),
+        subjects: facts.subjects,
+        analysis: ToolAnalysisStatus::Complete,
+        containment: ExecutionContainmentRequest::default(),
+        semantic_scope: Some(semantic_scope),
+        tool_default_mode: facts.tool_default_mode,
+        analysis_bindings: BTreeMap::from([("planner".to_owned(), "tool_declared_v2".to_owned())]),
+        safe_summary: ToolPermissionSummary {
+            title: spec.name.clone(),
+            detail: format!("{} operation", facts.operation.as_str()),
+            step_count: 1,
+            workspace_code_steps: u32::from(matches!(
+                facts.operation,
+                ToolOperation::ExecuteWorkspaceCheckCommand
+            )),
+        },
+    })
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Returns the tool's stable contract and JSON Schema surface.
@@ -2127,73 +2269,29 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// Returns stable permission subjects for one tool call.
+    /// Produces all deterministic permission facts for one concrete call in one invocation.
+    ///
+    /// The default binds the tool's explicit access, operation, subjects, network effect and
+    /// default policy into one deterministic V2 plan. Shell-like or dynamically scoped tools must
+    /// override this method when those declarations do not completely describe a concrete call.
     ///
     /// # Errors
     ///
-    /// Returns an error when the arguments are invalid and no reliable subjects can be derived.
-    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(Vec::new())
-    }
-
-    /// Returns the access class used for permission policy on this concrete call.
-    ///
-    /// Most tools use their static [`ToolSpec::access`]. Shell-like tools may conservatively
-    /// downgrade a simple read-only command to `Read` while keeping unknown syntax as `Execute`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the arguments are invalid and no reliable access class can be derived.
-    fn permission_access(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolAccess> {
-        Ok(self.spec().access)
-    }
-
-    /// Returns the independent network effect for this concrete call.
-    ///
-    /// Argument-dependent adapters may return a narrower verified effect than their static
-    /// contract. The default preserves the static [`ToolSpec::network_effect`] declaration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the arguments are invalid and no reliable network effect can be
-    /// derived.
-    fn permission_network_effect(
-        &self,
-        _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<NetworkEffect>> {
-        Ok(self.spec().network_effect)
-    }
-
-    /// Returns the fine-grained operation used by permission policy on this concrete call.
-    ///
-    /// Tools with argument-dependent behavior can override this. The default keeps existing tools
-    /// compatible by deriving the operation from the stable tool name and dynamic access class.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the arguments are invalid and no reliable operation can be derived.
-    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+    /// Returns an error when arguments are invalid or stable permission facts cannot be derived.
+    fn permission_plan(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let spec = self.spec();
-        let access = self.permission_access(ctx, args)?;
-        Ok(infer_tool_operation(&spec.name, access))
-    }
-
-    /// Returns an optional tool-provided default approval mode for this concrete call.
-    ///
-    /// This is used for configuration domains that are more specific than the global
-    /// access default, such as one MCP server's trust policy, while still allowing
-    /// explicit permission tool and subject rules to override it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the arguments are invalid and no reliable default can be derived.
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(None)
+        let access = spec.access;
+        declared_tool_permission_plan(
+            &spec,
+            args,
+            DeclaredToolPermissionFacts {
+                access,
+                operation: infer_tool_operation(&spec.name, access),
+                network_effect: spec.network_effect,
+                subjects: Vec::new(),
+                tool_default_mode: None,
+            },
+        )
     }
 
     /// Returns a safe, bounded audit summary for one outbound tool call.
@@ -2790,39 +2888,23 @@ impl ToolRegistry {
         }))
     }
 
-    /// Returns stable permission subjects for a tool call by name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tool is unknown or the JSON arguments are invalid.
-    pub fn permission_subjects(
+    /// Builds one immutable V2 permission plan after decoding arguments exactly once.
+    pub fn permission_plan(
         &self,
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
-    ) -> Result<Vec<ToolSubject>> {
-        let tool = {
-            let tools = match self.tools.read() {
-                Ok(tools) => tools,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            self.allowed_tool(&tools, &call.name)?
-        };
-        let args: Value = serde_json::from_str(&call.args_json)
-            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.permission_subjects(ctx, &args)
+    ) -> Result<ToolPermissionPlanV2> {
+        self.permission_plan_with_subjects(ctx, call, None)
     }
 
-    /// Returns the dynamic permission access class for one concrete tool call.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool cannot
-    /// derive a reliable access class for the call.
-    pub fn permission_access(
+    /// Builds one immutable plan while replacing coarse subjects with a prepared artifact's exact
+    /// subjects before the plan hash is calculated.
+    pub fn permission_plan_with_subjects(
         &self,
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
-    ) -> Result<ToolAccess> {
+        prepared_subjects: Option<&[ToolSubject]>,
+    ) -> Result<ToolPermissionPlanV2> {
         let tool = {
             let tools = match self.tools.read() {
                 Ok(tools) => tools,
@@ -2832,75 +2914,11 @@ impl ToolRegistry {
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.permission_access(ctx, &args)
-    }
-
-    /// Returns the dynamic network effect for one concrete tool call.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool cannot
-    /// derive a reliable network effect for the call.
-    pub fn permission_network_effect(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<Option<NetworkEffect>> {
-        let tool = {
-            let tools = match self.tools.read() {
-                Ok(tools) => tools,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            self.allowed_tool(&tools, &call.name)?
-        };
-        let args: Value = serde_json::from_str(&call.args_json)
-            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.permission_network_effect(ctx, &args)
-    }
-
-    /// Returns the fine-grained permission operation for a tool call by name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool cannot
-    /// derive a reliable operation for the call.
-    pub fn permission_operation(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<ToolOperation> {
-        let tool = {
-            let tools = match self.tools.read() {
-                Ok(tools) => tools,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            self.allowed_tool(&tools, &call.name)?
-        };
-        let args: Value = serde_json::from_str(&call.args_json)
-            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.permission_operation(ctx, &args)
-    }
-
-    /// Returns an optional tool-provided default approval mode for a tool call by name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tool is unknown or the JSON arguments are invalid.
-    pub fn permission_default_mode(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<Option<ApprovalMode>> {
-        let tool = {
-            let tools = match self.tools.read() {
-                Ok(tools) => tools,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            self.allowed_tool(&tools, &call.name)?
-        };
-        let args: Value = serde_json::from_str(&call.args_json)
-            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.permission_default_mode(ctx, &args)
+        let mut draft = tool.permission_plan(ctx, &args)?;
+        if let Some(subjects) = prepared_subjects {
+            draft.subjects = subjects.to_vec();
+        }
+        ToolPermissionPlanV2::bind(&call.name, &args, &ctx.workspace_root, draft)
     }
 
     /// Returns a safe outbound audit summary for a tool call by name.
@@ -3008,44 +3026,12 @@ impl ScopedToolRegistry {
         self.inner.prepare(ctx, call).await
     }
 
-    pub fn permission_subjects(
+    pub fn permission_plan(
         &self,
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
-    ) -> Result<Vec<ToolSubject>> {
-        self.inner.permission_subjects(ctx, call)
-    }
-
-    pub fn permission_access(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<ToolAccess> {
-        self.inner.permission_access(ctx, call)
-    }
-
-    pub fn permission_network_effect(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<Option<NetworkEffect>> {
-        self.inner.permission_network_effect(ctx, call)
-    }
-
-    pub fn permission_operation(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<ToolOperation> {
-        self.inner.permission_operation(ctx, call)
-    }
-
-    pub fn permission_default_mode(
-        &self,
-        ctx: &ToolContext,
-        call: &crate::provider::ToolCall,
-    ) -> Result<Option<ApprovalMode>> {
-        self.inner.permission_default_mode(ctx, call)
+    ) -> Result<ToolPermissionPlanV2> {
+        self.inner.permission_plan(ctx, call)
     }
 
     pub fn egress_audit(

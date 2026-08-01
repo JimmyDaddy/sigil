@@ -24,19 +24,20 @@ use crate::{
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
     ResponseHandle, RunStatus, RuntimeContextCandidates, SandboxProfileRequirement, SessionRef,
     SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
-    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
-    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolArtifactSensitivity, ToolEffect,
-    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile,
-    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolSubjectAudit,
-    ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats, VerificationAutoRunPolicy,
-    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus,
-    VerificationFailureLocatorRecorded, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationReceipt, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
-    VerificationScope, VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
-    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, plan_draft_created_entry, provider::ModelMessage, stable_event_hash,
+    SkillSource, SkillTrustState, StoredEvent, TERMINAL_TASK_SCHEMA_VERSION, TaskId, TaskPlanEntry,
+    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
+    TaskStepStatus, TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, ToolApprovalAuditAction, ToolApprovalEntry, ToolArtifactSensitivity,
+    ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
+    ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultRecordedV2,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
+    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationReceiptLinkRecorded,
+    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, plan_draft_created_entry,
+    provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -216,30 +217,11 @@ fn test_tool_execution(status: ToolExecutionStatus) -> SessionLogEntry {
 }
 
 fn test_tool_approval(action: ToolApprovalAuditAction) -> SessionLogEntry {
-    SessionLogEntry::Control(ControlEntry::ToolApproval(ToolApprovalEntry {
+    SessionLogEntry::Control(ControlEntry::ToolApproval(ToolApprovalEntry::test_fixture(
         action,
-        call_id: "call-approval".to_owned(),
-        tool_name: "read_file".to_owned(),
-        access: ToolAccess::Read,
-        network_effect: None,
-        local_policy_decision: crate::ApprovalMode::Ask,
-        network_policy_decision: crate::ApprovalMode::Allow,
-        source_policy_decision: crate::ApprovalMode::Allow,
-        operation: None,
-        risk: None,
-        subjects: Vec::new(),
-        subject_zones: Vec::new(),
-        policy_decision: crate::ApprovalMode::Ask,
-        external_directory_required: false,
-        confirmation: None,
-        snapshot_required: false,
-        command_permission_matches: Vec::new(),
-        allow_source: None,
-        grant_call_id: None,
-        user_decision: None,
-        reason: None,
-        preview_hash: None,
-    }))
+        "call-approval",
+        "read_file",
+    )))
 }
 
 fn sample_verification_policy() -> VerificationPolicy {
@@ -2263,7 +2245,7 @@ fn tool_preview_captured_control_entry_roundtrips() -> Result<()> {
             }],
         },
         Default::default(),
-        Some("preview-hash".to_owned()),
+        Some("a".repeat(64)),
     );
     let entry = SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot.clone()));
 
@@ -2279,6 +2261,74 @@ fn tool_preview_captured_control_entry_roundtrips() -> Result<()> {
 }
 
 #[test]
+fn session_append_rejects_unbounded_or_secret_bearing_approval_audit() {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut approval =
+        ToolApprovalEntry::test_fixture(ToolApprovalAuditAction::Resolved, "call-private", "bash");
+    approval.reason = Some(format!(
+        "token=approval-secret {}",
+        "x".repeat(crate::MAX_DURABLE_PERMISSION_TEXT_BYTES + 1)
+    ));
+
+    let error = session
+        .append_control(ControlEntry::ToolApproval(approval))
+        .expect_err("unsafe unbounded approval audit must be rejected before append");
+    assert!(error.to_string().contains("approval reason"));
+    assert!(session.entries().is_empty());
+}
+
+#[test]
+fn session_append_rejects_inconsistent_current_schema_approval_phases() {
+    let cases = [
+        {
+            let mut approval = ToolApprovalEntry::test_fixture(
+                ToolApprovalAuditAction::Requested,
+                "call-requested-terminal",
+                "bash",
+            );
+            approval.terminal_status = Some(crate::ToolApprovalTerminalStatusV2::Approved);
+            approval
+        },
+        {
+            let mut approval = ToolApprovalEntry::test_fixture(
+                ToolApprovalAuditAction::DecisionAccepted,
+                "call-accepted-without-receipt",
+                "bash",
+            );
+            approval.decision_receipt = None;
+            approval
+        },
+        {
+            let mut approval = ToolApprovalEntry::test_fixture(
+                ToolApprovalAuditAction::Resolved,
+                "call-resolved-without-terminal",
+                "bash",
+            );
+            approval.terminal_status = None;
+            approval
+        },
+        {
+            let mut approval = ToolApprovalEntry::test_fixture(
+                ToolApprovalAuditAction::Resolved,
+                "call-resolved-mismatch",
+                "bash",
+            );
+            approval.terminal_status = Some(crate::ToolApprovalTerminalStatusV2::Expired);
+            approval
+        },
+    ];
+
+    for approval in cases {
+        let mut session = Session::new("deepseek", "deepseek-v4-flash");
+        let error = session
+            .append_control(ControlEntry::ToolApproval(approval))
+            .expect_err("inconsistent current-schema approval phase must fail closed");
+        assert!(error.to_string().contains("tool approval"));
+        assert!(session.entries().is_empty());
+    }
+}
+
+#[test]
 fn tool_egress_control_entry_roundtrips() -> Result<()> {
     let entry = ToolEgressEntry {
         call_id: "call-1".to_owned(),
@@ -2287,10 +2337,10 @@ fn tool_egress_control_entry_roundtrips() -> Result<()> {
         operation: "tools/call".to_owned(),
         subjects: vec![ToolSubjectAudit {
             kind: ToolSubjectKind::McpTool,
-            original: "mcp__fake__echo".to_owned(),
-            normalized: "mcp__fake__echo".to_owned(),
-            canonical_path: None,
             scope: ToolSubjectScope::Unknown,
+            identity_sha256: "0".repeat(64),
+            relative_label: None,
+            canonical_path_sha256: None,
         }],
         payload: serde_json::json!({
             "server": "fake",
@@ -2923,10 +2973,10 @@ fn dispatch_trace_projection_replays_from_session_durable_stream() -> Result<()>
             operation: "request".to_owned(),
             subjects: vec![ToolSubjectAudit {
                 kind: ToolSubjectKind::NetworkEndpoint,
-                original: "https://example.test".to_owned(),
-                normalized: "https://example.test".to_owned(),
-                canonical_path: None,
                 scope: ToolSubjectScope::External,
+                identity_sha256: "0".repeat(64),
+                relative_label: None,
+                canonical_path_sha256: None,
             }],
             payload: serde_json::json!({"secret": "must-not-project"}),
             redacted: true,
@@ -3478,12 +3528,15 @@ fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let id = TerminalTaskId::new("terminal-1")?;
     session.append_control(ControlEntry::TerminalTask(TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: 1,
         handle: TerminalTaskHandle {
             task_id: id.clone(),
-            command: "cargo test".to_owned(),
-            cwd: ".".into(),
-            shell: "zsh".to_owned(),
-            log_path: ".sigil/terminal/terminal-1/output.log".into(),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:terminal-1".to_owned(),
             created_at_ms: 100,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -3492,8 +3545,9 @@ fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
             sandbox_profile: None,
         },
         status: TerminalTaskStatus::Running,
-        output_preview: Some("running tests".to_owned()),
-        output_hash: Some("sha256:abc".to_owned()),
+        readiness: TerminalReadinessStatus::None,
+        output_preview: None,
+        output_hash: Some("2".repeat(64)),
         output_truncated: false,
         output_total_bytes: 13,
         output_limit_bytes: None,
@@ -3518,12 +3572,15 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
     let store = JsonlSessionStore::new(&path)?;
     let id = TerminalTaskId::new("terminal-1")?;
     let running = SessionLogEntry::Control(ControlEntry::TerminalTask(TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: 1,
         handle: TerminalTaskHandle {
             task_id: id.clone(),
-            command: "cargo test".to_owned(),
-            cwd: ".".into(),
-            shell: "zsh".to_owned(),
-            log_path: ".sigil/terminal/terminal-1/output.log".into(),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "zsh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:terminal-1".to_owned(),
             created_at_ms: 100,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -3532,8 +3589,9 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
             sandbox_profile: None,
         },
         status: TerminalTaskStatus::Running,
-        output_preview: Some("running tests".to_owned()),
-        output_hash: Some("sha256:abc".to_owned()),
+        readiness: TerminalReadinessStatus::None,
+        output_preview: None,
+        output_hash: Some("2".repeat(64)),
         output_truncated: false,
         output_total_bytes: 13,
         output_limit_bytes: None,
@@ -3544,12 +3602,15 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
     store.append_session_entry_event(&running)?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TerminalTask(
         TerminalTaskEntry {
+            schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+            generation: 2,
             handle: TerminalTaskHandle {
                 task_id: id.clone(),
-                command: "cargo test".to_owned(),
-                cwd: ".".into(),
-                shell: "zsh".to_owned(),
-                log_path: ".sigil/terminal/terminal-1/output.log".into(),
+                command_sha256: "0".repeat(64),
+                cwd_label: ".".to_owned(),
+                shell_label: "zsh".to_owned(),
+                shell_sha256: "1".repeat(64),
+                log_ref: "terminal-log:terminal-1".to_owned(),
                 created_at_ms: 100,
                 execution_backend: None,
                 execution_backend_capabilities: None,
@@ -3558,8 +3619,9 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
                 sandbox_profile: None,
             },
             status: TerminalTaskStatus::Exited { exit_code: Some(0) },
-            output_preview: Some("ok".to_owned()),
-            output_hash: Some("sha256:def".to_owned()),
+            readiness: TerminalReadinessStatus::None,
+            output_preview: None,
+            output_hash: Some("3".repeat(64)),
             output_truncated: false,
             output_total_bytes: 2,
             output_limit_bytes: None,
@@ -3581,7 +3643,8 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
         latest.status,
         TerminalTaskStatus::Exited { exit_code: Some(0) }
     ));
-    assert_eq!(latest.output_preview.as_deref(), Some("ok"));
+    assert!(latest.output_preview.is_none());
+    assert_eq!(latest.output_hash.as_deref(), Some("3".repeat(64).as_str()));
     assert_eq!(latest.output_total_bytes, 2);
     Ok(())
 }
@@ -4394,6 +4457,54 @@ fn load_from_store_marks_started_tool_execution_as_interrupted() -> Result<()> {
 }
 
 #[test]
+fn load_from_store_closes_expired_tool_approval_once() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    let mut requested = ToolApprovalEntry::test_fixture(
+        ToolApprovalAuditAction::Requested,
+        "call-approval",
+        "bash",
+    );
+    requested.identity.expires_at_ms = 1;
+    store.append(&SessionLogEntry::Control(ControlEntry::ToolApproval(
+        requested,
+    )))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-approval"
+                    && approval.action == ToolApprovalAuditAction::Resolved
+                    && approval.terminal_status
+                        == Some(crate::ToolApprovalTerminalStatusV2::Expired)
+                    && approval.user_decision.is_none()
+                    && approval.decision_receipt.is_none()
+        )
+    }));
+    drop(session);
+
+    let second = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
+    let resolved_count = second
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                    if approval.call_id == "call-approval"
+                        && approval.action == ToolApprovalAuditAction::Resolved
+            )
+        })
+        .count();
+    assert_eq!(resolved_count, 1);
+    Ok(())
+}
+
+#[test]
 fn unfinished_write_tool_execution_profile_reconciles_workspace_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -4568,16 +4679,35 @@ fn model_selection_is_durable_and_cuts_off_native_continuation_material() -> Res
             opaque_blob: serde_json::json!({"cursor":"flash"}),
         },
     ))?;
+    session.append_control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
+        materialization: test_prefix_materialization("prefix-flash".len()),
+        sha256: "flash".to_owned(),
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        memory_fingerprint: "memory-flash".to_owned(),
+        tool_schema_fingerprint: "tools-flash".to_owned(),
+        skill_index_fingerprint: "skills-flash".to_owned(),
+    }))?;
 
-    session.select_model("deepseek-v4-pro")?;
+    let selected_route = crate::ResolvedModelRoute::new(
+        crate::ModelRef::new(crate::ConnectionId::new("gateway-team")?, "gpt-5")?,
+        "openai",
+        "responses",
+        "sha256:selected-route",
+    )?;
+    session.select_model_route("openai", selected_route.clone())?;
 
-    assert_eq!(session.model_name(), "deepseek-v4-pro");
+    assert_eq!(session.provider_name(), "openai");
+    assert_eq!(session.model_name(), "gpt-5");
+    assert_eq!(session.resolved_model_route(), Some(&selected_route));
     assert!(session.latest_response_handle("deepseek").is_none());
     assert!(session.continuation_states("deepseek").is_empty());
+    assert!(session.latest_prefix_snapshot().is_none());
     let store = JsonlSessionStore::new(&path)?;
     let restored = Session::load_from_store("other", "other", store)?;
-    assert_eq!(restored.provider_name(), "deepseek");
-    assert_eq!(restored.model_name(), "deepseek-v4-pro");
+    assert_eq!(restored.provider_name(), "openai");
+    assert_eq!(restored.model_name(), "gpt-5");
+    assert_eq!(restored.resolved_model_route(), Some(&selected_route));
     Ok(())
 }
 
@@ -5034,7 +5164,7 @@ fn load_from_store_does_not_duplicate_closed_tool_execution() -> Result<()> {
             changed_files: vec!["file.txt".to_owned()],
             metadata: ToolResultMeta::default(),
             error: None,
-            model_content_hash: Some("hash".to_owned()),
+            model_content_hash: Some(crate::stable_event_hash(b"model-content")),
         }),
     )))?;
 
@@ -5159,4 +5289,53 @@ fn interrupted_tool_executions_only_keep_open_started_records() {
     assert!(interrupted[0].metadata.changed_files.is_empty());
     assert!(interrupted[0].error.is_some());
     assert_eq!(interrupted[0].model_content_hash, None);
+}
+
+#[test]
+fn unresolved_tool_approvals_reconcile_without_fabricating_user_decisions() {
+    let mut requested =
+        ToolApprovalEntry::test_fixture(ToolApprovalAuditAction::Requested, "call-expired", "bash");
+    requested.identity.expires_at_ms = 10;
+    let mut accepted = ToolApprovalEntry::test_fixture(
+        ToolApprovalAuditAction::DecisionAccepted,
+        "call-accepted",
+        "bash",
+    );
+    accepted.identity.expires_at_ms = 10;
+    let mut accepted_requested = ToolApprovalEntry::test_fixture(
+        ToolApprovalAuditAction::Requested,
+        "call-accepted",
+        "bash",
+    );
+    accepted_requested.identity.expires_at_ms = 10;
+    let reconciled = super::unresolved_tool_approvals(
+        &[
+            SessionLogEntry::Control(ControlEntry::ToolApproval(requested)),
+            SessionLogEntry::Control(ControlEntry::ToolApproval(accepted_requested)),
+            SessionLogEntry::Control(ControlEntry::ToolApproval(accepted)),
+        ],
+        20,
+    );
+
+    assert_eq!(reconciled.len(), 2);
+    let expired = reconciled
+        .iter()
+        .find(|approval| approval.call_id == "call-expired")
+        .expect("requested approval should be reconciled");
+    assert_eq!(
+        expired.terminal_status,
+        Some(crate::ToolApprovalTerminalStatusV2::Expired)
+    );
+    assert_eq!(expired.user_decision, None);
+    assert_eq!(expired.decision_receipt, None);
+    let stale = reconciled
+        .iter()
+        .find(|approval| approval.call_id == "call-accepted")
+        .expect("accepted approval without execution should be reconciled");
+    assert_eq!(
+        stale.terminal_status,
+        Some(crate::ToolApprovalTerminalStatusV2::Stale)
+    );
+    assert_eq!(stale.user_decision, None);
+    assert_eq!(stale.decision_receipt, None);
 }

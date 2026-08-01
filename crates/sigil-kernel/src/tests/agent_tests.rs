@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     path::PathBuf,
     pin::Pin,
@@ -15,6 +15,9 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use futures::{Stream, stream};
 use serde_json::{Value, json};
+
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 use crate::session::SessionWriterFault;
 use crate::{
@@ -56,6 +59,27 @@ use super::{
     AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
     TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, emit_tool_result,
 };
+
+fn declared_test_permission_plan<T: Tool + ?Sized>(
+    tool: &T,
+    args: &Value,
+    subjects: Vec<ToolSubject>,
+    tool_default_mode: Option<ApprovalMode>,
+) -> Result<crate::ToolPermissionPlanDraft> {
+    let spec = tool.spec();
+    let access = spec.access;
+    crate::declared_tool_permission_plan(
+        &spec,
+        args,
+        crate::DeclaredToolPermissionFacts {
+            access,
+            operation: crate::infer_tool_operation(&spec.name, access),
+            network_effect: spec.network_effect,
+            subjects,
+            tool_default_mode,
+        },
+    )
+}
 
 struct MockProvider;
 struct TerminalToolProvider;
@@ -807,6 +831,7 @@ struct TerminalCancelAuditTool;
 struct WorkspaceMutatingCustomTool;
 struct RecorderAwareEchoTool {
     saw_recorder: Arc<AtomicBool>,
+    route_identity: Arc<Mutex<Option<(String, String)>>>,
 }
 struct WriteTool {
     executed: Arc<AtomicBool>,
@@ -1012,6 +1037,13 @@ impl Tool for RecorderAwareEchoTool {
     ) -> Result<ToolResult> {
         self.saw_recorder
             .store(ctx.mutation_recorder.is_some(), Ordering::SeqCst);
+        *self
+            .route_identity
+            .lock()
+            .expect("route identity lock should not be poisoned") = ctx
+            .session_scope_id()
+            .zip(ctx.logical_run_id())
+            .map(|(session, run)| (session.to_owned(), run.to_owned()));
         Ok(ToolResult::ok(
             call_id,
             "echo",
@@ -1041,16 +1073,47 @@ impl Tool for ReadPathTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
+        Ok(crate::ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: crate::ToolOperation::Read,
+            effects: BTreeSet::from([crate::ToolPermissionEffect::FileRead]),
+            subjects: vec![ToolSubject::path(path, path)],
+            analysis: crate::ToolAnalysisStatus::Complete,
+            containment: crate::ExecutionContainmentRequest {
+                filesystem: crate::FilesystemContainment::WorkspaceReadOnly,
+                process: crate::ProcessContainment::OwnedTree,
+                environment: crate::EnvironmentContainment::Restricted,
+                ..crate::ExecutionContainmentRequest::default()
+            },
+            semantic_scope: Some(crate::ToolSemanticScope::new("workspace_read", 1)),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([
+                ("containment_proven".to_owned(), "true".to_owned()),
+                (
+                    "execution_backend".to_owned(),
+                    "test-owned-process".to_owned(),
+                ),
+                ("execution_profile".to_owned(), "workspace-read".to_owned()),
+                (
+                    "environment_binding".to_owned(),
+                    "test-restricted-v1".to_owned(),
+                ),
+            ]),
+            safe_summary: crate::ToolPermissionSummary {
+                title: "Read workspace path".to_owned(),
+                detail: path.to_owned(),
+                ..crate::ToolPermissionSummary::default()
+            },
+        })
     }
 
     async fn execute(
@@ -1089,23 +1152,51 @@ impl Tool for BashCargoCheckFamilyTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         _args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        Ok(vec![ToolSubject::command(
-            "family:cargo_check",
-            "family:cargo_check",
-        )])
-    }
-
-    fn permission_operation(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<crate::ToolOperation> {
-        Ok(crate::ToolOperation::ExecuteUnknownCommand)
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        Ok(crate::ToolPermissionPlanDraft {
+            access: ToolAccess::Execute,
+            operation: crate::ToolOperation::ExecuteWorkspaceCheckCommand,
+            effects: BTreeSet::from([
+                crate::ToolPermissionEffect::FileRead,
+                crate::ToolPermissionEffect::ExecuteWorkspaceCode,
+            ]),
+            subjects: vec![ToolSubject::command(
+                "family:cargo_check",
+                "family:cargo_check",
+            )],
+            analysis: crate::ToolAnalysisStatus::Complete,
+            containment: crate::ExecutionContainmentRequest {
+                filesystem: crate::FilesystemContainment::WorkspaceAndScratch,
+                network: crate::NetworkContainment::Deny,
+                process: crate::ProcessContainment::OwnedTree,
+                environment: crate::EnvironmentContainment::Restricted,
+                persistent_process: false,
+            },
+            semantic_scope: Some(crate::ToolSemanticScope::new("workspace_validation", 1)),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([
+                ("containment_proven".to_owned(), "true".to_owned()),
+                (
+                    "execution_backend".to_owned(),
+                    "test-owned-process".to_owned(),
+                ),
+                ("execution_profile".to_owned(), "build-offline".to_owned()),
+                (
+                    "environment_binding".to_owned(),
+                    "test-restricted-v1".to_owned(),
+                ),
+            ]),
+            safe_summary: crate::ToolPermissionSummary {
+                title: "Run cargo check".to_owned(),
+                detail: "workspace validation".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 1,
+            },
+        })
     }
 
     async fn execute(
@@ -1320,12 +1411,12 @@ impl Tool for WorkspaceMutatingCustomTool {
         }
     }
 
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Allow))
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(self, args, Vec::new(), Some(ApprovalMode::Allow))
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, _args: Value) -> Result<ToolResult> {
@@ -1356,12 +1447,12 @@ impl Tool for TerminalStartAuditTool {
         }
     }
 
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Allow))
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(self, args, Vec::new(), Some(ApprovalMode::Allow))
     }
 
     async fn execute(
@@ -1376,17 +1467,21 @@ impl Tool for TerminalStartAuditTool {
             "started terminal task terminal-1",
             ToolResultMeta {
                 details: json!({
+                    "schema_version": crate::TERMINAL_TASK_SCHEMA_VERSION,
                     "task_id": "terminal-1",
+                    "generation": 1,
                     "status": "running",
                     "status_detail": { "state": "running" },
-                    "command": "cargo test",
-                    "cwd": ".",
-                    "shell": "sh",
-                    "log_path": ".sigil/terminal/terminal-1/output.log",
+                    "readiness": { "state": "none" },
+                    "command_sha256": "0".repeat(64),
+                    "cwd_label": ".",
+                    "shell_label": "sh",
+                    "shell_sha256": "1".repeat(64),
+                    "log_ref": "terminal-log:terminal-1",
                     "created_at_ms": 10,
                     "updated_at_ms": 20,
                     "output_preview": "running output",
-                    "output_hash": "sha256:abc",
+                    "output_hash": "2".repeat(64),
                     "output_truncated": false
                 }),
                 ..ToolResultMeta::default()
@@ -1409,12 +1504,12 @@ impl Tool for TerminalCancelAuditTool {
         }
     }
 
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Allow))
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(self, args, Vec::new(), Some(ApprovalMode::Allow))
     }
 
     async fn execute(
@@ -1429,17 +1524,21 @@ impl Tool for TerminalCancelAuditTool {
             "cancelled terminal task terminal-1",
             ToolResultMeta {
                 details: json!({
+                    "schema_version": crate::TERMINAL_TASK_SCHEMA_VERSION,
                     "task_id": "terminal-1",
+                    "generation": 2,
                     "status": "cancelled",
                     "status_detail": { "state": "cancelled" },
-                    "command": "sleep 5",
-                    "cwd": ".",
-                    "shell": "sh",
-                    "log_path": ".sigil/terminal/terminal-1/output.log",
+                    "readiness": { "state": "none" },
+                    "command_sha256": "0".repeat(64),
+                    "cwd_label": ".",
+                    "shell_label": "sh",
+                    "shell_sha256": "1".repeat(64),
+                    "log_ref": "terminal-log:terminal-1",
                     "created_at_ms": 10,
                     "updated_at_ms": 30,
                     "output_preview": "cancelled output",
-                    "output_hash": "sha256:def",
+                    "output_hash": crate::stable_event_hash(b"cancelled output"),
                     "output_truncated": false
                 }),
                 ..ToolResultMeta::default()
@@ -1468,16 +1567,16 @@ impl Tool for WriteTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
+        declared_test_permission_plan(self, args, vec![ToolSubject::path(path, path)], None)
     }
 
     async fn preview(
@@ -1511,7 +1610,7 @@ impl Tool for WriteTool {
             .preview(ctx.clone(), args.clone())
             .await?
             .ok_or_else(|| anyhow::anyhow!("write preview is required"))?;
-        let subjects = self.permission_subjects(&ctx, &args)?;
+        let subjects = self.permission_plan(&ctx, &args)?.subjects;
         Ok(Some(ToolPreparation::new(
             preview,
             subjects,
@@ -1553,6 +1652,85 @@ impl Tool for WriteTool {
     }
 }
 
+#[cfg(unix)]
+struct SymlinkWriteTool {
+    executed: Arc<AtomicBool>,
+}
+
+#[cfg(unix)]
+#[async_trait]
+impl Tool for SymlinkWriteTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write through a workspace symlink".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            network_effect: None,
+            preview: ToolPreviewCapability::Required,
+        }
+    }
+
+    fn permission_plan(
+        &self,
+        ctx: &ToolContext,
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        let workspace = ctx.workspace_root.canonicalize()?;
+        let canonical = workspace.join(path).canonicalize()?;
+        let scope = if canonical.starts_with(&workspace) {
+            ToolSubjectScope::Workspace
+        } else {
+            ToolSubjectScope::External
+        };
+        declared_test_permission_plan(
+            self,
+            args,
+            vec![ToolSubject::path_with_scope(
+                path,
+                path,
+                Some(canonical),
+                scope,
+            )],
+            None,
+        )
+    }
+
+    async fn preview(&self, _ctx: ToolContext, _args: Value) -> Result<Option<ToolPreview>> {
+        Ok(Some(ToolPreview {
+            title: "Write file".to_owned(),
+            summary: "Write one workspace path".to_owned(),
+            body: "write file.txt".to_owned(),
+            changed_files: vec!["file.txt".to_owned()],
+            file_diffs: Vec::new(),
+        }))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        self.executed.store(true, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "unexpected write",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
 #[async_trait]
 impl Tool for DefaultAllowWriteTool {
     fn spec(&self) -> crate::ToolSpec {
@@ -1573,24 +1751,21 @@ impl Tool for DefaultAllowWriteTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Allow))
+        declared_test_permission_plan(
+            self,
+            args,
+            vec![ToolSubject::path(path, path)],
+            Some(ApprovalMode::Allow),
+        )
     }
 
     fn egress_audit(
@@ -1644,17 +1819,22 @@ impl Tool for ExternalWriteTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        Ok(vec![ToolSubject::path_with_scope(
-            self.external_path.display().to_string(),
-            self.external_path.display().to_string(),
-            Some(self.external_path.clone()),
-            ToolSubjectScope::External,
-        )])
+        args: &serde_json::Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(
+            self,
+            args,
+            vec![ToolSubject::path_with_scope(
+                self.external_path.display().to_string(),
+                self.external_path.display().to_string(),
+                Some(self.external_path.clone()),
+                ToolSubjectScope::External,
+            )],
+            None,
+        )
     }
 
     async fn execute(
@@ -1675,6 +1855,8 @@ impl Tool for ExternalWriteTool {
 
 struct DenyWritesHandler;
 
+struct ExpiredApprovalHandler;
+
 struct ApproveForSessionHandler {
     approvals: Arc<AtomicUsize>,
 }
@@ -1682,6 +1864,12 @@ struct ApproveForSessionHandler {
 struct ApproveWithArgsHandler;
 
 struct PanicApprovalHandler;
+
+#[cfg(unix)]
+struct RetargetSymlinkApprovalHandler {
+    link: PathBuf,
+    protected_target: PathBuf,
+}
 
 impl ApprovalHandler for DenyWritesHandler {
     fn approve_tool_call(
@@ -1692,6 +1880,22 @@ impl ApprovalHandler for DenyWritesHandler {
         Ok(ToolApproval::Deny {
             reason: format!("denied {}", call.name),
         })
+    }
+}
+
+impl ApprovalHandler for ExpiredApprovalHandler {
+    fn approve_tool_call(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &crate::ToolSpec,
+    ) -> Result<ToolApproval> {
+        Ok(ToolApproval::Expired {
+            reason: "approval request expired before a decision".to_owned(),
+        })
+    }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        true
     }
 }
 
@@ -1725,6 +1929,23 @@ impl ApprovalHandler for PanicApprovalHandler {
         _spec: &crate::ToolSpec,
     ) -> Result<ToolApproval> {
         panic!("approval handler should not be called")
+    }
+}
+
+#[cfg(unix)]
+impl ApprovalHandler for RetargetSymlinkApprovalHandler {
+    fn approve_tool_call(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &crate::ToolSpec,
+    ) -> Result<ToolApproval> {
+        std::fs::remove_file(&self.link)?;
+        symlink(&self.protected_target, &self.link)?;
+        Ok(ToolApproval::Approve)
+    }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        true
     }
 }
 
@@ -1963,23 +2184,11 @@ impl Tool for PermissionAccessFailingWriteTool {
         }
     }
 
-    fn permission_subjects(
-        &self,
-        _ctx: &crate::ToolContext,
-        args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        let path = args
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
-    }
-
-    fn permission_access(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         _args: &serde_json::Value,
-    ) -> Result<ToolAccess> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         anyhow::bail!("access exploded");
     }
 
@@ -1989,7 +2198,7 @@ impl Tool for PermissionAccessFailingWriteTool {
         _call_id: String,
         _args: serde_json::Value,
     ) -> Result<ToolResult> {
-        unreachable!("tool should not execute when permission_access fails")
+        unreachable!("tool should not execute when permission_plan fails")
     }
 }
 
@@ -2013,16 +2222,16 @@ impl Tool for EgressAuditFailingWriteTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
+        declared_test_permission_plan(self, args, vec![ToolSubject::path(path, path)], None)
     }
 
     fn egress_audit(
@@ -2063,16 +2272,16 @@ impl Tool for ExecuteFailingWriteTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
+        declared_test_permission_plan(self, args, vec![ToolSubject::path(path, path)], None)
     }
 
     async fn execute(
@@ -2435,24 +2644,21 @@ impl Tool for InvalidEgressTool {
         }
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(vec![ToolSubject::path(path, path)])
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(Some(ApprovalMode::Allow))
+        declared_test_permission_plan(
+            self,
+            args,
+            vec![ToolSubject::path(path, path)],
+            Some(ApprovalMode::Allow),
+        )
     }
 
     fn egress_audit(
@@ -2486,9 +2692,9 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
     let mut session = Session::new("mock", "mock-model");
     let mut handler = crate::event::NoopEventHandler;
     let result = agent
-        .run(
+        .run_with_input(
             &mut session,
-            "hi",
+            AgentRunInput::user("hi"),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
                 max_turns: Some(4),
@@ -2503,7 +2709,8 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
             },
             &mut handler,
         )
-        .await?;
+        .await?
+        .result;
     assert_eq!(result.final_text, "done");
     assert_eq!(result.tool_calls, 1);
     assert!(
@@ -2523,10 +2730,9 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-1"
-                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
-                    && approval.policy_decision == ApprovalMode::Allow
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-1"
+                    && decision.policy_decision == ApprovalMode::Allow
         )
     }));
     assert!(session.entries().iter().any(|entry| {
@@ -2677,9 +2883,9 @@ async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messag
     let mut handler = RecordingEventHandler::default();
 
     let result = agent
-        .run(
+        .run_with_input(
             &mut session,
-            "hi",
+            AgentRunInput::user("hi"),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
                 max_turns: Some(4),
@@ -2694,7 +2900,8 @@ async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messag
             },
             &mut handler,
         )
-        .await?;
+        .await?
+        .result;
 
     assert_eq!(result.final_text, "done");
     assert_eq!(
@@ -2811,22 +3018,24 @@ async fn agent_waits_for_foreground_terminal_result_before_next_provider_request
 }
 
 #[tokio::test]
-async fn agent_injects_mutation_recorder_into_tool_context_for_durable_sessions() -> Result<()> {
+async fn agent_injects_durable_recorder_and_exact_route_into_tool_context() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let saw_recorder = Arc::new(AtomicBool::new(false));
+    let route_identity = Arc::new(Mutex::new(None));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(RecorderAwareEchoTool {
         saw_recorder: Arc::clone(&saw_recorder),
+        route_identity: Arc::clone(&route_identity),
     }));
     let agent = Agent::new(MockProvider, registry);
     let mut session = Session::new("mock", "mock-model").with_store(store);
     let mut handler = crate::event::NoopEventHandler;
 
     let result = agent
-        .run(
+        .run_with_input(
             &mut session,
-            "hi",
+            AgentRunInput::user("hi").with_logical_run_id("tool-context-run"),
             AgentRunOptions {
                 workspace_root: temp.path().to_path_buf(),
                 max_turns: Some(4),
@@ -2841,10 +3050,21 @@ async fn agent_injects_mutation_recorder_into_tool_context_for_durable_sessions(
             },
             &mut handler,
         )
-        .await?;
+        .await?
+        .result;
 
     assert_eq!(result.final_text, "done");
     assert!(saw_recorder.load(Ordering::SeqCst));
+    assert_eq!(
+        route_identity
+            .lock()
+            .expect("route identity lock should not be poisoned")
+            .as_ref(),
+        Some(&(
+            session.session_scope_id().to_owned(),
+            "tool-context-run".to_owned(),
+        ))
+    );
     Ok(())
 }
 
@@ -4029,12 +4249,15 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
         )
         .await?;
 
+    let expected_execution_hash = format!("sha256:{}", "2".repeat(64));
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
                 if execution.call_id == "call-terminal-1"
                     && execution.status == ToolExecutionStatus::Completed
+                    && execution.metadata.details.get("output_hash").and_then(Value::as_str)
+                        == Some(expected_execution_hash.as_str())
         )
     }));
     assert!(session.entries().iter().any(|entry| {
@@ -4042,10 +4265,10 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
             entry,
             SessionLogEntry::Control(ControlEntry::TerminalTask(task))
                 if task.handle.task_id.as_str() == "terminal-1"
-                    && task.handle.command == "cargo test"
+                    && task.handle.command_sha256 == "0".repeat(64)
                     && matches!(task.status, TerminalTaskStatus::Running)
-                    && task.output_preview.as_deref() == Some("running output")
-                    && task.output_hash.as_deref() == Some("sha256:abc")
+                    && task.output_preview.is_none()
+                    && task.output_hash.as_deref() == Some("2".repeat(64).as_str())
         )
     }));
     Ok(())
@@ -6631,72 +6854,6 @@ fn task_bound_plan_permission_grant_expires_after_task_terminal_status() -> Resu
     assert_eq!(decision.mode, ApprovalMode::Ask);
     Ok(())
 }
-#[test]
-fn mcp_session_grant_does_not_reuse_after_exact_process_binding_changes() -> Result<()> {
-    let tool_name = "mcp__same_server__echo";
-    let approved_decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        tool_name,
-        ToolAccess::Read,
-        vec![ToolSubject::mcp_trust_class_with_process_binding(
-            "same-server",
-            "third_party",
-            "hmac-sha256:approved-manifest-command-base",
-            "hmac-sha256:environment",
-        )],
-        false,
-    );
-    let changed_decision = PermissionDecision::new(
-        ApprovalMode::Ask,
-        tool_name,
-        ToolAccess::Read,
-        vec![ToolSubject::mcp_trust_class_with_process_binding(
-            "same-server",
-            "third_party",
-            "hmac-sha256:changed-manifest-command-base",
-            "hmac-sha256:environment",
-        )],
-        false,
-    );
-    let call = ToolCall {
-        id: "mcp-approved-for-session".to_owned(),
-        name: tool_name.to_owned(),
-        args_json: "{}".to_owned(),
-    };
-    let mut session = Session::new("mcp-grant-session", "mock-model");
-    let mut events = RecordingEventHandler::default();
-    super::append_tool_approval_session_grant(
-        &mut session,
-        &mut events,
-        &call,
-        &approved_decision,
-    )?;
-
-    let grant = session
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant)) => Some(grant),
-            _ => None,
-        })
-        .expect("approved-for-session fixture should append a grant");
-    assert!(super::session_grant_covers_decision(
-        grant,
-        tool_name,
-        &approved_decision
-    ));
-    assert!(!super::session_grant_covers_decision(
-        grant,
-        tool_name,
-        &changed_decision
-    ));
-    let (changed, stale_grant) =
-        super::tool_session_grant_decision_override(&session, tool_name, changed_decision);
-    assert!(stale_grant.is_none());
-    assert_eq!(changed.mode, ApprovalMode::Ask);
-    Ok(())
-}
-
 #[tokio::test]
 async fn agent_respects_denied_write_approval() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
@@ -6736,7 +6893,8 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
             && message.content.as_deref().is_some_and(|content| {
                 content.contains(r#""kind":"approval_denied""#)
                     && content.contains("tool execution denied by user")
-                    && content.contains(r#""summary":"path=file.txt"#)
+                    && content.contains(r#""summary":"path_sha256="#)
+                    && !content.contains("file.txt")
             })
     }));
     assert!(session.entries().iter().any(|entry| {
@@ -6757,6 +6915,140 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
                     && approval.user_decision == Some(ToolApprovalUserDecision::Denied)
                     && approval.reason.as_deref() == Some("denied write_file")
         )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Started
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_approval_has_no_user_decision_receipt_and_never_executes() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = ExpiredApprovalHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write something",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::DecisionAccepted
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Resolved
+                    && approval.user_decision.is_none()
+                    && approval.decision_receipt.is_none()
+                    && approval.terminal_status
+                        == Some(crate::ToolApprovalTerminalStatusV2::Expired)
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Started
+        )
+    }));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn execution_replan_rejects_symlink_retargeted_to_protected_path_after_approval() -> Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let ordinary_target = workspace.path().join("ordinary.txt");
+    std::fs::write(&ordinary_target, "ordinary")?;
+    let protected_directory = workspace.path().join(".git");
+    std::fs::create_dir(&protected_directory)?;
+    let protected_target = protected_directory.join("config");
+    std::fs::write(&protected_target, "protected")?;
+    let link = workspace.path().join("file.txt");
+    symlink(&ordinary_target, &link)?;
+
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SymlinkWriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut event_handler = RecordingEventHandler::default();
+    let mut approval_handler = RetargetSymlinkApprovalHandler {
+        link,
+        protected_target: protected_target.clone(),
+    };
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("write something"),
+            AgentRunOptions {
+                workspace_root: workspace.path().to_path_buf(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut event_handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert_eq!(std::fs::read_to_string(protected_target)?, "protected");
+    assert!(output.outcome.tool_errors.iter().any(|error| {
+        error.kind == ToolErrorKind::StalePreparedMutation
+            && error
+                .message
+                .contains("subjects or trust zones changed after authorization")
     }));
     assert!(!session.entries().iter().any(|entry| {
         matches!(
@@ -6852,11 +7144,10 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
-                if grant.call_id == "call-read-1"
+                if grant.source_call_id == "call-read-1"
                     && grant.tool_name == "read_path"
-                    && grant.access == ToolAccess::Read
                     && grant.subjects.len() == 1
-                    && grant.subjects[0].normalized == "file.txt"
+                    && grant.subjects[0].relative_label.as_deref() == Some("file.txt")
         )
     }));
     assert!(!session.entries().iter().any(|entry| {
@@ -6870,12 +7161,11 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-read-2"
-                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
-                    && approval.policy_decision == ApprovalMode::Allow
-                    && approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
-                    && approval.grant_call_id.as_deref() == Some("call-read-1")
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-read-2"
+                    && decision.policy_decision == ApprovalMode::Allow
+                    && decision.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
+                    && decision.grant_id.is_some()
         )
     }));
     Ok(())
@@ -6954,11 +7244,11 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
-                if grant.call_id == "call-cargo-1"
+                if grant.source_call_id == "call-cargo-1"
                     && grant.tool_name == "bash"
-                    && grant.access == ToolAccess::Execute
                     && grant.subjects.len() == 1
-                    && grant.subjects[0].normalized == "family:cargo_check"
+                    && grant.subjects[0].identity_sha256
+                        == crate::stable_event_hash(b"family:cargo_check")
         )
     }));
     assert!(!session.entries().iter().any(|entry| {
@@ -6972,12 +7262,11 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-cargo-2"
-                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
-                    && approval.policy_decision == ApprovalMode::Allow
-                    && approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
-                    && approval.grant_call_id.as_deref() == Some("call-cargo-1")
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-cargo-2"
+                    && decision.policy_decision == ApprovalMode::Allow
+                    && decision.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
+                    && decision.grant_id.is_some()
         )
     }));
     Ok(())
@@ -7055,9 +7344,44 @@ async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Resul
             )
         })
         .expect("tool execution start should be captured");
+    let accepted_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                    if approval.call_id == "call-write-1"
+                        && approval.action == ToolApprovalAuditAction::DecisionAccepted
+                        && approval.decision_receipt.as_ref().is_some_and(|receipt| {
+                            receipt.approval_request_id
+                                == approval.identity.approval_request_id
+                        })
+            )
+        })
+        .expect("approval acceptance receipt should be durable");
+    let resolved_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                    if approval.call_id == "call-write-1"
+                        && approval.action == ToolApprovalAuditAction::Resolved
+                        && approval.terminal_status
+                            == Some(crate::ToolApprovalTerminalStatusV2::Approved)
+            )
+        })
+        .expect("approval terminal status should be durable");
 
     assert!(snapshot_index < requested_index);
-    assert!(requested_index < started_index);
+    assert!(requested_index < accepted_index);
+    assert!(accepted_index < resolved_index);
+    assert!(resolved_index < started_index);
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-write-1"
+                && execution.status == ToolExecutionStatus::Started)
+    }));
 
     let snapshot_hash = entries.iter().find_map(|entry| match entry {
         SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)) => {
@@ -7241,7 +7565,9 @@ async fn prepared_execution_rejects_approval_time_argument_changes() -> Result<(
             SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
                 if approval.call_id == "call-write-1"
                     && approval.action == ToolApprovalAuditAction::Resolved
-                    && approval.user_decision == Some(ToolApprovalUserDecision::Denied)
+                    && approval.user_decision.is_none()
+                    && approval.terminal_status
+                        == Some(crate::ToolApprovalTerminalStatusV2::Stale)
                     && approval.reason.as_deref().is_some_and(|reason| {
                         reason.contains("approval-time argument changes")
                     })
@@ -7430,12 +7756,11 @@ async fn agent_tool_default_permission_mode_cannot_relax_local_baseline() -> Res
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
-                if approval.call_id == "call-write-1"
-                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
-                    && approval.policy_decision == ApprovalMode::Ask
-                    && approval.local_policy_decision == ApprovalMode::Ask
-                    && approval.source_policy_decision == ApprovalMode::Allow
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-write-1"
+                    && decision.policy_decision == ApprovalMode::Ask
+                    && decision.local_policy_decision == ApprovalMode::Ask
+                    && decision.source_policy_decision == ApprovalMode::Allow
         )
     }));
     assert!(!session.entries().iter().any(|entry| {
@@ -7490,11 +7815,21 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
 
     assert_eq!(result.final_text, "done");
     assert!(!executed.load(Ordering::SeqCst));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-write-1"
+                    && decision.policy_decision == ApprovalMode::Deny
+                    && decision.local_policy_decision == ApprovalMode::Deny
+        )
+    }));
     assert!(handler.events.iter().any(|event| {
         matches!(
             event,
-            RunEvent::ToolApprovalResolved { approved: false, reason: Some(reason), .. }
-                if reason.contains("permission policy")
+            RunEvent::ToolResult(result)
+                if result.is_error()
+                    && result.content.contains("denied by permission policy")
         )
     }));
     Ok(())
@@ -7935,7 +8270,7 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
                         .get("call")
                         .and_then(|call| call.get("summary"))
                         .and_then(serde_json::Value::as_str)
-                        == Some("path=file.txt")
+                        .is_some_and(|summary| summary.starts_with("path_sha256="))
         )
     }));
 
@@ -8297,7 +8632,7 @@ async fn agent_returns_invalid_input_when_egress_payload_audit_fails() -> Result
 }
 
 #[tokio::test]
-async fn agent_returns_invalid_input_when_permission_access_fails() -> Result<()> {
+async fn agent_returns_invalid_input_when_permission_plan_fails() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(PermissionAccessFailingWriteTool));
     let agent = Agent::new(WriteMockProvider, registry);
@@ -9103,19 +9438,11 @@ impl Tool for AccessErrorTool {
         path_tool_spec("access_error", ToolAccess::Write)
     }
 
-    fn permission_subjects(
-        &self,
-        _ctx: &ToolContext,
-        args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        path_tool_subject(args)
-    }
-
-    fn permission_access(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         _args: &serde_json::Value,
-    ) -> Result<ToolAccess> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         anyhow::bail!("access exploded");
     }
 
@@ -9140,19 +9467,11 @@ impl Tool for DefaultModeErrorTool {
         path_tool_spec("default_mode_error", ToolAccess::Write)
     }
 
-    fn permission_subjects(
-        &self,
-        _ctx: &ToolContext,
-        args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        path_tool_subject(args)
-    }
-
-    fn permission_default_mode(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         _args: &serde_json::Value,
-    ) -> Result<Option<ApprovalMode>> {
+    ) -> Result<crate::ToolPermissionPlanDraft> {
         anyhow::bail!("default mode exploded");
     }
 
@@ -9177,12 +9496,12 @@ impl Tool for EgressAuditErrorTool {
         path_tool_spec("egress_error", ToolAccess::Read)
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        path_tool_subject(args)
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(self, args, path_tool_subject(args)?, None)
     }
 
     fn egress_audit(
@@ -9214,12 +9533,12 @@ impl Tool for ExecuteErrorTool {
         path_tool_spec("execute_error", ToolAccess::Read)
     }
 
-    fn permission_subjects(
+    fn permission_plan(
         &self,
         _ctx: &ToolContext,
         args: &serde_json::Value,
-    ) -> Result<Vec<ToolSubject>> {
-        path_tool_subject(args)
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        declared_test_permission_plan(self, args, path_tool_subject(args)?, None)
     }
 
     async fn execute(
@@ -9291,19 +9610,35 @@ fn agent_context_helpers_attach_and_truncate_metadata() {
     let context = super::tool_call_context(&call, &subjects)
         .and_then(|value| value.as_object().cloned())
         .expect("context should be derived");
-    assert!(
-        context["command"]
-            .as_str()
-            .is_some_and(|value| value.ends_with("..."))
+    assert_eq!(
+        context["command_sha256"],
+        super::stable_text_hash(
+            json!({
+                "command": format!("  echo   {}  ", "x".repeat(220)),
+                "path": "notes/file.txt",
+                "pattern": "needle",
+            })["command"]
+                .as_str()
+                .expect("command")
+        )
     );
-    assert_eq!(context["path"], "notes/file.txt");
-    assert_eq!(context["pattern"], "needle");
+    assert_eq!(
+        context["path_sha256"],
+        super::stable_text_hash("notes/file.txt")
+    );
+    assert_eq!(context["pattern_sha256"], super::stable_text_hash("needle"));
     assert_eq!(context["subjects"].as_array().map(Vec::len), Some(6));
-    assert_eq!(context["subjects"][0], "workspace:path:notes/file.txt");
+    assert_eq!(
+        context["subjects"][0],
+        format!(
+            "workspace:path:{}",
+            super::stable_text_hash("notes/file.txt")
+        )
+    );
     assert!(
         context["summary"]
             .as_str()
-            .is_some_and(|value| value.contains("command="))
+            .is_some_and(|value| value.contains("command_sha256="))
     );
 
     let subject_only_context = super::tool_call_context(
@@ -9334,23 +9669,26 @@ fn agent_context_helpers_attach_and_truncate_metadata() {
     let mut null_details = ToolResult::ok("call-ctx", "bash", "ok", ToolResultMeta::default());
     super::attach_tool_call_context(&mut null_details, &call, &subjects);
     assert_eq!(
-        null_details.metadata.details["call"]["path"],
-        "notes/file.txt"
+        null_details.metadata.details["call"]["path_sha256"],
+        super::stable_text_hash("notes/file.txt")
     );
 
     let mut object_details = ToolResult::ok("call-ctx", "bash", "ok", ToolResultMeta::default());
     object_details.metadata.details = json!({ "existing": true });
     super::attach_tool_call_context(&mut object_details, &call, &subjects);
     assert_eq!(object_details.metadata.details["existing"], true);
-    assert_eq!(object_details.metadata.details["call"]["pattern"], "needle");
+    assert_eq!(
+        object_details.metadata.details["call"]["pattern_sha256"],
+        super::stable_text_hash("needle")
+    );
 
     let mut string_details = ToolResult::ok("call-ctx", "bash", "ok", ToolResultMeta::default());
     string_details.metadata.details = Value::String("previous".to_owned());
     super::attach_tool_call_context(&mut string_details, &call, &subjects);
     assert_eq!(string_details.metadata.details["tool"], "previous");
     assert_eq!(
-        string_details.metadata.details["call"]["path"],
-        "notes/file.txt"
+        string_details.metadata.details["call"]["path_sha256"],
+        super::stable_text_hash("notes/file.txt")
     );
 }
 
@@ -9369,13 +9707,60 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
         Some(external_path.clone()),
         ToolSubjectScope::External,
     )];
-    let decision = PermissionDecision::new(
+    let mut decision = PermissionDecision::new(
         ApprovalMode::Ask,
         "write_file",
         ToolAccess::Write,
         subjects.clone(),
         true,
     );
+    decision.confirmation = Some(crate::PermissionConfirmation::TypePhrase {
+        phrase: "approval-secret-phrase".to_owned(),
+    });
+    decision.command_permission_matches = vec![crate::CommandPermissionMatch {
+        group: crate::CommandPermissionGroup::Ask,
+        pattern: "curl * approval-secret-pattern".to_owned(),
+        command: "curl https://example.test?token=approval-secret-command".to_owned(),
+    }];
+    decision.reasons = vec![crate::PermissionDecisionReason {
+        source: crate::PermissionDecisionSource::HardSafety,
+        code: "sensitive_test".to_owned(),
+        detail: format!(
+            "Review https://example.test?token=approval-secret-reason {}",
+            "x".repeat(2_048)
+        ),
+    }];
+    let plan = crate::ToolPermissionPlanV2::bind(
+        &call.name,
+        &serde_json::from_str(&call.args_json)?,
+        std::path::Path::new("."),
+        crate::ToolPermissionPlanDraft {
+            access: ToolAccess::Write,
+            operation: crate::ToolOperation::EditFile,
+            effects: BTreeSet::from([crate::ToolPermissionEffect::FileWrite]),
+            subjects: subjects.clone(),
+            analysis: crate::ToolAnalysisStatus::Complete,
+            containment: crate::ExecutionContainmentRequest::default(),
+            semantic_scope: Some(crate::ToolSemanticScope::new("workspace_edit", 1)),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::new(),
+            safe_summary: crate::ToolPermissionSummary {
+                title: "Edit file".to_owned(),
+                detail: "test fixture".to_owned(),
+                ..crate::ToolPermissionSummary::default()
+            },
+        },
+    )?;
+    let identity = crate::ApprovalRequestIdentityV2 {
+        session_id: "deepseek".to_owned(),
+        run_id: "test-run".to_owned(),
+        call_id: call.id.clone(),
+        approval_request_id: "test-approval".to_owned(),
+        plan_hash: plan.plan_hash.clone(),
+        policy_version: "sha256:test-policy".to_owned(),
+        execution_binding_hash: plan.plan_hash.clone(),
+        expires_at_ms: 1_000,
+    };
 
     super::append_reasoning_trace(&mut session, "")?;
     super::append_reasoning_trace(&mut session, "trace details")?;
@@ -9400,10 +9785,13 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
         &mut session,
         &call,
         &decision,
+        &identity,
+        &plan,
         ToolApprovalAuditAction::Requested,
         None,
         None,
-        Some("preview-hash".to_owned()),
+        None,
+        Some("a".repeat(64)),
     )?;
     super::append_tool_execution_audit(
         &mut session,
@@ -9413,13 +9801,26 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
         None,
         None,
     )?;
-    let result = ToolResult::error(
+    let mut result = ToolResult::error(
         "call-1",
         "write_file",
         ToolErrorKind::PermissionDenied,
-        "denied",
+        "denied token=durable-secret-value",
     )
-    .with_error_details(true, json!({"reason": "policy"}));
+    .with_error_details(
+        true,
+        json!({
+            "reason": "policy",
+            "secret": "durable-secret-value",
+            "path": "/Users/private/workspace/file.txt",
+            "payload": "x".repeat(128_000),
+        }),
+    );
+    result.metadata.changed_files = vec!["/Users/private/workspace/file.txt".to_owned()];
+    result.metadata.details = json!({
+        "custom": "durable-secret-value",
+        "command": "cat /Users/private/workspace/file.txt",
+    });
     super::append_tool_execution_audit(
         &mut session,
         &call,
@@ -9444,10 +9845,45 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
             entry,
             SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
                 if approval.call_id == "call-1"
-                    && approval.preview_hash.as_deref() == Some("preview-hash")
+                    && approval.preview_hash.as_deref() == Some("a".repeat(64).as_str())
                     && approval.external_directory_required
         )
     }));
+    let execution = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.status == ToolExecutionStatus::Failed =>
+            {
+                Some(execution)
+            }
+            _ => None,
+        })
+        .expect("failed tool execution audit");
+    let execution_json = serde_json::to_string(execution)?;
+    assert!(execution_json.len() <= crate::MAX_DURABLE_TOOL_EXECUTION_BYTES);
+    assert!(!execution_json.contains("durable-secret-value"));
+    assert!(!execution_json.contains("/Users/private"));
+    assert_eq!(execution.metadata.changed_files.len(), 1);
+    assert!(execution.metadata.changed_files[0].starts_with("sha256:"));
+    assert_eq!(
+        execution.error.as_ref().expect("error").details["redacted"],
+        true
+    );
+    let approval = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval)) => Some(approval),
+            _ => None,
+        })
+        .expect("tool approval audit");
+    let approval_json = serde_json::to_string(approval)?;
+    assert!(approval_json.len() <= crate::MAX_DURABLE_TOOL_CONTROL_BYTES);
+    assert!(!approval_json.contains("approval-secret"));
+    assert!(!approval_json.contains("curl"));
+    assert!(!approval_json.contains("https://"));
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -9614,7 +10050,7 @@ fn agent_helper_preview_and_hash_edges_cover_normalized_subjects_and_errors() ->
 }
 
 #[tokio::test]
-async fn agent_surfaces_invalid_permission_access_with_usage_snapshot() -> Result<()> {
+async fn agent_surfaces_invalid_permission_plan_with_usage_snapshot() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(AccessErrorTool));
     let agent = Agent::new(

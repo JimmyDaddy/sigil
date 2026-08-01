@@ -70,8 +70,16 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             model_name,
             ..
         } => format!("[ctl] session {provider_name}/{model_name}"),
-        ControlEntry::SessionModelSelected { model_name } => {
-            format!("[ctl] session model {model_name}")
+        ControlEntry::SessionModelSelected {
+            provider_name,
+            resolved_model_route,
+            ..
+        } => {
+            format!(
+                "[ctl] session model {provider_name}/{}/{}",
+                resolved_model_route.model_ref.connection_id,
+                resolved_model_route.model_ref.model_id
+            )
         }
         ControlEntry::ContinuationStateSaved(state) => format!(
             "[ctl] cont {} msg={}",
@@ -136,6 +144,26 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 usage.cache_miss_tokens
             )
         }
+        ControlEntry::ToolPermissionPlannedV2(entry) => format!(
+            "[ctl] permission plan {} {} hash={} effects={}",
+            entry.call_id,
+            entry.tool_name,
+            truncate_session_view_text(&entry.plan_hash, 24),
+            entry
+                .effects
+                .iter()
+                .map(|effect| format!("{effect:?}"))
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+        ControlEntry::ToolPermissionDecisionV2(decision) => format!(
+            "[ctl] permission decision {} {} final={} risk={:?} operation={:?}",
+            decision.call_id,
+            decision.tool_name,
+            decision.policy_decision.as_str(),
+            decision.risk,
+            decision.operation
+        ),
         ControlEntry::ToolApproval(approval) => format!(
             "[ctl] approval {} {} action={} effect={} local={} network={} source={} final={}",
             approval.call_id,
@@ -150,8 +178,8 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             approval.policy_decision.as_str()
         ),
         ControlEntry::ToolApprovalSessionGrant(grant) => format!(
-            "[ctl] approval grant {} {} expires=session scope={} facets={} access={} effect={} subjects={}",
-            grant.call_id,
+            "[ctl] approval grant {} {} expires=session scope={} facets={} semantic={}@{} effects={} risk<={:?} subjects={}",
+            grant.source_call_id,
             grant.tool_name,
             grant.scope.as_str(),
             grant
@@ -160,10 +188,15 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 .map(|facet| facet.as_str())
                 .collect::<Vec<_>>()
                 .join("+"),
-            grant.access.as_str(),
+            grant.semantic_scope.family,
+            grant.semantic_scope.version,
             grant
-                .network_effect
-                .map_or("none", sigil_kernel::NetworkEffect::as_str),
+                .effect_ceiling
+                .iter()
+                .map(|effect| format!("{effect:?}"))
+                .collect::<Vec<_>>()
+                .join("+"),
+            grant.risk_ceiling,
             grant.subjects.len()
         ),
         ControlEntry::ToolExecution(execution) => render_tool_execution_line(execution),
@@ -303,7 +336,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             "[ctl] terminal {} status={} log={}",
             task.handle.task_id.as_str(),
             task.status.as_str(),
-            truncate_session_view_text(&task.handle.log_path.display().to_string(), 48)
+            truncate_session_view_text(&task.handle.log_ref, 48)
         ),
         ControlEntry::PlanDraftCreated(entry) => format!(
             "[ctl] plan draft {} paths={} suggested_checks={} hash={}",
@@ -1057,8 +1090,8 @@ pub(super) fn tool_approval_action_label(
     action: sigil_kernel::ToolApprovalAuditAction,
 ) -> &'static str {
     match action {
-        sigil_kernel::ToolApprovalAuditAction::PolicyEvaluated => "policy",
         sigil_kernel::ToolApprovalAuditAction::Requested => "requested",
+        sigil_kernel::ToolApprovalAuditAction::DecisionAccepted => "decision_accepted",
         sigil_kernel::ToolApprovalAuditAction::Resolved => "resolved",
         sigil_kernel::ToolApprovalAuditAction::PreviewFailed => "preview_failed",
     }
@@ -1424,6 +1457,7 @@ pub(super) fn task_route_status_label(status: sigil_kernel::TaskRouteStatus) -> 
         sigil_kernel::TaskRouteStatus::Requested => "requested",
         sigil_kernel::TaskRouteStatus::Resolved => "resolved",
         sigil_kernel::TaskRouteStatus::Rejected => "rejected",
+        sigil_kernel::TaskRouteStatus::Expired => "expired",
         sigil_kernel::TaskRouteStatus::Cancelled => "cancelled",
         sigil_kernel::TaskRouteStatus::Stale => "stale",
     }
@@ -1522,6 +1556,7 @@ pub(super) fn agent_route_status_label(status: sigil_kernel::AgentRouteStatus) -
         sigil_kernel::AgentRouteStatus::Requested => "requested",
         sigil_kernel::AgentRouteStatus::Resolved => "resolved",
         sigil_kernel::AgentRouteStatus::Rejected => "rejected",
+        sigil_kernel::AgentRouteStatus::Expired => "expired",
         sigil_kernel::AgentRouteStatus::Cancelled => "cancelled",
         sigil_kernel::AgentRouteStatus::Stale => "stale",
         sigil_kernel::AgentRouteStatus::Closed => "closed",

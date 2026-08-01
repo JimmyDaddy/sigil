@@ -44,6 +44,19 @@ fn boxed_chunk_stream(
     Box::pin(stream::iter(chunks))
 }
 
+fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentityV2 {
+    sigil_kernel::ApprovalRequestIdentityV2 {
+        session_id: "session-cli-test".to_owned(),
+        run_id: "run-cli-test".to_owned(),
+        call_id: call_id.to_owned(),
+        approval_request_id: format!("approval-{call_id}"),
+        plan_hash: "plan-cli-test".to_owned(),
+        policy_version: "policy-cli-test".to_owned(),
+        execution_binding_hash: "binding-cli-test".to_owned(),
+        expires_at_ms: u64::MAX,
+    }
+}
+
 #[test]
 fn resolve_workspace_root_uses_config_parent() -> Result<()> {
     let config_path = std::env::temp_dir()
@@ -74,7 +87,7 @@ fn serve_session_catalog_service_uses_resolved_global_projection_path() -> Resul
     let service = build_session_catalog_service(&paths);
 
     assert_eq!(service.database_path(), paths.session_catalog_db);
-    assert_eq!(HTTP_SERVER_STATE_DIR, "http-server-v2");
+    assert_eq!(HTTP_SERVER_STATE_DIR, "http-server-v4");
     assert_eq!(
         paths.session_catalog_db.parent(),
         Some(paths.projections_root.as_path())
@@ -617,6 +630,18 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         preview: ToolPreviewCapability::Required,
     };
     let approval = render_run_event(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity(&call.id),
+        effects: std::collections::BTreeSet::from([sigil_kernel::ToolPermissionEffect::FileWrite]),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(
+            sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            },
+        ),
         call: call.clone(),
         spec,
         subjects: vec![ToolSubject::path("src/main.rs", "src/main.rs")],
@@ -759,6 +784,7 @@ async fn drain_provider_stream_and_stdout_event_handler_accept_supported_events(
     }))?;
     handler.handle(RunEvent::ToolApprovalResolved {
         call_id: "call-1".to_owned(),
+        approval_request_id: "approval-call-1".to_owned(),
         approved: false,
         reason: Some("blocked".to_owned()),
     })?;
@@ -1588,6 +1614,18 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
     })?;
     handler.handle(sigil_kernel::RunEvent::ToolCallCompleted(call.clone()))?;
     handler.handle(sigil_kernel::RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity(&call.id),
+        effects: std::collections::BTreeSet::from([sigil_kernel::ToolPermissionEffect::FileRead]),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(
+            sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            },
+        ),
         call: call.clone(),
         spec,
         subjects: vec![ToolSubject::path("README.md", "README.md")],
@@ -1611,6 +1649,7 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
     })?;
     handler.handle(sigil_kernel::RunEvent::ToolApprovalResolved {
         call_id: call.id.clone(),
+        approval_request_id: format!("approval-{}", call.id),
         approved: false,
         reason: Some("denied by test".to_owned()),
     })?;

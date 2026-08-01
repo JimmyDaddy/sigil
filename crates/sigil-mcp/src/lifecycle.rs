@@ -331,6 +331,11 @@ async fn register_mcp_tools_for_startup_inner(
         };
         let mut registered_surface_count = 0usize;
         for tool in tools {
+            let permission = classify_mcp_permission(
+                &tool.annotations,
+                server.trust.trust_class,
+                McpPermissionTransport::Stdio,
+            );
             let tool_name = McpToolName::new(
                 &server.name,
                 &tool.name,
@@ -344,12 +349,13 @@ async fn register_mcp_tools_for_startup_inner(
                     description: tool.description.unwrap_or_else(|| "MCP tool".to_owned()),
                     input_schema: tool.input_schema,
                     category: ToolCategory::Mcp,
-                    access: ToolAccess::Read,
-                    network_effect: Some(NetworkEffect::Unknown),
+                    access: permission.access,
+                    network_effect: permission.network_effect,
                     preview: ToolPreviewCapability::None,
                 },
                 tool_name,
                 trust: server.trust.clone(),
+                annotations: tool.annotations,
             }));
             registered_surface_count = registered_surface_count.saturating_add(1);
         }

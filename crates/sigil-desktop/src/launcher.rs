@@ -1,5 +1,10 @@
 use std::{
-    fmt, io, net::SocketAddr, path::PathBuf, process::ExitStatus, sync::Arc, time::Duration,
+    fmt, io,
+    net::SocketAddr,
+    path::PathBuf,
+    process::ExitStatus,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use reqwest::{Client, redirect::Policy};
@@ -15,6 +20,7 @@ use crate::{client::DesktopHttpClient, protocol::DesktopServerInfo, secret::Desk
 
 const MAX_BOOTSTRAP_BYTES: usize = 16 * 1024;
 const MAX_SERVER_INFO_BYTES: usize = 16 * 1024;
+const MAX_STARTUP_STDERR_BYTES: usize = 8 * 1024;
 const FAILED_LAUNCH_GRACE: Duration = Duration::from_millis(250);
 const FORCED_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 const PIPE_TASK_FINISH_TIMEOUT: Duration = Duration::from_millis(250);
@@ -96,6 +102,27 @@ impl fmt::Debug for DesktopLaunchRequest {
     }
 }
 
+/// Safe reason derived from bounded child startup diagnostics without retaining raw stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopStartupFailure {
+    /// Another process currently owns one of the workspace service leases.
+    WorkspaceBusy,
+    /// A required local adapter state store is invalid and could not be recovered.
+    AdapterStateInvalid,
+    /// The loopback listener could not be established.
+    LoopbackUnavailable,
+}
+
+impl fmt::Display for DesktopStartupFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::WorkspaceBusy => "workspace service state is busy",
+            Self::AdapterStateInvalid => "workspace service state is invalid",
+            Self::LoopbackUnavailable => "loopback service is unavailable",
+        })
+    }
+}
+
 /// Typed, path-free launcher failures safe to project into a native-shell status.
 #[derive(Debug, Error)]
 pub enum DesktopLaunchError {
@@ -126,6 +153,9 @@ pub enum DesktopLaunchError {
     /// The child closed stdout before publishing readiness.
     #[error("desktop server exited before publishing readiness")]
     ReadinessClosed,
+    /// The child rejected startup for one bounded, renderer-safe reason.
+    #[error("desktop server startup rejected: {0}")]
+    StartupRejected(DesktopStartupFailure),
     /// The single readiness record exceeded its hard cap.
     #[error("desktop server readiness record exceeded its size limit")]
     ReadinessTooLarge,
@@ -251,15 +281,17 @@ impl DesktopLauncher {
                 .await);
             }
         };
-        let stderr_task = tokio::spawn(drain_pipe(stderr));
+        let startup_stderr = Arc::new(StartupStderrCapture::default());
+        let stderr_task = tokio::spawn(drain_startup_stderr(stderr, Arc::clone(&startup_stderr)));
         let deadline = Instant::now() + self.startup_timeout;
 
         let startup_line = match timeout_at(deadline, read_startup_line(&mut stdout)).await {
             Ok(Ok(line)) => line,
             Ok(Err(error)) => {
-                stderr_task.abort();
+                let error =
+                    cleanup_owned_error(&mut child, process_id, owner_stdin.take(), error).await;
                 return Err(
-                    cleanup_owned_error(&mut child, process_id, owner_stdin.take(), error).await,
+                    classify_closed_startup_error(error, stderr_task, &startup_stderr).await,
                 );
             }
             Err(_) => {
@@ -655,6 +687,82 @@ where
             Ok(_) => {}
         }
     }
+}
+
+#[derive(Default)]
+struct StartupStderrCapture {
+    bytes: Mutex<Vec<u8>>,
+}
+
+impl StartupStderrCapture {
+    fn extend(&self, bytes: &[u8]) {
+        let Ok(mut captured) = self.bytes.lock() else {
+            return;
+        };
+        let remaining = MAX_STARTUP_STDERR_BYTES.saturating_sub(captured.len());
+        captured.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+
+    fn classify(&self) -> Option<DesktopStartupFailure> {
+        let captured = self.bytes.lock().ok()?;
+        classify_startup_stderr(&captured)
+    }
+}
+
+async fn drain_startup_stderr<R>(mut reader: R, capture: Arc<StartupStderrCapture>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => capture.extend(&buffer[..read]),
+        }
+    }
+}
+
+async fn classify_closed_startup_error(
+    error: DesktopLaunchError,
+    mut stderr_task: JoinHandle<()>,
+    capture: &StartupStderrCapture,
+) -> DesktopLaunchError {
+    if timeout(PIPE_TASK_FINISH_TIMEOUT, &mut stderr_task)
+        .await
+        .is_err()
+    {
+        stderr_task.abort();
+        let _ = stderr_task.await;
+    }
+    if !matches!(error, DesktopLaunchError::ReadinessClosed) {
+        return error;
+    }
+    capture
+        .classify()
+        .map_or(error, DesktopLaunchError::StartupRejected)
+}
+
+fn classify_startup_stderr(bytes: &[u8]) -> Option<DesktopStartupFailure> {
+    let diagnostic = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    if diagnostic.contains("failed to acquire durable lease")
+        || diagnostic.contains("resource temporarily unavailable")
+    {
+        return Some(DesktopStartupFailure::WorkspaceBusy);
+    }
+    if diagnostic.contains("journal is corrupt")
+        || diagnostic.contains("store is corrupt")
+        || diagnostic.contains("journal is too large")
+        || diagnostic.contains("store is too large")
+    {
+        return Some(DesktopStartupFailure::AdapterStateInvalid);
+    }
+    if diagnostic.contains("address already in use")
+        || diagnostic.contains("failed to bind")
+        || diagnostic.contains("could not bind")
+    {
+        return Some(DesktopStartupFailure::LoopbackUnavailable);
+    }
+    None
 }
 
 async fn cleanup_unowned_child(child: &mut Child) -> Result<(), DesktopLaunchError> {

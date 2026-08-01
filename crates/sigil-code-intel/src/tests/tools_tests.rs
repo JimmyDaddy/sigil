@@ -4,8 +4,8 @@ use anyhow::anyhow;
 use serde_json::json;
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, JsonlSessionStore, LanguageServerConfig,
-    MutationEventRecorder, ToolCall, ToolContext, ToolErrorKind, ToolRegistry, WorkspaceTrust,
-    write_file_with_mutation,
+    MutationEventRecorder, ToolAnalysisStatus, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
+    ToolPermissionEffect, ToolRegistry, WorkspaceTrust, write_file_with_mutation,
 };
 
 use super::*;
@@ -322,8 +322,8 @@ fn code_intel_tools_expose_permission_subjects_for_file_scoped_calls() {
         } else {
             json!({ "path": "lib.rs", "line": 1, "character": 0 }).to_string()
         };
-        let subjects = registry
-            .permission_subjects(
+        let plan = registry
+            .permission_plan(
                 &ctx,
                 &ToolCall {
                     id: format!("call-{tool_name}"),
@@ -331,11 +331,37 @@ fn code_intel_tools_expose_permission_subjects_for_file_scoped_calls() {
                     args_json,
                 },
             )
-            .expect("subjects should resolve");
+            .expect("native permission plan should resolve");
 
-        assert_eq!(subjects.len(), 1);
-        assert_eq!(subjects[0].original, "lib.rs");
+        assert_eq!(plan.operation, ToolOperation::Read);
+        assert_eq!(plan.analysis, ToolAnalysisStatus::Complete);
+        assert_eq!(
+            plan.effects,
+            std::collections::BTreeSet::from([ToolPermissionEffect::FileRead])
+        );
+        assert_eq!(plan.subjects.len(), 1);
+        assert_eq!(plan.subjects[0].original, "lib.rs");
+        assert_eq!(plan.network_effect(), None);
+        assert_eq!(plan.tool_default_mode, None);
     }
+}
+
+#[test]
+fn code_intelligence_production_tools_expose_only_native_permission_plans() {
+    let source = include_str!("../tools.rs");
+    for legacy in [
+        "fn permission_subjects(",
+        "fn permission_access(",
+        "fn permission_network_effect(",
+        "fn permission_operation(",
+        "fn permission_default_mode(",
+    ] {
+        assert!(
+            !source.contains(legacy),
+            "production code-intelligence tools must not override {legacy}"
+        );
+    }
+    assert_eq!(source.matches("fn permission_plan(").count(), 8);
 }
 
 #[tokio::test]
@@ -423,7 +449,7 @@ fn code_symbols_permission_subject_rejects_external_path() {
     register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
 
     let error = registry
-        .permission_subjects(
+        .permission_plan(
             &ToolContext::new(temp.path().to_path_buf(), 1),
             &ToolCall {
                 id: "call-code".to_owned(),
@@ -728,23 +754,27 @@ fn code_workspace_symbols_permission_subject_targets_workspace_root() {
     let mut registry = ToolRegistry::new();
     register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
 
-    let subjects = registry
-        .permission_subjects(
-            &ToolContext::new(temp.path().to_path_buf(), 1),
-            &ToolCall {
-                id: "call-workspace".to_owned(),
-                name: "code_workspace_symbols".to_owned(),
-                args_json: json!({ "query": "hello" }).to_string(),
-            },
-        )
-        .expect("workspace subject should resolve");
+    let call = ToolCall {
+        id: "call-workspace".to_owned(),
+        name: "code_workspace_symbols".to_owned(),
+        args_json: json!({ "query": "hello" }).to_string(),
+    };
+    let plan = registry
+        .permission_plan(&ToolContext::new(temp.path().to_path_buf(), 1), &call)
+        .expect("workspace plan should resolve");
+    let repeated = registry
+        .permission_plan(&ToolContext::new(temp.path().to_path_buf(), 1), &call)
+        .expect("identical workspace plan should resolve");
 
-    assert_eq!(subjects.len(), 1);
-    assert_eq!(subjects[0].original, ".");
-    assert_eq!(subjects[0].normalized, ".");
-    assert_eq!(subjects[0].scope.as_str(), "workspace");
+    assert_eq!(plan.plan_hash, repeated.plan_hash);
+    assert_eq!(plan.subjects, repeated.subjects);
+    assert_eq!(plan.operation, ToolOperation::Read);
+    assert_eq!(plan.subjects.len(), 1);
+    assert_eq!(plan.subjects[0].original, ".");
+    assert_eq!(plan.subjects[0].normalized, ".");
+    assert_eq!(plan.subjects[0].scope.as_str(), "workspace");
     assert_eq!(
-        subjects[0].canonical_path.as_deref(),
+        plan.subjects[0].canonical_path.as_deref(),
         Some(
             temp.path()
                 .canonicalize()
@@ -807,7 +837,7 @@ fn code_action_and_rename_permission_subjects_use_expected_scopes() {
     register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
     let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
     let actions = registry
-        .permission_subjects(
+        .permission_plan(
             &ctx,
             &ToolCall {
                 id: "actions".to_owned(),
@@ -815,24 +845,86 @@ fn code_action_and_rename_permission_subjects_use_expected_scopes() {
                 args_json: json!({ "path": "lib.rs", "line": 1, "character": 7 }).to_string(),
             },
         )
-        .expect("code actions subject should resolve");
+        .expect("code actions plan should resolve");
 
-    assert_eq!(actions[0].normalized, "lib.rs");
+    assert_eq!(actions.subjects[0].normalized, "lib.rs");
 
     for name in ["code_action", "code_rename"] {
-        let subjects = registry
-            .permission_subjects(
+        let args = if name == "code_rename" {
+            json!({
+                "path": "lib.rs",
+                "line": 1,
+                "character": 7,
+                "new_name": "renamed"
+            })
+        } else {
+            json!({ "path": "lib.rs", "line": 1, "character": 7 })
+        };
+        let plan = registry
+            .permission_plan(
                 &ctx,
                 &ToolCall {
                     id: name.to_owned(),
                     name: name.to_owned(),
-                    args_json: json!({ "path": "lib.rs", "line": 1, "character": 7 }).to_string(),
+                    args_json: args.to_string(),
                 },
             )
-            .expect("write code-intel subject should resolve");
-        assert_eq!(subjects.len(), 1);
-        assert_eq!(subjects[0].normalized, ".");
-        assert_eq!(subjects[0].scope, ToolSubjectScope::Workspace);
+            .expect("write code-intel plan should resolve");
+        assert_eq!(plan.subjects.len(), 1);
+        assert_eq!(plan.subjects[0].normalized, ".");
+        assert_eq!(plan.subjects[0].scope, ToolSubjectScope::Workspace);
+    }
+}
+
+#[test]
+fn prepared_code_mutation_permission_plans_publish_read_write_facts_without_reusable_scope() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
+
+    for (name, args, operation, planner) in [
+        (
+            "code_action",
+            json!({ "path": "lib.rs", "line": 1, "character": 7, "title": "Fix" }),
+            ToolOperation::EditFile,
+            "code_action_v2",
+        ),
+        (
+            "code_rename",
+            json!({ "path": "lib.rs", "line": 1, "character": 7, "new_name": "renamed" }),
+            ToolOperation::RenamePath,
+            "code_rename_v2",
+        ),
+    ] {
+        let plan = registry
+            .permission_plan(
+                &ctx,
+                &ToolCall {
+                    id: format!("plan-{name}"),
+                    name: name.to_owned(),
+                    args_json: args.to_string(),
+                },
+            )
+            .expect("prepared mutation plan should resolve");
+
+        assert_eq!(plan.operation, operation);
+        assert_eq!(plan.analysis, ToolAnalysisStatus::Complete);
+        assert!(plan.effects.contains(&ToolPermissionEffect::FileRead));
+        assert!(plan.effects.contains(&ToolPermissionEffect::FileWrite));
+        assert!(!plan.effects.contains(&ToolPermissionEffect::Unknown));
+        assert!(plan.semantic_scope.is_none());
+        assert_eq!(
+            plan.analysis_bindings.get("planner").map(String::as_str),
+            Some(planner)
+        );
+        assert_eq!(
+            plan.analysis_bindings
+                .get("target_binding")
+                .map(String::as_str),
+            Some("prepared_exact_subjects")
+        );
     }
 }
 

@@ -649,6 +649,7 @@ fn bundled_identity() -> WebSearchConnectorIdentity {
         input_schema: bundled_input_schema(),
         output_schema: None,
         task_support: Some("forbidden".to_owned()),
+        annotations: sigil_mcp::McpToolAnnotations::default(),
     };
     WebSearchConnectorIdentity {
         origin: crate::McpSearchBindingOrigin::Bundled {

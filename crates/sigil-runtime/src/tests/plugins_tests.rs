@@ -21,9 +21,9 @@ use sigil_kernel::{
 };
 
 use super::{
-    MAX_PLUGIN_MANIFEST_BYTES, PluginDiscoveryWarningKind, PluginHookExecutionRequest,
-    PluginHookExecutionRunner, discover_workspace_plugins, merge_mcp_server_declarations,
-    merge_plugin_skill_descriptors,
+    MAX_PLUGIN_MANIFEST_BYTES, PluginDiscoveryWarningKind, PluginHookExecutionAdmissionError,
+    PluginHookExecutionAdmissionErrorCode, PluginHookExecutionRequest, PluginHookExecutionRunner,
+    discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
 };
 use crate::skills::discover_plugin_skill_descriptors;
 use crate::{McpConfigOrigin, McpExecutionBase, resolve_user_root_mcp_declarations};
@@ -711,6 +711,7 @@ kind = "context"
 command = "hook-runner"
 args = ["--json"]
 declared_effect = "read_only"
+approval = "allow"
 timeout_ms = 45000
 "#,
     );
@@ -808,6 +809,41 @@ timeout_ms = 45000
 }
 
 #[tokio::test]
+async fn plugin_hook_runner_enforces_manifest_approval_before_execution() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+
+    for (approval, expected_code) in [
+        (
+            ApprovalMode::Ask,
+            PluginHookExecutionAdmissionErrorCode::ApprovalRequired,
+        ),
+        (
+            ApprovalMode::Deny,
+            PluginHookExecutionAdmissionErrorCode::ApprovalDenied,
+        ),
+    ] {
+        let mut registration = trusted_read_only_hook_registration(workspace.path());
+        registration.hook.approval = approval;
+        let backend = RecordingExecutionBackend::default();
+        let requests = backend.requests.clone();
+        let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+
+        let error = runner
+            .execute(PluginHookExecutionRequest::new(
+                registration,
+                workspace.path().to_path_buf(),
+            ))
+            .await
+            .expect_err("non-allow manifest approval must fail before execution");
+        let admission = error
+            .downcast_ref::<PluginHookExecutionAdmissionError>()
+            .expect("error must retain typed plugin hook admission reason");
+        assert_eq!(admission.code, expected_code);
+        assert!(requests.lock().expect("requests should lock").is_empty());
+    }
+}
+
+#[tokio::test]
 async fn trusted_plugin_hook_runner_records_configured_sandbox_policy_evidence() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     write_plugin_manifest(
@@ -823,6 +859,7 @@ event = "context"
 kind = "context"
 command = "hook-runner"
 declared_effect = "read_only"
+approval = "allow"
 egress_logging = false
 allow_secrets = true
 "#,
@@ -1050,6 +1087,7 @@ kind = "context"
 command = "/bin/sh"
 args = ["-c", "printf '%s|%s' \"${HOME-unset}\" \"${PATH-unset}\""]
 declared_effect = "read_only"
+approval = "allow"
 "#,
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
@@ -1132,6 +1170,7 @@ event = "context"
 kind = "context"
 command = "hook-runner"
 declared_effect = "read_only"
+approval = "allow"
 "#,
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
@@ -1290,6 +1329,7 @@ event = "context"
 kind = "context"
 command = "hook-runner"
 declared_effect = "workspace_write"
+approval = "allow"
 "#,
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
@@ -1360,6 +1400,7 @@ event = "context"
 kind = "context"
 command = "hook-runner"
 declared_effect = "workspace_write"
+approval = "allow"
 "#,
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
@@ -1406,6 +1447,7 @@ event = "context"
 kind = "context"
 command = "hook-runner"
 declared_effect = "read_only"
+approval = "allow"
 "#,
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
@@ -2196,6 +2238,7 @@ event = "context"
 kind = "context"
 command = "hook-runner"
 declared_effect = "read_only"
+approval = "allow"
 "#,
     );
     let pending = discover_workspace_plugins(workspace, &[])

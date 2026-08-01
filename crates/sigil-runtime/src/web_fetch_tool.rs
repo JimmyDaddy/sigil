@@ -1,12 +1,16 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ApprovalMode, EgressDisclosurePresenter, NetworkEffect, NetworkPolicy, RootConfig, Tool,
-    ToolAccess, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    EgressDisclosurePresenter, NetworkEffect, NetworkPolicy, RootConfig, Tool, ToolAccess,
+    ToolAnalysisStatus, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
+    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject,
     ToolSubjectKind, ToolSubjectScope, WebBudgetReservationKind, WebBudgetReservationRequest,
 };
 use sigil_tools_builtin::{WebFetchFormat, WebFetchLimits, WebFetchTransport};
@@ -69,27 +73,9 @@ impl Tool for WebFetchTool {
         }
     }
 
-    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
-        Ok(ToolOperation::NetworkRequest)
-    }
-
-    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let capability = resolve_capability(ctx, args)?;
-        Ok(vec![ToolSubject {
-            kind: ToolSubjectKind::NetworkEndpoint,
-            original: capability.safe_display_url().to_owned(),
-            normalized: capability.safe_display_url().to_owned(),
-            canonical_path: None,
-            scope: ToolSubjectScope::External,
-        }])
-    }
-
-    fn permission_default_mode(
-        &self,
-        _ctx: &ToolContext,
-        _args: &Value,
-    ) -> Result<Option<ApprovalMode>> {
-        Ok(None)
+        webfetch_permission_plan(args, &capability)
     }
 
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
@@ -301,6 +287,53 @@ impl Tool for WebFetchTool {
             Err(error) => Ok(webfetch_error(call_id, error)),
         }
     }
+}
+
+fn webfetch_permission_plan(
+    args: &Value,
+    capability: &sigil_kernel::ResolvedUserUrlCapability,
+) -> Result<ToolPermissionPlanDraft> {
+    let format = args
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("markdown");
+    if !matches!(format, "markdown" | "text") {
+        return Err(anyhow!("webfetch format must be markdown or text"));
+    }
+    if let Some(value) = args.get("max_content_bytes") {
+        value
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow!("webfetch max_content_bytes must be a positive integer"))?;
+    }
+    let mut semantic_scope = ToolSemanticScope::new("network_read:webfetch", 1);
+    semantic_scope.qualifiers.insert(
+        "capability_kind".to_owned(),
+        "observed_session_url".to_owned(),
+    );
+    Ok(ToolPermissionPlanDraft {
+        access: ToolAccess::Read,
+        operation: ToolOperation::NetworkRequest,
+        effects: BTreeSet::from([ToolPermissionEffect::NetworkRead]),
+        subjects: vec![ToolSubject {
+            kind: ToolSubjectKind::NetworkEndpoint,
+            original: capability.safe_display_url().to_owned(),
+            normalized: capability.safe_display_url().to_owned(),
+            canonical_path: None,
+            scope: ToolSubjectScope::External,
+        }],
+        analysis: ToolAnalysisStatus::Complete,
+        containment: Default::default(),
+        semantic_scope: Some(semantic_scope),
+        tool_default_mode: None,
+        analysis_bindings: BTreeMap::from([("planner".to_owned(), "webfetch_v2".to_owned())]),
+        safe_summary: ToolPermissionSummary {
+            title: "Fetch observed web source".to_owned(),
+            detail: "Read one exact session-authorized HTTP(S) source".to_owned(),
+            step_count: 1,
+            workspace_code_steps: 0,
+        },
+    })
 }
 
 fn resolve_capability(

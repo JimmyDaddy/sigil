@@ -465,6 +465,7 @@ impl JsonlSessionStore {
 
     /// Appends a provider-visible or control session entry as a v2 stored event.
     pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
+        validate_session_entry_durable_contract(entry)?;
         if matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
@@ -486,6 +487,9 @@ impl JsonlSessionStore {
         if entries.is_empty() {
             bail!("session entry append batch must not be empty");
         }
+        entries
+            .iter()
+            .try_for_each(validate_session_entry_durable_contract)?;
         if entries.iter().any(|entry| {
             matches!(
                 entry,
@@ -587,6 +591,12 @@ impl JsonlSessionStore {
         }
         let (provider_name, model_name) = session_identity_from_entries(&entries)
             .ok_or_else(|| anyhow::anyhow!("current session identity could not be decoded"))?;
+
+        for approval in unresolved_tool_approvals(&entries, recovered_at_ms) {
+            let entry = SessionLogEntry::Control(ControlEntry::ToolApproval(approval));
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
 
         for execution in interrupted_tool_executions(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution)));
@@ -798,6 +808,14 @@ impl JsonlSessionStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         Ok(writer.data_sync_count())
+    }
+}
+
+fn validate_session_entry_durable_contract(entry: &SessionLogEntry) -> Result<()> {
+    match entry {
+        SessionLogEntry::Control(control) => control.validate_durable_contract(),
+        SessionLogEntry::ToolResultV2(result) => result.validate(),
+        _ => Ok(()),
     }
 }
 
@@ -1140,6 +1158,7 @@ pub(super) fn session_entry_from_stored_event(
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from stored event payload")?;
+    validate_session_entry_durable_contract(&entry)?;
     if let SessionLogEntry::ToolResultV2(result) = &entry {
         if event.event_kind() != Some(DurableEventType::ToolResultRecordedV2) {
             bail!("tool result V2 payload used the wrong durable event type");
@@ -1174,6 +1193,7 @@ pub(crate) fn session_entry_from_domain_event(
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from domain event payload")?;
+    validate_session_entry_durable_contract(&entry)?;
     if let SessionLogEntry::ToolResultV2(result) = &entry {
         if event.event_type() != DurableEventType::ToolResultRecordedV2 {
             bail!("tool result V2 payload used the wrong durable event type");

@@ -68,13 +68,13 @@ use uuid::Uuid;
 pub(crate) use crate::approval::{
     ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
     ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
+    session_grant_unavailable_reason_label,
 };
-pub use crate::approval::{ApprovalDiffMode, PendingApproval};
+pub use crate::approval::{ApprovalDiffMode, ApprovalPresentationState, PendingApproval};
 use crate::commands::{UiCommand, command_for_key_event};
 pub(crate) use crate::config_panel::ConfigState;
 pub use crate::input::PaneFocus;
-use crate::runner::EgressDisclosureReceiptTx;
-use crate::runner::QueueMoveDirection;
+use crate::runner::{EgressDisclosureReceiptTx, QueueMoveDirection, TerminalTaskControlIdentity};
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
 use crate::slash::ResolvedSlashCommand;
@@ -337,6 +337,7 @@ pub struct AppState {
     thinking_block_mode: ThinkingBlockMode,
     timeline_state: TimelineState,
     pending_terminal_cancel_confirmation: Option<String>,
+    terminal_task_control_identities: HashMap<String, TerminalTaskControlIdentity>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
     pending_mouse_left_down: bool,
@@ -417,19 +418,22 @@ pub enum AppAction {
     },
     ApprovalDecision {
         call_id: String,
+        approval_request_id: String,
         approved: bool,
     },
     ApprovalSessionDecision {
         call_id: String,
+        approval_request_id: String,
     },
     ApprovalDecisionWithArgs {
         call_id: String,
+        approval_request_id: String,
         args_json: String,
     },
     BackgroundActiveAgent,
     CancelRun,
     CancelTerminalTask {
-        task_id: String,
+        identity: TerminalTaskControlIdentity,
     },
     CloseAgent {
         thread_id: AgentThreadId,
@@ -570,9 +574,6 @@ pub enum AppAction {
     },
     RuntimeConfigUpdated {
         root_config: Box<RootConfig>,
-    },
-    StartNewModelSession {
-        runtime_config: Box<RootConfig>,
     },
     SetDefaultModel {
         root_config: Box<RootConfig>,
@@ -718,6 +719,7 @@ impl AppState {
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
+            terminal_task_control_identities: HashMap::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
@@ -838,6 +840,7 @@ impl AppState {
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
+            terminal_task_control_identities: HashMap::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
@@ -988,64 +991,6 @@ impl AppState {
         }
     }
 
-    fn reset_for_new_session(
-        &mut self,
-        provider_name: String,
-        model_name: String,
-        model_route: Option<sigil_kernel::ResolvedModelRoute>,
-        notice: String,
-    ) {
-        self.runtime.provider_name = provider_name;
-        self.runtime.model_name = model_name;
-        self.runtime.model_route = model_route;
-        self.session_id = Uuid::new_v4().to_string();
-        self.session_log_path = self
-            .session_log_dir
-            .join(format!("session-{}.jsonl", self.session_id));
-        self.runtime.stats = SessionStats::default();
-        self.runtime.session_delta_stats = SessionStats::default();
-        self.runtime.is_busy = false;
-        self.approval.pending = None;
-        self.active_pane = PaneFocus::Composer;
-        self.timeline_scroll_back = 0;
-        self.approval.scroll_back = 0;
-        self.activity_scroll_back = 0;
-        self.session_browser.current_entries.clear();
-        self.mark_current_session_entries_changed();
-        self.tool_preview_snapshots.clear();
-        self.runtime.run_phase = RunPhase::Idle;
-        self.runtime.last_phase_marker = None;
-        self.timeline_state.streaming_assistant_index = None;
-        self.timeline_state.streaming_reasoning_index = None;
-        self.approval.metadata_collapsed = false;
-        self.approval.selected_file_index = 0;
-        self.approval.selected_hunk_index = 0;
-        self.approval.diff_mode = ApprovalDiffMode::Full;
-        self.approval.selected_action = ApprovalAction::Deny;
-        self.timeline_state.selected_tool_activity_key = None;
-        self.timeline_state.expanded_thinking_entry_indices.clear();
-        self.timeline_state.collapsed_thinking_entry_indices.clear();
-        self.timeline_state.expanded_tool_activity_keys.clear();
-        self.timeline_state.collapsed_tool_activity_keys.clear();
-        self.timeline_state.tool_activity_visible_rows.clear();
-        self.pending_terminal_cancel_confirmation = None;
-        self.pending_mouse_slash_confirmation = None;
-        self.mouse_hover_target = None;
-        self.pending_mouse_left_down = false;
-        self.pending_tool_card_body_click_entry = None;
-        self.agent_panel.active_view = AgentView::Main;
-        self.agent_panel.active_child_transcript = None;
-        self.composer.agent_panel_focused = false;
-        self.composer.cleared_input_draft = None;
-        self.composer.input_kill_buffer = None;
-        self.composer.input_paste_spans.clear();
-        self.bootstrap();
-        self.last_notice = Some(notice.clone());
-        self.push_timeline(TimelineRole::Notice, notice);
-        self.refresh_session_history();
-        self.refresh_usage_sidebar_cache();
-    }
-
     fn new_session_log_path(&self) -> PathBuf {
         self.session_log_dir
             .join(format!("session-{}.jsonl", Uuid::new_v4()))
@@ -1159,7 +1104,7 @@ impl AppState {
         }
 
         if self.runtime.is_busy
-            && self.approval.pending.is_none()
+            && !self.approval.has_actionable_pending()
             && matches!(self.runtime.run_phase, RunPhase::Agent(_))
             && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
             && has_control_without_alt(key)
@@ -1171,7 +1116,7 @@ impl AppState {
         }
 
         if self.active_pane == PaneFocus::Activity
-            && self.approval.pending.is_none()
+            && !self.approval.has_actionable_pending()
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
             match key.code {
@@ -1254,49 +1199,49 @@ impl AppState {
         match key.code {
             KeyCode::Char('u')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 self.scroll_timeline(self.transcript_page_step());
                 return Ok(None);
             }
             KeyCode::Char('d')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 self.unscroll_timeline(self.transcript_page_step());
                 return Ok(None);
             }
             KeyCode::Char('p')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 self.navigate_input_history(true);
                 return Ok(None);
             }
             KeyCode::Char('n')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 self.navigate_input_history(false);
                 return Ok(None);
             }
             KeyCode::Home
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 self.scroll_timeline_to_top();
                 return Ok(None);
             }
             KeyCode::End
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 self.unscroll_timeline(usize::MAX / 2);
                 return Ok(None);
             }
             KeyCode::Char('t')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.approval.pending.is_none() =>
+                    && !self.approval.has_actionable_pending() =>
             {
                 if self.active_pane != PaneFocus::Activity && self.has_collapsible_thinking_blocks()
                 {
@@ -1324,7 +1269,7 @@ impl AppState {
         }
 
         match key.code {
-            KeyCode::BackTab if self.approval.pending.is_none() => {
+            KeyCode::BackTab if !self.approval.has_actionable_pending() => {
                 return self.toggle_runtime_permission_mode();
             }
             KeyCode::PageUp => self.scroll_timeline(self.transcript_page_step()),

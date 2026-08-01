@@ -1028,11 +1028,7 @@ pub(super) fn approval_modal_area(screen: Rect, view: &ApprovalModalView) -> Rec
     .unwrap_or(72)
     .min(screen.width.saturating_sub(8).max(36) as usize);
 
-    centered_rect(
-        inner_width as u16 + 2,
-        screen.height.saturating_sub(4).min(30),
-        screen,
-    )
+    centered_rect(inner_width as u16 + 2, screen.height.min(34), screen)
 }
 
 fn approval_modal_hit_areas(
@@ -1090,9 +1086,11 @@ fn approval_header_line_count(view: &ApprovalModalView) -> u16 {
     };
     let change_set_lines = if view.change_set.is_some() { 2 } else { 0 };
     let source_agent_lines = u16::from(view.source_agent.is_some());
+    let permission_metadata_lines = if view.metadata_collapsed { 0 } else { 4 };
     4u16.saturating_add(summary_lines)
         .saturating_add(source_agent_lines)
         .saturating_add(change_set_lines)
+        .saturating_add(permission_metadata_lines)
 }
 
 fn approval_file_row_hit_areas(

@@ -27,11 +27,13 @@ use crate::{
         HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
         HttpConversationRecoveryDriverError, HttpIntentStackDriverError, HttpQueuedRunDriverStart,
         HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
-        HttpRunDriverTaskPause, HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
+        HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpSessionOpenBindingError,
+        HttpToolArtifactReadDriverError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
-        HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest, HttpCheckpointRestoreReview,
+        HttpApprovalDecisionRequest, HttpApprovalLifecycleState, HttpApprovalLifecycleView,
+        HttpApprovalRouteState, HttpCheckpointRestoreRequest, HttpCheckpointRestoreReview,
         HttpCompactionReview, HttpContinuityRecoveryAction, HttpConversationDisplayPage,
         HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
         HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
@@ -46,8 +48,9 @@ use crate::{
         HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
         HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationReviewRequest,
         HttpTaskIntegrationReviewView, HttpTaskPauseCommandReceipt, HttpTaskPauseRequest,
-        HttpToolArtifactPage, HttpToolArtifactReadRequest, HttpVerificationRerunCommandReceipt,
-        HttpVerificationRerunRequest, HttpVerificationView,
+        HttpTerminalLifecycleView, HttpTerminalTaskCancelCommandReceipt,
+        HttpTerminalTaskCancelRequest, HttpToolArtifactPage, HttpToolArtifactReadRequest,
+        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -62,6 +65,9 @@ const MAX_CONVERSATION_RECOVERY_ID_BYTES: usize = 512;
 const MAX_TASK_INTEGRATION_ID_BYTES: usize = 512;
 const QUEUE_INTERRUPT_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUEUE_STALE_START_RESCHEDULE_LIMIT: usize = 3;
+const MAX_PENDING_APPROVALS_PER_RUN: usize = 8;
+const MAX_APPROVAL_LIFECYCLES_PER_RUN: usize = 32;
+const MAX_CONTINUITY_TERMINAL_RUNS: usize = 16;
 
 /// Errors returned by the HTTP session/run registry.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
@@ -123,6 +129,15 @@ pub enum HttpRegistryError {
     /// The exact Task pause request identity is malformed.
     #[error("http Task pause request is invalid")]
     InvalidTaskPauseRequest,
+    /// The persistent terminal cancellation request is malformed.
+    #[error("http terminal task cancellation request is invalid")]
+    InvalidTerminalTaskCancelRequest,
+    /// The addressed terminal task is absent from this run's bounded owner projection.
+    #[error("http terminal task {task_id} was not found for run {run_id}")]
+    TerminalTaskNotFound { run_id: String, task_id: String },
+    /// The rendered terminal generation no longer matches current owner truth.
+    #[error("http terminal task {task_id} generation changed for run {run_id}")]
+    TerminalTaskGenerationChanged { run_id: String, task_id: String },
     /// The Intent Stack request body is malformed.
     #[error("http Intent Stack request is invalid")]
     IntentStackInvalidRequest,
@@ -147,6 +162,9 @@ pub enum HttpRegistryError {
     /// The approval call id is not currently pending for the run.
     #[error("http approval not pending for run {run_id} call {call_id}")]
     ApprovalNotPending { run_id: String, call_id: String },
+    /// The bounded run snapshot cannot safely retain another distinct pending approval.
+    #[error("http run {run_id} reached the pending approval limit")]
+    ApprovalCapacityExceeded { run_id: String },
     /// The underlying run driver rejected the registry operation.
     #[error("http driver rejected {operation} for run {run_id}: {message}")]
     DriverRejected {
@@ -601,6 +619,41 @@ impl HttpSessionRunRegistry {
                     session_id: session_id.to_owned(),
                 })?;
         let foreground_owner = current.foreground_owner();
+        let terminal_run_candidates = current
+            .run_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, run_id)| state.runs.get(run_id).map(|run| (index, run)))
+            .filter(|(_, run)| !run.terminal_tasks.is_empty())
+            .collect::<Vec<_>>();
+        let mut selected = terminal_run_candidates
+            .iter()
+            .rev()
+            .filter(|(_, run)| {
+                run.terminal_tasks
+                    .values()
+                    .any(|task| !task.status.is_terminal())
+            })
+            .take(MAX_CONTINUITY_TERMINAL_RUNS)
+            .copied()
+            .collect::<Vec<_>>();
+        let mut selected_ids = selected
+            .iter()
+            .map(|(_, run)| run.id.clone())
+            .collect::<BTreeSet<_>>();
+        for candidate in terminal_run_candidates.iter().rev() {
+            if selected.len() >= MAX_CONTINUITY_TERMINAL_RUNS {
+                break;
+            }
+            if selected_ids.insert(candidate.1.id.clone()) {
+                selected.push(*candidate);
+            }
+        }
+        selected.sort_by_key(|(index, _)| *index);
+        let retained_terminal_runs = selected
+            .into_iter()
+            .map(|(_, run)| run.snapshot())
+            .collect::<Vec<_>>();
         let recovery_actions = if foreground_owner.is_some() {
             vec![
                 HttpContinuityRecoveryAction::RetryCurrent,
@@ -613,6 +666,7 @@ impl HttpSessionRunRegistry {
             durable_session_scope_id: current.binding.session_scope_id.clone(),
             durable_frontier,
             foreground_owner,
+            retained_terminal_runs,
             recovery_actions,
         })
     }
@@ -1358,7 +1412,7 @@ impl HttpSessionRunRegistry {
                         .as_deref()
                         .is_some_and(|guidance| guidance.trim().is_empty())
                     || !request.prompt.trim().is_empty()
-                    || request.model_name.is_some()
+                    || request.model_ref.is_some()
                     || request.model_selection_binding.is_some()
                     || request.reasoning_effort.is_some()
                     || request.reasoning_effort_binding.is_some()
@@ -1376,7 +1430,7 @@ impl HttpSessionRunRegistry {
         let permission_mode = request
             .permission_mode
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
-        let model_name = request.model_name;
+        let model_ref = request.model_ref;
         let model_selection_binding = request.model_selection_binding;
         let reasoning_effort = request.reasoning_effort;
         let reasoning_effort_binding = request.reasoning_effort_binding;
@@ -1453,7 +1507,7 @@ impl HttpSessionRunRegistry {
             session: session_snapshot,
             run: run_snapshot,
             prompt,
-            model_name,
+            model_ref,
             model_selection_binding,
             reasoning_effort_binding,
             skill_binding,
@@ -1514,6 +1568,118 @@ impl HttpSessionRunRegistry {
         outcome: HttpRunTerminalOutcome,
     ) -> Result<HttpRunSnapshot, HttpRegistryError> {
         self.lock_state().transition_run_terminal(run_id, outcome)
+    }
+
+    /// Reconciles an already-settled retained stream before committing the foreground terminal.
+    ///
+    /// The callback runs only when every terminal task is terminal. If reconciliation fails, the
+    /// run transition is left uncommitted so the same terminal outcome can be retried without a
+    /// process-local terminal / durable-open split.
+    pub fn record_run_terminal_with_reconciliation<F>(
+        &self,
+        run_id: &str,
+        outcome: HttpRunTerminalOutcome,
+        reconcile: F,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut state = self.lock_state();
+        let requested = outcome.status();
+        let (current, snapshot, should_reconcile) = {
+            let run = state
+                .runs
+                .get(run_id)
+                .ok_or_else(|| HttpRegistryError::RunNotFound {
+                    run_id: run_id.to_owned(),
+                })?;
+            if run.status.is_terminal() && run.status != requested {
+                return Err(HttpRegistryError::RunTerminalConflict {
+                    run_id: run_id.to_owned(),
+                    current: run.status,
+                    requested: outcome,
+                });
+            }
+            (
+                run.status,
+                run.snapshot(),
+                run.terminal_tasks
+                    .values()
+                    .all(|task| task.status.is_terminal()),
+            )
+        };
+        if should_reconcile {
+            reconcile().map_err(|message| HttpRegistryError::DriverRejected {
+                operation: "reconcile terminal run stream",
+                run_id: run_id.to_owned(),
+                message,
+            })?;
+        }
+        if current.is_terminal() {
+            return Ok(snapshot);
+        }
+        state.transition_run_terminal(run_id, outcome)
+    }
+
+    /// Applies one generation-aware terminal lifecycle update to a run snapshot.
+    ///
+    /// `Ok(None)` means the generation was already projected. Terminal tasks may outlive the
+    /// foreground model run, so a terminal run continues to accept newer owner generations.
+    pub fn record_terminal_lifecycle(
+        &self,
+        run_id: &str,
+        event: &sigil_kernel::TerminalLifecycleEvent,
+    ) -> Result<Option<u64>, HttpRegistryError> {
+        self.record_terminal_lifecycle_with_publication(run_id, event, |_, _| Ok(()))
+    }
+
+    /// Durably publishes and then commits one terminal lifecycle projection under the run lock.
+    ///
+    /// The publication callback receives the exact next stream sequence and whether this event
+    /// must atomically close a foreground-terminal stream. Registry generation and sequence state
+    /// are committed only after the callback succeeds, so a transient protocol journal failure can
+    /// retry the same owner generation without creating a permanent gap.
+    pub fn record_terminal_lifecycle_with_publication<F>(
+        &self,
+        run_id: &str,
+        event: &sigil_kernel::TerminalLifecycleEvent,
+        publish: F,
+    ) -> Result<Option<u64>, HttpRegistryError>
+    where
+        F: FnOnce(u64, bool) -> Result<(), String>,
+    {
+        let mut state = self.lock_state();
+        let run = state
+            .runs
+            .get_mut(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        let task_id = event.task_id.as_str();
+        if run
+            .terminal_tasks
+            .get(task_id)
+            .is_some_and(|current| current.generation >= event.generation)
+        {
+            return Ok(None);
+        }
+        let candidate = HttpTerminalLifecycleView::from(event);
+        let all_tasks_terminal = candidate.status.is_terminal()
+            && run.terminal_tasks.iter().all(|(existing_id, existing)| {
+                existing_id == task_id || existing.status.is_terminal()
+            });
+        let close_stream_after_publication = run.status.is_terminal() && all_tasks_terminal;
+        let sequence = run.stream_sequence.saturating_add(1);
+        publish(sequence, close_stream_after_publication).map_err(|message| {
+            HttpRegistryError::DriverRejected {
+                operation: "publish terminal lifecycle",
+                run_id: run_id.to_owned(),
+                message,
+            }
+        })?;
+        run.terminal_tasks.insert(task_id.to_owned(), candidate);
+        run.stream_sequence = sequence;
+        Ok(Some(sequence))
     }
 
     /// Notifies the queue scheduler after a driver-owned supervisor released its session lease.
@@ -2255,6 +2421,122 @@ impl HttpSessionRunRegistry {
         result
     }
 
+    /// Cancels one exact persistent terminal task without reopening its foreground model run.
+    ///
+    /// The command is generation- and session-bound. Retrying after a confirmed terminal owner
+    /// state returns that same bounded state and does not execute another side effect.
+    pub fn cancel_terminal_task_command(
+        &self,
+        run_id: &str,
+        command: HttpCommandEnvelope<HttpTerminalTaskCancelRequest>,
+    ) -> Result<HttpTerminalTaskCancelCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        command
+            .payload
+            .validate()
+            .map_err(|_| HttpRegistryError::InvalidTerminalTaskCancelRequest)?;
+        let request = HttpReservedCommand::terminal_cancel(run_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => {
+                    return reservation.wait_for_terminal_cancel();
+                }
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| {
+            let current = {
+                let state = self.lock_state();
+                let run = state
+                    .runs
+                    .get(run_id)
+                    .ok_or_else(|| HttpRegistryError::RunNotFound {
+                        run_id: run_id.to_owned(),
+                    })?;
+                if run.session_id != command.session_id {
+                    return Err(HttpRegistryError::CommandSessionMismatch {
+                        command_session_id: command.session_id.clone(),
+                        run_id: run_id.to_owned(),
+                        run_session_id: run.session_id.clone(),
+                    });
+                }
+                if let Some(expected) = command.expected_stream_sequence
+                    && expected != run.stream_sequence
+                {
+                    return Err(HttpRegistryError::StaleCommandSequence {
+                        run_id: run_id.to_owned(),
+                        expected,
+                        actual: run.stream_sequence,
+                    });
+                }
+                let task = run
+                    .terminal_tasks
+                    .get(&command.payload.task_id)
+                    .cloned()
+                    .ok_or_else(|| HttpRegistryError::TerminalTaskNotFound {
+                        run_id: run_id.to_owned(),
+                        task_id: command.payload.task_id.clone(),
+                    })?;
+                if task.generation != command.payload.expected_generation {
+                    return Err(HttpRegistryError::TerminalTaskGenerationChanged {
+                        run_id: run_id.to_owned(),
+                        task_id: command.payload.task_id.clone(),
+                    });
+                }
+                task
+            };
+            let replayed = current.status.is_terminal();
+            let terminal_task = if replayed {
+                current
+            } else {
+                catch_unwind(AssertUnwindSafe(|| {
+                    self.driver
+                        .cancel_terminal_task(HttpRunDriverTerminalTaskCancel {
+                            session_id: command.session_id.clone(),
+                            run_id: run_id.to_owned(),
+                            task_id: command.payload.task_id.clone(),
+                            expected_generation: command.payload.expected_generation,
+                        })
+                }))
+                .map_err(|_| HttpRegistryError::DriverPanicked {
+                    operation: "cancel terminal task",
+                    run_id: run_id.to_owned(),
+                })?
+                .map_err(|error| HttpRegistryError::DriverRejected {
+                    operation: "cancel terminal task",
+                    run_id: run_id.to_owned(),
+                    message: error.message,
+                })?
+            };
+            if terminal_task.task_id != command.payload.task_id
+                || terminal_task.generation < command.payload.expected_generation
+                || !terminal_task.status.is_terminal()
+            {
+                return Err(HttpRegistryError::DriverRejected {
+                    operation: "cancel terminal task",
+                    run_id: run_id.to_owned(),
+                    message: "terminal owner returned an invalid cancellation receipt".to_owned(),
+                });
+            }
+            Ok(HttpTerminalTaskCancelCommandReceipt {
+                command_id: command.command_id,
+                client_id: command.client_id,
+                session_id: command.session_id,
+                expected_stream_sequence: command.expected_stream_sequence,
+                correlation_id: command.correlation_id,
+                run_id: run_id.to_owned(),
+                terminal_task,
+                replayed,
+            })
+        })();
+        completion.complete(HttpCommandCompletion::TerminalCancel(result.clone()))?;
+        result
+    }
+
     fn pause_task(
         &self,
         run_id: &str,
@@ -2361,11 +2643,45 @@ impl HttpSessionRunRegistry {
         if let Some(error) = run.approval_route_error(run_id, true) {
             return Err(error);
         }
-        run.pending_approvals
-            .insert(approval.call_id.clone(), approval);
+        if !run.pending_approvals.contains_key(&approval.call_id)
+            && run.pending_approvals.len() >= MAX_PENDING_APPROVALS_PER_RUN
+        {
+            return Err(HttpRegistryError::ApprovalCapacityExceeded {
+                run_id: run_id.to_owned(),
+            });
+        }
+        let call_id = approval.call_id.clone();
+        run.pending_approvals.insert(call_id.clone(), approval);
+        run.approval_lifecycles.remove(&call_id);
         run.status = HttpRunStatus::WaitingForApproval;
         run.advance_stream_sequence();
         Ok(run.snapshot())
+    }
+
+    /// Rebinds a pre-registered approval projection to the public sequence allocated by the
+    /// durable event sequencer. Approval routing is registered before publication so the event
+    /// bus never needs to acquire the registry lock while holding its publication lock.
+    pub(crate) fn update_approval_event_sequence(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        approval_request_id: &str,
+        event_sequence: u64,
+    ) -> bool {
+        let mut state = self.lock_state();
+        let Some(pending) = state
+            .runs
+            .get_mut(run_id)
+            .and_then(|run| run.pending_approvals.get_mut(call_id))
+            .filter(|pending| pending.approval_request_id == approval_request_id)
+        else {
+            // A racing user decision or terminal transition may already have consumed the
+            // projection after observing the live event. Routing was still registered before
+            // publication, so there is no missing approval window to repair.
+            return false;
+        };
+        pending.display.event_sequence = event_sequence;
+        true
     }
 
     /// Removes an approval request whose adapter-owned wait expired before a decision arrived.
@@ -2381,6 +2697,90 @@ impl HttpSessionRunRegistry {
         run_id: &str,
         call_id: &str,
     ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.expire_approval_request_matching(run_id, call_id, None)
+    }
+
+    /// Expires only the exact kernel-owned approval request, leaving a newer request for the same
+    /// call untouched.
+    pub fn expire_approval_request_exact(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        approval_request_id: &str,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.expire_approval_request_matching(run_id, call_id, Some(approval_request_id))
+    }
+
+    /// Records the durable resolution of one exact approval request for snapshot recovery.
+    pub(crate) fn record_approval_resolution(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        approval_request_id: &str,
+        approved: bool,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let mut state = self.lock_state();
+        let run = state
+            .runs
+            .get_mut(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        let exact_request = run
+            .approval_lifecycles
+            .get(call_id)
+            .is_some_and(|lifecycle| lifecycle.approval.approval_request_id == approval_request_id);
+        if exact_request
+            && run.update_approval_lifecycle_state(
+                call_id,
+                if approved {
+                    HttpApprovalLifecycleState::Resolved
+                } else {
+                    HttpApprovalLifecycleState::Terminal
+                },
+            )
+        {
+            run.advance_stream_sequence();
+        }
+        Ok(run.snapshot())
+    }
+
+    /// Records one exact tool execution transition for approval lifecycle recovery.
+    pub(crate) fn record_tool_execution_lifecycle(
+        &self,
+        run_id: &str,
+        execution: &sigil_kernel::ToolExecutionEntry,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let mut state = self.lock_state();
+        let run = state
+            .runs
+            .get_mut(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        let next = match execution.status {
+            sigil_kernel::ToolExecutionStatus::Started => {
+                HttpApprovalLifecycleState::ExecutionStarted
+            }
+            sigil_kernel::ToolExecutionStatus::Completed
+            | sigil_kernel::ToolExecutionStatus::Failed
+            | sigil_kernel::ToolExecutionStatus::Cancelled
+            | sigil_kernel::ToolExecutionStatus::Interrupted => {
+                HttpApprovalLifecycleState::Terminal
+            }
+        };
+        if run.update_approval_lifecycle_state(&execution.call_id, next) {
+            run.advance_stream_sequence();
+        }
+        Ok(run.snapshot())
+    }
+
+    fn expire_approval_request_matching(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        approval_request_id: Option<&str>,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
         let mut state = self.lock_state();
         let run = state
             .runs
@@ -2391,7 +2791,12 @@ impl HttpSessionRunRegistry {
         if run.status.is_terminal() {
             return Ok(run.snapshot());
         }
-        if run.pending_approvals.remove(call_id).is_some() {
+        let matches = run.pending_approvals.get(call_id).is_some_and(|pending| {
+            approval_request_id
+                .map(|request_id| pending.approval_request_id == request_id)
+                .unwrap_or(true)
+        });
+        if matches && run.pending_approvals.remove(call_id).is_some() {
             if run.pending_approvals.is_empty()
                 && run.in_flight_approvals.is_empty()
                 && run.status == HttpRunStatus::WaitingForApproval
@@ -2453,16 +2858,21 @@ impl HttpSessionRunRegistry {
                     });
                 }
             }
-            let record = self.submit_approval_decision(run_id, call_id, command.payload)?;
+            let approval_request_id = command.payload.approval_request_id.clone();
+            let outcome =
+                self.submit_approval_decision_with_route(run_id, call_id, command.payload)?;
             Ok(HttpApprovalCommandReceipt {
                 command_id: command.command_id,
                 client_id: command.client_id,
                 session_id: command.session_id,
                 run_id: run_id.to_owned(),
                 call_id: call_id.to_owned(),
+                approval_request_id,
                 expected_stream_sequence: command.expected_stream_sequence,
                 correlation_id: command.correlation_id,
-                decision: record,
+                decision: outcome.decision,
+                route_state: outcome.route_state,
+                registry_revision: outcome.registry_revision,
                 replayed: false,
             })
         })();
@@ -2482,6 +2892,22 @@ impl HttpSessionRunRegistry {
         call_id: &str,
         request: HttpApprovalDecisionRequest,
     ) -> Result<HttpApprovalDecisionRecord, HttpRegistryError> {
+        let outcome = self.submit_approval_decision_with_route(run_id, call_id, request)?;
+        if outcome.route_state == HttpApprovalRouteState::DeliveryUncertain {
+            return Err(HttpRegistryError::DriverPanicked {
+                operation: "approval",
+                run_id: run_id.to_owned(),
+            });
+        }
+        Ok(outcome.decision)
+    }
+
+    fn submit_approval_decision_with_route(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        request: HttpApprovalDecisionRequest,
+    ) -> Result<HttpApprovalRouteOutcome, HttpRegistryError> {
         let (session_id, record) = {
             let mut state = self.lock_state();
             let run = state
@@ -2506,6 +2932,7 @@ impl HttpSessionRunRegistry {
                     call_id: call_id.to_owned(),
                 }
             })?;
+            run.record_approval_lifecycle(pending.clone(), HttpApprovalLifecycleState::Resolving);
             run.in_flight_approvals.insert(call_id.to_owned(), pending);
             let record = HttpApprovalDecisionRecord {
                 run_id: run_id.to_owned(),
@@ -2520,6 +2947,7 @@ impl HttpSessionRunRegistry {
             session_id,
             run_id: run_id.to_owned(),
             call_id: call_id.to_owned(),
+            approval_request_id: request.approval_request_id,
             decision: record.clone(),
         };
         match catch_unwind(AssertUnwindSafe(|| self.driver.submit_approval(approval))) {
@@ -2536,10 +2964,11 @@ impl HttpSessionRunRegistry {
                 });
             }
             Err(_) => {
-                self.lock_state().mark_run_driver_uncertain(run_id)?;
-                return Err(HttpRegistryError::DriverPanicked {
-                    operation: "approval",
-                    run_id: run_id.to_owned(),
+                let snapshot = self.lock_state().mark_run_driver_uncertain(run_id)?;
+                return Ok(HttpApprovalRouteOutcome {
+                    decision: record,
+                    route_state: HttpApprovalRouteState::DeliveryUncertain,
+                    registry_revision: snapshot.stream_sequence,
                 });
             }
         }
@@ -2552,9 +2981,14 @@ impl HttpSessionRunRegistry {
                 run_id: run_id.to_owned(),
             })?;
         if run.status.is_terminal() {
-            return Ok(record);
+            return Ok(HttpApprovalRouteOutcome {
+                decision: record,
+                route_state: HttpApprovalRouteState::Terminal,
+                registry_revision: run.stream_sequence,
+            });
         }
         run.in_flight_approvals.remove(call_id);
+        run.update_approval_lifecycle_state(call_id, HttpApprovalLifecycleState::DecisionAccepted);
         run.approval_decisions.push(record.clone());
         if run.pending_approvals.is_empty()
             && run.in_flight_approvals.is_empty()
@@ -2563,7 +2997,11 @@ impl HttpSessionRunRegistry {
             run.status = HttpRunStatus::Running;
         }
         run.advance_stream_sequence();
-        Ok(record)
+        Ok(HttpApprovalRouteOutcome {
+            decision: record,
+            route_state: HttpApprovalRouteState::DecisionAccepted,
+            registry_revision: run.stream_sequence,
+        })
     }
 
     fn reserve_command(
@@ -2770,6 +3208,7 @@ enum HttpCommandKind {
     Start,
     Cancel,
     Pause,
+    TerminalCancel,
     Approval,
     Verification,
     Integration,
@@ -2784,6 +3223,7 @@ impl HttpCommandKind {
             Self::Start => b"start",
             Self::Cancel => b"cancel",
             Self::Pause => b"pause",
+            Self::TerminalCancel => b"terminal_cancel",
             Self::Approval => b"approval",
             Self::Verification => b"verification",
             Self::Integration => b"integration",
@@ -2798,6 +3238,7 @@ impl HttpCommandKind {
             Self::Start => "start",
             Self::Cancel => "cancel",
             Self::Pause => "pause",
+            Self::TerminalCancel => "terminal_cancel",
             Self::Approval => "approval",
             Self::Verification => "verification",
             Self::Integration => "integration",
@@ -2834,6 +3275,13 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpTaskPauseRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::Pause, &[run_id], command)
+    }
+
+    fn terminal_cancel(
+        run_id: &str,
+        command: &HttpCommandEnvelope<HttpTerminalTaskCancelRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::TerminalCancel, &[run_id], command)
     }
 
     fn approval(
@@ -2928,6 +3376,7 @@ enum HttpCommandCompletion {
     Start(Result<HttpRunStartCommandReceipt, HttpRegistryError>),
     Cancel(Result<HttpRunCancelCommandReceipt, HttpRegistryError>),
     Pause(Result<HttpTaskPauseCommandReceipt, HttpRegistryError>),
+    TerminalCancel(Result<HttpTerminalTaskCancelCommandReceipt, HttpRegistryError>),
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Integration(Box<Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError>>),
@@ -2963,6 +3412,13 @@ impl HttpCommandCompletion {
                     .correlation_id
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Pause(receipt)
+            }
+            Self::TerminalCancel(Ok(receipt)) => {
+                let mut receipt = receipt.clone();
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::TerminalCancel(receipt)
             }
             Self::Approval(Ok(receipt)) => {
                 let mut receipt = receipt.clone();
@@ -3042,6 +3498,7 @@ impl HttpCommandCompletion {
             Self::Start(Err(_))
             | Self::Cancel(Err(_))
             | Self::Pause(Err(_))
+            | Self::TerminalCancel(Err(_))
             | Self::Approval(Err(_))
             | Self::Verification(_)
             | Self::Integration(_)
@@ -3057,6 +3514,9 @@ impl HttpCommandCompletion {
             HttpStoredCommandCompletion::Start(receipt) => Self::Start(Ok(receipt)),
             HttpStoredCommandCompletion::Cancel(receipt) => Self::Cancel(Ok(receipt)),
             HttpStoredCommandCompletion::Pause(receipt) => Self::Pause(Ok(receipt)),
+            HttpStoredCommandCompletion::TerminalCancel(receipt) => {
+                Self::TerminalCancel(Ok(receipt))
+            }
             HttpStoredCommandCompletion::Approval(receipt) => Self::Approval(Ok(receipt)),
             HttpStoredCommandCompletion::Verification(receipt) => {
                 Self::Verification(Box::new(Ok(*receipt)))
@@ -3080,8 +3540,15 @@ impl HttpCommandCompletion {
 
 fn project_stored_run_snapshot(run: &mut HttpRunSnapshot) {
     run.prompt_preview = HTTP_DURABLE_COMMAND_PROMPT_OMISSION.to_owned();
-    for call_id in &mut run.pending_approval_call_ids {
-        *call_id = safe_persistence_text(call_id);
+    for approval in &mut run.pending_approvals {
+        approval.call_id = safe_persistence_text(&approval.call_id);
+        approval.tool_name = safe_persistence_text(&approval.tool_name);
+        approval.approval_request_id = safe_persistence_text(&approval.approval_request_id);
+        approval.policy_version = safe_persistence_text(&approval.policy_version);
+        approval.display.safe_summary_title =
+            safe_persistence_text(&approval.display.safe_summary_title);
+        approval.display.safe_summary_detail =
+            safe_persistence_text(&approval.display.safe_summary_detail);
     }
 }
 
@@ -3266,6 +3733,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3283,6 +3751,7 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3300,6 +3769,27 @@ impl HttpCommandReservation {
             }
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::TerminalCancel(_)
+            | HttpCommandCompletion::Approval(_)
+            | HttpCommandCompletion::Verification(_)
+            | HttpCommandCompletion::Integration(_)
+            | HttpCommandCompletion::IntentDrop(_)
+            | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_terminal_cancel(
+        &self,
+    ) -> Result<HttpTerminalTaskCancelCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::TerminalCancel(result) => {
+                result.map(HttpTerminalTaskCancelCommandReceipt::replayed)
+            }
+            HttpCommandCompletion::Start(_)
+            | HttpCommandCompletion::Cancel(_)
+            | HttpCommandCompletion::Pause(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3318,6 +3808,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::IntentDrop(_)
@@ -3337,6 +3828,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::IntentDrop(_)
@@ -3356,6 +3848,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::IntentDrop(_)
@@ -3373,6 +3866,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3390,6 +3884,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3409,6 +3904,7 @@ impl HttpCommandReservation {
             HttpCommandCompletion::Start(_)
             | HttpCommandCompletion::Cancel(_)
             | HttpCommandCompletion::Pause(_)
+            | HttpCommandCompletion::TerminalCancel(_)
             | HttpCommandCompletion::Approval(_)
             | HttpCommandCompletion::Verification(_)
             | HttpCommandCompletion::Integration(_)
@@ -3529,6 +4025,9 @@ impl HttpRegistryState {
             run.pause_operation = None;
             run.pending_approvals.clear();
             run.in_flight_approvals.clear();
+            for lifecycle in run.approval_lifecycles.values_mut() {
+                lifecycle.state = HttpApprovalLifecycleState::Terminal;
+            }
             run.advance_stream_sequence();
             run.session_id.clone()
         };
@@ -3591,6 +4090,17 @@ impl HttpRegistryState {
             run.cancel_operation = None;
             run.pause_operation = None;
             run.pending_approvals.clear();
+            let uncertain = run
+                .in_flight_approvals
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for approval in uncertain {
+                run.record_approval_lifecycle(
+                    approval,
+                    HttpApprovalLifecycleState::DeliveryUncertain,
+                );
+            }
             run.in_flight_approvals.clear();
             run.advance_stream_sequence();
         }
@@ -3664,7 +4174,9 @@ struct HttpRunState {
     prompt_preview: String,
     pending_approvals: BTreeMap<String, HttpPendingApproval>,
     in_flight_approvals: BTreeMap<String, HttpPendingApproval>,
+    approval_lifecycles: BTreeMap<String, HttpApprovalLifecycleView>,
     approval_decisions: Vec<HttpApprovalDecisionRecord>,
+    terminal_tasks: BTreeMap<String, HttpTerminalLifecycleView>,
     stream_sequence: u64,
 }
 
@@ -3688,7 +4200,9 @@ impl HttpRunState {
             prompt_preview,
             pending_approvals: BTreeMap::new(),
             in_flight_approvals: BTreeMap::new(),
+            approval_lifecycles: BTreeMap::new(),
             approval_decisions: Vec::new(),
+            terminal_tasks: BTreeMap::new(),
             stream_sequence: 0,
         }
     }
@@ -3701,7 +4215,9 @@ impl HttpRunState {
             permission_mode: self.permission_mode,
             reasoning_effort: self.reasoning_effort,
             prompt_preview: self.prompt_preview.clone(),
-            pending_approval_call_ids: self.pending_approvals.keys().cloned().collect(),
+            pending_approvals: self.pending_approvals.values().cloned().collect(),
+            approval_lifecycles: self.approval_lifecycles.values().cloned().collect(),
+            terminal_tasks: self.terminal_tasks.values().cloned().collect(),
             stream_sequence: self.stream_sequence,
         }
     }
@@ -3747,12 +4263,58 @@ impl HttpRunState {
         }
         if let Some(approval) = self.in_flight_approvals.remove(call_id) {
             self.pending_approvals.insert(call_id.to_owned(), approval);
+            self.approval_lifecycles.remove(call_id);
+            self.advance_stream_sequence();
         }
+    }
+
+    fn record_approval_lifecycle(
+        &mut self,
+        approval: HttpPendingApproval,
+        state: HttpApprovalLifecycleState,
+    ) {
+        let call_id = approval.call_id.clone();
+        self.approval_lifecycles
+            .insert(call_id, HttpApprovalLifecycleView { approval, state });
+        while self.approval_lifecycles.len() > MAX_APPROVAL_LIFECYCLES_PER_RUN {
+            let Some(terminal_call_id) =
+                self.approval_lifecycles
+                    .iter()
+                    .find_map(|(call_id, lifecycle)| {
+                        (lifecycle.state == HttpApprovalLifecycleState::Terminal)
+                            .then(|| call_id.clone())
+                    })
+            else {
+                break;
+            };
+            self.approval_lifecycles.remove(&terminal_call_id);
+        }
+    }
+
+    fn update_approval_lifecycle_state(
+        &mut self,
+        call_id: &str,
+        state: HttpApprovalLifecycleState,
+    ) -> bool {
+        let Some(lifecycle) = self.approval_lifecycles.get_mut(call_id) else {
+            return false;
+        };
+        if lifecycle.state == state {
+            return false;
+        }
+        lifecycle.state = state;
+        true
     }
 
     fn advance_stream_sequence(&mut self) {
         self.stream_sequence = self.stream_sequence.saturating_add(1);
     }
+}
+
+struct HttpApprovalRouteOutcome {
+    decision: HttpApprovalDecisionRecord,
+    route_state: HttpApprovalRouteState,
+    registry_revision: u64,
 }
 
 fn prompt_preview(prompt: &str) -> String {

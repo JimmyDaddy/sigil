@@ -109,7 +109,7 @@ impl AppState {
             self.handle_config_paste_text(&pasted);
             return;
         }
-        if self.approval.pending.is_some() {
+        if self.approval.has_actionable_pending() {
             return;
         }
 

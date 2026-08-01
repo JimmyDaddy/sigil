@@ -17,9 +17,10 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupReceipt,
     ExecutionCleanupStatus, ExecutionConfig, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    ExecutionSandboxStrategyConfig, TerminalExecutionBackendCapabilities,
-    TerminalExecutionBackendKind, TerminalOutputTerminationReason, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ExecutionSandboxStrategyConfig, TERMINAL_TASK_SCHEMA_VERSION,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalLifecycleEvent,
+    TerminalOutputTerminationReason, TerminalReadinessKind, TerminalReadinessStatus,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
 };
 #[cfg(unix)]
 use tokio::process::Command;
@@ -32,8 +33,92 @@ use tokio::{
 
 #[cfg(unix)]
 use super::TerminalExecutionConfig;
-use super::{TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalStartRequest};
+use super::{
+    TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalReadinessCondition,
+    TerminalStartRequest, TerminalWaitCondition, TerminalWaitOutcome, write_task_meta,
+};
 use serial_test::serial;
+
+#[derive(Debug, Default)]
+struct AlwaysFailLifecycleSink {
+    attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl sigil_kernel::TerminalLifecycleSink for AlwaysFailLifecycleSink {
+    async fn publish(&self, _update: sigil_kernel::TerminalLifecycleUpdateV2) -> Result<()> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(anyhow!(
+            "injected lifecycle sink failure with private diagnostic"
+        ))
+    }
+}
+
+#[test]
+fn terminal_lifecycle_output_wakes_are_bounded_without_losing_state_edges() {
+    let task_id = TerminalTaskId::new("terminal-flood").expect("task id");
+    let mut previous = TerminalLifecycleEvent {
+        task_id: task_id.clone(),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 0,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Waiting {
+            kind: TerminalReadinessKind::OutputContains,
+        },
+        total_output_bytes: 0,
+        emitted_at_ms: 0,
+    };
+    let mut output_wakes = 0;
+    for generation in 1..=1_000 {
+        let current = TerminalLifecycleEvent {
+            task_id: task_id.clone(),
+            execution_backend: previous.execution_backend,
+            sandbox_profile: previous.sandbox_profile,
+            generation,
+            status: TerminalTaskStatus::Running,
+            readiness: previous.readiness.clone(),
+            total_output_bytes: generation * 4 * 1024,
+            emitted_at_ms: generation * 10,
+        };
+        if super::should_publish_lifecycle_event(&previous, &current) {
+            output_wakes += 1;
+            previous = current;
+        }
+    }
+    assert!(
+        output_wakes <= 40,
+        "1000 high-frequency output updates produced {output_wakes} wakes"
+    );
+
+    let ready = TerminalLifecycleEvent {
+        task_id: task_id.clone(),
+        execution_backend: None,
+        sandbox_profile: None,
+        generation: 1_001,
+        status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::Ready {
+            kind: TerminalReadinessKind::OutputContains,
+            ready_at_ms: 10_001,
+        },
+        total_output_bytes: previous.total_output_bytes,
+        emitted_at_ms: 10_001,
+    };
+    assert!(super::should_publish_lifecycle_event(&previous, &ready));
+    let exited = TerminalLifecycleEvent {
+        task_id,
+        execution_backend: ready.execution_backend,
+        sandbox_profile: ready.sandbox_profile,
+        generation: 1_002,
+        status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+        readiness: ready.readiness.clone(),
+        total_output_bytes: ready.total_output_bytes,
+        emitted_at_ms: 10_002,
+    };
+    assert!(super::should_publish_lifecycle_event(&ready, &exited));
+    assert!(!super::should_publish_lifecycle_event(&exited, &ready));
+}
 
 #[test]
 fn pty_post_cleanup_drain_preserves_proven_cancellation() {
@@ -196,10 +281,7 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
         final_entry.handle.execution_backend,
         Some(TerminalExecutionBackendKind::LocalProcess)
     );
-    assert_eq!(
-        final_entry.handle.log_path,
-        PathBuf::from("state/artifacts/tasks/terminal-1/output.log")
-    );
+    assert_eq!(final_entry.handle.log_ref, "terminal-log:terminal-1");
     assert!(!final_entry.output_truncated);
     assert!(final_entry.output_hash.is_some());
     assert_eq!(
@@ -226,6 +308,256 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
     assert!(read.content.contains("out"));
     assert!(read.content.contains("err"));
     assert!(!read.truncated);
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_lifecycle_fast_exit_preserves_readiness_and_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let entry = manager
+        .start_with_readiness(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-fast-ready")?),
+                command: "printf 'READY\\n'".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+                env: Default::default(),
+            },
+            TerminalReadinessCondition::OutputContains {
+                value: "READY".to_owned(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .await?;
+
+    let waited = manager
+        .wait(
+            &entry.handle.task_id,
+            0,
+            TerminalWaitCondition::Readiness,
+            Duration::from_secs(5),
+        )
+        .await?;
+    assert_eq!(waited.outcome, TerminalWaitOutcome::ConditionMet);
+    assert!(waited.snapshot.generation >= 2);
+    assert!(waited.snapshot.readiness.is_ready());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_lifecycle_route_failure_retries_then_fails_and_persists_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let sink = Arc::new(AlwaysFailLifecycleSink::default());
+    let entry = manager
+        .start_with_readiness_and_sink(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-route-failure")?),
+                command: "sleep 10".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+                env: Default::default(),
+            },
+            TerminalReadinessCondition::None,
+            Some(sink.clone()),
+        )
+        .await?;
+    let mut events = manager.subscribe(&entry.handle.task_id).await?;
+    let failed = timeout(Duration::from_secs(3), async {
+        loop {
+            let event = events.borrow_and_update().clone();
+            if matches!(event.status, TerminalTaskStatus::Failed { .. }) {
+                return Ok::<_, anyhow::Error>(event);
+            }
+            events
+                .changed()
+                .await
+                .map_err(|_| anyhow!("terminal lifecycle owner closed before route failure"))?;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("terminal lifecycle route failure did not settle"))??;
+
+    assert_eq!(
+        sink.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        super::manager::TERMINAL_LIFECYCLE_ROUTE_MAX_ATTEMPTS
+    );
+    let TerminalTaskStatus::Failed { reason } = &failed.status else {
+        unreachable!("terminal lifecycle route must fail closed")
+    };
+    assert!(reason.starts_with("terminal_lifecycle_route_failed:sha256:"));
+    assert!(!reason.contains("private diagnostic"));
+
+    let artifacts = manager.artifacts_for(&entry.handle.task_id)?;
+    let stored: TerminalTaskEntry =
+        serde_json::from_slice(&tokio::fs::read(&artifacts.absolute_meta).await?)?;
+    assert_eq!(stored.status, failed.status);
+    assert_eq!(stored.generation, failed.generation);
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_task_meta_publish_does_not_overwrite_a_newer_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("meta.json");
+    let task_id = TerminalTaskId::new("terminal-meta-generation")?;
+    let mut newer = test_entry(task_id);
+    newer.generation = 2;
+    newer.updated_at_ms = 20;
+    newer.status = TerminalTaskStatus::Failed {
+        reason: "newer failure".to_owned(),
+    };
+    write_task_meta(&path, &newer).await?;
+
+    let mut stale = newer.clone();
+    stale.generation = 1;
+    stale.updated_at_ms = 30;
+    stale.status = TerminalTaskStatus::Running;
+    write_task_meta(&path, &stale).await?;
+
+    let mut clock_skewed_stale = newer.clone();
+    clock_skewed_stale.updated_at_ms = 200;
+    clock_skewed_stale.status = TerminalTaskStatus::Running;
+    write_task_meta(&path, &clock_skewed_stale).await?;
+
+    let stored: TerminalTaskEntry = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    assert_eq!(stored, newer);
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_wait_observes_change_that_happened_before_wait_subscription() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let entry = manager
+        .start(TerminalStartRequest {
+            task_id: Some(TerminalTaskId::new("terminal-lost-wake")?),
+            command: "sleep 5".to_owned(),
+            cwd: None,
+            shell: Some(shell),
+            env: Default::default(),
+        })
+        .await?;
+    let initial = manager.snapshot(&entry.handle.task_id).await?;
+    let lifecycle = manager
+        .tasks
+        .lock()
+        .await
+        .get(&entry.handle.task_id)
+        .expect("managed terminal task")
+        .lifecycle
+        .clone();
+    lifecycle.observe_output(b"changed");
+
+    let waited = manager
+        .wait(
+            &entry.handle.task_id,
+            initial.generation,
+            TerminalWaitCondition::StatusChange,
+            Duration::from_millis(100),
+        )
+        .await?;
+    assert_eq!(waited.outcome, TerminalWaitOutcome::ConditionMet);
+    assert!(waited.snapshot.generation > initial.generation);
+    manager.cancel(&entry.handle.task_id).await?;
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_wait_timeout_is_a_typed_normal_outcome_and_cancel_wakes_exit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let entry = manager
+        .start(TerminalStartRequest {
+            task_id: Some(TerminalTaskId::new("terminal-wait-timeout")?),
+            command: "sleep 5".to_owned(),
+            cwd: None,
+            shell: Some(shell),
+            env: Default::default(),
+        })
+        .await?;
+    let initial = manager.snapshot(&entry.handle.task_id).await?;
+    let timed_out = manager
+        .wait(
+            &entry.handle.task_id,
+            initial.generation,
+            TerminalWaitCondition::OutputContains("never".to_owned()),
+            Duration::from_millis(20),
+        )
+        .await?;
+    assert_eq!(timed_out.outcome, TerminalWaitOutcome::Timeout);
+
+    manager.cancel(&entry.handle.task_id).await?;
+    let exited = manager
+        .wait(
+            &entry.handle.task_id,
+            initial.generation,
+            TerminalWaitCondition::Exit,
+            Duration::from_secs(1),
+        )
+        .await?;
+    assert_eq!(exited.outcome, TerminalWaitOutcome::ConditionMet);
+    assert!(exited.snapshot.entry.status.is_terminal());
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_status_and_cancel_return_the_exact_lifecycle_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let entry = manager
+        .start_with_readiness(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-exact-cancel-generation")?),
+                command: "printf 'READY\\n'; sleep 5".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+                env: Default::default(),
+            },
+            TerminalReadinessCondition::OutputContains {
+                value: "READY".to_owned(),
+                timeout: Duration::from_secs(2),
+            },
+        )
+        .await?;
+    let ready = manager
+        .wait(
+            &entry.handle.task_id,
+            0,
+            TerminalWaitCondition::Readiness,
+            Duration::from_secs(2),
+        )
+        .await?;
+    assert_eq!(
+        ready.outcome,
+        TerminalWaitOutcome::ConditionMet,
+        "readiness wait did not converge: {ready:?}"
+    );
+
+    let current = manager.status(&entry.handle.task_id).await?;
+    assert_eq!(current.generation, ready.snapshot.generation);
+    assert!(current.readiness.is_ready());
+
+    let cancelled = manager.cancel(&entry.handle.task_id).await?;
+    assert!(cancelled.generation > current.generation);
+    assert!(matches!(cancelled.status, TerminalTaskStatus::Cancelled));
     Ok(())
 }
 
@@ -657,7 +989,7 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
 
     assert!(entry.handle.task_id.as_str().starts_with("terminal-"));
-    assert_eq!(entry.handle.cwd, PathBuf::from("subdir"));
+    assert_eq!(entry.handle.cwd_label, "subdir");
     assert!(matches!(
         final_entry.status,
         TerminalTaskStatus::Exited { exit_code: Some(0) }
@@ -1252,7 +1584,8 @@ async fn terminal_reader_task_panic_triggers_live_cleanup_without_failure_signal
     let artifacts = manager.artifacts_for(&task_id)?;
     tokio::fs::create_dir_all(&artifacts.absolute_dir).await?;
     super::create_empty_log_files(&artifacts).await?;
-    let summary = Arc::new(Mutex::new(test_entry(task_id)));
+    let summary = Arc::new(Mutex::new(test_entry(task_id.clone())));
+    let lifecycle = test_lifecycle(&task_id)?;
     let pid_file = temp.path().join("reader-panic-child.pid");
     let mut command = Command::new("/bin/sh");
     command
@@ -1296,6 +1629,7 @@ async fn terminal_reader_task_panic_triggers_live_cleanup_without_failure_signal
         cancel_rx,
         preview_limit_bytes: 8,
         cancel_grace: Duration::from_millis(50),
+        lifecycle,
     })
     .await;
 
@@ -1462,7 +1796,8 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     let worker_artifacts = manager.artifacts_for(&worker_task_id)?;
     tokio::fs::create_dir_all(&worker_artifacts.absolute_dir).await?;
     super::create_empty_log_files(&worker_artifacts).await?;
-    let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id)));
+    let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id.clone())));
+    let worker_lifecycle = test_lifecycle(&worker_task_id)?;
     let (closed_cancel_tx, closed_cancel_rx) = mpsc::channel::<super::CancelCommand>(1);
     let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
     drop(capture_failure_tx);
@@ -1488,6 +1823,7 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         cancel_rx: closed_cancel_rx,
         preview_limit_bytes: 8,
         cancel_grace: Duration::from_millis(1),
+        lifecycle: worker_lifecycle,
     })
     .await;
     assert!(matches!(
@@ -1507,7 +1843,9 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         task_id.clone(),
         super::ManagedTerminalTask {
             summary: Arc::clone(&summary),
+            lifecycle: test_lifecycle(&task_id)?,
             control: super::TerminalTaskControl::Process { cancel_tx },
+            lifecycle_route_abort: None,
         },
     );
     let error = manager
@@ -1525,9 +1863,11 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         missing_receiver_task_id.clone(),
         super::ManagedTerminalTask {
             summary: Arc::clone(&missing_receiver_summary),
+            lifecycle: test_lifecycle(&missing_receiver_task_id)?,
             control: super::TerminalTaskControl::Process {
                 cancel_tx: missing_receiver_tx,
             },
+            lifecycle_route_abort: None,
         },
     );
     let send_error = manager
@@ -1653,7 +1993,8 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
     let worker_artifacts = manager.artifacts_for(&worker_task_id)?;
     tokio::fs::create_dir_all(&worker_artifacts.absolute_dir).await?;
     super::create_empty_log_files(&worker_artifacts).await?;
-    let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id)));
+    let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id.clone())));
+    let worker_lifecycle = test_lifecycle(&worker_task_id)?;
     let (_capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
     let (_child_exit_tx, child_exit_rx) = mpsc::unbounded_channel();
     let aborted_wait_task = tokio::spawn(async {
@@ -1682,6 +2023,7 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
         child_exit_rx,
         preview_limit_bytes: 8,
         cancel_grace: Duration::from_millis(1),
+        lifecycle: worker_lifecycle,
     })
     .await;
     assert!(matches!(
@@ -1709,12 +2051,15 @@ async fn terminal_process_artifacts_succeeds_with_explicit_artifact_root() -> Re
 
 fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
     TerminalTaskEntry {
+        schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+        generation: 1,
         handle: TerminalTaskHandle {
             task_id,
-            command: "test".to_owned(),
-            cwd: PathBuf::from("."),
-            shell: "sh".to_owned(),
-            log_path: PathBuf::from("state/artifacts/tasks/test/output.log"),
+            command_sha256: "0".repeat(64),
+            cwd_label: ".".to_owned(),
+            shell_label: "sh".to_owned(),
+            shell_sha256: "1".repeat(64),
+            log_ref: "terminal-log:test".to_owned(),
             created_at_ms: 1,
             execution_backend: None,
             execution_backend_capabilities: None,
@@ -1723,6 +2068,7 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
             sandbox_profile: None,
         },
         status: TerminalTaskStatus::Running,
+        readiness: TerminalReadinessStatus::None,
         output_preview: None,
         output_hash: None,
         output_truncated: false,
@@ -1732,6 +2078,15 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
         cleanup: None,
         updated_at_ms: 1,
     }
+}
+
+fn test_lifecycle(task_id: &TerminalTaskId) -> Result<super::TerminalLifecycleOwner> {
+    super::TerminalLifecycleOwner::new(
+        task_id.clone(),
+        None,
+        None,
+        &TerminalReadinessCondition::None,
+    )
 }
 
 fn capture_outcome(bytes: u64) -> super::io::CaptureOutcome {

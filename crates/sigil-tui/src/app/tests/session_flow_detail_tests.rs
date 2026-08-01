@@ -87,13 +87,24 @@ fn session_labels_and_identifiers_truncate_as_expected() {
 }
 
 #[test]
-fn session_model_selection_has_a_stable_audit_line() {
+fn session_model_selection_has_a_stable_audit_line() -> Result<()> {
     assert_eq!(
         render_control_entry_line(&ControlEntry::SessionModelSelected {
+            provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-pro".to_owned(),
+            resolved_model_route: sigil_kernel::ResolvedModelRoute::new(
+                sigil_kernel::ModelRef::new(
+                    sigil_kernel::ConnectionId::new("deepseek-default")?,
+                    "deepseek-v4-pro",
+                )?,
+                "deepseek",
+                "deepseek",
+                "sha256:route",
+            )?,
         }),
-        "[ctl] session model deepseek-v4-pro"
+        "[ctl] session model deepseek/deepseek-default/deepseek-v4-pro"
     );
+    Ok(())
 }
 
 #[test]
@@ -1876,12 +1887,14 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
         }))),
         SessionLogEntry::Control(ControlEntry::TerminalTask(
             sigil_kernel::TerminalTaskEntry {
+                schema_version: sigil_kernel::terminal_task::TERMINAL_TASK_SCHEMA_VERSION,
                 handle: sigil_kernel::TerminalTaskHandle {
                     task_id: sigil_kernel::TerminalTaskId::new("terminal-1")?,
-                    command: "cargo test".to_owned(),
-                    cwd: std::path::PathBuf::from("."),
-                    shell: "sh".to_owned(),
-                    log_path: std::path::PathBuf::from(".sigil/tasks/terminal-1/output.log"),
+                    command_sha256: "0".repeat(64),
+                    cwd_label: ".".to_owned(),
+                    shell_label: "sh".to_owned(),
+                    shell_sha256: "1".repeat(64),
+                    log_ref: "terminal-log:terminal-1".to_owned(),
                     created_at_ms: 1,
                     execution_backend: None,
                     execution_backend_capabilities: None,
@@ -1889,7 +1902,9 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
                     enforcement_backend_capabilities: None,
                     sandbox_profile: None,
                 },
+                generation: 1,
                 status: sigil_kernel::TerminalTaskStatus::Running,
+                readiness: sigil_kernel::TerminalReadinessStatus::None,
                 output_preview: Some("running output".to_owned()),
                 output_hash: Some("hash".to_owned()),
                 output_truncated: false,
@@ -2208,8 +2223,8 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
         "requested"
     );
     assert_eq!(
-        tool_approval_action_label(sigil_kernel::ToolApprovalAuditAction::PolicyEvaluated),
-        "policy"
+        tool_approval_action_label(sigil_kernel::ToolApprovalAuditAction::DecisionAccepted),
+        "decision_accepted"
     );
     assert_eq!(
         tool_approval_action_label(sigil_kernel::ToolApprovalAuditAction::Resolved),
@@ -2238,6 +2253,18 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
 fn render_session_control_entries_cover_remaining_labels() {
     let approval = render_session_log_entry(&SessionLogEntry::Control(ControlEntry::ToolApproval(
         ToolApprovalEntry {
+            schema_version: sigil_kernel::TOOL_APPROVAL_AUDIT_SCHEMA_VERSION,
+            identity: sigil_kernel::ApprovalRequestIdentityV2 {
+                session_id: "session-approval".to_owned(),
+                run_id: "run-approval".to_owned(),
+                call_id: "call-approval".to_owned(),
+                approval_request_id: "approval-call-approval".to_owned(),
+                plan_hash: "sha256:approval-plan".to_owned(),
+                policy_version: "sha256:approval-policy".to_owned(),
+                execution_binding_hash: "sha256:approval-binding".to_owned(),
+                expires_at_ms: 1_000,
+            },
+            plan_hash: "sha256:approval-plan".to_owned(),
             action: ToolApprovalAuditAction::Resolved,
             call_id: "call-approval".to_owned(),
             tool_name: "write_file".to_owned(),
@@ -2247,41 +2274,53 @@ fn render_session_control_entries_cover_remaining_labels() {
             network_policy_decision: ApprovalMode::Allow,
             source_policy_decision: ApprovalMode::Allow,
             subjects: Vec::new(),
-            operation: None,
-            risk: None,
+            operation: sigil_kernel::ToolOperation::EditFile,
+            risk: sigil_kernel::PermissionRisk::Medium,
             subject_zones: Vec::new(),
             confirmation: None,
             snapshot_required: false,
             command_permission_matches: Vec::new(),
+            decision_reasons: Vec::new(),
             policy_decision: ApprovalMode::Deny,
             external_directory_required: false,
-            allow_source: None,
-            grant_call_id: None,
             user_decision: Some(ToolApprovalUserDecision::Denied),
             reason: Some("denied".to_owned()),
             preview_hash: None,
+            decision_receipt: None,
+            terminal_status: Some(sigil_kernel::ToolApprovalTerminalStatusV2::Denied),
         },
     )));
     assert!(approval.contains("action=resolved"));
     assert!(approval.contains("local=deny network=allow source=allow final=deny"));
 
-    let legacy_network_grant = render_session_log_entry(&SessionLogEntry::Control(
+    let network_grant = render_session_log_entry(&SessionLogEntry::Control(
         ControlEntry::ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry {
-            call_id: "call-network".to_owned(),
-            tool_name: "legacy_mcp".to_owned(),
-            access: sigil_kernel::ToolAccess::Read,
-            network_effect: Some(sigil_kernel::NetworkEffect::Unknown),
-            operation: sigil_kernel::ToolOperation::NetworkRequest,
-            risk: sigil_kernel::PermissionRisk::High,
+            schema_version: sigil_kernel::TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION,
+            grant_id: "grant-network".to_owned(),
+            source_call_id: "call-network".to_owned(),
+            source_approval_request_id: "approval-call-network".to_owned(),
+            tool_name: "custom_mcp".to_owned(),
+            semantic_scope: sigil_kernel::ToolSemanticScope::new("network_read", 1),
+            effect_ceiling: std::collections::BTreeSet::from([
+                sigil_kernel::ToolPermissionEffect::NetworkUnknown,
+            ]),
+            risk_ceiling: sigil_kernel::PermissionRisk::High,
             subjects: Vec::new(),
-            subject_zones: Vec::new(),
-            facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Local],
-            scope: sigil_kernel::ToolApprovalSessionGrantScope::ExactSubjects,
+            facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Network],
+            scope: sigil_kernel::ToolApprovalSessionGrantScope::NetworkReadTool,
+            containment_binding: sigil_kernel::ExecutionContainmentBindingV2 {
+                requested: sigil_kernel::ExecutionContainmentRequest::default(),
+                backend_identity_hash: "0".repeat(64),
+                backend_profile_hash: "1".repeat(64),
+                environment_binding_hash: "2".repeat(64),
+            },
+            policy_version: "sha256:approval-policy".to_owned(),
             expires: ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 1,
         }),
     ));
-    assert!(legacy_network_grant.contains("access=read effect=unknown"));
+    assert!(network_grant.contains("scope=network_read_tool facets=network"));
+    assert!(network_grant.contains("semantic=network_read@1 effects=NetworkUnknown"));
 
     let skill_index =
         render_session_log_entry(&SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(

@@ -45,6 +45,30 @@ describe("conversation continuity reducer", () => {
     expect(state.transcriptLoaded).toBe(true);
   });
 
+  it("does not reopen owner verification when an idle transcript is canonically reloaded", () => {
+    let state = receiveInitial([messageItem("message-1", "1", "first")]);
+    state = reduceConversationContinuity(state, {
+      type: "owner_probe_resolved",
+      sessionId: SESSION_ID,
+    });
+    expect(state.lifecycle).toBe("idle");
+
+    state = reduceConversationContinuity(state, {
+      type: "initial_page_received",
+      sessionId: SESSION_ID,
+      page: page([
+        messageItem("message-1", "1", "first"),
+        messageItem("message-2", "2", "second"),
+      ], "2"),
+    });
+
+    expect(state.lifecycle).toBe("idle");
+    expect(selectConversationTimeline(state).map(({ identity }) => identity)).toEqual([
+      "message-1",
+      "message-2",
+    ]);
+  });
+
   it("preserves duplicate text when stable display ids are distinct", () => {
     const state = receiveInitial([
       messageItem("message-1", "1", "same text"),
@@ -239,6 +263,44 @@ describe("conversation continuity reducer", () => {
     expect(selectConversationTimeline(state).map(({ identity }) => identity)).toEqual([
       "status-only-final",
     ]);
+  });
+
+  it("accepts a proven queued successor while retaining fail-closed unrelated terminal facts", () => {
+    let state = receiveInitial([]);
+    state = reduceConversationContinuity(state, {
+      type: "terminal_transport_observed",
+      sessionId: SESSION_ID,
+      runId: "run-first",
+    });
+    state = reduceConversationContinuity(state, {
+      type: "terminal_observed",
+      sessionId: SESSION_ID,
+      terminal: { runId: "run-successor", status: "succeeded" },
+      supersedesRunId: "run-first",
+    });
+
+    expect(state.lifecycle).toBe("finalizing");
+    expect(state.observedTerminal).toEqual({
+      runId: "run-successor",
+      status: "succeeded",
+    });
+    expect(state.pendingTerminalRunId).toBeUndefined();
+
+    const afterLatePredecessor = reduceConversationContinuity(state, {
+      type: "terminal_observed",
+      sessionId: SESSION_ID,
+      terminal: { runId: "run-first", status: "succeeded" },
+      supersededByRunId: "run-successor",
+    });
+    expect(afterLatePredecessor).toBe(state);
+
+    const unrelated = reduceConversationContinuity(state, {
+      type: "terminal_transport_observed",
+      sessionId: SESSION_ID,
+      runId: "run-unrelated",
+    });
+    expect(unrelated.lifecycle).toBe("error");
+    expect(unrelated.contractError?.code).toBe("terminal_conflict");
   });
 
   it("does not use equal text as a reconciliation identity", () => {

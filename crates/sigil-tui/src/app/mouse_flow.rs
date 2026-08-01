@@ -86,7 +86,7 @@ impl AppState {
                 self.mark_mouse_left_down();
                 self.handle_mouse_left_down_target(target, input, layout)
             }
-            crate::mouse::MouseInputKind::Drag if self.approval.pending.is_none() => {
+            crate::mouse::MouseInputKind::Drag if !self.approval.has_actionable_pending() => {
                 self.mark_mouse_left_down();
                 self.cancel_tool_card_body_click();
                 if let Some(position) = layout.live_text_position_at(input.column, input.row) {
@@ -100,7 +100,7 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::MouseInputKind::LeftUp if self.approval.pending.is_none() => {
+            crate::mouse::MouseInputKind::LeftUp if !self.approval.has_actionable_pending() => {
                 let had_left_down = self.take_mouse_left_down();
                 if let Some(entry_index) = self.take_pending_tool_card_body_click(target) {
                     let anchor =
@@ -215,7 +215,7 @@ impl AppState {
                 self.handle_config_mouse_footer_action(index)
             }
             crate::mouse::HitTarget::ApprovalFileRow { index }
-                if self.approval.pending.is_some() =>
+                if self.approval.has_actionable_pending() =>
             {
                 if self.select_approval_file_index(index) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
@@ -223,66 +223,81 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalHunkPrevious if self.approval.pending.is_some() => {
+            crate::mouse::HitTarget::ApprovalHunkPrevious
+                if self.approval.has_actionable_pending() =>
+            {
                 if self.jump_approval_hunk(false) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalHunkNext if self.approval.pending.is_some() => {
+            crate::mouse::HitTarget::ApprovalHunkNext if self.approval.has_actionable_pending() => {
                 if self.jump_approval_hunk(true) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalDiffViewToggle if self.approval.pending.is_some() => {
+            crate::mouse::HitTarget::ApprovalDiffViewToggle
+                if self.approval.has_actionable_pending() =>
+            {
                 self.cycle_approval_diff_mode();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::ApprovalMetadataToggle if self.approval.pending.is_some() => {
+            crate::mouse::HitTarget::ApprovalMetadataToggle
+                if self.approval.has_actionable_pending() =>
+            {
                 self.toggle_approval_metadata();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ApprovalAction { action }
-                if self.approval.pending.is_some() =>
-            {
-                let call_id = self
+                if self
                     .approval
                     .pending
                     .as_ref()
-                    .map(|pending| pending.call.id.clone())
+                    .is_some_and(|pending| pending.actions_available()) =>
+            {
+                let (call_id, approval_request_id) = self
+                    .approval
+                    .pending
+                    .as_ref()
+                    .map(|pending| (pending.call.id.clone(), pending.approval_request_id.clone()))
                     .expect("approval action target requires pending approval");
                 Ok(crate::mouse::AppMouseOutcome::Action(match action {
                     crate::app::ApprovalAction::AllowOnce => {
                         crate::app::AppAction::ApprovalDecision {
                             call_id,
+                            approval_request_id,
                             approved: true,
                         }
                     }
                     crate::app::ApprovalAction::AllowSession => {
-                        crate::app::AppAction::ApprovalSessionDecision { call_id }
+                        crate::app::AppAction::ApprovalSessionDecision {
+                            call_id,
+                            approval_request_id,
+                        }
                     }
                     crate::app::ApprovalAction::Deny => crate::app::AppAction::ApprovalDecision {
                         call_id,
+                        approval_request_id,
                         approved: false,
                     },
                 }))
             }
             crate::mouse::HitTarget::SlashCandidate { index }
-                if self.approval.pending.is_none() =>
+                if !self.approval.has_actionable_pending() =>
             {
                 self.click_slash_candidate(index)
             }
             crate::mouse::HitTarget::ToolCardHeader { entry_index }
             | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
-                if self.approval.pending.is_none() =>
+                if !self.approval.has_actionable_pending() =>
             {
                 self.click_tool_card_toggle_target(entry_index, input, layout, target)
             }
             crate::mouse::HitTarget::ToolCard { entry_index }
-                if self.approval.pending.is_none() =>
+                if !self.approval.has_actionable_pending() =>
             {
                 self.begin_tool_card_body_click(entry_index);
                 self.set_mouse_hover_target(Some(target));
@@ -298,11 +313,13 @@ impl AppState {
                 }
             }
             crate::mouse::HitTarget::ThinkingBlock { entry_index }
-                if self.approval.pending.is_none() =>
+                if !self.approval.has_actionable_pending() =>
             {
                 Ok(self.click_thinking_block(entry_index, target))
             }
-            crate::mouse::HitTarget::VerificationCard if self.approval.pending.is_none() => {
+            crate::mouse::HitTarget::VerificationCard
+                if !self.approval.has_actionable_pending() =>
+            {
                 self.cancel_tool_card_body_click();
                 self.set_mouse_hover_target(Some(target));
                 self.clear_timeline_text_selection();
@@ -312,18 +329,18 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::Composer if self.approval.pending.is_none() => {
+            crate::mouse::HitTarget::Composer if !self.approval.has_actionable_pending() => {
                 Ok(self.click_composer(input, layout))
             }
             crate::mouse::HitTarget::InfoRailAgentRow { index }
-                if self.approval.pending.is_none() =>
+                if !self.approval.has_actionable_pending() =>
             {
                 Ok(self.click_info_rail_agent_row(index, target))
             }
-            crate::mouse::HitTarget::InfoRail if self.approval.pending.is_none() => {
+            crate::mouse::HitTarget::InfoRail if !self.approval.has_actionable_pending() => {
                 Ok(self.click_info_rail(target))
             }
-            _ if self.approval.pending.is_none() => {
+            _ if !self.approval.has_actionable_pending() => {
                 Ok(self.click_live_text_or_background(input, layout))
             }
             _ => Ok(crate::mouse::AppMouseOutcome::Noop),
@@ -499,7 +516,7 @@ impl AppState {
         target: crate::mouse::HitTarget,
         upward: bool,
     ) -> Result<crate::mouse::AppMouseOutcome> {
-        if self.approval.pending.is_some() {
+        if self.approval.has_actionable_pending() {
             return match target {
                 crate::mouse::HitTarget::ApprovalModal
                 | crate::mouse::HitTarget::ApprovalDiffArea

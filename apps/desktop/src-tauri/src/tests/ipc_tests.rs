@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn approval_receipt_projection_preserves_route_identity_and_revision() {
+    let native = serde_json::from_value::<NativeApprovalCommandReceipt>(serde_json::json!({
+        "command_id": "approval-command-1",
+        "client_id": "desktop-1",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "call_id": "call-1",
+        "approval_request_id": "approval-1",
+        "expected_stream_sequence": 7,
+        "correlation_id": "event-1",
+        "decision": {
+            "run_id": "run-1",
+            "call_id": "call-1",
+            "decision": "approved_for_session"
+        },
+        "route_state": "decision_accepted",
+        "registry_revision": 8,
+        "replayed": true
+    }))
+    .expect("native approval receipt should decode");
+
+    let projected = serde_json::to_value(DesktopApprovalDecisionSummary::from(native))
+        .expect("approval projection should serialize");
+    assert_eq!(projected["approvalRequestId"], "approval-1");
+    assert_eq!(projected["decision"], "approved_for_session");
+    assert_eq!(projected["routeState"], "decision_accepted");
+    assert_eq!(projected["registryRevision"], 8);
+    assert_eq!(projected["replayed"], true);
+}
+
+#[test]
 fn run_context_projects_agent_name_from_existing_invocation_token() {
     let native = serde_json::from_value::<DesktopRunContextView>(serde_json::json!({
         "model_ref": {
@@ -10,7 +41,7 @@ fn run_context_projects_agent_name_from_existing_invocation_token() {
         "provider_name": "deepseek",
         "model_name": "deepseek-v4-flash",
         "model_options": [],
-        "model_selection": "fresh_session",
+        "model_selection": "same_session",
         "model_selection_binding": "model-binding",
         "default_permission_mode": "manual",
         "available_permission_modes": ["manual"],
@@ -43,6 +74,29 @@ fn run_context_projects_agent_name_from_existing_invocation_token() {
 #[test]
 fn agent_display_name_falls_back_to_profile_id_for_empty_token() {
     assert_eq!(agent_display_name("@", "explore"), "explore");
+}
+
+#[test]
+fn run_start_input_preserves_the_exact_same_session_model_route() {
+    let input = serde_json::from_value::<DesktopRunStartInput>(serde_json::json!({
+        "sessionId": "session-1",
+        "prompt": "continue here",
+        "permissionMode": "manual",
+        "modelRef": {
+            "connectionId": "gateway-team",
+            "modelId": "gpt-5"
+        },
+        "modelSelectionBinding": "selection-binding"
+    }))
+    .expect("desktop run input should decode");
+
+    let model_ref = input.model_ref.expect("exact route should be present");
+    assert_eq!(model_ref.connection_id, "gateway-team");
+    assert_eq!(model_ref.model_id, "gpt-5");
+    assert_eq!(
+        input.model_selection_binding.as_deref(),
+        Some("selection-binding")
+    );
 }
 
 #[test]

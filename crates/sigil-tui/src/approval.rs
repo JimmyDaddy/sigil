@@ -1,6 +1,11 @@
+use std::collections::BTreeSet;
+
 use sigil_kernel::{
-    ApprovalMode, CommandPermissionMatch, NetworkEffect, PathTrustZone, PermissionConfirmation,
-    PermissionRisk, ToolCall, ToolOperation, ToolPreview, ToolSpec, ToolSubject,
+    ApprovalMode, CommandPermissionMatch, ExecutionContainmentRequest, NetworkEffect,
+    PathTrustZone, PermissionConfirmation, PermissionDecisionReason, PermissionRisk,
+    ToolAnalysisStatus, ToolApprovalSessionGrantUnavailableReason,
+    ToolApprovalSessionGrantUnavailableReasonCode, ToolCall, ToolOperation, ToolPermissionEffect,
+    ToolPermissionSummary, ToolPreview, ToolSpec, ToolSubject,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +130,12 @@ pub(crate) struct ApprovalModalView {
     pub access_label: String,
     pub risk: PermissionRisk,
     pub policy_label: String,
+    pub effects: BTreeSet<ToolPermissionEffect>,
+    pub subjects: Vec<ToolSubject>,
+    pub analysis: ToolAnalysisStatus,
+    pub containment: ExecutionContainmentRequest,
+    pub safe_summary: ToolPermissionSummary,
+    pub decision_reasons: Vec<PermissionDecisionReason>,
     pub preview_title: String,
     pub preview_summary: String,
     pub change_set: Option<ApprovalChangeSetSummary>,
@@ -138,13 +149,56 @@ pub(crate) struct ApprovalModalView {
     pub diff_lines: Vec<ApprovalDiffLine>,
     pub selected_action: ApprovalAction,
     pub session_grant_available: bool,
+    pub session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
+}
+
+#[cfg(test)]
+impl Default for ApprovalModalView {
+    fn default() -> Self {
+        Self {
+            tool_name: String::new(),
+            call_id: String::new(),
+            source_agent: None,
+            access_label: String::new(),
+            risk: PermissionRisk::Low,
+            policy_label: String::new(),
+            effects: BTreeSet::new(),
+            subjects: Vec::new(),
+            analysis: ToolAnalysisStatus::Complete,
+            containment: ExecutionContainmentRequest::default(),
+            safe_summary: ToolPermissionSummary::default(),
+            decision_reasons: Vec::new(),
+            preview_title: String::new(),
+            preview_summary: String::new(),
+            change_set: None,
+            metadata_collapsed: false,
+            file_rows: Vec::new(),
+            changed_files: Vec::new(),
+            diff_mode_label: "full",
+            active_hunk_index: 0,
+            hunk_total: 0,
+            diff_label: String::new(),
+            diff_lines: Vec::new(),
+            selected_action: ApprovalAction::AllowOnce,
+            session_grant_available: false,
+            session_grant_unavailable_reason: Some(ToolApprovalSessionGrantUnavailableReason {
+                code: ToolApprovalSessionGrantUnavailableReasonCode::NoReusableApprovalFacet,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
+    pub approval_request_id: String,
     pub call: ToolCall,
     pub spec: ToolSpec,
+    pub effects: BTreeSet<ToolPermissionEffect>,
     pub subjects: Vec<ToolSubject>,
+    pub analysis: ToolAnalysisStatus,
+    pub containment: ExecutionContainmentRequest,
+    pub safe_summary: ToolPermissionSummary,
+    pub decision_reasons: Vec<PermissionDecisionReason>,
     pub network_effect: Option<NetworkEffect>,
     pub local_policy_decision: ApprovalMode,
     pub network_policy_decision: ApprovalMode,
@@ -156,7 +210,71 @@ pub struct PendingApproval {
     pub snapshot_required: bool,
     pub command_permission_matches: Vec<CommandPermissionMatch>,
     pub session_grant_available: bool,
+    pub session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
     pub preview: Option<ToolPreview>,
+    pub presentation_state: ApprovalPresentationState,
+}
+
+pub(crate) fn session_grant_unavailable_reason_label(
+    reason: Option<ToolApprovalSessionGrantUnavailableReason>,
+) -> &'static str {
+    use ToolApprovalSessionGrantUnavailableReasonCode as Reason;
+
+    match reason.map(|reason| reason.code) {
+        Some(Reason::AnalysisIncomplete) => {
+            "tool effects could not be analyzed completely; only this request can be approved"
+        }
+        Some(Reason::SemanticScopeUnavailable) => {
+            "the request has no stable reusable scope; only this request can be approved"
+        }
+        Some(Reason::NonGrantableEffect) => {
+            "the request includes an effect that cannot be safely reused"
+        }
+        Some(Reason::ContainmentBindingUnavailable) => {
+            "the execution limits cannot be bound to reusable authority"
+        }
+        Some(Reason::PolicyDecisionNotGrantable) => {
+            "the current permission policy does not allow reusable authority"
+        }
+        Some(Reason::NoReusableApprovalFacet) => {
+            "there is no pending permission facet that can be reused"
+        }
+        Some(Reason::NetworkScopeNotGrantable) => {
+            "the network scope is not a stable, bounded read-only scope"
+        }
+        Some(Reason::ConfirmationRequired) => "the request requires an explicit confirmation",
+        Some(Reason::SnapshotRequired) => "the decision is bound to a file snapshot",
+        Some(Reason::SubjectScopeUnavailable) => {
+            "the request targets cannot be represented as a stable bounded scope"
+        }
+        Some(Reason::RiskNotGrantable) => {
+            "the request risk level does not allow reusable authority"
+        }
+        Some(Reason::ExternalMutation) => {
+            "mutations outside the workspace cannot receive reusable authority"
+        }
+        Some(Reason::OperationNotGrantable) => {
+            "this operation type cannot receive reusable authority"
+        }
+        None => "this request cannot receive reusable authority",
+    }
+}
+
+/// Local presentation state for one exact approval request.
+///
+/// `DecisionAccepted` is an acknowledgement from the local worker route. It does not imply that
+/// the tool has started; the matching kernel resolution/execution events remain authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalPresentationState {
+    Pending,
+    DecisionAccepted { command_id: String },
+    DeliveryUncertain { command_id: String },
+}
+
+impl PendingApproval {
+    pub(crate) fn actions_available(&self) -> bool {
+        matches!(self.presentation_state, ApprovalPresentationState::Pending)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

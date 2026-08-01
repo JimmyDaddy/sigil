@@ -13,6 +13,7 @@ Feature: Desktop workbench remains usable
     When I press Enter with a follow-up while approval is pending
     Then the follow-up is recorded in the durable queue
     When I approve the pending command
+    Then the accepted approval stops offering actions before the next run event
     Then the initial run and queued follow-up both complete
     And terminal completion releases continuity and history controls
     And the generated semantic title is synchronized into the conversation page
@@ -25,6 +26,34 @@ Feature: Desktop workbench remains usable
     When I create a new desktop conversation
     And I invoke the custom workspace agent
     Then the custom workspace agent executes with its profile instructions
+
+  Scenario: Keep a persistent terminal task live after foreground completion
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I start a persistent terminal task from Desktop
+    Then the terminal task becomes ready before the foreground answer completes
+    And the foreground answer completes while the terminal task remains running
+    When I start a successor run while the older terminal task remains running
+    Then the successor completes while the older terminal task is still tracked
+    And the later terminal exit settles the Desktop task card
+
+  Scenario: Stop a persistent terminal task after foreground completion
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I start a persistent terminal task from Desktop
+    Then the terminal task becomes ready before the foreground answer completes
+    And the foreground answer completes while the terminal task remains running
+    When I stop the retained terminal task
+    Then the retained terminal task becomes cancelled
+
+  Scenario: Restore a retained terminal task after a renderer reload
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I start a persistent terminal task from Desktop
+    Then the terminal task becomes ready before the foreground answer completes
+    And the foreground answer completes while the terminal task remains running
+    When I reload Desktop while the retained terminal task is owned by the session
+    Then Desktop restores the retained terminal task from continuity
 
   Scenario: Execute the supervised plan agent
     Given the current-source desktop has restored the isolated workspace

@@ -64,6 +64,14 @@ impl EventHandler for AppState {
                 self.push_event("tool:complete", format!("{} {}", call.name, call.id));
             }
             RunEvent::ToolApprovalRequested {
+                approval_identity,
+                effects,
+                analysis,
+                containment,
+                safe_summary,
+                decision_reasons,
+                session_grant_available,
+                session_grant_unavailable_reason,
                 call,
                 spec,
                 subjects,
@@ -78,6 +86,7 @@ impl EventHandler for AppState {
                 snapshot_required,
                 command_permission_matches,
                 preview,
+                ..
             } => {
                 self.runtime.run_phase = RunPhase::Tool(call.name.clone());
                 self.downgrade_streaming_assistant_entry_to_thinking();
@@ -96,25 +105,18 @@ impl EventHandler for AppState {
                             )
                         });
                 }
-                let session_grant_available =
-                    sigil_kernel::tool_approval_session_grant_available_for_facets(
-                        spec.access,
-                        network_effect,
-                        operation,
-                        risk,
-                        &subjects,
-                        &subject_zones,
-                        confirmation.as_ref(),
-                        snapshot_required,
-                        local_policy_decision,
-                        network_policy_decision,
-                        source_policy_decision,
-                    );
                 self.approval.pending = Some(PendingApproval {
+                    approval_request_id: approval_identity.approval_request_id,
                     call: call.clone(),
                     session_grant_available,
+                    session_grant_unavailable_reason,
                     spec,
+                    effects,
                     subjects,
+                    analysis,
+                    containment,
+                    safe_summary,
+                    decision_reasons,
                     network_effect,
                     local_policy_decision,
                     network_policy_decision,
@@ -126,6 +128,7 @@ impl EventHandler for AppState {
                     snapshot_required,
                     command_permission_matches,
                     preview,
+                    presentation_state: super::super::ApprovalPresentationState::Pending,
                 });
                 self.active_pane = PaneFocus::Activity;
                 self.approval.scroll_back = 0;
@@ -143,9 +146,19 @@ impl EventHandler for AppState {
             }
             RunEvent::ToolApprovalResolved {
                 call_id,
+                approval_request_id,
                 approved,
                 reason,
             } => {
+                if self.approval.pending.as_ref().is_some_and(|pending| {
+                    pending.call.id != call_id || pending.approval_request_id != approval_request_id
+                }) {
+                    self.push_event(
+                        "approval:resolved-ignored",
+                        format!("{call_id} {approval_request_id}"),
+                    );
+                    return Ok(());
+                }
                 let approved_agent_profile = approved.then(|| {
                     self.approval
                         .pending

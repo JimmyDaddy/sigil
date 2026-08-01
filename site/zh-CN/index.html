@@ -289,13 +289,13 @@ sigil</code></pre>
           <article class="feature-card">
             <p class="feature-kicker">执行前由你决定</p>
             <h3>危险操作先停一下</h3>
-            <p>写文件、执行命令、访问网络或调用外部集成前，Sigil 会说明影响范围，由你决定允许还是拒绝。</p>
+            <p>操作执行前，Sigil 会把检测到的副作用与权限策略分开，展示目标和执行约束，只在确实需要精确决定时询问。</p>
             <ul class="feature-benefits">
-              <li>文件与命令写得清楚</li>
-              <li>可选择单次或会话内允许</li>
+              <li>副作用、目标与执行约束</li>
+              <li>精确单次或有边界的会话授权</li>
             </ul>
             <div class="feature-visual feature-diff" aria-hidden="true">
-              <div class="feature-visual-bar"><span>审批 · README.md</span><b>请检查</b></div>
+              <div class="feature-visual-bar"><span>文件写入 · README.md</span><b>网络已禁止</b></div>
               <code><span class="diff-remove">- npm install sigil</span><span class="diff-add">+ npm install @sigil-ai/sigil@alpha</span></code>
               <div class="feature-visual-actions"><span>拒绝</span><strong>仅允许这次</strong></div>
             </div>

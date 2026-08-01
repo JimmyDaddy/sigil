@@ -1,73 +1,14 @@
 use super::*;
 
-pub(in crate::runner) fn refresh_terminal_task_statuses(
-    runtime: &tokio::runtime::Runtime,
-    registry: &ToolRegistry,
-    options: &AgentRunOptions,
-    current_session_log_path: &Path,
-    current_session: &mut Option<Session>,
-    active_task_ids: &BTreeSet<TerminalTaskId>,
-) -> std::result::Result<Vec<(TerminalTaskEntry, Vec<SessionLogEntry>)>, String> {
-    let Some(session) = current_session.as_mut() else {
-        return Ok(Vec::new());
-    };
-    if active_task_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mutation_recorder = MutationEventRecorder::new(
-        JsonlSessionStore::new(current_session_log_path)
-            .map_err(|error| format!("failed to open mutation recorder: {error:#}"))?,
-    );
-    let tool_context = ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs)
-        .with_mutation_recorder(mutation_recorder.clone());
-    let mut updates = Vec::new();
-    for task_id in active_task_ids {
-        let call = ToolCall {
-            id: format!("tui-terminal-refresh-{}", task_id.as_str()),
-            name: "terminal_read".to_owned(),
-            args_json: serde_json::json!({
-                "task_id": task_id.as_str(),
-                "limit_bytes": 1
-            })
-            .to_string(),
-        };
-        let result = match runtime.block_on(registry.execute(tool_context.clone(), call)) {
-            Ok(result) if !result.is_error() => result,
-            Ok(_) | Err(_) => continue,
-        };
-        let Some(entry) = terminal_read_latest_entry(&result)? else {
-            continue;
-        };
-        if !entry.status.is_terminal() {
-            continue;
-        }
-
-        session
-            .append_control(ControlEntry::TerminalTask(entry.clone()))
-            .map_err(|error| format!("failed to append terminal task state: {error:#}"))?;
-        if let Some(profile) =
-            terminal_start_execution_profile_for_task(session.entries(), &entry.handle.task_id)
-        {
-            mutation_recorder
-                .reconcile_execution_mutation_profile(&options.workspace_root, &profile)
-                .map_err(|error| {
-                    format!("failed to reconcile terminal task workspace mutation: {error:#}")
-                })?;
-        }
-        updates.push((entry, session.entries().to_vec()));
-    }
-    Ok(updates)
-}
-
 pub(in crate::runner) fn cancel_terminal_task(
     runtime: &tokio::runtime::Runtime,
     registry: ToolRegistry,
+    terminal_control: &sigil_tools_builtin::TerminalTaskControlHandle,
     root_config: &RootConfig,
     options: &AgentRunOptions,
     current_session_log_path: &Path,
     current_session: &mut Option<Session>,
-    task_id: String,
+    identity: &TerminalTaskControlIdentity,
 ) -> std::result::Result<(TerminalTaskEntry, Vec<SessionLogEntry>), String> {
     let mut session = load_session_with_runtime_attachments(
         &root_config.agent.runtime_provider,
@@ -76,6 +17,10 @@ pub(in crate::runner) fn cancel_terminal_task(
         current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before terminal cancel: {error:#}"))?;
+    if session.session_scope_id() != identity.session_scope_id {
+        return Err("terminal cancel session owner changed".to_owned());
+    }
+    let task_id = identity.task_id.clone();
     let terminal_task_id = TerminalTaskId::new(task_id.clone())
         .map_err(|error| format!("invalid terminal task id: {error:#}"))?;
     let projection = session.terminal_task_projection();
@@ -86,6 +31,12 @@ pub(in crate::runner) fn cancel_terminal_task(
         .ok_or_else(|| format!("terminal task {task_id} is not in the current session"))?;
     if !previous.status.is_active() {
         return Err(format!("terminal task {task_id} is not running"));
+    }
+    if previous.generation != identity.expected_generation {
+        return Err(format!(
+            "terminal task {task_id} generation changed from {} to {}",
+            identity.expected_generation, previous.generation
+        ));
     }
 
     let terminal_mutation_profile =
@@ -101,9 +52,18 @@ pub(in crate::runner) fn cancel_terminal_task(
         name: "terminal_cancel".to_owned(),
         args_json: serde_json::json!({ "task_id": task_id }).to_string(),
     };
-    let subjects = registry
-        .permission_subjects(&tool_context, &call)
+    let permission_plan = registry
+        .permission_plan(&tool_context, &call)
         .map_err(|error| format!("invalid terminal cancel arguments: {error:#}"))?;
+    let subjects = permission_plan.subjects.clone();
+    session
+        .append_control(ControlEntry::ToolPermissionPlannedV2(Box::new(
+            sigil_kernel::ToolPermissionPlannedV2Entry::from_plan(&call.id, &permission_plan)
+                .map_err(|error| {
+                    format!("failed to project terminal cancel permission plan: {error:#}")
+                })?,
+        )))
+        .map_err(|error| format!("failed to append terminal cancel permission plan: {error:#}"))?;
     let cancel_mutation_profile = registry
         .execution_mutation_profile(&tool_context, &call)
         .map_err(|error| {
@@ -115,16 +75,30 @@ pub(in crate::runner) fn cancel_terminal_task(
         &subjects,
         ToolExecutionStatus::Started,
         None,
+        Some(&permission_plan),
         cancel_mutation_profile.as_ref(),
         None,
     )
     .map_err(|error| format!("failed to append terminal cancel audit: {error:#}"))?;
 
     let execution_started = Instant::now();
-    let result = match runtime
-        .block_on(registry.execute_after_started_audit(tool_context.clone(), call.clone()))
-    {
-        Ok(result) => result,
+    let owner_result = runtime.block_on(async {
+        let before = terminal_control
+            .status(&options.workspace_root, &terminal_task_id)
+            .await?;
+        if before.generation != identity.expected_generation {
+            anyhow::bail!(
+                "live terminal generation changed from {} to {}",
+                identity.expected_generation,
+                before.generation
+            );
+        }
+        terminal_control
+            .cancel(&options.workspace_root, &terminal_task_id)
+            .await
+    });
+    let result = match owner_result {
+        Ok(entry) => terminal_cancel_result(&call, &entry),
         Err(error) => ToolResult::error(
             call.id.clone(),
             call.name.clone(),
@@ -144,6 +118,7 @@ pub(in crate::runner) fn cancel_terminal_task(
         &subjects,
         execution_status,
         duration_ms,
+        Some(&permission_plan),
         None,
         Some(&result),
     )
@@ -168,14 +143,50 @@ pub(in crate::runner) fn cancel_terminal_task(
     Ok((entry, entries))
 }
 
-pub(in crate::runner) fn terminal_read_latest_entry(
-    result: &ToolResult,
-) -> std::result::Result<Option<TerminalTaskEntry>, String> {
-    let Some(details) = result.metadata.details.get("terminal_task") else {
-        return Ok(None);
-    };
-    TerminalTaskEntry::from_tool_result_details(details)
-        .map_err(|error| format!("invalid terminal read status result: {error:#}"))
+fn terminal_cancel_result(call: &ToolCall, entry: &TerminalTaskEntry) -> ToolResult {
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        format!(
+            "cancelled terminal task {}\nstatus: {}\nlog: {}",
+            entry.handle.task_id.as_str(),
+            entry.status.as_str(),
+            entry.handle.log_ref
+        ),
+        ToolResultMeta {
+            truncated: entry.output_truncated,
+            total_bytes: Some(entry.output_total_bytes),
+            limit_bytes: entry.output_limit_bytes,
+            details: serde_json::json!({
+                "schema_version": entry.schema_version,
+                "task_id": entry.handle.task_id.as_str(),
+                "generation": entry.generation,
+                "status": entry.status.as_str(),
+                "status_detail": &entry.status,
+                "readiness": &entry.readiness,
+                "command_sha256": &entry.handle.command_sha256,
+                "cwd_label": &entry.handle.cwd_label,
+                "shell_label": &entry.handle.shell_label,
+                "shell_sha256": &entry.handle.shell_sha256,
+                "log_ref": &entry.handle.log_ref,
+                "created_at_ms": entry.handle.created_at_ms,
+                "updated_at_ms": entry.updated_at_ms,
+                "execution_backend": &entry.handle.execution_backend,
+                "execution_backend_capabilities": &entry.handle.execution_backend_capabilities,
+                "enforcement_backend": &entry.handle.enforcement_backend,
+                "enforcement_backend_capabilities": &entry.handle.enforcement_backend_capabilities,
+                "sandbox_profile": &entry.handle.sandbox_profile,
+                "output_preview": &entry.output_preview,
+                "output_hash": &entry.output_hash,
+                "output_truncated": entry.output_truncated,
+                "output_total_bytes": entry.output_total_bytes,
+                "output_limit_bytes": entry.output_limit_bytes,
+                "output_termination_reason": &entry.output_termination_reason,
+                "cleanup": &entry.cleanup
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
 }
 
 pub(in crate::runner) fn terminal_cancel_entry_from_result(
@@ -250,6 +261,7 @@ pub(in crate::runner) fn append_terminal_cancel_execution_audit(
     subjects: &[ToolSubject],
     status: ToolExecutionStatus,
     duration_ms: Option<u64>,
+    permission_plan: Option<&sigil_kernel::ToolPermissionPlanV2>,
     execution_mutation_profile: Option<&ExecutionMutationProfile>,
     result: Option<&ToolResult>,
 ) -> anyhow::Result<()> {
@@ -259,8 +271,8 @@ pub(in crate::runner) fn append_terminal_cancel_execution_audit(
             ToolResultStatus::Error(error) => Some(error.clone()),
         };
         (
-            result.metadata.changed_files.clone(),
-            result.metadata.clone(),
+            Vec::new(),
+            durable_terminal_tool_result_metadata(&result.metadata),
             error,
             Some(tool_result_model_content_hash(result)),
         )
@@ -272,6 +284,10 @@ pub(in crate::runner) fn append_terminal_cancel_execution_audit(
         });
         if let Some(profile) = execution_mutation_profile {
             details["execution_mutation_profile"] = serde_json::to_value(profile)?;
+        }
+        if let Some(plan) = permission_plan {
+            details["permission_plan_hash"] = serde_json::Value::String(plan.plan_hash.clone());
+            details["execution_containment"] = serde_json::to_value(&plan.containment)?;
         }
         (
             Vec::new(),
@@ -294,6 +310,55 @@ pub(in crate::runner) fn append_terminal_cancel_execution_audit(
         error,
         model_content_hash,
     })))
+}
+
+pub(in crate::runner) fn durable_terminal_tool_result_metadata(
+    metadata: &ToolResultMeta,
+) -> ToolResultMeta {
+    const DURABLE_TERMINAL_DETAIL_KEYS: &[&str] = &[
+        "cleanup",
+        "command_sha256",
+        "created_at_ms",
+        "cwd_label",
+        "generation",
+        "log_ref",
+        "output_hash",
+        "output_limit_bytes",
+        "output_termination_reason",
+        "output_total_bytes",
+        "output_truncated",
+        "readiness",
+        "schema_version",
+        "shell_label",
+        "shell_sha256",
+        "status",
+        "status_detail",
+        "task_id",
+        "updated_at_ms",
+    ];
+    let details = metadata.details.as_object().map_or_else(
+        || serde_json::Value::Object(serde_json::Map::new()),
+        |object| {
+            serde_json::Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, value)| {
+                        DURABLE_TERMINAL_DETAIL_KEYS.contains(&key.as_str()) && !value.is_null()
+                    })
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            sigil_kernel::safe_persistence_json_value(value.clone()),
+                        )
+                    })
+                    .collect(),
+            )
+        },
+    );
+    ToolResultMeta {
+        details,
+        ..ToolResultMeta::default()
+    }
 }
 
 pub(in crate::runner) fn terminal_cancel_task_id_from_call(call: &ToolCall) -> String {

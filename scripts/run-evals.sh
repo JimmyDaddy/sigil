@@ -128,6 +128,7 @@ if [[ "${mode}" == "deterministic" ]]; then
   mkdir -p "${output_dir}"
   node dev/evals/generate-orchestration-corpus.mjs --check
   ./scripts/check-orchestration-deterministic.sh
+  cargo test -p sigil-tools-builtin bash_permission_plan_matches_deterministic_risk_corpus
   SIGIL_DETERMINISTIC_EVAL_REPORT_DIR="${output_dir}" \
     cargo test -p sigil-kernel eval_report_writes_deterministic_artifacts -- --nocapture
 else
