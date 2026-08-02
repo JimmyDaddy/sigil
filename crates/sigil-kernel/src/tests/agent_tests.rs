@@ -850,6 +850,15 @@ struct ExternalWriteTool {
     external_path: std::path::PathBuf,
 }
 
+fn synthetic_external_test_root() -> Result<PathBuf> {
+    let current_dir = std::env::current_dir()?;
+    current_dir
+        .ancestors()
+        .last()
+        .map(|root| root.join("sigil-test-external"))
+        .ok_or_else(|| std::io::Error::other("current directory has no filesystem root").into())
+}
+
 #[async_trait]
 impl Tool for EchoTool {
     fn spec(&self) -> crate::ToolSpec {
@@ -7837,8 +7846,7 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
 
 #[tokio::test]
 async fn agent_requests_approval_for_external_directory_when_disabled_interactive() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let external_path = temp.path().canonicalize()?.join("outside.txt");
+    let external_path = synthetic_external_test_root()?.join("outside.txt");
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ExternalWriteTool {
@@ -7893,8 +7901,7 @@ async fn agent_requests_approval_for_external_directory_when_disabled_interactiv
 
 #[tokio::test]
 async fn agent_returns_external_directory_required_when_disabled_headless() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let external_path = temp.path().canonicalize()?.join("outside.txt");
+    let external_path = synthetic_external_test_root()?.join("outside.txt");
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ExternalWriteTool {
@@ -7945,8 +7952,7 @@ async fn agent_returns_external_directory_required_when_disabled_headless() -> R
 
 #[tokio::test]
 async fn agent_requests_approval_for_external_directory_default_ask() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let external_path = temp.path().canonicalize()?.join("outside.txt");
+    let external_path = synthetic_external_test_root()?.join("outside.txt");
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ExternalWriteTool {
@@ -7997,8 +8003,11 @@ async fn agent_requests_approval_for_external_directory_default_ask() -> Result<
 
 #[tokio::test]
 async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let external_root = temp.path().canonicalize()?;
+    let external_root = synthetic_external_test_root()?;
+    let external_rule_glob = external_root
+        .parent()
+        .map(|root| root.join("**").display().to_string())
+        .ok_or_else(|| std::io::Error::other("external test path has no filesystem root"))?;
     let external_path = external_root.join("outside.txt");
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
@@ -8027,7 +8036,7 @@ async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
                     external_directory: ExternalDirectoryConfig {
                         enabled: true,
                         rules: vec![ExternalDirectoryRule {
-                            path_glob: format!("{}/**", external_root.display()),
+                            path_glob: external_rule_glob,
                             mode: ApprovalMode::Allow,
                         }],
                         ..ExternalDirectoryConfig::default()

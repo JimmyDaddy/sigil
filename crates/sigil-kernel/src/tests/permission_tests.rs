@@ -110,6 +110,15 @@ fn external_path_subject(path: PathBuf) -> ToolSubject {
     )
 }
 
+fn synthetic_external_test_root() -> Result<PathBuf> {
+    let current_dir = std::env::current_dir()?;
+    current_dir
+        .ancestors()
+        .last()
+        .map(|root| root.join("sigil-test-external"))
+        .ok_or_else(|| std::io::Error::other("current directory has no filesystem root").into())
+}
+
 fn external_canonical_path_subject(path: PathBuf) -> ToolSubject {
     ToolSubject::path_with_scope(
         path.display().to_string(),
@@ -1325,8 +1334,7 @@ fn permission_external_directory_enabled_defaults_to_ask() -> Result<()> {
 
 #[test]
 fn session_grant_availability_requires_stable_low_or_medium_risk_scope() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let external_path = temp.path().canonicalize()?.join("note.txt");
+    let external_path = synthetic_external_test_root()?.join("note.txt");
     let config = PermissionConfig {
         external_directory: ExternalDirectoryConfig {
             enabled: true,
