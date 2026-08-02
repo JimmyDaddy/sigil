@@ -339,6 +339,13 @@ fn shell_follow_option(arg: &str) -> bool {
 }
 
 fn powershell_persistent_command_reason(command: &str) -> Option<&'static str> {
+    if command
+        .trim_end()
+        .strip_suffix('&')
+        .is_some_and(|prefix| !prefix.ends_with('&'))
+    {
+        return Some("PowerShell background operator `&`");
+    }
     command
         .split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|'))
         .any(|word| word.eq_ignore_ascii_case("start-job"))
@@ -393,7 +400,6 @@ fn known_finite_terminal_command_reason_from_tokens(
                 TerminalSegmentDurationEvidence::KnownFinite(reason) => {
                     first_reason.get_or_insert(reason);
                 }
-                TerminalSegmentDurationEvidence::FiniteSupport => {}
                 TerminalSegmentDurationEvidence::Persistent
                 | TerminalSegmentDurationEvidence::Unknown => return None,
             }
@@ -404,7 +410,6 @@ fn known_finite_terminal_command_reason_from_tokens(
 
 enum TerminalSegmentDurationEvidence {
     KnownFinite(String),
-    FiniteSupport,
     Persistent,
     Unknown,
 }
@@ -460,8 +465,12 @@ fn terminal_segment_duration_evidence(
     if let Some(reason) = known_reason {
         return TerminalSegmentDurationEvidence::KnownFinite(reason);
     }
-    if command_family_for_simple_segment_with_depth(words, depth).is_known_finite() {
-        TerminalSegmentDurationEvidence::FiniteSupport
+    let family = command_family_for_simple_segment_with_depth(words, depth);
+    if family.is_known_finite() {
+        TerminalSegmentDurationEvidence::KnownFinite(format!(
+            "known finite command family `{}`",
+            family.as_str()
+        ))
     } else {
         TerminalSegmentDurationEvidence::Unknown
     }

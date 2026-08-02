@@ -52,6 +52,15 @@ fn bash_tool(test_root: &Path) -> BashTool {
     }
 }
 
+fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
+    Ok(BashTool {
+        scratch_root: test_root.join("scratch-cache").join("tmp"),
+        scratch_label: "cache/tmp".to_owned(),
+        backend: Arc::new(LocalExecutionBackend),
+        shell: crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
+    })
+}
+
 #[derive(Default)]
 struct RecordingProgressSink {
     events: Mutex<Vec<ToolProgressEvent>>,
@@ -70,7 +79,7 @@ impl ToolProgressSink for RecordingProgressSink {
 #[test]
 fn bash_permission_plan_rejects_persistent_shell_constructs() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     for command in [
@@ -98,7 +107,7 @@ fn bash_permission_plan_rejects_persistent_shell_constructs() -> Result<()> {
 #[tokio::test]
 async fn bash_execution_rechecks_finite_only_contract() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let error = tool
@@ -2418,7 +2427,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
 #[test]
 fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     let plan = tool.permission_plan(
         &context,
@@ -2461,7 +2470,7 @@ fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()>
 #[test]
 fn bash_permission_plan_fails_closed_for_dynamic_shell_escape_hatches() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -2508,7 +2517,7 @@ fn bash_permission_plan_fails_closed_for_dynamic_shell_escape_hatches() -> Resul
 #[test]
 fn bash_permission_plan_fails_closed_for_shell_syntax_bypass_corpus() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -2577,10 +2586,11 @@ fn bash_permission_plan_fails_closed_for_shell_syntax_bypass_corpus() -> Result<
 #[test]
 fn bash_permission_plan_matches_deterministic_risk_corpus() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
+    registry.register(Arc::new(posix_bash_tool(workspace.path())?));
     let spec = registry.spec_for("bash").context("bash spec must exist")?;
     let corpus: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2673,7 +2683,7 @@ fn bash_permission_plan_matches_deterministic_risk_corpus() -> Result<()> {
 #[test]
 fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     let workspace_plan =
         tool.permission_plan(&context, &json!({ "command": "cat \"$PWD/Cargo.toml\"" }))?;
@@ -3006,7 +3016,7 @@ fn bash_permission_plan_does_not_claim_workspace_containment_for_redirection_esc
 #[test]
 fn bash_permission_plan_enforces_command_and_ast_resource_limits() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let oversized = format!("printf {}", "x".repeat(64 * 1024));
@@ -3030,7 +3040,7 @@ fn bash_permission_plan_enforces_command_and_ast_resource_limits() -> Result<()>
 #[test]
 fn bash_permission_plan_models_find_and_redirection_file_effects() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let delete = tool.permission_plan(&context, &json!({ "command": "find . -delete" }))?;
@@ -3087,7 +3097,7 @@ fn bash_permission_plan_models_find_and_redirection_file_effects() -> Result<()>
 fn bash_permission_plan_traverses_compound_pipeline_newline_and_attached_redirection() -> Result<()>
 {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let compound = tool.permission_plan(
@@ -3125,7 +3135,7 @@ fn bash_permission_plan_traverses_compound_pipeline_newline_and_attached_redirec
 #[test]
 fn bash_permission_plan_recurses_static_wrappers_and_limits_depth() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -3167,7 +3177,7 @@ fn bash_permission_plan_recurses_static_wrappers_and_limits_depth() -> Result<()
 #[test]
 fn bash_permission_plan_classifies_program_specific_escape_effects() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = posix_bash_tool(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let safe_git =
@@ -3206,8 +3216,8 @@ fn bash_permission_plan_classifies_program_specific_escape_effects() -> Result<(
 #[test]
 fn bash_session_scope_and_environment_binding_are_exact() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let first_tool = bash_tool(workspace.path());
-    let mut second_tool = bash_tool(workspace.path());
+    let first_tool = posix_bash_tool(workspace.path())?;
+    let mut second_tool = posix_bash_tool(workspace.path())?;
     second_tool.scratch_root = workspace.path().join("different-scratch");
     let context = ToolContext::new(workspace.path(), 30);
 
@@ -4160,7 +4170,8 @@ fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
             "terminal_start",
             json!({
                 "command": "printf payload > \"$SIGIL_SCRATCH_DIR/result.txt\"; while :; do sleep 60; done",
-                "mode": "background"
+                "mode": "background",
+                "shell": "sh"
             }),
         ),
     )?;
@@ -4176,7 +4187,8 @@ fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
             "terminal_start",
             json!({
                 "command": "printf payload > \"$TMPDIR/result.txt\"; while :; do sleep 60; done",
-                "mode": "background"
+                "mode": "background",
+                "shell": "sh"
             }),
         ),
     )?;
@@ -4329,16 +4341,8 @@ fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
             json!({ "command": "tail -f app.log", "mode": "background" }),
         ),
     )?;
-    #[cfg(unix)]
-    {
-        assert_eq!(bash.operation, ToolOperation::ExecuteDestructiveCommand);
-        assert_eq!(terminal.operation, ToolOperation::ExecuteMutatingCommand);
-    }
-    #[cfg(windows)]
-    {
-        assert_eq!(bash.operation, ToolOperation::ExecuteUnknownCommand);
-        assert_eq!(terminal.operation, ToolOperation::ExecuteMutatingCommand);
-    }
+    assert_eq!(bash.operation, ToolOperation::ExecuteDestructiveCommand);
+    assert_eq!(terminal.operation, ToolOperation::ExecuteMutatingCommand);
     Ok(())
 }
 
@@ -7554,6 +7558,34 @@ fn powershell_arguments_freeze_noninteractive_utf8_and_exit_propagation() -> Res
     assert!(args[4].contains("System.Text.UTF8Encoding"));
     assert!(args[4].contains("LASTEXITCODE"));
     assert!(args[4].contains("exit 1"));
+    Ok(())
+}
+
+#[test]
+fn powershell_bash_rejects_native_background_jobs() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let mut tool = bash_tool(workspace.path());
+    tool.shell = crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?;
+    let context = ToolContext::new(workspace.path(), 30);
+
+    for command in ["Start-Job { Get-Process }", "Get-Process &"] {
+        let error = tool
+            .permission_plan(&context, &json!({ "command": command }))
+            .expect_err("PowerShell background work must use terminal_start");
+        assert!(error.to_string().contains("terminal_start"), "{command}");
+    }
+    Ok(())
+}
+
+#[test]
+fn native_shells_redirect_known_finite_commands_to_bash() -> Result<()> {
+    let shell = crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?;
+    let analysis =
+        crate::shell::analyze_shell_command_with_shell(Path::new("."), "git status", &shell)?;
+    let reason =
+        crate::shell::known_finite_terminal_command_reason("git status", &shell, &analysis)
+            .context("git status should remain finite across native shell dialects")?;
+    assert!(reason.contains("known finite command family"));
     Ok(())
 }
 
