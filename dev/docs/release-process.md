@@ -43,6 +43,26 @@ assets and fails closed if an existing draft asset differs; it never uses
 `--clobber`. The tag run does not publish npm, make the release public, or update
 Homebrew.
 
+For an alpha or beta, maintainers may publish the frozen TUI npm packages before
+the signed Desktop matrix is complete:
+
+```bash
+gh workflow run release.yml \
+  --ref main \
+  -f publish=false \
+  -f publish_tui=true \
+  -f tag=v0.0.1-beta.1
+```
+
+This path re-verifies the commit-bound candidate manifest and npm tarball
+digests, publishes platform packages before the root `@sigil-ai/sigil` package,
+and proves the requested npm dist-tag converged. It deliberately keeps the
+GitHub Release as a draft and does not publish standalone archives, Homebrew, a
+Desktop update manifest, or Desktop installers. Never make the GitHub Release
+public before the Desktop matrix is complete: immutable releases cannot accept
+the remaining Desktop assets afterward. The later full publication is
+idempotent and verifies an already-published exact npm version before continuing.
+
 For a beta, build and upload the signed Desktop matrix from the tagged checkout:
 
 ```bash
@@ -60,8 +80,8 @@ version, commit, and architecture checks; binds local and remote tag/main/CI;
 keeps identical remote bytes; and requires explicit `--replace` before deleting
 a different draft asset.
 
-Final publication requires a manual dispatch with `publish: true` and the
-existing `v`-prefixed tag. This path does **not** rebuild TUI or regenerate npm
+Final publication requires a manual dispatch with `publish: true`,
+`publish_tui: false`, and the existing `v`-prefixed tag. This path does **not** rebuild TUI or regenerate npm
 packages. It downloads the candidate manifest and npm tarballs already frozen
 in the draft, checks every candidate digest against GitHub's release-asset
 digest, and for a beta requires both macOS Desktop architectures. Native arm64
@@ -104,6 +124,8 @@ append Desktop assets after publication.
    never publishes the draft.
 9. Upload the signed Desktop DMGs, checksums, updater archives, and updater
    signatures to the same draft.
+   An optional TUI-first dispatch may publish only the already-staged npm
+   packages at this point while preserving the draft release.
 10. On explicit publish, download and verify the staged candidate manifest and
    npm tarballs without rebuilding TUI. Require the beta Desktop asset matrix, verify the DMG
    and updater archive checksums, cryptographically verify both updater
