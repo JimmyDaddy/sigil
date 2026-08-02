@@ -12,7 +12,7 @@ Sigil 仍处于早期预览阶段。核心 Desktop 与 TUI 工作流已经可用
 |---|---|
 | 模型服务 | DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic 与 Gemini；见[模型服务指南](providers.md) |
 | 非交互入口 | `run` 支持纯文本、JSON 和 JSONL；高级集成可以使用带认证且仅监听本机的 `serve` |
-| 平台 | Desktop beta 候选以 Apple 芯片与 Intel 的签名、公证 DMG 为目标；完整矩阵通过发布门禁前不会公开。TUI 主要测试 macOS 与 Linux，Windows 使用原生 PowerShell并在 Doctor 中显示限制 |
+| 平台 | 公开 Desktop beta 提供 Apple 芯片与 Intel 的签名、公证 DMG。TUI 主要测试 macOS 与 Linux；Windows 使用原生 PowerShell，并在 Doctor 中显示限制 |
 
 ## 有限制或高级用法
 
@@ -28,7 +28,7 @@ Sigil 仍处于早期预览阶段。核心 Desktop 与 TUI 工作流已经可用
 
 ## 暂不支持
 
-目前尚不提供无人值守的后台更新安装、自动重启或稳定插件 API，也不承诺跨平台一致的沙箱能力。Desktop beta 公开后会在 DMG 旁发布分架构的签名更新包，但是否安装和何时重启仍由用户决定。桌面应用或其工作区服务重启后，同样无法继续之前仍在运行的子进程。
+目前尚不提供无人值守的后台更新安装、自动重启或稳定插件 API，也不承诺跨平台一致的沙箱能力。Desktop beta 会在 DMG 旁发布分架构的签名更新包，但是否安装和何时重启仍由用户决定。桌面应用或其工作区服务重启后，同样无法继续之前仍在运行的子进程。
 
 精确命令和键位见[参考](reference.md)，配置字段见[配置字段参考](configuration-reference.md)，问题处理见[排障](troubleshooting.md)。
 

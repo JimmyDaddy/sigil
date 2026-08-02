@@ -47,7 +47,7 @@
 ## 一分钟内开始
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 cd /path/to/your/project
 sigil
 ```

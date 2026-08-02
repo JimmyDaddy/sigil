@@ -19,8 +19,8 @@ The GitHub Pages documentation tracks `main`, so features listed under [Unreleas
 
 | Channel | Current coverage | Use when |
 | --- | --- | --- |
-| Desktop beta candidate | Signed and Apple-notarized Apple Silicon and Intel DMGs appear only after the complete beta draft passes publication gates. | You want a native conversation, approval, and settings workspace after the first Desktop beta is public. |
-| npm alpha | Platform-specific optional binary packages behind `@sigil-ai/sigil@alpha`. | You want the current public cross-platform TUI preview. |
+| Desktop beta | Signed and Apple-notarized Apple Silicon and Intel DMGs published with the beta release. | You want a native conversation, approval, and settings workspace on macOS. |
+| npm beta | Platform-specific optional binary packages behind `@sigil-ai/sigil@beta`. | You want the current public cross-platform TUI preview. |
 | Homebrew tap | macOS formula in `JimmyDaddy/homebrew-sigil`, installed as `sigil-ai` while exposing the `sigil` command. | You manage terminal tools with Homebrew. |
 | Cargo git tag | Builds from the tagged Git release with your local Rust toolchain. | You already use Rust tooling or need a source-based install. |
 | GitHub release archive | Downloadable release archives with checksum files. | You need a manual or offline install. |
@@ -32,14 +32,14 @@ Open the [GitHub prereleases page](https://github.com/JimmyDaddy/sigil/releases)
 - Apple Silicon: `Sigil_<version>_aarch64-apple-darwin.dmg`
 - Intel: `Sigil_<version>_x86_64-apple-darwin.dmg`
 
-Each beta draft is published only after both DMGs, their SHA-256 files, and the signed update archives are present. The DMGs are Developer ID-signed, Apple-notarized, stapled, and verified before upload. Open the DMG, drag Sigil to Applications, then launch it normally.
+Each beta release is published only after both DMGs, their SHA-256 files, and the signed update archives are present. The DMGs are Developer ID-signed, Apple-notarized, stapled, and verified before upload. Open the DMG, drag Sigil to Applications, then launch it normally.
 
 ## Install TUI With npm
 
 The npm package is scoped as `@sigil-ai/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 ```
 
 Confirm the install:
@@ -73,7 +73,7 @@ The release workflow generates `sigil-ai.rb` from the macOS release archives. Th
 For the first release, Cargo installs from the Git tag rather than crates.io:
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil
 ```
 
 This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
@@ -126,9 +126,9 @@ The archive contains the `sigil` binary plus the user-facing README, logo assets
 Use the installer you used originally:
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

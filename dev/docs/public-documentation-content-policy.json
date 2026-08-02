@@ -1050,7 +1050,7 @@
       "role": "user-visible-release-history",
       "heading_keys": [
         "unreleased-main",
-        "v0-0-1-beta-1-2026-07-31",
+        "v0-0-1-beta-1-2026-08-02",
         "v0-0-1-alpha-6-2026-07-30",
         "v0-0-1-alpha-5-2026-07-18",
         "v0-0-1-alpha-4-2026-07-16",
@@ -1063,7 +1063,7 @@
       "heading_labels": {
         "en": [
           "Unreleased - main",
-          "v0.0.1-beta.1 - 2026-07-31",
+          "v0.0.1-beta.1 - 2026-08-02",
           "v0.0.1-alpha.6 - 2026-07-30",
           "v0.0.1-alpha.5 - 2026-07-18",
           "v0.0.1-alpha.4 - 2026-07-16",
@@ -1074,7 +1074,7 @@
         ],
         "zh-CN": [
           "尚未发布 - main",
-          "v0.0.1-beta.1 - 2026-07-31",
+          "v0.0.1-beta.1 - 2026-08-02",
           "v0.0.1-alpha.6 - 2026-07-30",
           "v0.0.1-alpha.5 - 2026-07-18",
           "v0.0.1-alpha.4 - 2026-07-16",
@@ -1155,37 +1155,37 @@
     {
       "path": "README.md",
       "rule": "installation-authority",
-      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "line_pattern": "npm install -g @sigil-ai/sigil@beta",
       "reason": "The repository entry keeps one recommended first-install command."
     },
     {
       "path": "README.zh-CN.md",
       "rule": "installation-authority",
-      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "line_pattern": "npm install -g @sigil-ai/sigil@beta",
       "reason": "The localized repository entry mirrors the one recommended command."
     },
     {
       "path": "docs/en/quickstart.md",
       "rule": "installation-authority",
-      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "line_pattern": "npm install -g @sigil-ai/sigil@beta",
       "reason": "Quickstart needs one executable path to first success."
     },
     {
       "path": "docs/zh-CN/quickstart.md",
       "rule": "installation-authority",
-      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "line_pattern": "npm install -g @sigil-ai/sigil@beta",
       "reason": "Localized Quickstart mirrors the one executable first-success path."
     },
     {
       "path": "site/index.html",
       "rule": "installation-authority",
-      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "line_pattern": "npm install -g @sigil-ai/sigil@beta",
       "reason": "The homepage keeps one recommended first-install command."
     },
     {
       "path": "site/zh-CN/index.html",
       "rule": "installation-authority",
-      "line_pattern": "npm install -g @sigil-ai/sigil@alpha",
+      "line_pattern": "npm install -g @sigil-ai/sigil@beta",
       "reason": "The localized homepage mirrors the one recommended command."
     },
     {

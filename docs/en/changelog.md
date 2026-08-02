@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-07-31,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,11 +8,18 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+No user-facing changes have been recorded after `v0.0.1-beta.1` yet.
+
+## v0.0.1-beta.1 - 2026-08-02
+
+This beta publishes the first signed macOS Desktop distribution and the matching cross-platform TUI beta channel.
+
 - Shell permissions now use one immutable, structured plan across policy, approval, audit, and
   execution. Compound validation commands are classified per child command; dangerous flags,
   redirections, dynamic syntax, protected targets, and missing sandbox capabilities continue to
   fail closed. Exact, containment-bound session grants reduce repeated approval without widening
-  access to unrelated commands.
+  access to unrelated commands. Native PowerShell background work is kept out of the one-shot
+  Shell path, and unresolved shell paths remain conservative instead of aborting the plan.
 - Approval decisions now converge from the exact command receipt in both Desktop and TUI instead
   of waiting solely for a later live event. Accepted, resolving, execution-started, stale,
   expired, uncertain, and terminal states are distinct and protected against older receipts.
@@ -29,14 +36,8 @@ This page lists user-facing release notes. For support boundaries and early-prev
   current-format replacement in Settings; TUI Quick Setup offers the same replacement path.
   Neither surface reuses or migrates values from the invalid file, and both refuse to overwrite a
   concurrently repaired valid config.
-
-## v0.0.1-beta.1 - 2026-07-31
-
-This is the `v0.0.1-beta.1` release candidate. It is not a public release until the signed Desktop matrix and final publication gates pass.
-
-- Prepared the public macOS Desktop beta channel with signed, Apple-notarized Apple Silicon and Intel DMGs plus signed architecture-specific update bundles; publication remains gated on the complete matrix.
+- Published the macOS Desktop beta channel with signed, Apple-notarized Apple Silicon and Intel DMGs plus signed architecture-specific update bundles.
 - Added explicit version checks and updates across Desktop Settings, TUI `/update`, and CLI `sigil update`; managed installations receive their package-manager command, while standalone updates remain checksum/signature verified and never restart silently.
-- Release tags now stage a mutable draft first. The explicit publish run verifies all Desktop assets, makes the completed GitHub Release public, publishes npm with the matching `beta` or `alpha` dist-tag, and only then updates the website and Homebrew; this remains compatible with immutable GitHub Releases.
 - Updated the website, README, installation/status docs, and visual tour so Desktop and TUI are coequal entry points with architecture-specific download guidance, a real Desktop capture tour, and the existing TUI real-run demo.
 - `/compact` now treats the command itself as explicit intent: one invocation generates, validates, and atomically activates an admitted recoverable checkpoint without a confirmation modal. Failures keep the current context and remain visible with their exact reason.
 - Fixed semantic compaction discarding its own result as stale after its audited provider-attempt and usage records advanced the durable stream.

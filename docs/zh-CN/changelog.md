@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-07-31,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -8,9 +8,16 @@
 
 ## 尚未发布 - main
 
+`v0.0.1-beta.1` 之后暂未记录新的用户可见变更。
+
+## v0.0.1-beta.1 - 2026-08-02
+
+本 beta 正式发布首个已签名的 macOS Desktop 安装渠道，以及配套的跨平台 TUI beta 渠道。
+
 - Shell 权限现在通过同一份不可变结构化计划贯穿策略、审批、审计和执行。复合验证命令会逐个
   分析子命令；危险参数、重定向、动态语法、受保护目标和缺失的沙箱能力继续 fail closed。
-  精确绑定隔离能力的会话授权可以减少重复审批，但不会扩大到无关命令。
+  精确绑定隔离能力的会话授权可以减少重复审批，但不会扩大到无关命令。原生 PowerShell
+  后台任务不会进入一次性 Shell 路径；无法解析的 shell 路径会保守降级，而不是中断计划。
 - Desktop 与 TUI 的审批决定现在会在精确 command receipt 到达时立即收敛，不再只等待稍后的
   实时事件。已接受、正在解析、开始执行、过期、stale、状态待确认和终态相互区分，旧 receipt
   不能覆盖新状态。
@@ -24,14 +31,8 @@
   Desktop 现在会启动支持配置恢复的工作区服务，并在设置中提供明确的当前格式替换流程；
   TUI 快速设置也提供相同恢复路径。两端都不会复用或迁移原无效文件中的值，并会拒绝覆盖
   已被其他进程修复的有效配置。
-
-## v0.0.1-beta.1 - 2026-07-31
-
-以下是 `v0.0.1-beta.1` 发布候选内容；签名 Desktop 双架构矩阵与最终发布门禁全部通过前，不视为已公开发布。
-
-- 完成公开 macOS Desktop beta 渠道的发布候选准备：提供已签名并完成 Apple 公证的 Apple 芯片与 Intel DMG，以及分架构签名更新包；完整矩阵通过前不会公开。
+- 公开 macOS Desktop beta 渠道：提供已签名并完成 Apple 公证的 Apple 芯片与 Intel DMG，以及分架构签名更新包。
 - 为 Desktop 设置页、TUI `/update` 与 CLI `sigil update` 增加明确的版本检查和更新；包管理器安装会收到对应更新命令，独立安装包继续校验 checksum/签名，并且不会静默重启。
-- Release tag 现在先建立可补齐资源的 draft。明确 publish 时才校验全部 Desktop 资源、公开完整 GitHub Release、按 `beta` 或 `alpha` 发布 npm，最后更新官网与 Homebrew；该顺序兼容 immutable GitHub Releases。
 - 更新官网、README、安装/状态文档与界面导览，把 Desktop 与 TUI 作为并列入口，同时提供分架构下载指引、真实 Desktop 截图导览和已有 TUI 真实运行 Demo。
 - `/compact` 现在把命令本身视为明确意图：单次执行即可生成、校验并原子激活已准入的可恢复 checkpoint，不再打开确认弹窗。失败时保持当前上下文不变，并持续显示精确原因。
 - 修复语义压缩自己的 provider-attempt 与 usage 审计记录推进 durable stream 后，被错误判定为 stale 并丢弃结果的问题。

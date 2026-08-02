@@ -19,8 +19,8 @@
 
 | 渠道 | 当前覆盖 | 适合场景 |
 | --- | --- | --- |
-| Desktop beta 候选 | 完整 beta draft 通过发布门禁后，才会公开 Apple 芯片与 Intel 的签名、公证 DMG。 | 首个 Desktop beta 公开后，希望使用原生会话、审批与设置工作区。 |
-| npm alpha | `@sigil-ai/sigil@alpha` 会自动选择当前平台对应的软件包。 | 想安装当前已经公开的跨平台 TUI 预览版。 |
+| Desktop beta | 随 beta 发布 Apple 芯片与 Intel 的签名、公证 DMG。 | 希望在 macOS 使用原生会话、审批与设置工作区。 |
+| npm beta | `@sigil-ai/sigil@beta` 会自动选择当前平台对应的软件包。 | 想安装当前公开的跨平台 TUI 预览版。 |
 | Homebrew tap | macOS 配方位于 `JimmyDaddy/homebrew-sigil`，安装名是 `sigil-ai`，最终命令仍是 `sigil`。 | 习惯用 Homebrew 管理终端工具。 |
 | Cargo git tag | 使用本机 Rust 工具链，从带版本标签的 Git 发布构建。 | 已有 Rust 工具链，或希望从源码构建。 |
 | GitHub 发布压缩包 | 提供各平台的压缩包与校验文件。 | 需要手动或离线安装。 |
@@ -32,14 +32,14 @@
 - Apple 芯片：`Sigil_<version>_aarch64-apple-darwin.dmg`
 - Intel：`Sigil_<version>_x86_64-apple-darwin.dmg`
 
-每个 beta draft 只有在双架构 DMG、对应 SHA-256 和已签名更新包全部到齐后才会公开。DMG 上传前会完成 Developer ID 签名、Apple 公证、staple 与验证。打开 DMG，把 Sigil 拖入“应用程序”，然后正常启动。
+每个 beta 只有在双架构 DMG、对应 SHA-256 和已签名更新包全部到齐后才会公开。DMG 上传前会完成 Developer ID 签名、Apple 公证、staple 与验证。打开 DMG，把 Sigil 拖入“应用程序”，然后正常启动。
 
 ## 通过 npm 安装 TUI
 
 npm 包名是 `@sigil-ai/sigil`。安装时会先放置一个很小的 Node.js 启动器，再下载当前平台对应的 Sigil 可执行文件。最终命令仍然是 `sigil`。
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 ```
 
 确认安装：
@@ -73,7 +73,7 @@ sigil doctor
 首个发布版本通过 Git tag 安装，不从 crates.io 分发：
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil
 ```
 
 这会把 `sigil` 可执行文件安装到 Cargo 的二进制目录。macOS 和 Linux 默认为 `~/.cargo/bin`，Windows 默认为 `%USERPROFILE%\.cargo\bin`。
@@ -126,9 +126,9 @@ sigil run "总结一下当前仓库"
 使用原来的安装器更新：
 
 ```bash
-npm install -g @sigil-ai/sigil@alpha
+npm install -g @sigil-ai/sigil@beta
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.6 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

@@ -12,7 +12,7 @@ Sigil is an early preview. Core Desktop and TUI workflows are usable, but config
 |---|---|
 | Providers | DeepSeek, OpenAI-compatible Chat Completions, OpenAI Responses, Anthropic, and Gemini; see [Providers](providers.md) |
 | Non-interactive interfaces | Headless `run` supports text, JSON, and JSONL; advanced integrations can use authenticated local-only `serve` |
-| Platforms | The Desktop beta candidate targets signed, Apple-notarized Apple Silicon and Intel DMGs; it is not public until the complete matrix passes release gates. TUI primarily tests macOS and Linux, while Windows uses native PowerShell and reports its limits in Doctor |
+| Platforms | The public Desktop beta provides signed, Apple-notarized Apple Silicon and Intel DMGs. TUI primarily tests macOS and Linux, while Windows uses native PowerShell and reports its limits in Doctor |
 
 ## Limited Or Advanced
 
@@ -28,7 +28,7 @@ Sigil is an early preview. Core Desktop and TUI workflows are usable, but config
 
 ## Not Supported Yet
 
-Unattended background update installation or automatic restart, a stable plugin API, uniform sandbox guarantees across platforms, and resuming an in-flight child process after the desktop app or its workspace service restarts are not promised today. Once the Desktop beta is public, it publishes architecture-specific signed updater bundles next to its DMGs, but the user remains in control of installing and restarting after an update.
+Unattended background update installation or automatic restart, a stable plugin API, uniform sandbox guarantees across platforms, and resuming an in-flight child process after the desktop app or its workspace service restarts are not promised today. The Desktop beta publishes architecture-specific signed updater bundles next to its DMGs, but the user remains in control of installing and restarting after an update.
 
 For exact commands and keys, use [Reference](reference.md). For configuration fields, use [Configuration Reference](configuration-reference.md). For problems, use [Troubleshooting](troubleshooting.md).
 
