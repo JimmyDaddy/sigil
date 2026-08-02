@@ -8,7 +8,9 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 packages_dir="${tmp_dir}/packages"
 fake_bin="${tmp_dir}/bin"
 log_file="${tmp_dir}/npm.log"
+state_dir="${tmp_dir}/npm-state"
 mkdir -p "${packages_dir}" "${fake_bin}"
+mkdir -p "${state_dir}"
 
 make_package() {
   local dir_name="$1"
@@ -37,6 +39,19 @@ if [[ "${1-}" == "view" ]]; then
     exit 0
   fi
   if [[ "${2-}" == @sigil-ai/*@alpha && "${3-}" == "version" ]]; then
+    if [[ "${2-}" == "@sigil-ai/sigil-linux-x64@alpha" ]]; then
+      attempts_file="${FAKE_NPM_STATE_DIR}/linux-convergence-attempts"
+      attempts=0
+      if [[ -f "${attempts_file}" ]]; then
+        attempts="$(<"${attempts_file}")"
+      fi
+      attempts="$((attempts + 1))"
+      printf '%s\n' "${attempts}" >"${attempts_file}"
+      if ((attempts < 3)); then
+        echo "E404" >&2
+        exit 1
+      fi
+    fi
     echo "1.2.3-alpha.1"
     exit 0
   fi
@@ -50,7 +65,11 @@ exit 2
 FAKE_NPM
 chmod +x "${fake_bin}/npm"
 
-FAKE_NPM_LOG="${log_file}" PATH="${fake_bin}:${PATH}" \
+FAKE_NPM_LOG="${log_file}" \
+  FAKE_NPM_STATE_DIR="${state_dir}" \
+  SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS=3 \
+  SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS=0 \
+  PATH="${fake_bin}:${PATH}" \
   "${repo_root}/scripts/publish-npm-packages.sh" \
   --version 1.2.3-alpha.1 \
   --packages-dir "${packages_dir}" \
@@ -63,6 +82,10 @@ fi
 
 grep -Fqx "publish ${packages_dir}/sigil-linux-x64 --access public --tag alpha" "${log_file}"
 grep -Fqx "publish ${packages_dir}/sigil-win32-x64 --access public --tag alpha" "${log_file}"
+if [[ "$(<"${state_dir}/linux-convergence-attempts")" != "3" ]]; then
+  echo "transient npm registry propagation was not retried" >&2
+  exit 1
+fi
 
 expected_last="publish ${packages_dir}/sigil --access public --tag alpha"
 actual_last="$(grep '^publish ' "${log_file}" | tail -n 1)"

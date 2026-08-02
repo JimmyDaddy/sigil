@@ -27,6 +27,8 @@ packages_dir=""
 package_tarballs_dir=""
 dist_tag=""
 dry_run=false
+publish_verify_attempts="${SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS:-12}"
+publish_verify_delay_seconds="${SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS:-5}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,6 +68,15 @@ if [[ -z "${version}" ]] ||
   [[ -z "${packages_dir}" && -z "${package_tarballs_dir}" ]] ||
   [[ -n "${packages_dir}" && -n "${package_tarballs_dir}" ]]; then
   usage >&2
+  exit 2
+fi
+
+if [[ ! "${publish_verify_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SIGIL_NPM_PUBLISH_VERIFY_ATTEMPTS must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "${publish_verify_delay_seconds}" =~ ^[0-9]+$ ]]; then
+  echo "SIGIL_NPM_PUBLISH_VERIFY_DELAY_SECONDS must be a non-negative integer" >&2
   exit 2
 fi
 
@@ -122,6 +133,8 @@ else
     exit 1
   fi
   shopt -s nullglob
+  # This intentionally expands the package tarball inventory.
+  # shellcheck disable=SC2206
   platform_package_sources=("${package_tarballs_dir}"/sigil-ai-sigil-*-${version}.tgz)
   shopt -u nullglob
   metadata_root="$(mktemp -d "${TMPDIR:-/tmp}/sigil-npm-metadata.XXXXXX")"
@@ -144,6 +157,43 @@ if [[ "${#platform_package_sources[@]}" -eq 0 ]]; then
   echo "no platform npm packages found" >&2
   exit 1
 fi
+
+wait_for_published_dist_tag() {
+  local package_name="$1"
+  local expected_version="$2"
+  local attempt
+  local observed_version
+  local npm_error
+
+  for ((attempt = 1; attempt <= publish_verify_attempts; attempt++)); do
+    npm_error="$(mktemp "${TMPDIR:-/tmp}/sigil-npm-view.XXXXXX")"
+    if observed_version="$(
+      npm view "${package_name}@${dist_tag}" version 2>"${npm_error}"
+    )"; then
+      rm -f "${npm_error}"
+      if [[ "${observed_version}" == "${expected_version}" ]]; then
+        echo "npm ${package_name}@${dist_tag} converged to ${expected_version}"
+        return
+      fi
+      echo "waiting for npm ${package_name}@${dist_tag}: observed ${observed_version}" >&2
+    elif grep -Fq "E404" "${npm_error}"; then
+      rm -f "${npm_error}"
+      echo "waiting for npm ${package_name}@${dist_tag}: not visible yet" >&2
+    else
+      cat "${npm_error}" >&2
+      rm -f "${npm_error}"
+      echo "cannot prove npm convergence for ${package_name}@${dist_tag}" >&2
+      return 1
+    fi
+
+    if ((attempt < publish_verify_attempts)); then
+      sleep "${publish_verify_delay_seconds}"
+    fi
+  done
+
+  echo "npm ${package_name}@${dist_tag} did not converge to ${expected_version} after ${publish_verify_attempts} attempts" >&2
+  return 1
+}
 
 publish_package() {
   local package_source="$1"
@@ -229,11 +279,7 @@ publish_package() {
 
   echo "publishing ${package_name}@${version} with tag ${dist_tag}"
   npm publish "${package_source}" --access public --tag "${dist_tag}"
-  published_version="$(npm view "${package_name}@${dist_tag}" version)"
-  if [[ "${published_version}" != "${version}" ]]; then
-    echo "npm ${package_name}@${dist_tag} did not converge to ${version}" >&2
-    exit 1
-  fi
+  wait_for_published_dist_tag "${package_name}" "${version}"
 }
 
 for index in "${!platform_package_sources[@]}"; do

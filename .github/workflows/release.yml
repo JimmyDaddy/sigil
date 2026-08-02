@@ -518,11 +518,13 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
-      - name: Checkout release candidate
+      - name: Checkout publication tooling
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
+          # The workflow implementation and its release tooling must advance
+          # together. Candidate bytes still come only from the verified draft.
+          ref: ${{ github.sha }}
 
       - name: Install Node
         uses: actions/setup-node@v7
