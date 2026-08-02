@@ -4172,23 +4172,57 @@ fn push_shell_path_subject(
         .strip_prefix("$PWD/")
         .or_else(|| requested.strip_prefix("${PWD}/"))
     {
-        subjects.push(shell_path_subject(
+        push_resolved_or_unknown_shell_path_subject(
+            subjects,
             workspace_root,
             cwd,
             cwd.join(relative).to_string_lossy().as_ref(),
-        )?);
+            requested,
+        );
         return Ok(());
     }
     if matches!(requested, "$PWD" | "${PWD}") {
-        subjects.push(shell_path_subject(
+        push_resolved_or_unknown_shell_path_subject(
+            subjects,
             workspace_root,
             cwd,
             cwd.to_string_lossy().as_ref(),
-        )?);
+            requested,
+        );
         return Ok(());
     }
-    subjects.push(shell_path_subject(workspace_root, cwd, requested)?);
+    push_resolved_or_unknown_shell_path_subject(
+        subjects,
+        workspace_root,
+        cwd,
+        requested,
+        requested,
+    );
     Ok(())
+}
+
+fn push_resolved_or_unknown_shell_path_subject(
+    subjects: &mut Vec<ToolSubject>,
+    workspace_root: &Path,
+    cwd: &Path,
+    resolution_target: &str,
+    original: &str,
+) {
+    match shell_path_subject(workspace_root, cwd, resolution_target) {
+        Ok(mut subject) => {
+            subject.original = original.to_owned();
+            subjects.push(subject);
+        }
+        Err(_) => subjects.push(ToolSubject::path_with_scope(
+            original.to_owned(),
+            format!(
+                "unresolved_shell_path:sha256:{}",
+                sha256_hex(original.as_bytes())
+            ),
+            None,
+            ToolSubjectScope::Unknown,
+        )),
+    }
 }
 
 fn shell_requested_path_is_safe_device(requested: &str) -> bool {

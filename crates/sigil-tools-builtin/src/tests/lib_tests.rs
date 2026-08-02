@@ -2775,6 +2775,19 @@ fn shell_symbolic_path_bindings_fail_closed_when_unbound_forged_or_escaping() ->
     Ok(())
 }
 
+#[test]
+fn shell_path_resolution_errors_become_unknown_subjects() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let subjects = super::bash_path_subjects(workspace.path(), "cat invalid\0path")?;
+
+    assert_eq!(subjects.len(), 1);
+    assert_eq!(subjects[0].original, "invalid\0path");
+    assert_eq!(subjects[0].scope, ToolSubjectScope::Unknown);
+    assert!(subjects[0].canonical_path.is_none());
+    assert!(subjects[0].normalized.starts_with("unresolved_shell_path:"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn shell_symbolic_path_binding_rejects_symlink_escape() -> Result<()> {
