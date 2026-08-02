@@ -112,11 +112,11 @@ fn external_path_subject(path: PathBuf) -> ToolSubject {
 
 fn synthetic_external_test_root() -> Result<PathBuf> {
     let current_dir = std::env::current_dir()?;
-    current_dir
+    let filesystem_root = current_dir
         .ancestors()
         .last()
-        .map(|root| root.join("sigil-test-external"))
-        .ok_or_else(|| std::io::Error::other("current directory has no filesystem root").into())
+        .ok_or_else(|| std::io::Error::other("current directory has no filesystem root"))?;
+    Ok(std::fs::canonicalize(filesystem_root)?.join("sigil-test-external"))
 }
 
 fn external_canonical_path_subject(path: PathBuf) -> ToolSubject {
