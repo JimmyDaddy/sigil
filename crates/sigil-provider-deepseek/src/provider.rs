@@ -22,7 +22,12 @@ use crate::{
     endpoint::DeepSeekEndpointClass,
     errors::DeepSeekProviderError,
     fim::DeepSeekFimCompletionRequest,
+    hosted_search::{hosted_web_search_request, is_hosted_web_search_model},
     mapper::StreamMapper,
+    messages_continuation::{DeepSeekHostedContinuationStore, DeepSeekHostedStreamContext},
+    messages_mapper::MessagesStreamMapper,
+    messages_models::DeepSeekMessagesEnvelope,
+    messages_request::build_messages_request,
     models::{DeepSeekCompletionStreamEnvelope, DeepSeekStreamEnvelope},
     prefix::DeepSeekPrefixCompletionRequest,
     request::{
@@ -41,6 +46,7 @@ pub struct DeepSeekProvider {
     timeouts: ModelRequestTimeouts,
     capabilities: ProviderCapabilities,
     client: reqwest::Client,
+    messages_continuations: DeepSeekHostedContinuationStore,
 }
 
 impl DeepSeekProvider {
@@ -75,6 +81,7 @@ impl DeepSeekProvider {
             client: build_http_client()?,
             capabilities,
             config,
+            messages_continuations: DeepSeekHostedContinuationStore::default(),
         })
     }
 
@@ -150,6 +157,16 @@ impl Provider for DeepSeekProvider {
         self.capabilities.clone()
     }
 
+    fn hosted_web_search_capability(
+        &self,
+        model_name: &str,
+    ) -> sigil_kernel::HostedWebSearchCapability {
+        crate::hosted_search::hosted_web_search_capability(
+            model_name,
+            self.official_anthropic_endpoint(),
+        )
+    }
+
     fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
         deepseek_context_capabilities(
             self.profile.primary_base_url.trim_end_matches('/') == "https://api.deepseek.com",
@@ -190,6 +207,9 @@ impl DeepSeekProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(hosted) = hosted_web_search_request(&request.hosted_tools)?.cloned() {
+            return self.stream_messages_chunks(request, hosted).await;
+        }
         let user_id = extract_user_id(&request, self.config.user_id_strategy.as_deref())?;
         let prepared = build_chat_request(
             &request,
@@ -212,6 +232,88 @@ impl DeepSeekProvider {
             &prepared.body,
         )
         .await
+    }
+
+    fn official_anthropic_endpoint(&self) -> bool {
+        self.profile
+            .anthropic_base_url
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case("https://api.deepseek.com/anthropic")
+    }
+
+    async fn stream_messages_chunks(
+        &self,
+        request: CompletionRequest,
+        hosted: sigil_kernel::HostedToolRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if !is_hosted_web_search_model(&request.model_name) {
+            anyhow::bail!(
+                "DeepSeek model {} does not support hosted web search",
+                request.model_name
+            );
+        }
+        if !self.official_anthropic_endpoint() {
+            anyhow::bail!(
+                "DeepSeek hosted web search requires the official api.deepseek.com anthropic endpoint"
+            );
+        }
+        let prepared = build_messages_request(&request, &hosted, &self.messages_continuations)?;
+        let hosted_context = DeepSeekHostedStreamContext {
+            authorization_id: hosted.authorization_id.clone(),
+            continuation_store: self.messages_continuations.clone(),
+            prior_invocations: prepared.prior_hosted_invocations.clone(),
+        };
+        let url = format!(
+            "{}/v1/messages",
+            self.profile.anthropic_base_url.trim_end_matches('/')
+        );
+        let response =
+            match timeout_provider_request(self.post_json(&url, &prepared.body), self.timeouts)
+                .await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    return Err(error.context("deepseek messages request failed"));
+                }
+                Err(phase) => {
+                    return Err(provider_timeout_error(
+                        phase,
+                        self.timeouts,
+                        self.name(),
+                        &request.model_name,
+                    )
+                    .context("deepseek messages request failed"));
+                }
+            };
+        let status = response.status();
+        if status.is_success() {
+            return Ok(messages_response_stream(
+                response,
+                request.model_name,
+                self.timeouts,
+                Some(hosted_context),
+            ));
+        }
+        let status_code = status.as_u16();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let error_body = read_error_response_body(
+            response,
+            self.timeouts.request_timeout,
+            &SecretRedactor::from_values([self.api_key()?]),
+            self.name(),
+            &request.model_name,
+            status_code,
+        )
+        .await?;
+        Err(provider_status_error(
+            status_code,
+            retry_after.as_deref(),
+            classify_status(status_code, error_body.text()).into(),
+        ))
     }
 
     async fn stream_chat_chunks<T: Serialize>(
@@ -315,6 +417,78 @@ impl DeepSeekProvider {
             .send()
             .await
             .context("failed to send DeepSeek request")
+    }
+}
+
+fn messages_response_stream(
+    response: reqwest::Response,
+    model_name: String,
+    timeouts: ModelRequestTimeouts,
+    hosted: Option<DeepSeekHostedStreamContext>,
+) -> std::pin::Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
+    Box::pin(stream::try_unfold(
+        (
+            response.bytes_stream(),
+            DeepSeekSseDecoder::default(),
+            MessagesStreamMapper::new(hosted),
+            model_name,
+            ProviderStreamTimeoutState::new(timeouts),
+            std::collections::VecDeque::<ProviderChunk>::new(),
+        ),
+        move |(mut bytes, mut decoder, mut mapper, model_name, mut timeout_state, mut queue)| async move {
+            loop {
+                if let Some(chunk) = queue.pop_front() {
+                    return Ok(Some((
+                        chunk,
+                        (bytes, decoder, mapper, model_name, timeout_state, queue),
+                    )));
+                }
+                match timeout_provider_stream_next(&mut bytes, timeouts, &mut timeout_state).await {
+                    Ok(Some(Ok(frame))) => {
+                        for frame in decoder.push_bytes(&frame)? {
+                            if let Some(envelope) = parse_messages_envelope(frame)? {
+                                queue.extend(mapper.map_envelope(envelope)?);
+                            }
+                        }
+                    }
+                    Ok(Some(Err(error))) => {
+                        return Err(anyhow::anyhow!(
+                            "deepseek messages stream read failed: {error}"
+                        ));
+                    }
+                    Ok(None) => {
+                        for frame in decoder.finish()? {
+                            if let Some(envelope) = parse_messages_envelope(frame)? {
+                                queue.extend(mapper.map_envelope(envelope)?);
+                            }
+                        }
+                        queue.extend(mapper.finish()?);
+                        if queue.is_empty() {
+                            return Ok(None);
+                        }
+                    }
+                    Err(phase) => {
+                        return Err(provider_timeout_error(
+                            phase,
+                            timeouts,
+                            "deepseek",
+                            &model_name,
+                        ));
+                    }
+                }
+            }
+        },
+    ))
+}
+
+fn parse_messages_envelope(
+    frame: crate::response::DeepSeekSseFrame,
+) -> Result<Option<DeepSeekMessagesEnvelope>> {
+    match frame {
+        crate::response::DeepSeekSseFrame::Data(data) => Ok(Some(serde_json::from_str(&data)?)),
+        crate::response::DeepSeekSseFrame::Done
+        | crate::response::DeepSeekSseFrame::Blank
+        | crate::response::DeepSeekSseFrame::Comment => Ok(None),
     }
 }
 
