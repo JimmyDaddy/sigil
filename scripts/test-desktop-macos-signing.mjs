@@ -26,16 +26,20 @@ const uploadScript = readFileSync(
   "utf8",
 );
 const workspaceManifest = readFileSync(resolve(root, "Cargo.toml"), "utf8");
-const notarizeScript = readFileSync(
-  resolve(root, "scripts/notarize-desktop-macos.sh"),
+const notarizationStateScript = readFileSync(
+  resolve(root, "scripts/desktop-notarization-state.mjs"),
   "utf8",
 );
 const verifyScript = readFileSync(
   resolve(root, "scripts/verify-desktop-macos.sh"),
   "utf8",
 );
-const notarizeAppScript = readFileSync(
-  resolve(root, "scripts/notarize-desktop-macos-app.sh"),
+const notarizationStatusScript = readFileSync(
+  resolve(root, "scripts/status-desktop-macos-notarization.sh"),
+  "utf8",
+);
+const finalizeScript = readFileSync(
+  resolve(root, "scripts/finalize-desktop-macos-local.sh"),
   "utf8",
 );
 const verifyAppScript = readFileSync(
@@ -100,8 +104,9 @@ for (const token of [
   "--target all",
   'SIGIL_DESKTOP_SIDECAR_TARGET="$target"',
   "verify-desktop-macos.sh",
-  "notarize-desktop-macos.sh",
-  "notarize-desktop-macos-app.sh",
+  "desktop-notarization-state.mjs",
+  "status-desktop-macos-notarization.sh",
+  "finalize-desktop-macos-local.sh",
   'TAURI_SIGNING_PRIVATE_KEY="$(<"$updater_key")"',
   'TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_key_password"',
   "TAURI_SIGNING_PRIVATE_KEY_PATH",
@@ -113,9 +118,12 @@ for (const token of [
   "--expected-commit",
   "release-doctor.mjs",
   "--tag",
+  "app.notary.zip",
+  "submission.dmg",
 ]) {
   assert.match(packageScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
+assert.doesNotMatch(packageScript, /notarytool["', ]+wait/);
 
 for (const token of [
   "--require-head-tag",
@@ -130,6 +138,8 @@ for (const token of [
   "verify-desktop-macos-app.sh",
   "verify-desktop-update-signature.sh",
   "extract-verified-desktop-updater-app.py",
+  "desktop-notarization-state.mjs",
+  "verify-finalized",
   "--replace",
   "gh release download",
 ]) {
@@ -138,23 +148,54 @@ for (const token of [
 assert.doesNotMatch(uploadScript, /gh release upload[^\n]*--clobber/);
 
 for (const token of [
-  "notarytool submit",
-  "notarytool wait",
-  "stapler staple",
-  "verify-desktop-macos-app.sh",
+  "sigil-desktop-notarization-ledger",
+  "submission_started",
+  "submission_recorded",
+  "submission_recovered",
+  "submission_orphaned",
+  "status_observed",
+  "status_error",
+  "release_finalized",
+  "historyIdsBefore",
+  "sha256",
+  "teamId",
+  "profile",
+  "writeJsonAtomic",
+  "handle.sync",
+  "--webhook",
 ]) {
-  assert.match(notarizeAppScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(
+    notarizationStateScript,
+    new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+}
+assert.doesNotMatch(notarizationStateScript, /notarytool["', ]+wait/);
+
+for (const token of [
+  "--summary",
+  "--submit-pending",
+  "--resubmit",
+  "desktop-notarization-state.mjs",
+]) {
+  assert.match(
+    notarizationStatusScript,
+    new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
 }
 
 for (const token of [
-  "notarytool submit",
-  "notarytool wait",
-  "notarytool log",
+  "assert-accepted",
   "stapler staple",
-  "--submission-id",
+  "stapler validate",
   "verify-desktop-macos.sh",
+  "verify-desktop-macos-app.sh",
+  "verify-desktop-update-signature.sh",
+  "record-finalized",
+  "complete",
+  "verify-finalized",
+  "swapped Desktop updater signature",
 ]) {
-  assert.match(notarizeScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(finalizeScript, new RegExp(token.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }
 
 for (const token of [

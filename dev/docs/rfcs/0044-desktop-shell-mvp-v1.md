@@ -308,7 +308,8 @@ macOS真实package启动审计发现并修复了pre-setup读取managed state导�
 清理旧记录。重新打包后native process成功创建`Sigil`窗口，bundled runtime可执行，`.app`通过strict ad-hoc
 `codesign`校验。普通 GitHub Actions dogfood artifact 明确使用 ad-hoc 签名；公开
 macOS 安装包由受信发布者 Mac 使用 Developer ID 签名，并通过
-`scripts/package-desktop-macos-local.sh` 完成 Apple notarization、staple、Gatekeeper
+`scripts/package-desktop-macos-local.sh` 生成不可变 submission bytes 并异步提交 Apple；
+append-only 公证账本、单次 status 与可重入 offline finalizer 随后完成 staple、Gatekeeper
 与嵌套 sidecar 校验。完整操作见
 [`dev/docs/desktop-macos-signing.md`](../desktop-macos-signing.md)。
 

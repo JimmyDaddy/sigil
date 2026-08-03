@@ -76,12 +76,23 @@ pnpm --dir apps/desktop package:macos:signed -- \
   --target all \
   --tag v0.0.1-beta.1
 
+scripts/status-desktop-macos-notarization.sh \
+  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
+
+scripts/finalize-desktop-macos-local.sh \
+  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
+
 scripts/upload-desktop-macos-release.sh \
   --tag v0.0.1-beta.1 \
   --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
 ```
 
-The upload command reruns checksum, updater-signature, Apple trust, notarization,
+The package command submits all four immutable DMG/app artifacts and exits without
+waiting. The status command performs one query per non-terminal submission and
+persists the observation in the append-only notarization ledger. Finalize is
+offline and resumable; it requires four recorded `Accepted` states before stapling,
+signing updater archives, and freezing the final asset hashes. The upload command
+reprojects that ledger and reruns checksum, updater-signature, Apple trust, notarization,
 version, commit, and architecture checks; binds local and remote tag/main/CI;
 keeps identical remote bytes; and requires explicit `--replace` before deleting
 a different draft asset.
@@ -128,29 +139,33 @@ append Desktop assets after publication.
    asset names, byte sizes, and SHA-256 digests. On tag push, create or update a
    draft GitHub Release without replacing a different existing asset. A tag push
    never publishes the draft.
-9. Upload the signed Desktop DMGs, checksums, updater archives, and updater
+9. Build immutable local Desktop submission bytes, append hash/Team/profile-bound
+   submission attempts, and return immediately after asynchronous Apple submission.
+   A one-shot status command records terminal results; an offline, idempotent finalizer
+   staples and verifies both architectures before upload.
+10. Upload the signed Desktop DMGs, checksums, updater archives, and updater
    signatures to the same draft.
    An optional TUI-first dispatch may publish only the already-staged npm
    packages at this point while preserving the draft release.
-10. On explicit publish, download and verify the staged candidate manifest and
+11. On explicit publish, download and verify the staged candidate manifest and
    npm tarballs without rebuilding TUI. Require the beta Desktop asset matrix, verify the DMG
    and updater archive checksums, cryptographically verify both updater
    signatures against the public key embedded in the tagged Tauri config, run a
    swapped-signature negative control, and generate `latest.json`.
-11. On native arm64 and Intel macOS runners, download the exact draft assets,
+12. On native arm64 and Intel macOS runners, download the exact draft assets,
    safely validate and extract the updater archive, and independently verify
    Developer ID, Team ID, Hardened Runtime, version, commit, stapler, and
    Gatekeeper evidence for both the DMG and updater app.
-12. Prove through GitHub's immutable-releases repository API that release
+13. Prove through GitHub's immutable-releases repository API that release
    immutability is enabled, then make the completed draft public. Prerelease
    suffixes stay marked as GitHub prereleases; no release assets are appended
    afterward.
-13. Publish the already-staged npm tarballs only after the release is accessible. `-alpha.*` uses the
+14. Publish the already-staged npm tarballs only after the release is accessible. `-alpha.*` uses the
    `alpha` dist-tag, `-beta.*` uses `beta`, and unknown prerelease suffixes fail.
    Registry reads and SemVer comparison fail closed. An exact package-version
    retry is skipped only when the requested dist-tag already points to that
    exact version.
-14. Copy the immutable release `latest.json` into the full Pages artifact at
+15. Copy the immutable release `latest.json` into the full Pages artifact at
    `/updates/beta/latest.json` and deploy that artifact as the Desktop updater
    endpoint. Normal `main` Pages deployments resolve the newest published beta
    across every API page, select the SemVer-maximum immutable published beta,
@@ -158,11 +173,11 @@ append Desktop assets after publication.
    immutable manifest too. The release deployment also compares the current
    public manifest before upload. API or publication ordering therefore cannot
    erase or roll back the update endpoint.
-15. For beta releases, update the single `JimmyDaddy/homebrew-sigil` tap from
+16. For beta releases, update the single `JimmyDaddy/homebrew-sigil` tap from
    the generated `sigil-ai.rb` asset only after a SemVer monotonicity check and
    verify the tap points at the same release tag. Alpha remains an npm/GitHub
    channel and does not compete for the single Homebrew formula.
-16. After npm publication, the release workflow emits a
+17. After npm publication, the release workflow emits a
    `sigil_published_distribution` repository dispatch because GitHub suppresses
    ordinary workflow events caused by `GITHUB_TOKEN`. A `release.published`
    trigger remains as coverage for maintainer-published releases. The smoke waits

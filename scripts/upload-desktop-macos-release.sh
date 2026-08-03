@@ -122,6 +122,10 @@ test "$(read_build_field version)" = "${version}"
 test "$(read_build_field commit)" = "${commit}"
 test "$(read_build_field team_id)" = "${team_id}"
 test "$(read_build_field notarized)" = "true"
+test "$(node scripts/desktop-notarization-state.mjs get-release "${artifact_dir}" tag)" = "${release_tag}"
+test "$(node scripts/desktop-notarization-state.mjs get-release "${artifact_dir}" commit)" = "${commit}"
+test "$(node scripts/desktop-notarization-state.mjs get-release "${artifact_dir}" teamId)" = "${team_id}"
+node scripts/desktop-notarization-state.mjs verify-finalized "${artifact_dir}" >/dev/null
 targets="$(read_build_field targets)"
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
   if ! grep -Eq "(^|[[:space:]])${target}([[:space:]]|$)" <<<"${targets}"; then

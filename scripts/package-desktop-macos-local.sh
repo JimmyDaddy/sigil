@@ -9,12 +9,13 @@ Usage: scripts/package-desktop-macos-local.sh \
   [--updater-key PATH] \
   [--tag v<version>] \
   [--output-dir PATH] \
+  [--notary-webhook HTTPS_URL] \
   [--skip-notarization]
 
-Build Developer ID-signed Sigil desktop DMGs and Tauri-signed update archives
-on the publisher's Mac. The default target is the native architecture. Use
---target all for a public two-architecture release. Notarization, stapling,
-Gatekeeper verification, and updater archive signing are enabled by default.
+Build Developer ID-signed Sigil desktop candidates and submit every immutable
+DMG/app archive to Apple without waiting. Use finalize-desktop-macos-local.sh
+after the one-shot status command reports Accepted for every submission. The
+default target is the native architecture; public releases use --target all.
 USAGE
 }
 
@@ -28,6 +29,7 @@ updater_key_password="${SIGIL_DESKTOP_UPDATER_KEY_PASSWORD:-}"
 output_root=""
 release_tag=""
 skip_notarization=false
+notary_webhook="${SIGIL_NOTARY_WEBHOOK_URL:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
     --skip-notarization)
       skip_notarization=true
       shift
+      ;;
+    --notary-webhook)
+      notary_webhook="${2-}"
+      shift 2
       ;;
     -h | --help)
       usage
@@ -194,6 +200,16 @@ fi
 mkdir -p "$output_root"
 mkdir -p "$output_root/.work"
 
+if [[ "$skip_notarization" == false ]]; then
+  ledger_tag="${release_tag:-v${version}}"
+  node scripts/desktop-notarization-state.mjs init \
+    "$output_root" \
+    "$ledger_tag" \
+    "$commit" \
+    "$team_id" \
+    "$notary_profile" >/dev/null
+fi
+
 pnpm --dir apps/desktop install --frozen-lockfile
 rustup target add "${targets[@]}"
 
@@ -236,36 +252,53 @@ for target in "${targets[@]}"; do
   work_root="$output_root/.work/$target"
   updater_app="$work_root/Sigil.app"
   mkdir -p "$work_root"
-  ditto "$source_dmg" "$output_dmg"
+  if [[ "$skip_notarization" == true ]]; then
+    submission_dmg="$output_dmg"
+  else
+    submission_dmg="$work_root/Sigil_${version}_${target}.submission.dmg"
+  fi
+  ditto "$source_dmg" "$submission_dmg"
   ditto "$source_app" "$updater_app"
 
   "$repo_root/scripts/verify-desktop-macos.sh" \
-    --dmg "$output_dmg" \
+    --dmg "$submission_dmg" \
     --expected-arch "$expected_arch" \
     --team-id "$team_id" \
     --expected-version "$version" \
     --expected-commit "${commit:0:12}"
 
   if [[ "$skip_notarization" == false ]]; then
-    "$repo_root/scripts/notarize-desktop-macos.sh" \
-      --dmg "$output_dmg" \
-      --expected-arch "$expected_arch" \
-      --team-id "$team_id" \
-      --notary-profile "$notary_profile"
-
-    "$repo_root/scripts/notarize-desktop-macos-app.sh" \
-      --app "$updater_app" \
-      --expected-arch "$expected_arch" \
-      --team-id "$team_id" \
-      --notary-profile "$notary_profile"
-  else
-    "$repo_root/scripts/verify-desktop-macos-app.sh" \
-      --app "$updater_app" \
-      --expected-arch "$expected_arch" \
-      --team-id "$team_id" \
-      --expected-version "$version" \
-      --expected-commit "${commit:0:12}"
+    app_submission="$work_root/Sigil_${version}_${target}.app.notary.zip"
+    ditto -c -k --keepParent "$updater_app" "$app_submission"
+    case "$target" in
+      aarch64-apple-darwin) key_prefix="arm64" ;;
+      x86_64-apple-darwin) key_prefix="x86_64" ;;
+    esac
+    node scripts/desktop-notarization-state.mjs register \
+      "$output_root" \
+      "${key_prefix}_dmg" \
+      dmg \
+      "$target" \
+      "$expected_arch" \
+      "$submission_dmg" \
+      "$output_dmg" >/dev/null
+    node scripts/desktop-notarization-state.mjs register \
+      "$output_root" \
+      "${key_prefix}_app" \
+      app_zip \
+      "$target" \
+      "$expected_arch" \
+      "$app_submission" \
+      "$updater_app" >/dev/null
+    continue
   fi
+
+  "$repo_root/scripts/verify-desktop-macos-app.sh" \
+    --app "$updater_app" \
+    --expected-arch "$expected_arch" \
+    --team-id "$team_id" \
+    --expected-version "$version" \
+    --expected-commit "${commit:0:12}"
 
   updater_archive="$output_root/Sigil_${version}_${target}.app.tar.gz"
   tar -czf "$updater_archive" -C "$work_root" Sigil.app
@@ -279,9 +312,6 @@ for target in "${targets[@]}"; do
     --expected-version "$version"
     --expected-commit "${commit:0:12}"
   )
-  if [[ "$skip_notarization" == false ]]; then
-    roundtrip_verify_args+=(--notarized)
-  fi
   "$repo_root/scripts/verify-desktop-macos-app.sh" "${roundtrip_verify_args[@]}"
   TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_key_password" \
@@ -297,6 +327,18 @@ for target in "${targets[@]}"; do
     shasum -a 256 "$(basename "$updater_archive")" >"$(basename "$updater_archive").sha256"
   )
 done
+
+if [[ "$skip_notarization" == false ]]; then
+  submit_args=("$output_root")
+  if [[ -n "$notary_webhook" ]]; then
+    submit_args+=("$notary_webhook")
+  fi
+  node scripts/desktop-notarization-state.mjs submit "${submit_args[@]}"
+  echo "Desktop candidates were submitted without waiting: $output_root"
+  echo "Check once: scripts/status-desktop-macos-notarization.sh --artifact-dir $(printf '%q' "$output_root")"
+  echo "Finalize after every item is Accepted: scripts/finalize-desktop-macos-local.sh --artifact-dir $(printf '%q' "$output_root")"
+  exit 0
+fi
 
 if [[ "${#targets[@]}" -eq 2 ]]; then
   arm_archive="$output_root/Sigil_${version}_aarch64-apple-darwin.app.tar.gz"
@@ -322,7 +364,7 @@ commit=$commit
 team_id=$team_id
 identity=$identity
 targets=$(printf '%s ' "${targets[@]}")
-notarized=$([[ "$skip_notarization" == false ]] && echo true || echo false)
+notarized=false
 updater_public_key=$(shasum -a 256 "${updater_key}.pub" | awk '{print $1}')
 EOF
 

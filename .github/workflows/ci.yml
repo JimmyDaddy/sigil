@@ -43,17 +43,19 @@ on:
       - "scripts/build-release-archive.sh"
       - "scripts/extract-verified-desktop-updater-app.py"
       - "scripts/generate-desktop-update-manifest.mjs"
+      - "scripts/desktop-notarization-state.mjs"
+      - "scripts/finalize-desktop-macos-local.sh"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/status-desktop-macos-notarization.sh"
       - "scripts/upload-desktop-macos-release.sh"
       - "scripts/release-candidate.mjs"
       - "scripts/release-doctor.mjs"
       - "scripts/release-channel-version.mjs"
       - "scripts/publish-npm-packages.sh"
-      - "scripts/notarize-desktop-macos-app.sh"
-      - "scripts/notarize-desktop-macos.sh"
       - "scripts/verify-desktop-macos-app.sh"
       - "scripts/verify-desktop-macos.sh"
       - "scripts/test-desktop-macos-signing.mjs"
+      - "scripts/test-desktop-notarization-state.mjs"
       - "scripts/test-extract-verified-desktop-updater-app.py"
       - "scripts/test-published-distribution-smoke.sh"
       - "scripts/test-publish-npm-packages.sh"
@@ -101,17 +103,19 @@ on:
       - "scripts/build-release-archive.sh"
       - "scripts/extract-verified-desktop-updater-app.py"
       - "scripts/generate-desktop-update-manifest.mjs"
+      - "scripts/desktop-notarization-state.mjs"
+      - "scripts/finalize-desktop-macos-local.sh"
       - "scripts/package-desktop-macos-local.sh"
+      - "scripts/status-desktop-macos-notarization.sh"
       - "scripts/upload-desktop-macos-release.sh"
       - "scripts/release-candidate.mjs"
       - "scripts/release-doctor.mjs"
       - "scripts/release-channel-version.mjs"
       - "scripts/publish-npm-packages.sh"
-      - "scripts/notarize-desktop-macos-app.sh"
-      - "scripts/notarize-desktop-macos.sh"
       - "scripts/verify-desktop-macos-app.sh"
       - "scripts/verify-desktop-macos.sh"
       - "scripts/test-desktop-macos-signing.mjs"
+      - "scripts/test-desktop-notarization-state.mjs"
       - "scripts/test-extract-verified-desktop-updater-app.py"
       - "scripts/test-published-distribution-smoke.sh"
       - "scripts/test-publish-npm-packages.sh"
@@ -151,6 +155,7 @@ jobs:
           python3 scripts/test-tui-orchestration-pty-acceptance.py
           python3 scripts/test-tui-web-pty-acceptance.py
           node scripts/test-desktop-macos-signing.mjs
+          node scripts/test-desktop-notarization-state.mjs
           python3 scripts/test-extract-verified-desktop-updater-app.py
           node scripts/test-product-surface-positioning.mjs
           node scripts/test-update-distribution-markers.mjs
