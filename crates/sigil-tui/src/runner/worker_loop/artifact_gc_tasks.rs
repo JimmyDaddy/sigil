@@ -46,6 +46,7 @@ pub(in crate::runner) struct ArtifactGcTaskResult {
 #[derive(Default)]
 pub(in crate::runner) struct ArtifactGcTaskManager {
     active: Option<ActiveArtifactGcTask>,
+    retired: Vec<JoinHandle<()>>,
 }
 
 struct ActiveArtifactGcTask {
@@ -66,6 +67,9 @@ impl ArtifactGcTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
+        session_attachment: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
         projection_cursor: Option<ProjectionCursor>,
         result_tx: WorkerEventPayloadSender<ArtifactGcTaskResult>,
         lifecycle: LocalSessionLifecycleService,
@@ -75,9 +79,11 @@ impl ArtifactGcTaskManager {
         debug_assert!(self.active.is_none());
         let cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&cancelled);
+        let task_attachment = Arc::clone(&session_attachment);
         let result_session_scope_id = session_scope_id.clone();
         ARTIFACT_GC_TASK_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
         let handle = runtime.spawn_blocking(move || {
+            let _session_attachment = task_attachment;
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -109,7 +115,11 @@ impl ArtifactGcTaskManager {
     }
 
     pub(in crate::runner) fn has_active(&self) -> bool {
-        self.active.is_some()
+        self.active.is_some() || self.retired.iter().any(|handle| !handle.is_finished())
+    }
+
+    pub(in crate::runner) fn reap_finished(&mut self) {
+        self.retired.retain(|handle| !handle.is_finished());
     }
 
     pub(in crate::runner) fn accept_result(
@@ -120,7 +130,12 @@ impl ArtifactGcTaskManager {
         if self.active.as_ref().is_some_and(|task| {
             task.request_id == request_id && task.session_scope_id == session_scope_id
         }) {
-            self.active = None;
+            if let Some(task) = self.active.take()
+                && !task.handle.is_finished()
+            {
+                self.retired.push(task.handle);
+            }
+            self.reap_finished();
             true
         } else {
             false
@@ -131,6 +146,15 @@ impl ArtifactGcTaskManager {
         if let Some(task) = self.active.take() {
             task.cancelled.store(true, Ordering::Release);
             task.handle.abort();
+            self.retired.push(task.handle);
+        }
+        self.reap_finished();
+    }
+
+    pub(in crate::runner) fn cancel_and_join(&mut self, runtime: &Runtime) {
+        self.abort_all();
+        for handle in self.retired.drain(..) {
+            let _ = runtime.block_on(handle);
         }
     }
 }

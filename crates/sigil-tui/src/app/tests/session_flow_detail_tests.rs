@@ -2136,7 +2136,7 @@ fn refresh_memory_summary_records_inspect_errors() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
     app.workspace_root = temp.path().join("missing-workspace");
-    app.memory_config = MemoryConfig { enabled: true };
+    app.memory_config = MemoryConfig::with_enabled(true);
 
     app.refresh_memory_summary();
 

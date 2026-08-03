@@ -20,9 +20,10 @@ use thiserror::Error as ThisError;
 
 use super::{
     LocalSessionCatalogState, LocalSessionLifecycleLimits, LocalSessionLifecycleService,
-    LocalSessionMutationError, SessionCandidate, acquire_session_writer_lease,
-    direct_jsonl_candidates, hash_file_bounded, map_session_writer_lease_mutation_error,
-    modified_at_unix_ms, move_session_bundle, move_session_to_tombstone,
+    LocalSessionMutationError, LocalSessionReopenBinding, LocalSessionReopenError,
+    SessionCandidate, acquire_session_writer_lease, direct_jsonl_candidates, hash_file_bounded,
+    map_session_writer_lease_mutation_error, modified_at_unix_ms, move_session_bundle,
+    move_session_to_tombstone,
 };
 
 mod query;
@@ -321,6 +322,16 @@ impl SessionCatalogProjectionService {
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    /// Revalidates one ready catalog identity and returns its exact canonical durable path.
+    pub fn resolve_session_for_reopen(
+        &self,
+        session_ref: &SessionRef,
+        expected_session_id: &str,
+    ) -> Result<LocalSessionReopenBinding, LocalSessionReopenError> {
+        self.lifecycle
+            .resolve_session_for_reopen(session_ref, expected_session_id)
     }
 
     /// Replaces this workspace's materialized rows from bounded durable JSONL and lifecycle input.

@@ -215,6 +215,7 @@ fn session_management_validation_and_errors_are_actionable() {
     let pinned = project_session_mutation_client_error(DesktopClientError::Rejected {
         status: 409,
         code: Some("durable_session_pinned".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(pinned.code, "session_pinned");
     assert!(pinned.message.contains("Unpin"));
@@ -291,17 +292,16 @@ fn catalog_query_validation_bounds_renderer_controlled_values() {
 
 #[test]
 fn session_projection_drops_server_private_durable_fields() {
-    let private_path = "/private/canary/session.jsonl";
     let summary = DesktopSessionSummary::from(DesktopSessionSnapshot {
         id: "http-session-1".to_owned(),
         label: Some("Conversation".to_owned()),
         run_ids: vec!["run-1".to_owned()],
         durable_session_scope_id: "durable-secret-scope".to_owned(),
-        session_log_path: private_path.to_owned(),
         foreground_run_id: None,
+        route_transition: None,
+        route_recovery: None,
     });
     let projection = serde_json::to_string(&summary).expect("summary should serialize");
-    assert!(!projection.contains(private_path));
     assert!(!projection.contains("durable-secret-scope"));
     assert_eq!(summary.run_count, 1);
 }
@@ -620,6 +620,7 @@ fn tool_artifact_errors_are_specific_and_path_free() {
     let unavailable = project_tool_artifact_client_error(DesktopClientError::Rejected {
         status: 404,
         code: Some("tool_artifact_unavailable".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(unavailable.code, "tool_artifact_unavailable");
     assert!(!unavailable.message.contains('/'));
@@ -627,6 +628,7 @@ fn tool_artifact_errors_are_specific_and_path_free() {
     let corrupt = project_tool_artifact_client_error(DesktopClientError::Rejected {
         status: 409,
         code: Some("tool_artifact_corrupt".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(corrupt.code, "tool_artifact_corrupt");
     assert!(
@@ -642,12 +644,14 @@ fn conversation_display_errors_are_distinct_from_catalog_pagination() {
     let catalog = project_client_error(DesktopClientError::Rejected {
         status: 409,
         code: Some("stale_cursor".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(catalog.code, "catalog_stale");
 
     let display = project_conversation_display_client_error(DesktopClientError::Rejected {
         status: 409,
         code: Some("display_cursor_stale".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(display.code, "conversation_display_stale");
     assert_ne!(display.code, catalog.code);
@@ -655,12 +659,14 @@ fn conversation_display_errors_are_distinct_from_catalog_pagination() {
     let invalid = project_conversation_display_client_error(DesktopClientError::Rejected {
         status: 400,
         code: Some("invalid_display_cursor".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(invalid.code, "conversation_display_cursor_invalid");
 
     let unavailable = project_conversation_display_client_error(DesktopClientError::Rejected {
         status: 503,
         code: Some("conversation_display_unavailable".to_owned()),
+        route_recovery: None,
     });
     assert_eq!(unavailable.code, "conversation_display_unavailable");
     assert!(

@@ -19,6 +19,7 @@ impl AppState {
         self.runtime.run_phase = RunPhase::Idle;
         self.runtime.mcp_progress = None;
         self.runtime.active_task = None;
+        self.refresh_conversation_queue_selection();
         self.runtime.task_provider_route_diagnostics =
             sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
         self.runtime.task_completion_progress =

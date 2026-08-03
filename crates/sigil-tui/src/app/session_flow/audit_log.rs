@@ -81,6 +81,15 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 resolved_model_route.model_ref.model_id
             )
         }
+        ControlEntry::SessionRouteRebound {
+            provider_name,
+            resolved_model_route,
+            ..
+        } => format!(
+            "[ctl] session route rebound {provider_name}/{}/{}",
+            resolved_model_route.model_ref.connection_id, resolved_model_route.model_ref.model_id
+        ),
+        ControlEntry::SessionRouteTrustBound { .. } => "[ctl] session route trust bound".to_owned(),
         ControlEntry::ContinuationStateSaved(state) => format!(
             "[ctl] cont {} msg={}",
             state.state_kind,

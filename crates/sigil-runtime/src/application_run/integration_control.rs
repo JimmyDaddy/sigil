@@ -227,6 +227,30 @@ pub async fn accept_application_task_integration_review(
     services: &ApplicationRunServices,
     request: &sigil_kernel::TaskIntegrationReviewRequest,
 ) -> Result<ApplicationTaskIntegrationAcceptanceView> {
+    accept_application_task_integration_review_with_attachment(
+        config_path,
+        launch_cwd,
+        session_path,
+        expected_session_scope_id,
+        services,
+        request,
+        None,
+    )
+    .await
+}
+
+/// Accepts integration review while reusing a controller-owned session attachment.
+pub async fn accept_application_task_integration_review_with_attachment(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    services: &ApplicationRunServices,
+    request: &sigil_kernel::TaskIntegrationReviewRequest,
+    session_attachment: Option<
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    >,
+) -> Result<ApplicationTaskIntegrationAcceptanceView> {
     let config_path = config_path.to_owned();
     let launch_cwd = launch_cwd.to_owned();
     let session_path = session_path.to_owned();
@@ -238,7 +262,8 @@ pub async fn accept_application_task_integration_review(
         let workspace_root =
             resolve_workspace_root(&config_path, &launch_cwd, &root_config.workspace.root);
         let store = JsonlSessionStore::new(&session_path)?;
-        let session_lease = session_leases.acquire(store.path())?;
+        let session_lease =
+            session_leases.acquire_with_attachment(store.path(), session_attachment)?;
         let session = Session::load_from_store(
             root_config.agent.runtime_provider.clone(),
             root_config.agent.model.clone(),

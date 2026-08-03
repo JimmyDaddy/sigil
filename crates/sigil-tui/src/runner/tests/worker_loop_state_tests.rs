@@ -68,6 +68,10 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     let state = WorkerLoopState::new(
         session_log_path.clone(),
         Some(session),
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_log_path,
+        )?
+        .into(),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
         event_tx.clone(),
@@ -366,19 +370,19 @@ fn worker_commands_are_routed_to_explicit_domains() {
 #[test]
 fn detached_background_runs_block_session_transitions() {
     assert_eq!(
-        SessionTransitionKind::Switch.block_reason(false, true),
+        SessionTransitionKind::Switch.block_reason(false, true, false, false),
         Some("cannot switch sessions while a background agent is running")
     );
     assert_eq!(
-        SessionTransitionKind::StartNew.block_reason(false, true),
+        SessionTransitionKind::StartNew.block_reason(false, true, false, false),
         Some("cannot start a new session while a background agent is running")
     );
     assert_eq!(
-        SessionTransitionKind::LocalFork.block_reason(false, true),
+        SessionTransitionKind::LocalFork.block_reason(false, true, false, false),
         Some("cannot fork a local session while a background agent is running")
     );
     assert_eq!(
-        SessionTransitionKind::CheckpointFork.block_reason(false, true),
+        SessionTransitionKind::CheckpointFork.block_reason(false, true, false, false),
         Some("cannot fork conversation while a background agent is running")
     );
 }
@@ -422,6 +426,10 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     let mut state = WorkerLoopState::new(
         current_path.clone(),
         Some(current_session),
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &current_path,
+        )?
+        .into(),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
         event_tx.clone(),
@@ -462,8 +470,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         &agent,
         &mut state,
         &message_tx,
-    )
-    .map_err(anyhow::Error::msg)?;
+    )?;
 
     assert_eq!(message.session_log_path, target_path);
     assert_eq!(state.session.log_path, target_path);
@@ -505,8 +512,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         &agent,
         &mut state,
         &message_tx,
-    )
-    .map_err(anyhow::Error::msg)?;
+    )?;
     assert!(
         state
             .session
@@ -588,6 +594,10 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
     let mut state = WorkerLoopState::new(
         current_path.clone(),
         Some(current_session),
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &current_path,
+        )?
+        .into(),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
         event_tx.clone(),
@@ -628,8 +638,7 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
         &agent,
         &mut state,
         &message_tx,
-    )
-    .map_err(anyhow::Error::msg)?;
+    )?;
 
     assert_eq!(state.session.log_path, target_path);
     assert!(state.session.exact_prompts.is_empty());
@@ -717,6 +726,10 @@ allowed_tools = ["grep"]
     let mut state = WorkerLoopState::new(
         current_path.clone(),
         Some(current_session),
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &current_path,
+        )?
+        .into(),
         supervisor,
         sigil_runtime::AgentToolBackgroundRuns::default(),
         event_tx.clone(),
@@ -736,8 +749,7 @@ allowed_tools = ["grep"]
         &agent,
         &mut state,
         &message_tx,
-    )
-    .map_err(anyhow::Error::msg)?;
+    )?;
     assert_eq!(
         state
             .agent
@@ -767,8 +779,7 @@ allowed_tools = ["grep"]
         &agent,
         &mut state,
         &message_tx,
-    )
-    .map_err(anyhow::Error::msg)?;
+    )?;
     assert_eq!(
         state
             .agent

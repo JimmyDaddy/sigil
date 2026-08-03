@@ -110,6 +110,13 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let profile_id_for_summary = profile_id.clone();
@@ -270,6 +277,13 @@ where
                 };
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = spawn_skill_child_run(
                     runtime,
                     SkillChildRunSpawn {
@@ -402,6 +416,13 @@ where
                 };
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -518,6 +539,13 @@ where
                 };
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = if needs_planning {
                     spawn_task_run(
                         runtime,
@@ -766,6 +794,13 @@ where
                 };
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {

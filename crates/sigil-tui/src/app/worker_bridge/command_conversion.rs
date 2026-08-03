@@ -289,7 +289,13 @@ impl AppState {
                 WorkerCommand::StartNewSession { session_log_path }
             }
             AppAction::SwitchSession { session_log_path } => {
-                WorkerCommand::SwitchSession { session_log_path }
+                let attachment_recovery_binding = self
+                    .pending_session_attachment_recovery_binding_for(&session_log_path)
+                    .map(str::to_owned);
+                WorkerCommand::SwitchSession {
+                    session_log_path,
+                    attachment_recovery_binding,
+                }
             }
             AppAction::SetupCompleted { .. }
             | AppAction::TrustWorkspace

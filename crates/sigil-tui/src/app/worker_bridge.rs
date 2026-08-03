@@ -142,8 +142,70 @@ impl AppState {
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         match message {
             WorkerMessage::WorkerReady => {
+                self.clear_pending_session_route_startup();
                 self.record_started_model_route();
                 self.push_event("worker", "ready");
+            }
+            WorkerMessage::SessionAttachmentTransferred {
+                session_log_path,
+                attachment,
+            } => {
+                self.retain_worker_session_attachment(session_log_path, attachment);
+            }
+            WorkerMessage::SessionRouteRecoveryRequired {
+                code,
+                actions,
+                recovery_binding,
+                retryable,
+                target_session,
+            } => {
+                if let Some(target) = target_session {
+                    self.restore_session_view(
+                        target.session_log_path,
+                        target.provider_name,
+                        target.model_name,
+                        target.entries,
+                        "opened session recovery",
+                    );
+                }
+                if !recovery_binding.is_empty() {
+                    self.set_pending_session_route_recovery(code, recovery_binding);
+                }
+                let summary = match code {
+                    sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired => {
+                        "connection target changed; review /config, then save to confirm"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::SessionRouteSelectionRequired => {
+                        "saved connection is unavailable; select a replacement in /config"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::ModelRouteNotConfigured => {
+                        "provider setup is required; open /config"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid => {
+                        "connection configuration is invalid; repair it in /config"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable => {
+                        "provider is temporarily unavailable; retry or repair the connection"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive => {
+                        "session is open in another Sigil window; close it there, then retry /resume"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy => {
+                        "session writer is busy; wait for it to finish, then retry"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid => {
+                        "session stream is invalid; start a new session or return to the library"
+                    }
+                };
+                self.last_notice = Some(summary.to_owned());
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!("Session unavailable: {summary}"),
+                );
+                self.push_event(
+                    "session:recovery",
+                    format!("{code:?}; actions={actions:?}; retryable={retryable}"),
+                );
             }
             WorkerMessage::ApprovalCommandReceipt(receipt) => {
                 let exact_pending = self.approval.pending.as_mut().filter(|pending| {
@@ -334,6 +396,7 @@ impl AppState {
                     task_id: task_id.clone(),
                     objective: objective.clone(),
                 });
+                self.refresh_conversation_queue_selection();
                 self.runtime.task_provider_route_diagnostics =
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
                 self.runtime.task_completion_progress =

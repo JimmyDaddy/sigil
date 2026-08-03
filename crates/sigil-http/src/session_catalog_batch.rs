@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sigil_runtime::{
-    LocalSessionCatalogState, LocalSessionMutationError, SessionCatalogProjectionEntry,
-    SessionCatalogProjectionService,
+    LocalSessionCatalogState, LocalSessionMutationError, LocalSessionReopenError,
+    SessionCatalogProjectionEntry, SessionCatalogProjectionService,
 };
 use thiserror::Error as ThisError;
 
@@ -252,6 +252,21 @@ fn execute_item(
     match action {
         HttpSessionCatalogBatchAction::DeleteSessions => {
             let session_id = item.session_id.as_deref().unwrap_or_default();
+            let session_ref = match sigil_kernel::SessionRef::new_relative(&item.session_ref) {
+                Ok(session_ref) => session_ref,
+                Err(_) => return failed_receipt(item, "invalid_request"),
+            };
+            let candidate = match catalog.resolve_session_for_reopen(&session_ref, session_id) {
+                Ok(candidate) => candidate,
+                Err(error) => return failed_receipt(item, reopen_error_code(&error)),
+            };
+            let _attachment = match registry.acquire_durable_session_mutation_attachment(
+                session_id,
+                &candidate.session_log_path,
+            ) {
+                Ok(attachment) => attachment,
+                Err(error) => return failed_receipt(item, registry_error_code(&error)),
+            };
             let guard = match registry.reserve_durable_session_mutation(session_id) {
                 Ok(guard) => guard,
                 Err(error) => return failed_receipt(item, registry_error_code(&error)),
@@ -351,11 +366,25 @@ fn mutation_error_code(error: &LocalSessionMutationError) -> &'static str {
     }
 }
 
+fn reopen_error_code(error: &LocalSessionReopenError) -> &'static str {
+    match error {
+        LocalSessionReopenError::NotFound => "not_found",
+        LocalSessionReopenError::NotReady { .. } => "not_ready",
+        LocalSessionReopenError::IdentityChanged => "identity_changed",
+        LocalSessionReopenError::CatalogUnavailable { .. } => "unavailable",
+    }
+}
+
 fn registry_error_code(error: &HttpRegistryError) -> &'static str {
     match error {
         HttpRegistryError::SessionForegroundRunActive { .. }
         | HttpRegistryError::SessionVerificationActive { .. }
         | HttpRegistryError::DurableSessionMutationActive => "active",
+        HttpRegistryError::SessionRunRecoveryRequired { recovery }
+            if recovery.code == crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive =>
+        {
+            "session_already_active"
+        }
         HttpRegistryError::ServerShuttingDown => "unavailable",
         _ => "unavailable",
     }

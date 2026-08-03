@@ -7626,7 +7626,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
     let mut restored_session = Session::load_from_store("parent", "model", restored_store)?;
     let restored_request = restored_session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -7969,7 +7969,7 @@ fn root_config() -> RootConfig {
         },
         permission: PermissionConfig::default(),
         model_request: Default::default(),
-        memory: MemoryConfig { enabled: false },
+        memory: MemoryConfig::with_enabled(false),
         skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
@@ -8015,7 +8015,7 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
         permission_context: sigil_kernel::PermissionEvaluationContext::default(),
-        memory_config: MemoryConfig { enabled: false },
+        memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
     }
 }

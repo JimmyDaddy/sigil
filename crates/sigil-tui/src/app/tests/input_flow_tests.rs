@@ -760,6 +760,7 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
 #[test]
 fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let _ = app.drain_pending_worker_commands();
     app.runtime.is_busy = true;
     app.composer.input = "follow up after this finishes".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
@@ -795,16 +796,27 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     assert!(pending_action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("follow-up is already scheduled to run next")
+        Some("follow-up will run next after saving")
     );
     assert!(app.events.iter().any(|event| {
-        event.label == "follow-up:next" && event.detail == "saving; already first in queue"
+        event.label == "follow-up:next" && event.detail == "waiting for durable queue id"
     }));
 
-    app.sync_current_session_state(vec![queued_conversation_input_entry(
+    let entries = vec![queued_conversation_input_entry(
         "queue_1",
         "follow up after this finishes",
-    )?]);
+    )?];
+    let items = sigil_kernel::ConversationQueueProjection::from_entries(&entries).items;
+    app.handle_worker_message(crate::runner::WorkerMessage::ConversationQueueUpdated {
+        items,
+        paused: false,
+        entries,
+    })?;
+    assert!(matches!(
+        app.drain_pending_worker_commands().as_slice(),
+        [crate::runner::WorkerCommand::PromoteQueuedConversationInput { queue_id }]
+            if queue_id.as_str() == "queue_1"
+    ));
     let rows = app.composer_queue_rows();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, "follow up after this finishes");
@@ -2008,6 +2020,28 @@ fn busy_task_prompt_adds_typed_task_guidance() -> Result<()> {
         rows[0].detail, "pending · task task_1 · guidance",
         "task follow-up must not masquerade as a main-thread chat"
     );
+    Ok(())
+}
+
+#[test]
+fn task_start_clears_hidden_main_queue_focus_and_returns_input_to_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_main",
+        "run after the current turn",
+    )?]);
+    assert!(app.focus_composer_queue_panel());
+
+    app.handle_worker_message(crate::runner::WorkerMessage::TaskRunStarted {
+        task_id: "task_1".to_owned(),
+        objective: "ship the task".to_owned(),
+    })?;
+
+    assert!(app.composer_queue_rows().is_empty());
+    assert!(!app.is_composer_queue_panel_focused());
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "x");
     Ok(())
 }
 

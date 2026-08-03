@@ -1085,12 +1085,16 @@ impl DesktopHttpClient {
             body.extend_from_slice(&chunk);
         }
         if status != expected_status {
-            let code = serde_json::from_slice::<DesktopErrorResponse>(&body)
-                .ok()
-                .and_then(|error| safe_error_code(error.error.code));
+            let error = serde_json::from_slice::<DesktopErrorResponse>(&body).ok();
+            let code = error
+                .as_ref()
+                .and_then(|error| safe_error_code(error.error.code.clone()));
+            let route_recovery =
+                error.and_then(|error| safe_route_recovery(error.error.route_recovery));
             return Err(DesktopClientError::Rejected {
                 status: status.as_u16(),
                 code,
+                route_recovery,
             });
         }
         serde_json::from_slice(&body).map_err(|_| DesktopClientError::InvalidResponse)
@@ -2017,12 +2021,15 @@ async fn rejected_response(mut response: Response) -> DesktopClientError {
         }
         body.extend_from_slice(&chunk);
     }
-    let code = serde_json::from_slice::<DesktopErrorResponse>(&body)
-        .ok()
-        .and_then(|error| safe_error_code(error.error.code));
+    let error = serde_json::from_slice::<DesktopErrorResponse>(&body).ok();
+    let code = error
+        .as_ref()
+        .and_then(|error| safe_error_code(error.error.code.clone()));
+    let route_recovery = error.and_then(|error| safe_route_recovery(error.error.route_recovery));
     DesktopClientError::Rejected {
         status: status.as_u16(),
         code,
+        route_recovery,
     }
 }
 
@@ -2045,6 +2052,16 @@ fn safe_error_code(code: String) -> Option<String> {
     .then_some(code)
 }
 
+fn safe_route_recovery(
+    recovery: Option<crate::DesktopSessionRouteRecoveryView>,
+) -> Option<crate::DesktopSessionRouteRecoveryView> {
+    recovery.filter(|recovery| {
+        !recovery.recovery_binding.is_empty()
+            && recovery.recovery_binding.len() <= 128
+            && recovery.allowed_actions.len() <= 7
+    })
+}
+
 /// Path- and credential-free failures safe for native-shell projection.
 #[derive(Debug, Error)]
 pub enum DesktopClientError {
@@ -2055,7 +2072,11 @@ pub enum DesktopClientError {
     #[error("desktop server response exceeded its size limit")]
     ResponseTooLarge,
     #[error("desktop server returned HTTP {status}")]
-    Rejected { status: u16, code: Option<String> },
+    Rejected {
+        status: u16,
+        code: Option<String>,
+        route_recovery: Option<crate::DesktopSessionRouteRecoveryView>,
+    },
     #[error("desktop server response is invalid")]
     InvalidResponse,
     #[error("desktop server event stream is invalid")]

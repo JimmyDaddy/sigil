@@ -277,8 +277,10 @@ fn protocol_provisional_id(
         }
         PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::RunFailed { .. }
+        | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::RunCancelled => Some(ConversationLiveProvisionalSlotV1::Terminal),
-        PublicRunEventKind::TaskRunStarted { .. }
+        PublicRunEventKind::RouteTransition { .. }
+        | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
         | PublicRunEventKind::TaskRoutingChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
@@ -378,6 +380,13 @@ fn is_lower_hex_sha256(value: &str) -> bool {
 
 fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
     match event {
+        PublicRunEventKind::RouteTransition { transition } => {
+            transition.connection_id = transition
+                .connection_id
+                .as_deref()
+                .map(safe_persistence_text);
+            transition.model_id = transition.model_id.as_deref().map(safe_persistence_text);
+        }
         PublicRunEventKind::RunStarted { prompt } => {
             *prompt = safe_persistence_text(prompt);
         }
@@ -588,6 +597,7 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
         }
         PublicRunEventKind::TerminalLifecycle { .. } => {}
         PublicRunEventKind::RunCancelled
+        | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
         | PublicRunEventKind::ToolCallArgsDelta { .. }
@@ -1051,6 +1061,7 @@ impl HttpLiveEventBus {
             &event.run_event.event,
             PublicRunEventKind::RunFinished { .. }
                 | PublicRunEventKind::RunFailed { .. }
+                | PublicRunEventKind::RouteRecoveryRequired { .. }
                 | PublicRunEventKind::RunCancelled
         );
         let mut latest_sequences = self
@@ -1424,7 +1435,8 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::ReasoningDelta { .. }
         | PublicRunEventKind::ToolCallArgsDelta { .. }
         | PublicRunEventKind::ToolProgress { .. } => HttpProtocolEventClass::Transient,
-        PublicRunEventKind::RunStarted { .. }
+        PublicRunEventKind::RouteTransition { .. }
+        | PublicRunEventKind::RunStarted { .. }
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
@@ -1435,6 +1447,7 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::TaskStepChanged { .. }
         | PublicRunEventKind::IntegrationLaneChanged { .. }
         | PublicRunEventKind::RunFailed { .. }
+        | PublicRunEventKind::RouteRecoveryRequired { .. }
         | PublicRunEventKind::RunCancelled
         | PublicRunEventKind::ToolCallStarted { .. }
         | PublicRunEventKind::ToolCallCompleted { .. }

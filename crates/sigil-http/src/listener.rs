@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sigil_runtime::{
-    LocalSessionCatalogState, LocalSessionMutationError, SessionCatalogProjectionEntry,
-    SessionCatalogProjectionError, SessionCatalogProjectionPage, SessionCatalogProjectionQuery,
-    SessionCatalogProjectionService, SessionCatalogSourceDiagnostic,
+    LocalSessionCatalogState, LocalSessionMutationError, LocalSessionReopenError,
+    SessionCatalogProjectionEntry, SessionCatalogProjectionError, SessionCatalogProjectionPage,
+    SessionCatalogProjectionQuery, SessionCatalogProjectionService, SessionCatalogSourceDiagnostic,
     application_run::{
         DEFAULT_APPLICATION_TRANSCRIPT_PAGE_SIZE, MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE,
     },
@@ -689,6 +689,25 @@ fn route_http_request(
                 "invalid session rename body",
             );
         };
+        let Ok(session_ref) = sigil_kernel::SessionRef::new_relative(&body.session_ref) else {
+            return http_error_response(
+                400,
+                "invalid_session_mutation_request",
+                "invalid session reference",
+            );
+        };
+        let candidate =
+            match session_catalog.resolve_session_for_reopen(&session_ref, &body.session_id) {
+                Ok(candidate) => candidate,
+                Err(error) => return session_reopen_error_response(error),
+            };
+        let _attachment = match registry.acquire_durable_session_mutation_attachment(
+            &body.session_id,
+            &candidate.session_log_path,
+        ) {
+            Ok(attachment) => attachment,
+            Err(error) => return registry_error_response(error),
+        };
         let guard = match registry.reserve_durable_session_mutation(&body.session_id) {
             Ok(guard) => guard,
             Err(error) => return registry_error_response(error),
@@ -720,6 +739,25 @@ fn route_http_request(
                 "invalid_session_mutation_request",
                 "invalid session delete body",
             );
+        };
+        let Ok(session_ref) = sigil_kernel::SessionRef::new_relative(&body.session_ref) else {
+            return http_error_response(
+                400,
+                "invalid_session_mutation_request",
+                "invalid session reference",
+            );
+        };
+        let candidate =
+            match session_catalog.resolve_session_for_reopen(&session_ref, &body.session_id) {
+                Ok(candidate) => candidate,
+                Err(error) => return session_reopen_error_response(error),
+            };
+        let _attachment = match registry.acquire_durable_session_mutation_attachment(
+            &body.session_id,
+            &candidate.session_log_path,
+        ) {
+            Ok(attachment) => attachment,
+            Err(error) => return registry_error_response(error),
         };
         let guard = match registry.reserve_durable_session_mutation(&body.session_id) {
             Ok(guard) => guard,
@@ -1842,6 +1880,36 @@ async fn write_http_response(
 }
 
 fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
+    if let HttpRegistryError::SessionRunRecoveryRequired { recovery } = &error {
+        let code = match recovery.code {
+            crate::HttpSessionRouteRecoveryCode::SessionRouteConfirmationRequired => {
+                "session_route_confirmation_required"
+            }
+            crate::HttpSessionRouteRecoveryCode::SessionRouteSelectionRequired => {
+                "session_route_selection_required"
+            }
+            crate::HttpSessionRouteRecoveryCode::ModelRouteNotConfigured => {
+                "model_route_not_configured"
+            }
+            crate::HttpSessionRouteRecoveryCode::ConnectionConfigInvalid => {
+                "connection_config_invalid"
+            }
+            crate::HttpSessionRouteRecoveryCode::ProviderUnavailable => "provider_unavailable",
+            crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive => "session_already_active",
+            crate::HttpSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
+            crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid => "session_stream_invalid",
+        };
+        return json_response(
+            409,
+            json!({
+                "error": {
+                    "code": code,
+                    "message": error.to_string(),
+                    "route_recovery": recovery,
+                }
+            }),
+        );
+    }
     let status = match &error {
         HttpRegistryError::SessionNotFound { .. }
         | HttpRegistryError::RunNotFound { .. }
@@ -1867,6 +1935,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::SessionForegroundRunActive { .. }
         | HttpRegistryError::SessionRunCleanupActive { .. }
         | HttpRegistryError::SessionVerificationActive { .. }
+        | HttpRegistryError::SessionRunRecoveryRequired { .. }
         | HttpRegistryError::DurableSessionMutationActive
         | HttpRegistryError::CommandKeyConflict { .. }
         | HttpRegistryError::RunTerminalConflict { .. }
@@ -1934,6 +2003,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ToolArtifactCorrupt => "tool_artifact_corrupt",
         HttpRegistryError::ToolArtifactPolicyRevoked => "tool_artifact_policy_revoked",
         HttpRegistryError::SessionRunCleanupActive { .. } => "session_run_cleanup_active",
+        HttpRegistryError::SessionRunRecoveryRequired { .. } => "session_run_recovery_required",
         HttpRegistryError::ConversationQueueInvalidCommand => "invalid_queue_command",
         HttpRegistryError::ConversationQueueGenerationStale => "queue_generation_stale",
         HttpRegistryError::ConversationQueueEntryTerminal => "queue_entry_terminal",
@@ -2027,6 +2097,19 @@ fn session_mutation_error_response(error: LocalSessionMutationError) -> HttpResp
     }
 }
 
+fn session_reopen_error_response(error: LocalSessionReopenError) -> HttpResponse {
+    registry_error_response(match error {
+        LocalSessionReopenError::NotFound => HttpRegistryError::DurableSessionNotFound,
+        LocalSessionReopenError::NotReady { .. } => HttpRegistryError::DurableSessionNotReady,
+        LocalSessionReopenError::IdentityChanged => {
+            HttpRegistryError::DurableSessionIdentityChanged
+        }
+        LocalSessionReopenError::CatalogUnavailable { .. } => {
+            HttpRegistryError::DurableSessionUnavailable
+        }
+    })
+}
+
 fn json_response(status: u16, body: Value) -> HttpResponse {
     match serde_json::to_vec(&body) {
         Ok(body) => bytes_response(status, "application/json", body),
@@ -2103,3 +2186,7 @@ struct HttpResponse {
     content_type: &'static str,
     body: Vec<u8>,
 }
+
+#[cfg(test)]
+#[path = "tests/listener_tests.rs"]
+mod tests;

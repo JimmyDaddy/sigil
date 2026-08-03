@@ -279,6 +279,8 @@ pub struct DesktopSessionOpenRequest {
     /// Optional process-local label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_binding: Option<String>,
 }
 
 /// Exact durable catalog identity and new display name.
@@ -460,11 +462,34 @@ pub struct DesktopSessionSnapshot {
     pub run_ids: Vec<String>,
     /// Durable session scope revalidated by the server.
     pub durable_session_scope_id: String,
-    /// Server-private durable log path. Native-shell IPC must not project this field.
-    pub session_log_path: String,
     /// Current foreground run, when leased.
     #[serde(default)]
     pub foreground_run_id: Option<String>,
+    /// Last route transition receipt observed for this process-local handle.
+    #[serde(default)]
+    pub route_transition: Option<DesktopSessionRouteTransitionView>,
+    /// Recovery required before this read handle can become write-active.
+    #[serde(default)]
+    pub route_recovery: Option<DesktopSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionRouteTransitionKind {
+    Exact,
+    Rebound,
+    ExplicitlyConfirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionRouteTransitionView {
+    pub kind: DesktopSessionRouteTransitionKind,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    pub remote_context_reset: bool,
 }
 
 impl fmt::Debug for DesktopSessionSnapshot {
@@ -475,8 +500,9 @@ impl fmt::Debug for DesktopSessionSnapshot {
             .field("label", &self.label)
             .field("run_ids", &self.run_ids)
             .field("durable_session_scope_id", &self.durable_session_scope_id)
-            .field("session_log_path", &"<redacted>")
             .field("foreground_run_id", &self.foreground_run_id)
+            .field("route_transition", &self.route_transition)
+            .field("route_recovery", &self.route_recovery)
             .finish()
     }
 }
@@ -1263,6 +1289,42 @@ pub struct DesktopRunContextView {
     pub last_prompt_tokens: Option<u64>,
     pub context_window_source: DesktopContextWindowSource,
     pub extension_catalog: DesktopApplicationExtensionCatalog,
+    #[serde(default)]
+    pub route_recovery: Option<DesktopSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionRouteRecoveryCode {
+    SessionRouteConfirmationRequired,
+    SessionRouteSelectionRequired,
+    ModelRouteNotConfigured,
+    ConnectionConfigInvalid,
+    ProviderUnavailable,
+    SessionAlreadyActive,
+    SessionWriterBusy,
+    SessionStreamInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSessionRouteRecoveryAction {
+    ConfirmCurrentRoute,
+    RepairConnection,
+    SelectReplacement,
+    StartNewSession,
+    RetryProvider,
+    RetrySessionAttach,
+    BackToSessionLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopSessionRouteRecoveryView {
+    pub code: DesktopSessionRouteRecoveryCode,
+    pub allowed_actions: Vec<DesktopSessionRouteRecoveryAction>,
+    pub recovery_binding: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1338,6 +1400,8 @@ pub struct DesktopRunStartRequest {
     pub model_ref: Option<DesktopProviderModelRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_binding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_recovery_binding: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<DesktopReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2510,4 +2574,6 @@ pub(crate) struct DesktopErrorResponse {
 pub(crate) struct DesktopErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(default)]
+    pub route_recovery: Option<DesktopSessionRouteRecoveryView>,
 }

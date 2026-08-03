@@ -771,6 +771,21 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
             requested_at_ms: binding.requested_at_ms,
         },
     ))?;
+    let queue_id = ConversationInputQueueId::new("queue_before_recovered_handoff")?;
+    let follow_up = project_conversation_prompt_for_persistence(
+        "apply this follow-up before starting the recovered task",
+    );
+    session.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: follow_up.prompt_hash,
+            prompt: follow_up.safe_prompt,
+            reasoning_effort: Some(ReasoningEffort::High),
+            created_at_ms: Some(32),
+        },
+    ))?;
     drop(session);
 
     let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
@@ -813,11 +828,28 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
-        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        Agent::new(
+            PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("follow-up handled first".to_owned()),
+                ProviderChunk::Done,
+            ])]),
+            ToolRegistry::new(),
+        ),
         workspace_root,
         role_provider_builder,
     )?;
 
+    let dispatched = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueDispatchStarted { .. }
+        )
+    })?;
+    assert!(matches!(
+        dispatched,
+        WorkerMessage::ConversationQueueDispatchStarted { queue_id: dispatched, .. }
+            if dispatched == queue_id
+    ));
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
     let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::TaskRunFinished { .. })

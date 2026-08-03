@@ -77,6 +77,8 @@ pub enum ContextSource {
     CurrentDiff,
     SessionArchive,
     TaskDigest,
+    UserMemory,
+    ProjectMemory,
     ExtensionProvided,
     ExternalSource,
 }
@@ -97,6 +99,7 @@ pub enum ContextTrustLevel {
 #[serde(rename_all = "snake_case")]
 pub enum ContextSensitivity {
     Public,
+    UserPrivate,
     Repository,
     PotentialSecret,
     Secret,

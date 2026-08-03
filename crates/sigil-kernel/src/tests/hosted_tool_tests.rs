@@ -341,7 +341,7 @@ async fn hosted_tool_agent_emits_and_persists_only_finalized_text() {
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
                 permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig { enabled: false },
+                memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
             },
             &mut handler,
@@ -370,7 +370,7 @@ fn hosted_options(workspace_root: &std::path::Path) -> AgentRunOptions {
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
         permission_context: crate::PermissionEvaluationContext::default(),
-        memory_config: MemoryConfig { enabled: false },
+        memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
     }
 }

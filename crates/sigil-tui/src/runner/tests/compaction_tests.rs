@@ -40,6 +40,19 @@ fn compaction_result(event: WorkerEvent) -> CompactionPreparationTaskResult {
     };
     result
 }
+
+fn compaction_test_attachment() -> Result<(
+    tempfile::TempDir,
+    Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+)> {
+    let temp = tempdir()?;
+    let attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            temp.path().join("session.jsonl"),
+        )?,
+    );
+    Ok((temp, attachment))
+}
 use crate::runner::worker_loop::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult,
     IdleAutoCompactionPreparation, IdleAutoCompactionState, IdleV2CompactionPreparation,
@@ -56,23 +69,34 @@ fn replacement_compaction_preparation_cancels_and_discards_the_old_result() -> R
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let mut tasks = CompactionPreparationTaskManager::new();
+    let (_attachment_temp, attachment) = compaction_test_attachment()?;
 
-    tasks.start_manual(
-        &runtime,
-        41,
-        "session-a".to_owned(),
-        result_tx.clone(),
-        move || {
-            let _ = started_tx.send(());
-            let _ = release_rx.recv();
-            Err::<ManualV2CompactionPreparation, _>("superseded".to_owned())
-        },
-    );
+    tasks
+        .start_manual(
+            &runtime,
+            41,
+            "session-a".to_owned(),
+            Arc::clone(&attachment),
+            result_tx.clone(),
+            move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                Err::<ManualV2CompactionPreparation, _>("superseded".to_owned())
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
     started_rx.recv_timeout(Duration::from_secs(1))?;
 
-    tasks.start_manual(&runtime, 42, "session-a".to_owned(), result_tx, || {
-        Err::<ManualV2CompactionPreparation, _>("current".to_owned())
-    });
+    tasks
+        .start_manual(
+            &runtime,
+            42,
+            "session-a".to_owned(),
+            attachment,
+            result_tx,
+            || Err::<ManualV2CompactionPreparation, _>("current".to_owned()),
+        )
+        .map_err(anyhow::Error::msg)?;
     let current = compaction_result(result_rx.recv_timeout(Duration::from_secs(1))?);
     assert!(matches!(
         current,
@@ -100,14 +124,24 @@ fn idle_compaction_preparation_has_one_owned_background_result() -> Result<()> {
         .build()?;
     let (result_tx, result_rx) = compaction_result_channel();
     let mut tasks = CompactionPreparationTaskManager::new();
+    let (_attachment_temp, attachment) = compaction_test_attachment()?;
 
-    tasks.start_idle(&runtime, 43, "session-idle".to_owned(), result_tx, || {
-        Ok(IdleV2CompactionPreparation {
-            state: IdleAutoCompactionState::default(),
-            preparation: Ok(IdleAutoCompactionPreparation::NotRequested),
-            session,
-        })
-    });
+    tasks
+        .start_idle(
+            &runtime,
+            43,
+            "session-idle".to_owned(),
+            attachment,
+            result_tx,
+            || {
+                Ok(IdleV2CompactionPreparation {
+                    state: IdleAutoCompactionState::default(),
+                    preparation: Ok(IdleAutoCompactionPreparation::NotRequested),
+                    session,
+                })
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
     assert!(tasks.has_active());
     let result = compaction_result(result_rx.recv_timeout(Duration::from_secs(1))?);
     let CompactionPreparationTaskResult::Idle {
@@ -126,6 +160,11 @@ fn idle_compaction_preparation_has_one_owned_background_result() -> Result<()> {
         Ok(IdleAutoCompactionPreparation::NotRequested)
     ));
     assert!(tasks.accept_result(43, "session-idle"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while tasks.has_active() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+        tasks.reap_finished();
+    }
     assert!(!tasks.has_active());
     Ok(())
 }
@@ -140,18 +179,22 @@ fn cancelled_overflow_preparation_finishes_without_publishing_a_stale_result() -
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let mut tasks = CompactionPreparationTaskManager::new();
+    let (_attachment_temp, attachment) = compaction_test_attachment()?;
 
-    tasks.start_overflow(
-        &runtime,
-        44,
-        "session-overflow".to_owned(),
-        result_tx,
-        move || {
-            let _ = started_tx.send(());
-            let _ = release_rx.recv();
-            Err::<OverflowV2CompactionPreparation, _>("cancelled".to_owned())
-        },
-    );
+    tasks
+        .start_overflow(
+            &runtime,
+            44,
+            "session-overflow".to_owned(),
+            attachment,
+            result_tx,
+            move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                Err::<OverflowV2CompactionPreparation, _>("cancelled".to_owned())
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
     started_rx.recv_timeout(Duration::from_secs(1))?;
     tasks.abort_all();
     let _ = release_tx.send(());

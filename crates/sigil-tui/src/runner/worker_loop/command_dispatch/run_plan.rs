@@ -76,7 +76,7 @@ where
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
 
-                if !cfg!(test)
+                let pending_session_title = if !cfg!(test)
                     && !plan_mode
                     && !prompt.trim().is_empty()
                     && !run_session
@@ -90,24 +90,17 @@ where
                     let title_session_log_path = state.session.log_path.clone();
                     let title_session_id = run_session.session_scope_id().to_owned();
                     let title_prompt = prompt.clone();
-                    runtime.spawn(async move {
-                        let result = sigil_runtime::generate_and_persist_session_title(
-                            title_root_config,
-                            title_workspace_root,
-                            route.model_ref,
-                            title_session_log_path,
-                            title_session_id,
-                            title_prompt,
-                        )
-                        .await;
-                        if let Err(error) = result {
-                            tracing::debug!(
-                                %error,
-                                "semantic session title generation was not applied"
-                            );
-                        }
-                    });
-                }
+                    Some((
+                        title_root_config,
+                        title_workspace_root,
+                        route.model_ref,
+                        title_session_log_path,
+                        title_session_id,
+                        title_prompt,
+                    ))
+                } else {
+                    None
+                };
 
                 let safe_started_prompt = if prompt.is_empty() && !attachments.is_empty() {
                     sigil_kernel::render_image_attachment_placeholders(&attachments)
@@ -199,6 +192,13 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -400,6 +400,29 @@ where
                             },
                         };
                     }
+                    if let Some((
+                        title_root_config,
+                        title_workspace_root,
+                        title_model_ref,
+                        title_session_log_path,
+                        title_session_id,
+                        title_prompt,
+                    )) = pending_session_title
+                        && let Err(error) = sigil_runtime::generate_and_persist_session_title(
+                            title_root_config,
+                            title_workspace_root,
+                            title_model_ref,
+                            title_session_log_path,
+                            title_session_id,
+                            title_prompt,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            %error,
+                            "semantic session title generation was not applied"
+                        );
+                    }
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
@@ -496,6 +519,13 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;

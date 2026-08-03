@@ -759,16 +759,15 @@ fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
     ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_eq!(app.session_id, previous_session_id);
-    assert!(app.session_browser.current_entries.iter().any(|entry| {
-        matches!(
+    let (provider_name, route) = app
+        .pending_session_route_selection()
+        .expect("the worker startup must own the durable route transition");
+    assert_eq!(provider_name, "deepseek");
+    assert_eq!(route.model_ref.model_id, "deepseek-v4-pro");
+    assert!(app.session_browser.current_entries.iter().all(|entry| {
+        !matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
-                provider_name,
-                model_name,
-                resolved_model_route,
-            }) if provider_name == "deepseek"
-                && model_name == "deepseek-v4-pro"
-                && resolved_model_route.model_ref.model_id == "deepseek-v4-pro"
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
         )
     }));
     assert!(

@@ -32,6 +32,7 @@ import type {
   ProviderModelRef,
   RecentWorkspaceSummary,
   RunContext,
+  SessionRouteRecoveryView,
   SessionSummary,
   WorkspaceSummary,
 } from "./types";
@@ -402,7 +403,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       sessionId: remembered.sessionId,
       label: remembered.label,
     }).then((session) => {
-      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       setSelectedSession(session);
       setSelectedDurableSessionId(remembered.sessionId);
       setConversationNavigation((current) =>
@@ -414,7 +415,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionMessage(undefined);
       setFailedSessionEntry(undefined);
     }).catch(() => {
-      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       writeLastSession(activeWorkspaceId, undefined);
       setSessionActionState("idle");
       setConversationNavigation(undefined);
@@ -645,12 +646,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
     }
   };
 
-  const openSession = async (entry: CatalogEntry) => {
-    if (activeWorkspaceId === undefined || entry.sessionId === undefined) return;
-    if (entry.sessionId === selectedDurableSessionId && selectedSession !== undefined) {
+  const openSession = async (entry: CatalogEntry, recoveryBinding?: string): Promise<boolean> => {
+    if (activeWorkspaceId === undefined || entry.sessionId === undefined) return false;
+    if (
+      recoveryBinding === undefined
+      && entry.sessionId === selectedDurableSessionId
+      && selectedSession !== undefined
+    ) {
       setNavigationOpen(false);
       navigate("conversation");
-      return;
+      return true;
     }
     const selectionEpoch = ++sessionSelectionEpoch.current;
     setSessionActionState("working");
@@ -666,8 +671,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         sessionRef: entry.sessionRef,
         sessionId: entry.sessionId,
         label: entry.title,
+        recoveryBinding,
       });
-      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       setConversationNavigation((current) =>
         current?.kind === "opening" && current.sessionRef === entry.sessionRef
           ? { ...current, targetSessionId: session.id }
@@ -684,10 +690,17 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         sessionId: entry.sessionId,
         label: entry.title,
       });
-    } catch {
-      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      return true;
+    } catch (error) {
+      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
+      const routeRecovery = sessionRouteRecoveryFromError(error);
+      if (routeRecovery !== undefined && entry.sessionId === selectedDurableSessionId) {
+        setSelectedSession((current) => current === undefined
+          ? current
+          : { ...current, routeRecovery });
+      }
       const refreshed = await loadHistory(activeWorkspaceId);
-      if (sessionSelectionEpoch.current !== selectionEpoch) return;
+      if (sessionSelectionEpoch.current !== selectionEpoch) return false;
       const refreshedEntry = refreshed?.entries.find(
         (candidate) => candidate.sessionRef === entry.sessionRef
           && candidate.sessionId === entry.sessionId,
@@ -698,12 +711,13 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         setSessionMessage(t("historyChangedRefreshed"));
         setFailedSessionEntry(undefined);
         setConversationNavigation(undefined);
-        return;
+        return false;
       }
       setSessionActionState("error");
       setSessionMessage(t("conversationOpenFailed"));
       setFailedSessionEntry(entry);
       setConversationNavigation(undefined);
+      return false;
     }
   };
 
@@ -1193,6 +1207,12 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 onOpenSettings={() => navigate("settings")}
                 onOpenSupport={() => navigate("support")}
                 onOpenFork={openForkSession}
+                onRetrySessionAttach={async (recoveryBinding) => {
+                  const entry = catalog.entries.find(
+                    (candidate) => candidate.sessionId === selectedDurableSessionId,
+                  );
+                  return entry === undefined ? false : openSession(entry, recoveryBinding);
+                }}
               />
             </div>
           )}
@@ -1470,6 +1490,40 @@ function errorCode(error: unknown): string | undefined {
 function errorMessage(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("message" in error)) return undefined;
   return typeof error.message === "string" ? error.message : undefined;
+}
+
+function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView | undefined {
+  if (typeof error !== "object" || error === null || !("routeRecovery" in error)) return undefined;
+  const recovery = error.routeRecovery;
+  if (typeof recovery !== "object" || recovery === null) return undefined;
+  if (!("code" in recovery) || typeof recovery.code !== "string") return undefined;
+  if (!("allowedActions" in recovery) || !Array.isArray(recovery.allowedActions)) return undefined;
+  if (!("recoveryBinding" in recovery) || typeof recovery.recoveryBinding !== "string") return undefined;
+  if (!("retryable" in recovery) || typeof recovery.retryable !== "boolean") return undefined;
+  const codes = new Set([
+    "session_route_confirmation_required",
+    "session_route_selection_required",
+    "model_route_not_configured",
+    "connection_config_invalid",
+    "provider_unavailable",
+    "session_already_active",
+    "session_writer_busy",
+    "session_stream_invalid",
+  ]);
+  const actions = new Set([
+    "confirm_current_route",
+    "repair_connection",
+    "select_replacement",
+    "start_new_session",
+    "retry_provider",
+    "retry_session_attach",
+    "back_to_session_library",
+  ]);
+  if (!codes.has(recovery.code) || recovery.recoveryBinding.length > 128) return undefined;
+  if (!recovery.allowedActions.every((action) => typeof action === "string" && actions.has(action))) {
+    return undefined;
+  }
+  return recovery as SessionRouteRecoveryView;
 }
 
 function workspaceRecoveryFromError(

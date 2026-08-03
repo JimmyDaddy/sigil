@@ -37,7 +37,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: false },
+        memory: MemoryConfig::with_enabled(false),
         skills: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
@@ -137,8 +137,13 @@ fn report_runtime_build_result_forwards_runtime_build_failures() -> Result<()> {
     assert!(runtime.is_none());
     assert!(matches!(
         recv_message(&message_rx)?,
-        WorkerMessage::RunFailed(ref message) if message.contains("runtime unavailable")
+        WorkerMessage::SessionRouteRecoveryRequired {
+            code: sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable,
+            retryable: true,
+            ..
+        }
     ));
+    assert!(message_rx.try_recv().is_err());
     Ok(())
 }
 
@@ -166,7 +171,7 @@ fn worker_loads_workspace_trust_from_the_active_session_before_registry_build() 
 }
 
 #[test]
-fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Result<()> {
+fn spawn_agent_worker_rejects_unconfigured_route_before_worker_thread() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -175,15 +180,15 @@ fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Re
     let mut root_config = deepseek_root_config(&workspace_root);
     root_config.agent.connection = Some(ConnectionId::new("missing")?);
 
-    let (_command_tx, message_rx) = spawn_agent_worker(
+    let error = spawn_agent_worker(
         root_config,
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
-    )?;
-    let failure = recv_message(&message_rx)?;
+    )
+    .expect_err("route admission must fail synchronously");
 
-    assert!(matches!(failure, WorkerMessage::RunFailed(_)));
+    assert!(format!("{error:#}").contains("model_route_not_configured"));
     Ok(())
 }
 
@@ -204,6 +209,93 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
     )?;
     let ready = recv_message(&message_rx)?;
     assert!(matches!(ready, WorkerMessage::WorkerReady));
+    command_tx.send(WorkerCommand::Shutdown)?;
+    Ok(())
+}
+
+#[test]
+fn second_worker_for_the_same_session_reports_attachment_busy() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-exclusive.jsonl");
+    let root_config = deepseek_root_config(&workspace_root);
+    let (owner_tx, owner_rx) = spawn_agent_worker(
+        root_config.clone(),
+        session_log_path.clone(),
+        workspace_root.clone(),
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+    assert!(matches!(
+        recv_message(&owner_rx)?,
+        WorkerMessage::WorkerReady
+    ));
+
+    let contender = spawn_agent_worker(
+        root_config,
+        session_log_path,
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )
+    .expect_err("second attachment must be rejected before a worker starts");
+    assert!(format!("{contender:#}").contains("session_attachment_busy"));
+    owner_tx.send(WorkerCommand::Shutdown)?;
+    Ok(())
+}
+
+#[test]
+fn worker_rebinds_same_origin_route_after_endpoint_correction() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-corrected.jsonl");
+    let mut wrong_config = deepseek_root_config(&workspace_root);
+    wrong_config
+        .connections
+        .get_mut("deepseek-default")
+        .expect("connection")["base_url"] = json!("https://example.com/wrong-endpoint");
+    let (_, wrong_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&wrong_config)?;
+    let initial = sigil_runtime::provider_connections::load_session_for_route_resume(
+        &wrong_config,
+        &wrong_route,
+        JsonlSessionStore::new(&session_log_path)?,
+    )?;
+    let wrong_fingerprint = initial
+        .resolved_model_route()
+        .expect("initial route")
+        .semantic_fingerprint
+        .clone();
+    drop(initial);
+
+    let corrected_config = deepseek_root_config(&workspace_root);
+    let (command_tx, message_rx) = spawn_agent_worker(
+        corrected_config,
+        session_log_path.clone(),
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+    let mut saw_rebind_notice = false;
+    loop {
+        match recv_message(&message_rx)? {
+            WorkerMessage::Notice(message) if message.contains("连接配置已更新") => {
+                saw_rebind_notice = true;
+            }
+            WorkerMessage::WorkerReady => break,
+            message => anyhow::bail!("unexpected worker startup message: {message:?}"),
+        }
+    }
+    assert!(saw_rebind_notice);
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionRouteRebound {
+            resolved_model_route,
+            ..
+        }) if resolved_model_route.semantic_fingerprint != wrong_fingerprint
+    )));
     command_tx.send(WorkerCommand::Shutdown)?;
     Ok(())
 }

@@ -56,7 +56,7 @@ pub(crate) fn test_config() -> RootConfig {
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: true },
+        memory: MemoryConfig::with_enabled(true),
         skills,
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),

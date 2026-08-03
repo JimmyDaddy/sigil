@@ -8661,7 +8661,7 @@ fn options() -> AgentRunOptions {
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
         permission_context: crate::PermissionEvaluationContext::default(),
-        memory_config: MemoryConfig { enabled: false },
+        memory_config: MemoryConfig::with_enabled(false),
         compaction_config: crate::CompactionConfig::default(),
     }
 }

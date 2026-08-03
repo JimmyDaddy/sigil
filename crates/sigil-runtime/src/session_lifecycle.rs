@@ -706,6 +706,11 @@ impl LocalSessionLifecycleService {
             source_turn_digest,
             destination_key,
         );
+        let _destination_attachment =
+            crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                &destination_path,
+            )
+            .map_err(anyhow::Error::new)?;
         if destination_path.exists() {
             return recover_conversation_fork_output(
                 &destination_path,

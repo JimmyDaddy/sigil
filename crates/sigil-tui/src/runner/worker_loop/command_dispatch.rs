@@ -155,6 +155,7 @@ pub(in crate::runner) enum SessionCommand {
     },
     SwitchSession {
         session_log_path: PathBuf,
+        attachment_recovery_binding: Option<String>,
     },
 }
 
@@ -454,9 +455,13 @@ pub(in crate::runner) fn classify_worker_command(
         WorkerCommand::StartNewSession { session_log_path } => {
             ClassifiedWorkerCommand::Session(SessionCommand::StartNewSession { session_log_path })
         }
-        WorkerCommand::SwitchSession { session_log_path } => {
-            ClassifiedWorkerCommand::Session(SessionCommand::SwitchSession { session_log_path })
-        }
+        WorkerCommand::SwitchSession {
+            session_log_path,
+            attachment_recovery_binding,
+        } => ClassifiedWorkerCommand::Session(SessionCommand::SwitchSession {
+            session_log_path,
+            attachment_recovery_binding,
+        }),
         WorkerCommand::QueueConversationInput {
             prompt,
             kind,

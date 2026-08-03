@@ -51,8 +51,22 @@ pub use persistence::{
 };
 pub use recent::{load_recent_model_refs, recent_models_path, record_recent_model_ref};
 pub use route::{
-    ResolvedRouteError, ensure_route_is_current, resolve_default_model_route, resolve_model_route,
-    runtime_provider_name, validate_persisted_model_route,
+    InspectedSessionRouteResume, ModelRouteSetupReason, ResolvedRouteConfigSnapshot,
+    ResolvedRouteError, SessionRouteAuthorityError, SessionRouteConfirmationReason,
+    SessionRouteExecutionOwner, SessionRouteLoadError, SessionRouteLoadOutcome,
+    SessionRouteMutationAuthority, SessionRouteMutationPermit, SessionRouteRebindReason,
+    SessionRouteResumeError, SessionRouteResumeInput, SessionRouteResumeOutcome,
+    SessionRouteResumePlan, SessionRouteResumeStatus, SessionRouteTransitionKind,
+    SessionRouteTransitionView, SessionRouteUnavailableReason,
+    apply_explicit_session_route_selection, apply_session_route_confirmation_plan,
+    apply_session_route_resume_plan, connection_egress_trust_binding, ensure_route_is_current,
+    inspect_session_for_route_resume, load_session_for_route_resume,
+    load_session_for_route_resume_with_directive,
+    load_session_for_route_resume_with_directive_and_attachment,
+    load_session_for_route_resume_with_directive_and_attachment_transition,
+    plan_session_route_resume, resolve_default_model_route, resolve_model_route,
+    runtime_provider_name, session_route_authority_generation_binding,
+    session_route_frontier_binding, validate_persisted_model_route,
 };
 pub use setup::default_setup_root_config;
 

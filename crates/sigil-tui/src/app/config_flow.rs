@@ -864,6 +864,13 @@ impl AppState {
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
+                        ConfigField::MemoryWritable => {
+                            config_state.draft.memory_writable =
+                                !config_state.draft.memory_writable;
+                            config_state.mark_edited();
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
                         ConfigField::CompactionEnabled => {
                             config_state.draft.compaction_enabled =
                                 !config_state.draft.compaction_enabled;
@@ -1868,6 +1875,16 @@ impl AppState {
         Ok(())
     }
 
+    pub(super) fn select_current_session_route_with_trust(
+        &mut self,
+        _root_config: &RootConfig,
+        provider_name: String,
+        route: sigil_kernel::ResolvedModelRoute,
+    ) -> Result<()> {
+        self.mark_pending_session_route_selection(provider_name, route);
+        Ok(())
+    }
+
     fn attempt_close_config(&mut self) -> Result<Option<AppAction>> {
         let Some(config_state) = self.config_state.as_mut() else {
             return Ok(None);
@@ -1897,7 +1914,12 @@ impl AppState {
                 config_state.close_guard_armed = false;
             }
             self.last_notice = Some("saved config".to_owned());
-            return Ok(None);
+            return Ok(self
+                .pending_session_route_recovery_binding()
+                .and_then(|_| self.root_config_snapshot().cloned())
+                .map(|root_config| AppAction::ConfigSaved {
+                    root_config: Box::new(root_config),
+                }));
         }
         if self.runtime.is_busy {
             self.last_notice = Some("busy; save later".to_owned());
@@ -2066,12 +2088,11 @@ impl AppState {
             return Ok(None);
         }
 
-        self.ensure_current_session_identity()?;
-        self.append_control_to_current_session(ControlEntry::SessionModelSelected {
-            provider_name: provider_name.clone(),
-            model_name: target_model.model_id.clone(),
-            resolved_model_route: route.clone(),
-        })?;
+        self.select_current_session_route_with_trust(
+            saved_config,
+            provider_name.clone(),
+            route.clone(),
+        )?;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = target_model.model_id.clone();
         self.runtime.model_route = Some(route);

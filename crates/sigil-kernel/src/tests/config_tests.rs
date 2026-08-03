@@ -2288,6 +2288,7 @@ model = "deepseek-v4-flash"
     .expect("minimal config should parse");
 
     assert!(config.memory.enabled);
+    assert!(!config.memory.writable);
     assert!(!config.code_intelligence.enabled);
     assert_eq!(
         config.code_intelligence.server_startup,

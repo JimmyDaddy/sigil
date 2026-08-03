@@ -1612,7 +1612,7 @@ where
                 interaction_mode: InteractionMode::Interactive,
                 permission_config,
                 permission_context: sigil_kernel::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig { enabled: false },
+                memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
             },
             &mut handler,

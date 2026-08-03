@@ -79,6 +79,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) web_bundled_search_enabled: bool,
     pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
+    pub(crate) memory_writable: bool,
     pub(crate) compaction_enabled: bool,
     pub(crate) compaction_native_carrier_enabled: bool,
     pub(crate) compaction_context_window_tokens: String,
@@ -120,6 +121,7 @@ impl fmt::Debug for ConfigDraft {
             .field("permission_mode", &self.permission_mode)
             .field("web_enabled", &self.web_enabled)
             .field("memory_enabled", &self.memory_enabled)
+            .field("memory_writable", &self.memory_writable)
             .field("compaction_enabled", &self.compaction_enabled)
             .field(
                 "compaction_native_carrier_enabled",

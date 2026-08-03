@@ -90,19 +90,23 @@ impl AppState {
         kind: ConversationInputKind,
         target: ConversationInputTarget,
     ) {
+        let projection = self.conversation_queue_projection();
+        let schedule_default_run_next = !projection.paused && projection.items.is_empty();
         let queue_id = self.next_optimistic_queue_id();
         let prompt = sigil_kernel::safe_persistence_text(&prompt);
-        self.composer
-            .optimistic_queue_items
-            .push(ConversationInputQueuedEntry {
-                queue_id,
-                target,
-                kind,
-                prompt_hash: conversation_prompt_hash(&prompt),
-                prompt,
-                reasoning_effort: Some(self.runtime.reasoning_effort.clone()),
-                created_at_ms: None,
-            });
+        let queued = ConversationInputQueuedEntry {
+            queue_id,
+            target,
+            kind,
+            prompt_hash: conversation_prompt_hash(&prompt),
+            prompt,
+            reasoning_effort: Some(self.runtime.reasoning_effort.clone()),
+            created_at_ms: None,
+        };
+        if schedule_default_run_next {
+            self.composer.deferred_queue_promotions.push(queued.clone());
+        }
+        self.composer.optimistic_queue_items.push(queued);
         self.refresh_conversation_queue_selection();
     }
 
@@ -266,11 +270,6 @@ impl AppState {
             .take(COMPOSER_QUEUE_VISIBLE_ROWS)
             .nth(self.composer.queue_selected)?;
         if is_optimistic_queue_id(&item.queued.queue_id) {
-            if !projection.paused && self.composer.queue_selected == 0 {
-                self.last_notice = Some("follow-up is already scheduled to run next".to_owned());
-                self.push_event("follow-up:next", "saving; already first in queue");
-                return None;
-            }
             if !self
                 .composer
                 .deferred_queue_promotions

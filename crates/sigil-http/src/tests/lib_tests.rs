@@ -63,9 +63,9 @@ use super::{
     HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
     HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
     HttpProtocolVersionError, HttpProviderModelRef, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunCancelRequest,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
+    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunAdmissionError,
+    HttpRunCancelRequest, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
     HttpRunDriverTerminalTaskCancel, HttpRunEventSequencer, HttpRunSnapshot, HttpRunStartRequest,
     HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
     HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
@@ -1213,6 +1213,22 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         "items": batch_items
     })
     .to_string();
+    driver.reject_next_session_mutation_attachment(HttpRunAdmissionError::SessionAlreadyActive {
+        recovery_binding: "sha256:batch-catalog-busy".to_owned(),
+    });
+    let (status, busy_batch) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/batch/execute",
+            Some("secret-token"),
+            &execute_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(busy_batch["completed"], 0);
+    assert_eq!(busy_batch["failed"], 1);
+    assert_eq!(busy_batch["items"][0]["reason"], "session_already_active");
     let (status, deleted) = http_raw_request(
         address,
         http_post(
@@ -1266,6 +1282,24 @@ async fn production_session_catalog_queries_durable_history_and_rejects_stale_cu
         "session_id": remaining_session_id,
     })
     .to_string();
+    driver.reject_next_session_mutation_attachment(HttpRunAdmissionError::SessionAlreadyActive {
+        recovery_binding: "sha256:catalog-busy".to_owned(),
+    });
+    let (status, busy_delete) = http_raw_request(
+        address,
+        http_post(
+            "/session-catalog/delete",
+            Some("secret-token"),
+            &delete_body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(busy_delete["error"]["code"], "session_already_active");
+    assert_eq!(
+        busy_delete["error"]["route_recovery"]["recovery_binding"],
+        "sha256:catalog-busy"
+    );
     let (status, single_deleted) = http_raw_request(
         address,
         http_post(
@@ -1551,6 +1585,7 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
             model_selection_binding: None,
+            route_recovery_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -1605,6 +1640,7 @@ async fn local_server_routes_typed_task_continuation_through_run_start() {
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
             model_selection_binding: None,
+            route_recovery_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -2286,6 +2322,7 @@ async fn local_server_projects_typed_run_context() {
         last_prompt_tokens: Some(4_096),
         context_window_source: HttpContextWindowSource::Provider,
         extension_catalog: HttpApplicationExtensionCatalog::default(),
+        route_recovery: None,
     });
     let path = format!("/sessions/{session_id}/run-context");
 
@@ -2662,6 +2699,7 @@ async fn local_server_routes_approval_command_and_replays_retry() {
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
             model_selection_binding: None,
+            route_recovery_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -2751,6 +2789,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
             permission_mode: Some(HttpPermissionMode::Manual),
             model_ref: None,
             model_selection_binding: None,
+            route_recovery_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -4164,8 +4203,22 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     let session_required = document["components"]["schemas"]["SessionSnapshot"]["required"]
         .as_array()
         .expect("session required fields");
-    for field in ["durable_session_scope_id", "session_log_path"] {
-        assert!(session_required.iter().any(|value| value == field));
+    assert!(
+        session_required
+            .iter()
+            .any(|value| value == "durable_session_scope_id")
+    );
+    assert!(
+        session_required
+            .iter()
+            .all(|value| value != "session_log_path"),
+        "public session snapshots must not expose host filesystem paths"
+    );
+    for field in ["route_transition", "route_recovery"] {
+        assert!(
+            document["components"]["schemas"]["SessionSnapshot"]["properties"][field].is_object(),
+            "missing portable session route field {field}"
+        );
     }
     let run_statuses = document["components"]["schemas"]["RunStatus"]["enum"]
         .as_array()
@@ -6405,6 +6458,7 @@ fn session_open_validates_wire_identity_and_reuses_existing_handle() {
         session_ref: "session-history.jsonl".to_owned(),
         session_id: "durable-history-1".to_owned(),
         label: Some("History".to_owned()),
+        recovery_binding: None,
     };
 
     let first = registry
@@ -6426,6 +6480,7 @@ fn session_open_validates_wire_identity_and_reuses_existing_handle() {
                 session_ref: session_ref.to_owned(),
                 session_id: "durable".to_owned(),
                 label: None,
+                recovery_binding: None,
             }),
             Err(HttpRegistryError::InvalidSessionOpenRequest)
         );
@@ -6448,6 +6503,7 @@ fn concurrent_session_open_creates_one_process_local_handle() {
                         session_ref: "session-concurrent.jsonl".to_owned(),
                         session_id: "durable-concurrent-1".to_owned(),
                         label: Some(format!("client-{index}")),
+                        recovery_binding: None,
                     })
                     .expect("concurrent durable open should succeed")
             })
@@ -6550,6 +6606,8 @@ fn session_creation_fails_closed_without_a_valid_durable_binding() {
     driver.return_next_binding(HttpSessionBinding {
         session_scope_id: "scope-invalid".to_owned(),
         session_log_path: "relative/session.jsonl".to_owned(),
+        route_transition: None,
+        route_recovery: None,
     });
     assert_eq!(
         registry.create_session(HttpSessionCreateRequest::default()),
@@ -6646,6 +6704,37 @@ fn contradictory_terminal_callback_fails_closed() {
             .status,
         HttpRunStatus::Cancelled
     );
+}
+
+#[test]
+fn run_admission_recovery_is_returned_before_run_allocation() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = HttpSessionRunRegistry::new(driver.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let recovery = crate::HttpSessionRouteRecoveryView {
+        code: crate::HttpSessionRouteRecoveryCode::SessionRouteConfirmationRequired,
+        allowed_actions: vec![crate::HttpSessionRouteRecoveryAction::ConfirmCurrentRoute],
+        recovery_binding: "sha256:route-recovery".to_owned(),
+        retryable: true,
+    };
+    *lock(&driver.next_admission_error) =
+        Some(HttpRunAdmissionError::RouteRecovery(recovery.clone()));
+
+    assert_eq!(
+        registry.start_run(
+            &session.id,
+            run_start("preserve me", HttpPermissionMode::Manual),
+        ),
+        Err(HttpRegistryError::SessionRunRecoveryRequired { recovery })
+    );
+    assert!(
+        registry
+            .get_session(&session.id)
+            .expect("session remains readable")
+            .run_ids
+            .is_empty()
+    );
+    assert!(driver.starts().is_empty());
 }
 
 #[test]
@@ -6964,6 +7053,7 @@ fn run_start_requires_session_prompt_and_explicit_permission_mode() {
                 permission_mode: None,
                 model_ref: None,
                 model_selection_binding: None,
+                route_recovery_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -7048,6 +7138,7 @@ fn task_continuation_uses_the_foreground_run_control_plane() {
         permission_mode: Some(HttpPermissionMode::Manual),
         model_ref: None,
         model_selection_binding: None,
+        route_recovery_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
@@ -8039,6 +8130,7 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
         permission_mode: Some(HttpPermissionMode::ReadOnly),
         model_ref: None,
         model_selection_binding: None,
+        route_recovery_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
@@ -8154,6 +8246,7 @@ fn run_start(prompt: &str, permission_mode: HttpPermissionMode) -> HttpRunStartR
         permission_mode: Some(permission_mode),
         model_ref: None,
         model_selection_binding: None,
+        route_recovery_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
@@ -8583,6 +8676,8 @@ struct RecordingRunDriver {
     terminal_cancels: Mutex<Vec<HttpRunDriverTerminalTaskCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
     next_start_error: Mutex<Option<String>>,
+    next_admission_error: Mutex<Option<HttpRunAdmissionError>>,
+    next_session_mutation_attachment_error: Mutex<Option<HttpRunAdmissionError>>,
     next_binding_error: Mutex<Option<String>>,
     next_binding: Mutex<Option<HttpSessionBinding>>,
     next_cancel_error: Mutex<Option<String>>,
@@ -8623,6 +8718,10 @@ impl RecordingRunDriver {
 
     fn purged_session_scopes(&self) -> Vec<String> {
         lock(&self.purged_session_scopes).clone()
+    }
+
+    fn reject_next_session_mutation_attachment(&self, error: HttpRunAdmissionError) {
+        *lock(&self.next_session_mutation_attachment_error) = Some(error);
     }
 
     fn starts(&self) -> Vec<HttpRunDriverStart> {
@@ -8780,6 +8879,17 @@ impl RecordingRunDriver {
 }
 
 impl HttpRunDriver for RecordingRunDriver {
+    fn admit_run_start(
+        &self,
+        _session: &crate::HttpSessionSnapshot,
+        _request: &HttpRunStartRequest,
+    ) -> Result<(), HttpRunAdmissionError> {
+        match lock(&self.next_admission_error).take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     fn bind_session(
         &self,
         session_id: &str,
@@ -8795,6 +8905,8 @@ impl HttpRunDriver for RecordingRunDriver {
         Ok(HttpSessionBinding {
             session_scope_id: format!("scope-{session_id}"),
             session_log_path: recording_session_log_path(session_id),
+            route_transition: None,
+            route_recovery: None,
         })
     }
 
@@ -8802,15 +8914,29 @@ impl HttpRunDriver for RecordingRunDriver {
         &self,
         _session_ref: &sigil_kernel::SessionRef,
         expected_session_id: &str,
+        _recovery_binding: Option<&str>,
     ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
         Ok(HttpSessionBinding {
             session_scope_id: expected_session_id.to_owned(),
             session_log_path: recording_session_log_path(expected_session_id),
+            route_transition: None,
+            route_recovery: None,
         })
     }
 
     fn purge_session_local_state(&self, durable_session_scope_id: &str) {
         lock(&self.purged_session_scopes).push(durable_session_scope_id.to_owned());
+    }
+
+    fn acquire_durable_session_mutation_attachment(
+        &self,
+        _durable_session_scope_id: &str,
+        _session_log_path: &std::path::Path,
+    ) -> Result<crate::HttpDurableSessionAttachmentGuard, HttpRunAdmissionError> {
+        match lock(&self.next_session_mutation_attachment_error).take() {
+            Some(error) => Err(error),
+            None => Ok(crate::HttpDurableSessionAttachmentGuard::unmanaged()),
+        }
     }
 
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {

@@ -38,10 +38,11 @@ use super::{
         worker_event::WorkerMcpRuntimeEventSender,
         worker_loop::{
             CreateTaskFromPlanRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
-            WorkerLoopTerminalRuntime, agent_result_continuation_run_result,
-            append_mcp_elicitation_audits, artifact_gc_task_metrics, cancel_terminal_task,
-            close_agent_thread, create_task_from_plan, durable_terminal_tool_result_metadata,
-            next_task_id, partition_agent_result_continuations,
+            WorkerLoopSessionAttachment, WorkerLoopTerminalRuntime,
+            agent_result_continuation_run_result, append_mcp_elicitation_audits,
+            artifact_gc_task_metrics, cancel_terminal_task, close_agent_thread,
+            create_task_from_plan, durable_terminal_tool_result_metadata, next_task_id,
+            partition_agent_result_continuations,
             pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
             queued_background_ready_transient_context, resolve_continue_task, run_worker_loop,
@@ -1823,12 +1824,16 @@ fn spawn_loop_with_shared_agent(
                 .expect("edge worker runtime should build");
             let context_resolver =
                 sigil_runtime::RequestContextResolver::request_local(workspace_root.clone());
+            let attachment_lease = sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                &session_log_path,
+            )
+            .expect("edge worker should acquire its session attachment");
             run_worker_loop(
                 runtime,
                 agent_for_loop,
                 root_config,
                 workspace_root,
-                session_log_path,
+                WorkerLoopSessionAttachment::new(session_log_path, attachment_lease),
                 options,
                 (event_tx, event_rx, urgent_rx),
                 message_tx,

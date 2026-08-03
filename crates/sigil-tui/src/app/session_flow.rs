@@ -474,6 +474,7 @@ impl AppState {
         entries: Vec<SessionLogEntry>,
         notice: &str,
     ) {
+        self.clear_pending_session_route_startup();
         self.review.checkpoint_restore_preview = None;
         self.review.checkpoint_expected_request = None;
         self.review.checkpoint_request_id = None;
@@ -507,11 +508,18 @@ impl AppState {
                     model_name.clone(),
                     resolved_model_route.clone(),
                 ),
-                SessionLogEntry::Control(ControlEntry::SessionModelSelected {
-                    provider_name,
-                    model_name,
-                    resolved_model_route,
-                }) if identity_seen => (
+                SessionLogEntry::Control(
+                    ControlEntry::SessionModelSelected {
+                        provider_name,
+                        model_name,
+                        resolved_model_route,
+                    }
+                    | ControlEntry::SessionRouteRebound {
+                        provider_name,
+                        model_name,
+                        resolved_model_route,
+                    },
+                ) if identity_seen => (
                     true,
                     provider_name.clone(),
                     model_name.clone(),

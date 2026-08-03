@@ -61,7 +61,7 @@ fn external_source_constructor_sanitizes_signed_url_and_untrusted_title_before_c
     let temp = tempfile::tempdir()?;
     let request = session.build_request_with_transient_messages_and_context(
         temp.path(),
-        &crate::MemoryConfig { enabled: false },
+        &crate::MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -267,7 +267,7 @@ fn session_recovery_quarantines_tampered_external_sidecar_and_url_descriptor() -
     )));
     let request = recovered.build_request_with_transient_messages_and_context(
         temp.path(),
-        &crate::MemoryConfig { enabled: false },
+        &crate::MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,

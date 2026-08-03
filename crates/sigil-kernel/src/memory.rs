@@ -12,6 +12,8 @@ use crate::{MemoryConfig, ModelMessage, PrefixSnapshot};
 
 const ROOT_MEMORY_FILENAMES: &[&str] = &["SIGIL.md", "AGENTS.md", "CLAUDE.md", "SIGIL.local.md"];
 const BASE_SYSTEM_PROMPT: &str = "You are Sigil, an AI coding agent working inside the user's workspace. Prefer inspecting the workspace before edits, keep changes auditable, and follow loaded workspace instructions. Do not assume whether the user is in Desktop, TUI, CLI, or another client unless host context states it. When introducing Sigil, do not turn implementation details, UI entrypoints, or repository language into capability claims unless the user directly asks about them. When the user explicitly asks for parallel or delegated work, use the model-visible agent tools instead of inventing informal subagent behavior.";
+const WRITABLE_MEMORY_ENABLED_PROMPT: &str = "Writable memory is available. Decide from the user's meaning, not keyword matching, whether they intend information to persist beyond the current session. Use remember_user_preference only for stable interaction or workflow preferences that apply across workspaces, and remember_project_fact only for user-asserted facts or conventions of the current project. Ask for clarification when the intended scope or durable statement is ambiguous. Never store secrets, credentials, guesses, or inferred sensitive facts. Do not claim that anything was remembered durably unless the appropriate tool completed successfully and returned a durable receipt; then report its scope, memory_id, and version. If approval is denied or the write fails, explicitly say that the information can only be kept in the current session.";
+const WRITABLE_MEMORY_DISABLED_PROMPT: &str = "Writable memory tools are unavailable. If the user intends information to persist beyond the current session, explicitly say that you can only keep it in the current session and must not claim that it was remembered durably.";
 
 /// Loaded workspace memory summary for UI and request materialization.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,7 +45,7 @@ pub fn inspect_memory_documents(
     config: &MemoryConfig,
 ) -> Result<MemoryLoadReport> {
     let docs = load_memory_documents(workspace_root, config)?;
-    Ok(build_memory_report(config.enabled, &docs))
+    Ok(build_memory_report(config, &docs))
 }
 
 pub(crate) fn materialize_memory(
@@ -51,11 +53,12 @@ pub(crate) fn materialize_memory(
     config: &MemoryConfig,
 ) -> Result<MaterializedMemory> {
     let docs = load_memory_documents(workspace_root, config)?;
-    let report = build_memory_report(config.enabled, &docs);
+    let report = build_memory_report(config, &docs);
+    let writable_memory_prompt = writable_memory_system_prompt(config);
     let mut messages = vec![ModelMessage {
         id: "system:base".to_owned(),
         role: crate::MessageRole::System,
-        content: Some(BASE_SYSTEM_PROMPT.to_owned()),
+        content: Some(format!("{BASE_SYSTEM_PROMPT} {writable_memory_prompt}")),
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
@@ -87,8 +90,11 @@ pub(crate) fn apply_memory_report(snapshot: &mut PrefixSnapshot, report: &Memory
     snapshot.memory_fingerprint = report.fingerprint.clone();
 }
 
-fn build_memory_report(enabled: bool, docs: &[MemoryDocument]) -> MemoryLoadReport {
-    let mut digest_input = String::new();
+fn build_memory_report(config: &MemoryConfig, docs: &[MemoryDocument]) -> MemoryLoadReport {
+    let mut digest_input = format!(
+        "sigil-base-system-prompt-v2\n{BASE_SYSTEM_PROMPT}\n{}\n",
+        writable_memory_system_prompt(config)
+    );
     for document in docs {
         digest_input.push_str(&document.relative_path);
         digest_input.push('\n');
@@ -97,13 +103,17 @@ fn build_memory_report(enabled: bool, docs: &[MemoryDocument]) -> MemoryLoadRepo
     }
 
     MemoryLoadReport {
-        enabled,
+        enabled: config.enabled,
         document_count: docs.len(),
-        fingerprint: if docs.is_empty() {
-            "none".to_owned()
-        } else {
-            format!("{:x}", Sha256::digest(digest_input.as_bytes()))
-        },
+        fingerprint: format!("{:x}", Sha256::digest(digest_input.as_bytes())),
+    }
+}
+
+fn writable_memory_system_prompt(config: &MemoryConfig) -> &'static str {
+    if config.writable {
+        WRITABLE_MEMORY_ENABLED_PROMPT
+    } else {
+        WRITABLE_MEMORY_DISABLED_PROMPT
     }
 }
 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sigil_kernel::PublicRunEvent;
+use sigil_kernel::{PublicRouteRecoveryAction, PublicRunEvent, PublicSessionRouteTransitionView};
 
 /// Current version of the provider-neutral machine record envelope.
 pub const MACHINE_PROTOCOL_VERSION: u16 = 1;
@@ -87,6 +87,9 @@ pub struct MachineRunResult {
     pub status: MachineRunStatus,
     /// Final assistant text, empty when no final answer was produced.
     pub final_text: String,
+    /// Exact bounded route transition admitted by a successful invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_transition: Option<PublicSessionRouteTransitionView>,
     /// Durable V2 JSONL session log path.
     pub session_log_path: String,
 }
@@ -101,6 +104,20 @@ pub enum MachineErrorCode {
     ConfigurationInvalid,
     /// Headless startup has no saved or explicit compound model route.
     ModelRouteNotConfigured,
+    /// The existing session route must be explicitly confirmed before history can be sent.
+    SessionRouteConfirmationRequired,
+    /// The existing session route is unavailable and a replacement must be selected.
+    SessionRouteSelectionRequired,
+    /// Another write-capable surface currently owns the durable session.
+    SessionAlreadyActive,
+    /// The saved connection configuration is invalid.
+    ConnectionConfigInvalid,
+    /// The configured provider could not become ready.
+    ProviderUnavailable,
+    /// A live route owner prevents this writer transition.
+    SessionWriterBusy,
+    /// The durable session stream is invalid.
+    SessionStreamInvalid,
     /// Provider, tool, or runtime execution failed.
     ExecutionFailed,
     /// The run was cooperatively cancelled before a result could be produced.
@@ -119,6 +136,12 @@ pub struct MachineError {
     pub message: String,
     /// Whether retrying the same invocation may be useful.
     pub retryable: bool,
+    /// Normative bounded actions the caller may safely present or automate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_actions: Vec<PublicRouteRecoveryAction>,
+    /// Opaque exact recovery capability for route or attachment conflicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_binding: Option<String>,
 }
 
 impl MachineError {
@@ -129,7 +152,26 @@ impl MachineError {
             code,
             message: message.into(),
             retryable,
+            allowed_actions: Vec::new(),
+            recovery_binding: None,
         }
+    }
+
+    /// Attaches one opaque exact recovery binding without exposing its source material.
+    #[must_use]
+    pub fn with_recovery_binding(mut self, recovery_binding: Option<&str>) -> Self {
+        self.recovery_binding = recovery_binding.map(str::to_owned);
+        self
+    }
+
+    /// Attaches the normative bounded recovery actions for this error class.
+    #[must_use]
+    pub fn with_allowed_actions(
+        mut self,
+        allowed_actions: impl IntoIterator<Item = PublicRouteRecoveryAction>,
+    ) -> Self {
+        self.allowed_actions = allowed_actions.into_iter().collect();
+        self
     }
 }
 
@@ -170,9 +212,17 @@ impl MachineExitCode {
         match code {
             MachineErrorCode::InvalidInvocation
             | MachineErrorCode::ConfigurationInvalid
-            | MachineErrorCode::ModelRouteNotConfigured => Self::InvalidInput,
+            | MachineErrorCode::ConnectionConfigInvalid
+            | MachineErrorCode::ModelRouteNotConfigured
+            | MachineErrorCode::SessionRouteConfirmationRequired
+            | MachineErrorCode::SessionRouteSelectionRequired => Self::InvalidInput,
             MachineErrorCode::Cancelled => Self::Cancelled,
-            MachineErrorCode::ExecutionFailed | MachineErrorCode::Internal => Self::ExecutionFailed,
+            MachineErrorCode::SessionAlreadyActive
+            | MachineErrorCode::ProviderUnavailable
+            | MachineErrorCode::SessionWriterBusy
+            | MachineErrorCode::SessionStreamInvalid
+            | MachineErrorCode::ExecutionFailed
+            | MachineErrorCode::Internal => Self::ExecutionFailed,
         }
     }
 }

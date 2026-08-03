@@ -46,6 +46,7 @@ impl ConfigDraft {
             web_bundled_search_enabled: root_config.web.bundled_search.enabled,
             verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
+            memory_writable: root_config.memory.writable,
             compaction_enabled: root_config.compaction.enabled,
             compaction_native_carrier_enabled: root_config.compaction.native_carrier_enabled,
             compaction_context_window_tokens: root_config
@@ -164,6 +165,7 @@ impl ConfigDraft {
         root_config.web.bundled_search.enabled = self.web_bundled_search_enabled;
         root_config.verification.auto_run = self.verification_auto_run;
         root_config.memory.enabled = self.memory_enabled;
+        root_config.memory.writable = self.memory_writable;
         root_config.compaction.enabled = self.compaction_enabled;
         root_config.compaction.native_carrier_enabled = self.compaction_native_carrier_enabled;
         root_config.compaction.context_window_tokens = context_window_tokens;

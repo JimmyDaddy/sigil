@@ -152,8 +152,8 @@ where
     }
 
     // Safe-point priority after terminal settlement:
-    // compaction result -> blocking child continuation -> task guidance -> recovered handoff
-    // -> queued user work -> deterministic tool aging -> opportunistic idle compaction
+    // compaction result -> blocking child continuation -> task guidance -> queued user work
+    // -> recovered handoff -> deterministic tool aging -> opportunistic idle compaction
     // -> artifact maintenance.
     if matches!(
         advance_compaction_results(context.reborrow()),
@@ -616,6 +616,22 @@ where
     if state.run.active.is_some() || state.run.pending_task_handoffs.is_empty() {
         return WorkerAdvancementControl::PollCommand;
     }
+    let queued_main_input_ready = match state
+        .session
+        .current
+        .as_ref()
+        .map(active_next_dispatchable_queue_id)
+        .transpose()
+    {
+        Ok(queue_id) => queue_id.flatten().is_some(),
+        Err(error) => {
+            enter_projection_reconciliation(message_tx, state, error);
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    if queued_main_input_ready {
+        return WorkerAdvancementControl::PollCommand;
+    }
     let action = state.run.pending_task_handoffs.remove(0);
     let Some(mut run_session) = state.session.current.take() else {
         let _ = message_tx.send(WorkerMessage::RunFailed(
@@ -660,6 +676,13 @@ where
     let cancellation_target = RunCancellationTarget::Task {
         task_id: task_id_value.clone(),
     };
+    if let Err(error) =
+        state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+    {
+        state.session.current = Some(run_session);
+        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    }
     let handle = spawn_task_run(
         runtime,
         TaskRunSpawn {
@@ -921,6 +944,13 @@ where
                 cancellation_task_guard,
             ) = cancellation;
             let tool_artifact_read_budget = state.session.begin_root_tool_artifact_read_budget();
+            if let Err(error) =
+                state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+            {
+                state.session.current = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
             let handle = spawn_task_continue(
                 runtime,
                 TaskContinueSpawn {
@@ -1321,6 +1351,7 @@ where
         runtime,
         request_id,
         session_scope_id,
+        Arc::clone(&state.session.attachment_lease),
         pressure.cursor,
         state.artifact_gc.result_tx.clone(),
         lifecycle,
@@ -1475,6 +1506,11 @@ where
                     .preparation_tasks
                     .accept_result(request_id, &session_scope_id)
                 {
+                    continue;
+                }
+                if let Err(error) = state.acquire_route_execution_owner() {
+                    let _ = message_tx
+                        .send(WorkerMessage::V2CompactionApplyFailed { request_id, error });
                     continue;
                 }
                 let Some(session) = state.session.current.as_ref() else {
@@ -1645,6 +1681,12 @@ where
                 match result {
                     Ok(prepared) => {
                         state.compaction.idle_auto = prepared.state;
+                        if let Err(error) = state.acquire_route_execution_owner() {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "automatic compaction could not acquire route ownership: {error}"
+                            )));
+                            continue;
+                        }
                         finish_idle_auto_compaction(
                             prepared.preparation,
                             prepared.session,
@@ -1781,6 +1823,10 @@ where
                 let compaction_request_id = pending.request_id();
                 let folded_event_count = pending.folded_event_count();
                 let frozen_request = pending.frozen_target_request();
+                if let Err(error) = state.acquire_route_execution_owner() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let applied = state.session.current.as_ref().map(|session| {
                     pending.apply_with_optional_native(
                         session,
@@ -2114,10 +2160,11 @@ where
                         let preparation_agent = Arc::clone(agent);
                         let source_logical_run_id = logical_run_id.to_owned();
                         let original_run_error = error.clone();
-                        state.compaction.preparation_tasks.start_overflow(
+                        let start_result = state.compaction.preparation_tasks.start_overflow(
                                 runtime,
                                 request_id,
                                 expected_session_scope_id.clone(),
+                                Arc::clone(&state.session.attachment_lease),
                                 state.compaction.preparation_tx.clone(),
                                 move || {
                                     let preparation = (|| {
@@ -2159,6 +2206,10 @@ where
                                     })
                                 },
                             );
+                        if let Err(start_error) = start_result {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(start_error));
+                            continue;
+                        }
                         let _ = message_tx.send(WorkerMessage::Notice(
                                 "context window was rejected before generation; preparing one owned overflow recovery"
                                     .to_owned(),
@@ -2352,10 +2403,11 @@ where
         let preparation_agent = Arc::clone(agent);
         let mut idle_auto_state = state.compaction.idle_auto.clone();
         state.compaction.idle_auto.cancel_requested_run();
-        state.compaction.preparation_tasks.start_idle(
+        let start_result = state.compaction.preparation_tasks.start_idle(
             runtime,
             request_id,
             expected_session_scope_id.clone(),
+            Arc::clone(&state.session.attachment_lease),
             state.compaction.preparation_tx.clone(),
             move || {
                 let Some(mut session) = stable_snapshot
@@ -2405,6 +2457,11 @@ where
                 })
             },
         );
+        if let Err(error) = start_result {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "automatic compaction could not acquire session execution ownership: {error}"
+            )));
+        }
     }
     WorkerAdvancementControl::PollCommand
 }
@@ -2650,10 +2707,11 @@ where
             let runtime_handle = runtime.handle().clone();
             let queue_context_resolver = context_resolver.clone();
             let preparation_agent = Arc::clone(agent);
-            state.compaction.preparation_tasks.start_pre_turn(
+            let start_result = state.compaction.preparation_tasks.start_pre_turn(
                 runtime,
                 request_id,
                 expected_session_scope_id.clone(),
+                Arc::clone(&state.session.attachment_lease),
                 state.compaction.preparation_tx.clone(),
                 move || {
                     let Some(mut session) = stable_snapshot
@@ -2725,6 +2783,11 @@ where
                     })
                 },
             );
+            if let Err(error) = start_result {
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "queued pre-turn compaction could not acquire session execution ownership: {error}"
+                )));
+            }
         }
 
         let mut pending_preparation = state.session.pending_queued_pre_turn_preparation.take();
@@ -2794,6 +2857,10 @@ where
                 admission: QueuedConversationPreTurnAdmission::PortablePreflightReady(pending),
                 ..
             }) => {
+                if let Err(error) = state.acquire_route_execution_owner() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    return WorkerAdvancementControl::SkipCommandPoll;
+                }
                 let Some(session) = state.session.current.as_ref() else {
                     return WorkerAdvancementControl::SkipCommandPoll;
                 };

@@ -140,6 +140,8 @@ export interface SessionSummary {
   label?: string;
   runCount: number;
   foregroundRunId?: string;
+  routeTransition?: TimelineRouteTransition;
+  routeRecovery?: SessionRouteRecoveryView;
 }
 
 export interface ForegroundRunOwner {
@@ -488,6 +490,7 @@ export interface SessionOpenInput {
   sessionRef: string;
   sessionId: string;
   label?: string;
+  recoveryBinding?: string;
 }
 
 export interface SessionRenameInput {
@@ -975,6 +978,14 @@ export interface RunContext {
   lastPromptTokens?: number;
   contextWindowSource: "connection" | "provider" | "config" | "unavailable";
   extensionCatalog: ExtensionCatalog;
+  routeRecovery?: SessionRouteRecoveryView;
+}
+
+export interface SessionRouteRecoveryView {
+  code: RouteRecoveryCode;
+  allowedActions: RouteRecoveryAction[];
+  recoveryBinding: string;
+  retryable: boolean;
 }
 
 export interface ProviderModelRef {
@@ -1394,6 +1405,7 @@ export interface IntentDropExecution {
 }
 
 export type TimelineEventKind =
+  | "route_transition"
   | "run_started"
   | "task_run_started"
   | "task_run_finished"
@@ -1418,6 +1430,7 @@ export type TimelineEventKind =
   | "control"
   | "run_finished"
   | "run_failed"
+  | "route_recovery_required"
   | "run_cancelled"
   | "other";
 
@@ -1565,6 +1578,43 @@ export interface TimelineEvent {
   toolExecution?: TimelineToolExecution;
   task?: TimelineTask;
   terminalTask?: TimelineTerminalTask;
+  routeRecovery?: TimelineRouteRecovery;
+  routeTransition?: TimelineRouteTransition;
+}
+
+export type RouteTransitionKind = "exact" | "rebound" | "explicitly_confirmed";
+
+export interface TimelineRouteTransition {
+  kind: RouteTransitionKind;
+  connectionId?: string;
+  modelId?: string;
+  remoteContextReset: boolean;
+}
+
+export type RouteRecoveryCode =
+  | "session_route_confirmation_required"
+  | "session_route_selection_required"
+  | "model_route_not_configured"
+  | "connection_config_invalid"
+  | "provider_unavailable"
+  | "session_already_active"
+  | "session_writer_busy"
+  | "session_stream_invalid";
+
+export type RouteRecoveryAction =
+  | "confirm_current_route"
+  | "repair_connection"
+  | "select_replacement"
+  | "start_new_session"
+  | "retry_provider"
+  | "retry_session_attach"
+  | "back_to_session_library";
+
+export interface TimelineRouteRecovery {
+  code: RouteRecoveryCode;
+  actions: RouteRecoveryAction[];
+  recoveryBinding: string;
+  retryable: boolean;
 }
 
 export interface TimelineToolExecution {

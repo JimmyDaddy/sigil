@@ -1845,7 +1845,7 @@ fn active_context_v1_request_adoption_result(
 
     let request = session.build_request(
         &case_workspace,
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,

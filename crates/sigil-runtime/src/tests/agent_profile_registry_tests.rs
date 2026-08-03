@@ -47,7 +47,7 @@ fn root_config() -> RootConfig {
         },
         permission: PermissionConfig::default(),
         model_request: Default::default(),
-        memory: MemoryConfig { enabled: true },
+        memory: MemoryConfig::with_enabled(true),
         skills: Default::default(),
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),

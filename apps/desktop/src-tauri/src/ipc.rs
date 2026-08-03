@@ -40,12 +40,13 @@ use sigil_desktop::{
     DesktopSessionCatalogBatchOutcome, DesktopSessionCatalogBatchPlan,
     DesktopSessionCatalogBatchPlanStatus, DesktopSessionCatalogBatchReceipt,
     DesktopSessionCatalogEntry, DesktopSessionCatalogPage, DesktopSessionCatalogSourceDiagnostic,
-    DesktopSessionCatalogState, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
-    DesktopSessionTranscriptPage, DesktopSupportCheck, DesktopSupportDoctorReport,
-    DesktopSupportEnvironment, DesktopSupportPrivacy, DesktopSupportStatus, DesktopSupportSummary,
-    DesktopTaskIntegrationAcceptanceView, DesktopTaskIntegrationReviewRequest,
-    DesktopTaskIntegrationReviewView, DesktopTimelineEvent, DesktopTimelineTerminalTask,
-    DesktopToolArtifactAvailability as NativeToolArtifactAvailability,
+    DesktopSessionCatalogState, DesktopSessionRouteRecoveryAction, DesktopSessionRouteRecoveryCode,
+    DesktopSessionRouteRecoveryView, DesktopSessionRouteTransitionKind, DesktopSessionSnapshot,
+    DesktopSessionTranscriptMessage, DesktopSessionTranscriptPage, DesktopSupportCheck,
+    DesktopSupportDoctorReport, DesktopSupportEnvironment, DesktopSupportPrivacy,
+    DesktopSupportStatus, DesktopSupportSummary, DesktopTaskIntegrationAcceptanceView,
+    DesktopTaskIntegrationReviewRequest, DesktopTaskIntegrationReviewView, DesktopTimelineEvent,
+    DesktopTimelineTerminalTask, DesktopToolArtifactAvailability as NativeToolArtifactAvailability,
     DesktopToolArtifactPage as NativeToolArtifactPage,
     DesktopToolArtifactPageEncoding as NativeToolArtifactPageEncoding,
     DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptAssistantKind,
@@ -633,6 +634,8 @@ pub(crate) struct DesktopSessionOpenInput {
     pub(crate) session_id: String,
     #[serde(default)]
     pub(crate) label: Option<String>,
+    #[serde(default)]
+    pub(crate) recovery_binding: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -776,6 +779,21 @@ pub(crate) struct DesktopSessionSummary {
     pub(crate) run_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) foreground_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route_transition: Option<DesktopSessionRouteTransitionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route_recovery: Option<DesktopSessionRouteRecoverySummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionRouteTransitionSummary {
+    pub(crate) kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) connection_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
+    pub(crate) remote_context_reset: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1557,6 +1575,7 @@ pub(crate) struct DesktopRunStartInput {
     pub(crate) permission_mode: DesktopPermissionMode,
     pub(crate) model_ref: Option<DesktopProviderModelRefSummary>,
     pub(crate) model_selection_binding: Option<String>,
+    pub(crate) route_recovery_binding: Option<String>,
     pub(crate) reasoning_effort: Option<DesktopReasoningEffort>,
     pub(crate) reasoning_effort_binding: Option<String>,
     pub(crate) skill_binding: Option<DesktopSkillBindingInput>,
@@ -1629,6 +1648,17 @@ pub(crate) struct DesktopRunContext {
     pub(crate) last_prompt_tokens: Option<u64>,
     pub(crate) context_window_source: &'static str,
     pub(crate) extension_catalog: DesktopExtensionCatalog,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route_recovery: Option<DesktopSessionRouteRecoverySummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionRouteRecoverySummary {
+    pub(crate) code: &'static str,
+    pub(crate) allowed_actions: Vec<&'static str>,
+    pub(crate) recovery_binding: String,
+    pub(crate) retryable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2104,7 +2134,64 @@ impl From<DesktopSessionSnapshot> for DesktopSessionSummary {
             label: value.label,
             run_count: value.run_ids.len(),
             foreground_run_id: value.foreground_run_id,
+            route_transition: value.route_transition.map(|transition| {
+                DesktopSessionRouteTransitionSummary {
+                    kind: match transition.kind {
+                        DesktopSessionRouteTransitionKind::Exact => "exact",
+                        DesktopSessionRouteTransitionKind::Rebound => "rebound",
+                        DesktopSessionRouteTransitionKind::ExplicitlyConfirmed => {
+                            "explicitly_confirmed"
+                        }
+                    },
+                    connection_id: transition.connection_id,
+                    model_id: transition.model_id,
+                    remote_context_reset: transition.remote_context_reset,
+                }
+            }),
+            route_recovery: value
+                .route_recovery
+                .map(desktop_session_route_recovery_summary),
         }
+    }
+}
+
+pub(crate) fn desktop_session_route_recovery_summary(
+    recovery: DesktopSessionRouteRecoveryView,
+) -> DesktopSessionRouteRecoverySummary {
+    DesktopSessionRouteRecoverySummary {
+        code: match recovery.code {
+            DesktopSessionRouteRecoveryCode::SessionRouteConfirmationRequired => {
+                "session_route_confirmation_required"
+            }
+            DesktopSessionRouteRecoveryCode::SessionRouteSelectionRequired => {
+                "session_route_selection_required"
+            }
+            DesktopSessionRouteRecoveryCode::ModelRouteNotConfigured => {
+                "model_route_not_configured"
+            }
+            DesktopSessionRouteRecoveryCode::ConnectionConfigInvalid => "connection_config_invalid",
+            DesktopSessionRouteRecoveryCode::ProviderUnavailable => "provider_unavailable",
+            DesktopSessionRouteRecoveryCode::SessionAlreadyActive => "session_already_active",
+            DesktopSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
+            DesktopSessionRouteRecoveryCode::SessionStreamInvalid => "session_stream_invalid",
+        },
+        allowed_actions: recovery
+            .allowed_actions
+            .into_iter()
+            .map(|action| match action {
+                DesktopSessionRouteRecoveryAction::ConfirmCurrentRoute => "confirm_current_route",
+                DesktopSessionRouteRecoveryAction::RepairConnection => "repair_connection",
+                DesktopSessionRouteRecoveryAction::SelectReplacement => "select_replacement",
+                DesktopSessionRouteRecoveryAction::StartNewSession => "start_new_session",
+                DesktopSessionRouteRecoveryAction::RetryProvider => "retry_provider",
+                DesktopSessionRouteRecoveryAction::RetrySessionAttach => "retry_session_attach",
+                DesktopSessionRouteRecoveryAction::BackToSessionLibrary => {
+                    "back_to_session_library"
+                }
+            })
+            .collect(),
+        recovery_binding: recovery.recovery_binding,
+        retryable: recovery.retryable,
     }
 }
 
@@ -3081,6 +3168,61 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                 DesktopContextWindowSource::Unavailable => "unavailable",
             },
             extension_catalog,
+            route_recovery: value.route_recovery.map(|recovery| {
+                DesktopSessionRouteRecoverySummary {
+                    code: match recovery.code {
+                        DesktopSessionRouteRecoveryCode::SessionRouteConfirmationRequired => {
+                            "session_route_confirmation_required"
+                        }
+                        DesktopSessionRouteRecoveryCode::SessionRouteSelectionRequired => {
+                            "session_route_selection_required"
+                        }
+                        DesktopSessionRouteRecoveryCode::ModelRouteNotConfigured => {
+                            "model_route_not_configured"
+                        }
+                        DesktopSessionRouteRecoveryCode::ConnectionConfigInvalid => {
+                            "connection_config_invalid"
+                        }
+                        DesktopSessionRouteRecoveryCode::ProviderUnavailable => {
+                            "provider_unavailable"
+                        }
+                        DesktopSessionRouteRecoveryCode::SessionAlreadyActive => {
+                            "session_already_active"
+                        }
+                        DesktopSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
+                        DesktopSessionRouteRecoveryCode::SessionStreamInvalid => {
+                            "session_stream_invalid"
+                        }
+                    },
+                    allowed_actions: recovery
+                        .allowed_actions
+                        .into_iter()
+                        .map(|action| match action {
+                            DesktopSessionRouteRecoveryAction::ConfirmCurrentRoute => {
+                                "confirm_current_route"
+                            }
+                            DesktopSessionRouteRecoveryAction::RepairConnection => {
+                                "repair_connection"
+                            }
+                            DesktopSessionRouteRecoveryAction::SelectReplacement => {
+                                "select_replacement"
+                            }
+                            DesktopSessionRouteRecoveryAction::StartNewSession => {
+                                "start_new_session"
+                            }
+                            DesktopSessionRouteRecoveryAction::RetryProvider => "retry_provider",
+                            DesktopSessionRouteRecoveryAction::RetrySessionAttach => {
+                                "retry_session_attach"
+                            }
+                            DesktopSessionRouteRecoveryAction::BackToSessionLibrary => {
+                                "back_to_session_library"
+                            }
+                        })
+                        .collect(),
+                    recovery_binding: recovery.recovery_binding,
+                    retryable: recovery.retryable,
+                }
+            }),
         }
     }
 }

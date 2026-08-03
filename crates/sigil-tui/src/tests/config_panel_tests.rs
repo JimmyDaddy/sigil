@@ -1383,16 +1383,19 @@ fn config_field_character_filter_matches_field_kind() {
     assert!(!config_field_accepts_char(ConfigField::McpArgsCsv, '\n'));
     assert!(!config_field_accepts_char(ConfigField::ProviderApiKey, 'x'));
     assert!(!config_field_accepts_char(ConfigField::MemoryEnabled, '1'));
+    assert!(!config_field_accepts_char(ConfigField::MemoryWritable, '1'));
 }
 
 #[test]
 fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::Result<()> {
     let mut config = test_root_config();
     config.memory.enabled = true;
+    config.memory.writable = true;
     config.compaction.context_window_tokens = Some(64000);
     let mut state = ConfigState::from_root_config(&config);
 
     assert_eq!(state.display_value(ConfigField::MemoryEnabled), "yes");
+    assert_eq!(state.display_value(ConfigField::MemoryWritable), "yes");
     assert_eq!(
         state.display_value(ConfigField::CompactionContextWindowTokens),
         "64000 tokens"

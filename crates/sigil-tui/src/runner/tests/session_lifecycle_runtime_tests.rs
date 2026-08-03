@@ -354,7 +354,7 @@ fn active_session_fork_uses_the_owned_writer_instead_of_catalog_scanning() -> Re
         &root_config,
         &current_model_route,
     )?;
-    assert!(output.destination_path.is_file());
-    assert_eq!(output.copied_message_count, 2);
+    assert!(output.output.destination_path.is_file());
+    assert_eq!(output.output.copied_message_count, 2);
     Ok(())
 }

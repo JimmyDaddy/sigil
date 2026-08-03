@@ -1,4 +1,7 @@
-use std::{sync::mpsc, time::Duration};
+use std::{
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 
 use anyhow::Result;
 use sigil_kernel::{
@@ -41,11 +44,17 @@ fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
         .build()?;
     let (event_tx, event_rx) = mpsc::channel();
     let mut tasks = ArtifactGcTaskManager::new();
+    let attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )?,
+    );
 
     tasks.start(
         &runtime,
         7,
         artifact_store.session_scope_id().to_owned(),
+        attachment,
         None,
         WorkerEventPayloadSender::artifact_gc(event_tx),
         lifecycle,

@@ -72,6 +72,84 @@ impl AppState {
         self.config_snapshot.as_ref()
     }
 
+    pub(crate) fn pending_session_route_recovery_binding(&self) -> Option<&str> {
+        self.runtime
+            .pending_session_route_recovery_binding
+            .as_deref()
+    }
+
+    pub(crate) fn pending_session_attachment_recovery_binding_for(
+        &self,
+        session_log_path: &std::path::Path,
+    ) -> Option<&str> {
+        (self.runtime.pending_session_route_recovery_code
+            == Some(sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive)
+            && self
+                .runtime
+                .pending_session_route_recovery_target
+                .as_deref()
+                == Some(session_log_path))
+        .then(|| self.pending_session_route_recovery_binding())
+        .flatten()
+    }
+
+    pub(crate) fn mark_pending_session_transition_target(
+        &mut self,
+        session_log_path: std::path::PathBuf,
+    ) {
+        self.runtime.pending_session_route_recovery_target = Some(session_log_path);
+    }
+
+    pub(crate) fn pending_session_route_confirmation_binding(&self) -> Option<&str> {
+        (self.runtime.pending_session_route_recovery_code
+            != Some(sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive))
+        .then(|| self.pending_session_route_recovery_binding())
+        .flatten()
+    }
+
+    pub(crate) fn pending_session_route_selection(
+        &self,
+    ) -> Option<&(String, sigil_kernel::ResolvedModelRoute)> {
+        self.runtime.pending_session_route_selection.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pending_session_route_recovery_binding(&mut self, binding: Option<String>) {
+        self.runtime.pending_session_route_recovery_binding = binding;
+    }
+
+    pub(crate) fn set_pending_session_route_recovery(
+        &mut self,
+        code: sigil_kernel::PublicRouteRecoveryCode,
+        binding: String,
+    ) {
+        self.runtime.pending_session_route_recovery_code = Some(code);
+        if code == sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive {
+            if self.runtime.pending_session_route_recovery_target.is_none() {
+                self.runtime.pending_session_route_recovery_target =
+                    Some(self.session_log_path.clone());
+            }
+        } else {
+            self.runtime.pending_session_route_recovery_target = None;
+        }
+        self.runtime.pending_session_route_recovery_binding = Some(binding);
+    }
+
+    pub(crate) fn mark_pending_session_route_selection(
+        &mut self,
+        provider_name: String,
+        route: sigil_kernel::ResolvedModelRoute,
+    ) {
+        self.runtime.pending_session_route_selection = Some((provider_name, route));
+    }
+
+    pub(crate) fn clear_pending_session_route_startup(&mut self) {
+        self.runtime.pending_session_route_recovery_binding = None;
+        self.runtime.pending_session_route_recovery_code = None;
+        self.runtime.pending_session_route_recovery_target = None;
+        self.runtime.pending_session_route_selection = None;
+    }
+
     pub(crate) fn runtime_config_for_current_session(
         &self,
         mut saved_config: RootConfig,

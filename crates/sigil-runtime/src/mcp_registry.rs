@@ -484,8 +484,14 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         workspace_trust,
         terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
     )?;
-    let context_resolver =
+    let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
+    if root_config.memory.writable {
+        let paths =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+        context_resolver =
+            context_resolver.with_writable_memory(crate::WritableMemoryStore::from_paths(&paths));
+    }
     let mut registration_options = McpDeclarationRegistrationOptions::new(McpServerStartup::Eager)
         .with_handlers(
             Arc::clone(&elicitation_handler),
@@ -684,8 +690,14 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         workspace_trust,
         terminal_lifecycle_route,
     )?;
-    let context_resolver =
+    let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
+    if root_config.memory.writable {
+        let paths =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+        context_resolver =
+            context_resolver.with_writable_memory(crate::WritableMemoryStore::from_paths(&paths));
+    }
     register_lazy_mcp_activation_tool(
         &mut registry,
         root_config,
@@ -1069,6 +1081,12 @@ fn register_local_tools(
         user_config_dir.as_deref(),
         &root_config.skills,
     );
+    if root_config.memory.writable {
+        crate::register_writable_memory_tools(
+            registry,
+            crate::WritableMemoryStore::from_paths(&paths),
+        );
+    }
     Ok((code_intelligence, terminal_control))
 }
 

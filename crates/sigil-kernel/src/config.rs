@@ -2992,12 +2992,29 @@ pub struct ToolAllowlistConfig {
 pub struct MemoryConfig {
     #[serde(default = "default_memory_enabled")]
     pub enabled: bool,
+    /// Enables model-visible durable memory writes and cross-session retrieval.
+    ///
+    /// This is intentionally independent from workspace instruction loading and defaults off.
+    #[serde(default)]
+    pub writable: bool,
 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             enabled: default_memory_enabled(),
+            writable: false,
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Builds the workspace-document configuration while leaving writable memory disabled.
+    #[must_use]
+    pub const fn with_enabled(enabled: bool) -> Self {
+        Self {
+            enabled,
+            writable: false,
         }
     }
 }

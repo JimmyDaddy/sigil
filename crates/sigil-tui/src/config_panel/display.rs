@@ -55,6 +55,7 @@ impl ConfigState {
             | ConfigField::WebBundledSearchEnabled
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
+            | ConfigField::MemoryWritable
             | ConfigField::CompactionEnabled
             | ConfigField::CompactionNativeCarrierEnabled
             | ConfigField::CodeIntelEnabled
@@ -120,6 +121,7 @@ impl ConfigState {
             | ConfigField::WebBundledSearchEnabled
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
+            | ConfigField::MemoryWritable
             | ConfigField::CompactionEnabled
             | ConfigField::CompactionNativeCarrierEnabled
             | ConfigField::CodeIntelEnabled
@@ -198,6 +200,9 @@ impl ConfigState {
             }
             ConfigField::MemoryEnabled => {
                 return bool_label(self.draft.memory_enabled).to_owned();
+            }
+            ConfigField::MemoryWritable => {
+                return bool_label(self.draft.memory_writable).to_owned();
             }
             ConfigField::CompactionEnabled => {
                 return bool_label(self.draft.compaction_enabled).to_owned();
@@ -347,6 +352,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::WebBundledSearchEnabled
         | ConfigField::VerificationAutoRun
         | ConfigField::MemoryEnabled
+        | ConfigField::MemoryWritable
         | ConfigField::CompactionEnabled
         | ConfigField::CompactionNativeCarrierEnabled
         | ConfigField::CodeIntelEnabled

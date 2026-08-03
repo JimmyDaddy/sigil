@@ -806,6 +806,7 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
                 .clone()
                 .expect("ready catalog row should have an identity"),
             label: Some("desktop reopened".to_owned()),
+            recovery_binding: None,
         })
         .await
         .expect("typed open route should revalidate durable history");
@@ -1087,6 +1088,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
                 permission_mode: sigil_desktop::DesktopPermissionMode::ReadOnly,
                 model_ref: None,
                 model_selection_binding: None,
+                route_recovery_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -1159,6 +1161,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         sigil_desktop::DesktopClientError::Rejected {
             status: 409,
             code: Some(code),
+            ..
         } if code == "run_no_longer_foreground"
     ));
 

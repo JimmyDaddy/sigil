@@ -830,6 +830,279 @@ fn resolved_route_allows_credential_rotation_but_rejects_semantic_drift() {
     ));
 }
 
+#[test]
+fn portable_route_resume_planner_classifies_exact_rebind_confirmation_and_replacement() {
+    let root = local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
+    let (_, source_route) = resolve_default_model_route(&root).expect("source route");
+    let source_connection = load_provider_connections(&root)
+        .connections
+        .get(&source_route.model_ref.connection_id)
+        .expect("source connection")
+        .config
+        .clone();
+    let source_binding = connection_egress_trust_binding(&source_connection);
+    let persisted = SessionRouteResumeInput {
+        route: source_route.clone(),
+        egress_trust_binding: Some(source_binding.clone()),
+    };
+
+    assert!(matches!(
+        plan_session_route_resume(
+            &ResolvedRouteConfigSnapshot::from_root_config(&root),
+            &persisted
+        ),
+        SessionRouteResumePlan::Exact { .. }
+    ));
+
+    let mut path_changed = source_connection.clone();
+    path_changed.base_url = "https://models.example.test/v2/responses".to_owned();
+    let path_changed_root = materialize_root_config(
+        &root,
+        &BTreeMap::from([(path_changed.id.clone(), path_changed.clone())]),
+        &source_route.model_ref,
+    )
+    .expect("path-changed config");
+    let path_changed_snapshot = ResolvedRouteConfigSnapshot::from_root_config(&path_changed_root);
+    assert!(matches!(
+        plan_session_route_resume(&path_changed_snapshot, &persisted),
+        SessionRouteResumePlan::RebindCurrentModel {
+            reason: SessionRouteRebindReason::ConnectionSemanticsChanged,
+            ..
+        }
+    ));
+    assert!(matches!(
+        plan_session_route_resume(
+            &path_changed_snapshot,
+            &SessionRouteResumeInput {
+                route: source_route.clone(),
+                egress_trust_binding: None,
+            },
+        ),
+        SessionRouteResumePlan::NeedsConfirmation {
+            reason: SessionRouteConfirmationReason::EgressTrustUnproven,
+            ..
+        }
+    ));
+
+    let mut origin_changed = source_connection;
+    origin_changed.base_url = "https://alternate.example.test/v1".to_owned();
+    let origin_changed_root = materialize_root_config(
+        &root,
+        &BTreeMap::from([(origin_changed.id.clone(), origin_changed)]),
+        &source_route.model_ref,
+    )
+    .expect("origin-changed config");
+    assert!(matches!(
+        plan_session_route_resume(
+            &ResolvedRouteConfigSnapshot::from_root_config(&origin_changed_root),
+            &persisted,
+        ),
+        SessionRouteResumePlan::NeedsConfirmation {
+            reason: SessionRouteConfirmationReason::EgressTrustChanged,
+            ..
+        }
+    ));
+
+    let mut missing_root = root;
+    missing_root.connections.clear();
+    assert!(matches!(
+        plan_session_route_resume(
+            &ResolvedRouteConfigSnapshot::from_root_config(&missing_root),
+            &persisted,
+        ),
+        SessionRouteResumePlan::NeedsReplacement {
+            reason: SessionRouteUnavailableReason::ConnectionNotFound,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn route_trust_binding_uses_origin_and_tenant_but_not_endpoint_path_or_credentials() {
+    let root = local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
+    let loaded = load_provider_connections(&root);
+    let mut connection = loaded
+        .connections
+        .values()
+        .next()
+        .expect("connection")
+        .config
+        .clone();
+    let source = connection_egress_trust_binding(&connection);
+
+    connection.base_url = "https://models.example.test/v2/responses".to_owned();
+    connection.credential = CredentialRefConfig::Stored {
+        id: CredentialId::random(),
+    };
+    assert_eq!(source, connection_egress_trust_binding(&connection));
+
+    connection.options = json!({"organization": "tenant-a"});
+    assert_ne!(source, connection_egress_trust_binding(&connection));
+
+    connection.options = json!({});
+    connection.base_url = "https://other.example.test/v1".to_owned();
+    assert_ne!(source, connection_egress_trust_binding(&connection));
+}
+
+#[test]
+fn route_resume_apply_is_quiescent_durable_and_idempotent() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
+    let (provider_name, source_route) = resolve_default_model_route(&root)?;
+    let mut target_connection = load_provider_connections(&root)
+        .connections
+        .get(&source_route.model_ref.connection_id)
+        .expect("connection")
+        .config
+        .clone();
+    let source_binding = connection_egress_trust_binding(&target_connection);
+    target_connection.base_url = "https://models.example.test/v2/responses".to_owned();
+    let target_root = materialize_root_config(
+        &root,
+        &BTreeMap::from([(target_connection.id.clone(), target_connection)]),
+        &source_route.model_ref,
+    )?;
+    let snapshot = ResolvedRouteConfigSnapshot::from_root_config(&target_root);
+    let plan = plan_session_route_resume(
+        &snapshot,
+        &SessionRouteResumeInput {
+            route: source_route.clone(),
+            egress_trust_binding: Some(source_binding.clone()),
+        },
+    );
+    assert!(matches!(
+        plan,
+        SessionRouteResumePlan::RebindCurrentModel { .. }
+    ));
+
+    let store = sigil_kernel::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = sigil_kernel::Session::load_from_store_with_route_and_trust(
+        provider_name,
+        source_route.model_ref.model_id.clone(),
+        Some(source_route.clone()),
+        Some(source_binding),
+        store,
+    )?;
+    session.append_user_message(sigil_kernel::ModelMessage::user("portable history"))?;
+    let authority = SessionRouteMutationAuthority::new(session.session_scope_id());
+    let owner = authority.acquire_execution_owner()?;
+    assert_eq!(
+        authority
+            .issue_quiescence_permit()
+            .expect_err("an active execution owner must block route mutation"),
+        SessionRouteAuthorityError::ActiveOwners
+    );
+    owner.release();
+
+    let outcome = apply_session_route_resume_plan(
+        &snapshot,
+        &mut session,
+        plan.clone(),
+        authority.issue_quiescence_permit()?,
+    )?;
+    assert_eq!(outcome.status, SessionRouteResumeStatus::Applied);
+    assert!(outcome.private_state_reset);
+    assert!(
+        session
+            .messages()
+            .iter()
+            .any(|message| message.content.as_deref() == Some("portable history"))
+    );
+    let entry_count = session.entries().len();
+
+    let retry = apply_session_route_resume_plan(
+        &snapshot,
+        &mut session,
+        plan,
+        authority.issue_quiescence_permit()?,
+    )?;
+    assert_eq!(retry.status, SessionRouteResumeStatus::AlreadyApplied);
+    assert_eq!(session.entries().len(), entry_count);
+    Ok(())
+}
+
+#[test]
+fn legacy_route_loader_is_exact_only_and_cannot_fabricate_mutation_authority() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let source_root =
+        local_catalog_root("https://models.example.test/v1".to_owned(), "local-model");
+    let (provider_name, source_route) = resolve_default_model_route(&source_root)?;
+    let mut target_connection = load_provider_connections(&source_root)
+        .connections
+        .get(&source_route.model_ref.connection_id)
+        .expect("connection")
+        .config
+        .clone();
+    let source_binding = connection_egress_trust_binding(&target_connection);
+    let session_path = temp.path().join("session.jsonl");
+    let store = sigil_kernel::JsonlSessionStore::new(&session_path)?;
+    let session = sigil_kernel::Session::load_from_store_with_route_and_trust(
+        provider_name.clone(),
+        source_route.model_ref.model_id.clone(),
+        Some(source_route.clone()),
+        Some(source_binding),
+        store,
+    )?;
+    drop(session);
+    let before = std::fs::read(&session_path)?;
+
+    let explicit_error = match load_session_for_route_resume_with_directive(
+        &source_root,
+        &source_route,
+        sigil_kernel::JsonlSessionStore::new(&session_path)?,
+        None,
+        Some((&provider_name, &source_route)),
+    ) {
+        Ok(_) => anyhow::bail!("legacy loader must reject explicit route mutation"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        explicit_error,
+        SessionRouteLoadError::Unavailable(ref error)
+            if error.to_string() == "session_route_mutation_requires_attachment"
+    ));
+    assert_eq!(std::fs::read(&session_path)?, before);
+
+    target_connection.base_url = "https://models.example.test/v2/responses".to_owned();
+    let target_root = materialize_root_config(
+        &source_root,
+        &BTreeMap::from([(target_connection.id.clone(), target_connection)]),
+        &source_route.model_ref,
+    )?;
+    let (_, target_route) = resolve_default_model_route(&target_root)?;
+    let rebind_error = match load_session_for_route_resume(
+        &target_root,
+        &target_route,
+        sigil_kernel::JsonlSessionStore::new(&session_path)?,
+    ) {
+        Ok(_) => anyhow::bail!("legacy loader must reject automatic route mutation"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        rebind_error,
+        SessionRouteLoadError::Unavailable(ref error)
+            if error.to_string() == "session_route_mutation_requires_attachment"
+    ));
+    assert_eq!(std::fs::read(&session_path)?, before);
+
+    let attachment =
+        crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )?;
+    let rebound = load_session_for_route_resume_with_directive_and_attachment(
+        &target_root,
+        &target_route,
+        sigil_kernel::JsonlSessionStore::new(&session_path)?,
+        None,
+        None,
+        Some(&attachment),
+    )?;
+    assert_eq!(rebound.resolved_model_route(), Some(&target_route));
+    assert_ne!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
 #[tokio::test]
 async fn connection_inventory_is_secret_free_and_reports_each_connection() {
     let env_connection = deepseek_connection();

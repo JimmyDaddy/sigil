@@ -26,9 +26,9 @@ use crate::{
         HttpConversationDisplayDriverError, HttpConversationQueueDriverCommand,
         HttpConversationQueueDriverError, HttpConversationRecoveryDriverCommand,
         HttpConversationRecoveryDriverError, HttpIntentStackDriverError, HttpQueuedRunDriverStart,
-        HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart,
-        HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpSessionOpenBindingError,
-        HttpToolArtifactReadDriverError,
+        HttpRunAdmissionError, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+        HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel,
+        HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
     },
     dto::{
         HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
@@ -45,7 +45,8 @@ use crate::{
         HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
         HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
         HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
-        HttpSessionOpenRequest, HttpSessionSnapshot, HttpSessionTranscriptPage,
+        HttpSessionOpenRequest, HttpSessionRouteRecoveryAction, HttpSessionRouteRecoveryCode,
+        HttpSessionRouteRecoveryView, HttpSessionSnapshot, HttpSessionTranscriptPage,
         HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationReviewRequest,
         HttpTaskIntegrationReviewView, HttpTaskPauseCommandReceipt, HttpTaskPauseRequest,
         HttpTerminalLifecycleView, HttpTerminalTaskCancelCommandReceipt,
@@ -120,6 +121,11 @@ pub enum HttpRegistryError {
     /// A terminal run still owns process-local cleanup or the runtime session lease.
     #[error("http session {session_id} is still releasing run {run_id}")]
     SessionRunCleanupActive { session_id: String, run_id: String },
+    /// Write admission or route recovery rejected the run before a run id was allocated.
+    #[error("session run requires explicit recovery")]
+    SessionRunRecoveryRequired {
+        recovery: HttpSessionRouteRecoveryView,
+    },
     /// A verification rerun already owns the session's foreground mutation lease.
     #[error("http session {session_id} already has an active verification rerun")]
     SessionVerificationActive { session_id: String },
@@ -409,6 +415,7 @@ impl HttpSessionRunRegistry {
                 message: error.message,
             })?;
         validate_session_binding(&id, &binding)?;
+        let route_transition = binding.route_transition.clone();
         let mut state = self.lock_state();
         let session = HttpSessionState {
             id: id.clone(),
@@ -419,6 +426,7 @@ impl HttpSessionRunRegistry {
             release_pending_run_id: None,
             foreground_owner_generation: 0,
             verification_in_progress: false,
+            route_transition,
         };
         let snapshot = session.snapshot();
         state.sessions.insert(id, session);
@@ -445,12 +453,21 @@ impl HttpSessionRunRegistry {
         let session_ref = validate_session_open_request(&request)?;
         let binding = self
             .driver
-            .bind_existing_session(&session_ref, &request.session_id)
+            .bind_existing_session(
+                &session_ref,
+                &request.session_id,
+                request.recovery_binding.as_deref(),
+            )
             .map_err(|error| match error {
                 HttpSessionOpenBindingError::NotFound => HttpRegistryError::DurableSessionNotFound,
                 HttpSessionOpenBindingError::NotReady => HttpRegistryError::DurableSessionNotReady,
                 HttpSessionOpenBindingError::IdentityChanged => {
                     HttpRegistryError::DurableSessionIdentityChanged
+                }
+                HttpSessionOpenBindingError::AlreadyActive { recovery_binding } => {
+                    http_run_admission_registry_error(HttpRunAdmissionError::SessionAlreadyActive {
+                        recovery_binding,
+                    })
                 }
                 HttpSessionOpenBindingError::Unavailable => {
                     HttpRegistryError::DurableSessionUnavailable
@@ -461,7 +478,7 @@ impl HttpSessionRunRegistry {
             state.ensure_accepting_commands()?;
             if let Some(existing) = state
                 .sessions
-                .values()
+                .values_mut()
                 .find(|session| session.binding.session_scope_id == binding.session_scope_id)
             {
                 if existing.binding.session_log_path != binding.session_log_path {
@@ -470,10 +487,13 @@ impl HttpSessionRunRegistry {
                         message: "durable scope resolved to another canonical path".to_owned(),
                     });
                 }
+                existing.route_transition = binding.route_transition.clone();
+                existing.binding = binding;
                 existing.snapshot()
             } else {
                 let id = state.next_session_id();
                 validate_session_binding(&id, &binding)?;
+                let route_transition = binding.route_transition.clone();
                 let session = HttpSessionState {
                     id: id.clone(),
                     label: request.label,
@@ -483,6 +503,7 @@ impl HttpSessionRunRegistry {
                     release_pending_run_id: None,
                     foreground_owner_generation: 0,
                     verification_in_progress: false,
+                    route_transition,
                 };
                 let snapshot = session.snapshot();
                 state.sessions.insert(id, session);
@@ -552,6 +573,16 @@ impl HttpSessionRunRegistry {
         })
     }
 
+    pub(crate) fn acquire_durable_session_mutation_attachment(
+        &self,
+        durable_session_id: &str,
+        session_log_path: &Path,
+    ) -> Result<crate::HttpDurableSessionAttachmentGuard, HttpRegistryError> {
+        self.driver
+            .acquire_durable_session_mutation_attachment(durable_session_id, session_log_path)
+            .map_err(http_run_admission_registry_error)
+    }
+
     pub(crate) fn durable_session_mutation_is_blocked(&self, durable_session_id: &str) -> bool {
         let state = self.lock_state();
         if !state.accepting_commands
@@ -584,6 +615,25 @@ impl HttpSessionRunRegistry {
             .ok_or_else(|| HttpRegistryError::SessionNotFound {
                 session_id: session_id.to_owned(),
             })
+    }
+
+    pub(crate) fn record_session_route_transition(
+        &self,
+        durable_session_scope_id: &str,
+        transition: crate::HttpSessionRouteTransitionView,
+    ) -> Result<(), HttpRegistryError> {
+        let mut state = self.lock_state();
+        let session = state
+            .sessions
+            .values_mut()
+            .find(|session| session.binding.session_scope_id == durable_session_scope_id)
+            .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                session_id: durable_session_scope_id.to_owned(),
+            })?;
+        session.route_transition = Some(transition.clone());
+        session.binding.route_transition = Some(transition);
+        session.binding.route_recovery = None;
+        Ok(())
     }
 
     /// Probes durable frontier and process-local foreground ownership for one session.
@@ -1414,6 +1464,7 @@ impl HttpSessionRunRegistry {
                     || !request.prompt.trim().is_empty()
                     || request.model_ref.is_some()
                     || request.model_selection_binding.is_some()
+                    || request.route_recovery_binding.is_some()
                     || request.reasoning_effort.is_some()
                     || request.reasoning_effort_binding.is_some()
                     || request.skill_binding.is_some()
@@ -1427,11 +1478,30 @@ impl HttpSessionRunRegistry {
             }
             None => {}
         }
+        let admission_session = {
+            let state = self.lock_state();
+            state
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| HttpRegistryError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                })?
+                .snapshot()
+        };
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.admit_run_start(&admission_session, &request)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "run admission",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(http_run_admission_registry_error)?;
         let permission_mode = request
             .permission_mode
             .ok_or(HttpRegistryError::MissingPermissionMode)?;
         let model_ref = request.model_ref;
         let model_selection_binding = request.model_selection_binding;
+        let route_recovery_binding = request.route_recovery_binding;
         let reasoning_effort = request.reasoning_effort;
         let reasoning_effort_binding = request.reasoning_effort_binding;
         let skill_binding = request.skill_binding;
@@ -1509,6 +1579,7 @@ impl HttpSessionRunRegistry {
             prompt,
             model_ref,
             model_selection_binding,
+            route_recovery_binding,
             reasoning_effort_binding,
             skill_binding,
             agent_binding,
@@ -3083,6 +3154,28 @@ impl HttpSessionRunRegistry {
     }
 }
 
+fn http_run_admission_registry_error(error: HttpRunAdmissionError) -> HttpRegistryError {
+    let recovery = match error {
+        HttpRunAdmissionError::RouteRecovery(recovery) => recovery,
+        HttpRunAdmissionError::SessionAlreadyActive { recovery_binding } => {
+            HttpSessionRouteRecoveryView {
+                code: HttpSessionRouteRecoveryCode::SessionAlreadyActive,
+                allowed_actions: vec![
+                    HttpSessionRouteRecoveryAction::RetrySessionAttach,
+                    HttpSessionRouteRecoveryAction::StartNewSession,
+                    HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                recovery_binding,
+                retryable: true,
+            }
+        }
+        HttpRunAdmissionError::Unavailable => {
+            return HttpRegistryError::DurableSessionUnavailable;
+        }
+    };
+    HttpRegistryError::SessionRunRecoveryRequired { recovery }
+}
+
 struct HttpRegistryState {
     sessions: BTreeMap<String, HttpSessionState>,
     runs: BTreeMap<String, HttpRunState>,
@@ -4117,6 +4210,7 @@ struct HttpSessionState {
     release_pending_run_id: Option<String>,
     foreground_owner_generation: u64,
     verification_in_progress: bool,
+    route_transition: Option<crate::HttpSessionRouteTransitionView>,
 }
 
 impl HttpSessionState {
@@ -4153,6 +4247,8 @@ impl HttpSessionState {
             durable_session_scope_id: self.binding.session_scope_id.clone(),
             session_log_path: self.binding.session_log_path.clone(),
             foreground_run_id: self.foreground_run_id.clone(),
+            route_transition: self.route_transition.clone(),
+            route_recovery: self.binding.route_recovery.clone(),
         }
     }
 }
@@ -4501,6 +4597,11 @@ fn validate_session_open_request(
         || safe_persistence_text(session_id) != session_id
         || request.label.as_ref().is_some_and(|label| {
             label.len() > MAX_SESSION_OPEN_LABEL_BYTES || safe_persistence_text(label) != *label
+        })
+        || request.recovery_binding.as_ref().is_some_and(|binding| {
+            binding.trim().is_empty()
+                || binding.len() > 128
+                || safe_persistence_text(binding) != *binding
         })
     {
         return Err(HttpRegistryError::InvalidSessionOpenRequest);

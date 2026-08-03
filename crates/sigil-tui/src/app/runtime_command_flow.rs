@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sigil_kernel::{ConnectionId, ControlEntry, ModelRef};
+use sigil_kernel::{ConnectionId, ModelRef};
 use sigil_runtime::{
     normalize_provider_model_alias,
     provider_connections::{ConnectionReadiness, resolve_default_model_route, resolve_model_route},
@@ -112,12 +112,11 @@ impl AppState {
             return Ok(None);
         }
 
-        self.ensure_current_session_identity()?;
-        self.append_control_to_current_session(ControlEntry::SessionModelSelected {
-            provider_name: provider_name.clone(),
-            model_name: model_ref.model_id.clone(),
-            resolved_model_route: route.clone(),
-        })?;
+        self.select_current_session_route_with_trust(
+            &root_config,
+            provider_name.clone(),
+            route.clone(),
+        )?;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_ref.model_id.clone();
         self.runtime.model_route = Some(route);

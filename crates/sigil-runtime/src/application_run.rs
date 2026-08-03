@@ -45,7 +45,9 @@ pub use integration_control::{
     APPLICATION_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION, ApplicationIntegrationLaneCandidateKind,
     ApplicationIntegrationPromotionTargetKind, ApplicationTaskIntegrationAcceptanceView,
     ApplicationTaskIntegrationLaneView, ApplicationTaskIntegrationReviewView,
-    accept_application_task_integration_review, application_task_integration_review_view,
+    accept_application_task_integration_review,
+    accept_application_task_integration_review_with_attachment,
+    application_task_integration_review_view,
 };
 pub use task_control::{
     ApplicationTaskContinuationExecution, ApplicationTaskContinuationOutput,
@@ -126,8 +128,22 @@ pub enum ApplicationRunPrepareErrorClass {
     InvalidInvocation,
     /// Root configuration or provider construction was invalid.
     Configuration,
+    /// Saved connection configuration could not be decoded or admitted.
+    ConnectionConfigInvalid,
+    /// The configured provider could not become ready.
+    ProviderUnavailable,
     /// No saved or explicit compound model route was available.
     ModelRouteNotConfigured,
+    /// The current connection target needs an exact-bound user confirmation.
+    SessionRouteConfirmationRequired,
+    /// The saved connection is unavailable and a replacement must be selected.
+    SessionRouteSelectionRequired,
+    /// Another write-capable surface currently owns the durable session.
+    SessionAlreadyActive,
+    /// A durable writer could not be admitted after attachment ownership was established.
+    SessionWriterBusy,
+    /// The durable session stream could not be safely decoded.
+    SessionStreamInvalid,
     /// Durable session, tool, or extension assembly failed.
     Execution,
     /// The owned blocking preparation worker itself failed.
@@ -149,9 +165,32 @@ pub enum ApplicationRunPrepareError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("connection configuration is invalid")]
+    ConnectionConfigInvalid {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("provider is unavailable")]
+    ProviderUnavailable {
+        #[source]
+        source: anyhow::Error,
+    },
     /// Headless startup cannot choose a provider/model route without an explicit user decision.
     #[error("model route is not configured")]
     ModelRouteNotConfigured,
+    /// The session can be read, but provider egress needs explicit confirmation.
+    #[error("session route confirmation is required")]
+    SessionRouteConfirmationRequired { recovery_binding: String },
+    /// The saved connection can no longer be resolved.
+    #[error("session route selection is required")]
+    SessionRouteSelectionRequired { recovery_binding: String },
+    /// Another interactive or headless owner holds the cross-process attachment.
+    #[error("session is already active")]
+    SessionAlreadyActive { recovery_binding: String },
+    #[error("session writer is busy")]
+    SessionWriterBusy { recovery_binding: String },
+    #[error("session stream is invalid")]
+    SessionStreamInvalid,
     /// Runtime/session/tool preparation failure.
     #[error("application run preparation failed")]
     Execution {
@@ -173,16 +212,57 @@ impl ApplicationRunPrepareError {
         match self {
             Self::InvalidInvocation { .. } => ApplicationRunPrepareErrorClass::InvalidInvocation,
             Self::Configuration { .. } => ApplicationRunPrepareErrorClass::Configuration,
+            Self::ConnectionConfigInvalid { .. } => {
+                ApplicationRunPrepareErrorClass::ConnectionConfigInvalid
+            }
+            Self::ProviderUnavailable { .. } => {
+                ApplicationRunPrepareErrorClass::ProviderUnavailable
+            }
             Self::ModelRouteNotConfigured => {
                 ApplicationRunPrepareErrorClass::ModelRouteNotConfigured
             }
+            Self::SessionRouteConfirmationRequired { .. } => {
+                ApplicationRunPrepareErrorClass::SessionRouteConfirmationRequired
+            }
+            Self::SessionRouteSelectionRequired { .. } => {
+                ApplicationRunPrepareErrorClass::SessionRouteSelectionRequired
+            }
+            Self::SessionAlreadyActive { .. } => {
+                ApplicationRunPrepareErrorClass::SessionAlreadyActive
+            }
+            Self::SessionWriterBusy { .. } => ApplicationRunPrepareErrorClass::SessionWriterBusy,
+            Self::SessionStreamInvalid => ApplicationRunPrepareErrorClass::SessionStreamInvalid,
             Self::Execution { .. } => ApplicationRunPrepareErrorClass::Execution,
             Self::Internal { .. } => ApplicationRunPrepareErrorClass::Internal,
         }
     }
 
+    /// Returns the opaque exact recovery binding, when this failure admits a route action.
+    #[must_use]
+    pub fn recovery_binding(&self) -> Option<&str> {
+        match self {
+            Self::SessionRouteConfirmationRequired { recovery_binding }
+            | Self::SessionRouteSelectionRequired { recovery_binding }
+            | Self::SessionAlreadyActive { recovery_binding }
+            | Self::SessionWriterBusy { recovery_binding } => Some(recovery_binding),
+            _ => None,
+        }
+    }
+
     fn configuration(source: impl Into<anyhow::Error>) -> Self {
         Self::Configuration {
+            source: source.into(),
+        }
+    }
+
+    fn connection_config_invalid(source: impl Into<anyhow::Error>) -> Self {
+        Self::ConnectionConfigInvalid {
+            source: source.into(),
+        }
+    }
+
+    fn provider_unavailable(source: impl Into<anyhow::Error>) -> Self {
+        Self::ProviderUnavailable {
             source: source.into(),
         }
     }
@@ -222,6 +302,8 @@ pub struct ApplicationSessionBinding {
     pub session_scope_id: String,
     /// Canonical durable JSONL path.
     pub session_log_path: PathBuf,
+    /// Exact bounded route transition observed while opening this session.
+    pub route_transition: crate::provider_connections::SessionRouteTransitionView,
 }
 
 /// Exact reasoning-effort capabilities for one selectable provider model.
@@ -276,6 +358,39 @@ pub struct ApplicationRunContextView {
     pub context_window_source: crate::ContextWindowSource,
     /// Bounded command, skill, and agent metadata for application clients.
     pub extension_catalog: crate::ApplicationExtensionCatalogView,
+    /// Exact-bound route recovery state; transcript and catalog reads remain available.
+    pub route_recovery: Option<ApplicationSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationSessionRouteRecoveryCode {
+    SessionRouteConfirmationRequired,
+    SessionRouteSelectionRequired,
+    ModelRouteNotConfigured,
+    ConnectionConfigInvalid,
+    ProviderUnavailable,
+    SessionAlreadyActive,
+    SessionWriterBusy,
+    SessionStreamInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationSessionRouteRecoveryAction {
+    ConfirmCurrentRoute,
+    RepairConnection,
+    SelectReplacement,
+    StartNewSession,
+    RetryProvider,
+    RetrySessionAttach,
+    BackToSessionLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationSessionRouteRecoveryView {
+    pub code: ApplicationSessionRouteRecoveryCode,
+    pub allowed_actions: Vec<ApplicationSessionRouteRecoveryAction>,
+    pub recovery_binding: String,
+    pub retryable: bool,
 }
 
 /// Input required to prepare one application run.
@@ -291,6 +406,12 @@ pub struct ApplicationRunRequest {
     pub run_id: String,
     /// Optional existing or preallocated durable V2 session path.
     pub session_path: Option<PathBuf>,
+    /// Adapter-owned interactive attachment already acquired for this exact session.
+    ///
+    /// This supports one controller owning queue/control mutations and foreground runs without
+    /// reacquiring the cross-process lock. The runtime still enforces its foreground run lease.
+    pub session_attachment:
+        Option<Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>>,
     /// Whether the adapter can provide explicit approvals after run start.
     pub interaction: ApplicationRunInteraction,
     /// Optional user-selected permission mode for this run.
@@ -301,6 +422,8 @@ pub struct ApplicationRunRequest {
     pub model_connection_id: Option<ConnectionId>,
     /// Opaque binding returned with the run-context model selection capability.
     pub model_selection_binding: Option<String>,
+    /// Exact opaque route-recovery binding explicitly confirmed by the caller.
+    pub route_recovery_binding: Option<String>,
     /// Optional exact effort selected for this run.
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Opaque binding returned with the run-context effort capability.
@@ -339,11 +462,13 @@ impl ApplicationRunRequest {
             prompt: prompt.into(),
             run_id: run_id.into(),
             session_path: None,
+            session_attachment: None,
             interaction: ApplicationRunInteraction::NonInteractive,
             permission_mode: None,
             model_name: None,
             model_connection_id: None,
             model_selection_binding: None,
+            route_recovery_binding: None,
             reasoning_effort: None,
             reasoning_effort_binding: None,
             skill_binding: None,
@@ -376,22 +501,101 @@ impl ApplicationSessionLeaseManager {
         Self::default()
     }
 
-    fn acquire(&self, path: &Path) -> Result<ApplicationSessionLease> {
-        let canonical = canonical_session_lease_path(path)?;
-        let mut active = self
-            .active_paths
-            .lock()
-            .map_err(|_| anyhow!("application session lease state is unavailable"))?;
+    #[cfg(test)]
+    fn acquire(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<ApplicationSessionLease, ApplicationSessionLeaseError> {
+        self.acquire_with_attachment(path, None)
+    }
+
+    fn acquire_with_attachment(
+        &self,
+        path: &Path,
+        supplied_attachment: Option<
+            Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        >,
+    ) -> std::result::Result<ApplicationSessionLease, ApplicationSessionLeaseError> {
+        let canonical = canonical_session_lease_path(path)
+            .map_err(ApplicationSessionLeaseError::Unavailable)?;
+        let mut active = self.active_paths.lock().map_err(|_| {
+            ApplicationSessionLeaseError::Unavailable(anyhow!(
+                "application session lease state is unavailable"
+            ))
+        })?;
         if !active.insert(canonical.clone()) {
-            bail!(
-                "application session already has an active foreground run: {}",
-                path.display()
-            );
+            return Err(ApplicationSessionLeaseError::ProcessLocalActive {
+                recovery_binding:
+                    crate::interactive_session_attachment::session_attachment_path_recovery_binding(
+                        &canonical,
+                        "process-local-active",
+                    ),
+            });
         }
+        let attachment = if let Some(attachment) = supplied_attachment {
+            let attachment_path = canonical_session_lease_path(attachment.session_path())
+                .map_err(ApplicationSessionLeaseError::Unavailable)?;
+            if attachment_path != canonical {
+                active.remove(&canonical);
+                return Err(ApplicationSessionLeaseError::Unavailable(anyhow!(
+                    "supplied session attachment belongs to another durable session"
+                )));
+            }
+            attachment
+        } else {
+            match crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                &canonical,
+            ) {
+                Ok(attachment) => Arc::new(attachment),
+                Err(error) => {
+                    active.remove(&canonical);
+                    return match error {
+                        crate::interactive_session_attachment::InteractiveSessionAttachmentError::Busy { observed_generation } => {
+                            Err(ApplicationSessionLeaseError::AlreadyActive {
+                                recovery_binding: crate::interactive_session_attachment::session_attachment_path_recovery_binding(
+                                    &canonical,
+                                    &observed_generation,
+                                ),
+                            })
+                        }
+                        error => Err(ApplicationSessionLeaseError::Unavailable(anyhow!(error))),
+                    };
+                }
+            }
+        };
         Ok(ApplicationSessionLease {
             path: canonical,
             active_paths: Arc::clone(&self.active_paths),
+            attachment,
+            route_execution_owner: Mutex::new(None),
         })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ApplicationSessionLeaseError {
+    #[error("application session already has an active foreground run")]
+    ProcessLocalActive { recovery_binding: String },
+    #[error("session_already_active")]
+    AlreadyActive { recovery_binding: String },
+    #[error("application session lease is unavailable")]
+    Unavailable(#[source] anyhow::Error),
+}
+
+impl ApplicationSessionLeaseError {
+    const fn is_already_active(&self) -> bool {
+        matches!(
+            self,
+            Self::ProcessLocalActive { .. } | Self::AlreadyActive { .. }
+        )
+    }
+
+    fn recovery_binding(&self) -> Option<&str> {
+        match self {
+            Self::ProcessLocalActive { recovery_binding }
+            | Self::AlreadyActive { recovery_binding } => Some(recovery_binding),
+            Self::Unavailable(_) => None,
+        }
     }
 }
 
@@ -399,6 +603,29 @@ impl ApplicationSessionLeaseManager {
 struct ApplicationSessionLease {
     path: PathBuf,
     active_paths: Arc<Mutex<BTreeSet<PathBuf>>>,
+    attachment: Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    route_execution_owner: Mutex<Option<crate::provider_connections::SessionRouteExecutionOwner>>,
+}
+
+impl ApplicationSessionLease {
+    fn route_mutation_authority(
+        &self,
+        session_scope_id: &str,
+    ) -> Result<crate::provider_connections::SessionRouteMutationAuthority> {
+        self.attachment.route_mutation_authority(session_scope_id)
+    }
+
+    fn acquire_route_execution_owner(&self, session_scope_id: &str) -> Result<()> {
+        let authority = self.route_mutation_authority(session_scope_id)?;
+        let mut owner = self
+            .route_execution_owner
+            .lock()
+            .map_err(|_| anyhow!("session route execution owner state is unavailable"))?;
+        if owner.is_none() {
+            *owner = Some(authority.acquire_execution_owner()?);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ApplicationSessionLease {
@@ -424,14 +651,28 @@ pub struct ApplicationRunServices {
 pub struct ApplicationTerminalTaskControl {
     workspace_root: PathBuf,
     owner: sigil_tools_builtin::TerminalTaskControlHandle,
+    _session_attachment:
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    _route_execution_owner: Arc<crate::provider_connections::SessionRouteExecutionOwner>,
 }
 
 impl ApplicationTerminalTaskControl {
-    fn new(workspace_root: PathBuf, owner: sigil_tools_builtin::TerminalTaskControlHandle) -> Self {
-        Self {
+    fn new(
+        workspace_root: PathBuf,
+        owner: sigil_tools_builtin::TerminalTaskControlHandle,
+        session_lease: &ApplicationSessionLease,
+        session_scope_id: &str,
+    ) -> Result<Self> {
+        let route_execution_owner = session_lease
+            .route_mutation_authority(session_scope_id)?
+            .acquire_execution_owner()
+            .map_err(anyhow::Error::new)?;
+        Ok(Self {
             workspace_root,
             owner,
-        }
+            _session_attachment: Arc::clone(&session_lease.attachment),
+            _route_execution_owner: Arc::new(route_execution_owner),
+        })
     }
 
     /// Cancels one exact terminal task through its original process owner.
@@ -1452,6 +1693,7 @@ pub struct ApplicationRunExecution {
     conversation_coordinator: crate::ConversationCoordinator,
     parent_session_ref: SessionRef,
     pending_session_title: Option<ApplicationSessionTitleRequest>,
+    route_transition: crate::provider_connections::SessionRouteTransitionView,
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
@@ -1506,6 +1748,8 @@ pub struct ApplicationRunOutput {
     pub session_log_path: PathBuf,
     /// Terminal application classification derived from durable kernel lifecycle semantics.
     pub terminal_status: ApplicationRunTerminalStatus,
+    /// Machine-readable receipt for the exact route admitted by this invocation.
+    pub route_transition: crate::provider_connections::SessionRouteTransitionView,
     /// Kernel agent output.
     pub agent_output: AgentRunOutput,
 }
@@ -1587,6 +1831,9 @@ impl ApplicationRunExecution {
             )?;
             return Err(error).context("application run start event delivery failed");
         }
+        bridge.emit(PublicRunEventKind::RouteTransition {
+            transition: application_public_route_transition(&self.route_transition),
+        })?;
         for warning in std::mem::take(&mut self.warnings) {
             if let Err(error) = bridge.emit(PublicRunEventKind::Notice { message: warning }) {
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
@@ -1674,14 +1921,28 @@ impl ApplicationRunExecution {
                     &self.redactor,
                 )?;
                 bridge.emit(terminal_event)?;
-                if let Some(request) = self.pending_session_title.take() {
-                    spawn_application_session_title(request);
+                if let Some(request) = self.pending_session_title.take()
+                    && let Err(error) = crate::generate_and_persist_session_title(
+                        request.root_config,
+                        request.workspace_root,
+                        request.model_ref,
+                        request.session_log_path,
+                        request.session_id,
+                        request.prompt,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        %error,
+                        "semantic session title generation was not applied"
+                    );
                 }
                 Ok(ApplicationRunOutput {
                     session_id: self.session_id,
                     run_id: self.run_id,
                     session_log_path: self.session_log_path,
                     terminal_status,
+                    route_transition: self.route_transition,
                     agent_output,
                 })
             }
@@ -1701,6 +1962,29 @@ impl ApplicationRunExecution {
                 Err(error)
             }
         }
+    }
+}
+
+/// Converts the shared route transition receipt into the stable public machine/event DTO.
+#[must_use]
+pub fn application_public_route_transition(
+    transition: &crate::provider_connections::SessionRouteTransitionView,
+) -> sigil_kernel::PublicSessionRouteTransitionView {
+    sigil_kernel::PublicSessionRouteTransitionView {
+        kind: match transition.kind {
+            crate::provider_connections::SessionRouteTransitionKind::Exact => {
+                sigil_kernel::PublicSessionRouteTransitionKind::Exact
+            }
+            crate::provider_connections::SessionRouteTransitionKind::Rebound => {
+                sigil_kernel::PublicSessionRouteTransitionKind::Rebound
+            }
+            crate::provider_connections::SessionRouteTransitionKind::ExplicitlyConfirmed => {
+                sigil_kernel::PublicSessionRouteTransitionKind::ExplicitlyConfirmed
+            }
+        },
+        connection_id: transition.connection_id.clone(),
+        model_id: transition.model_id.clone(),
+        remote_context_reset: transition.remote_context_reset,
     }
 }
 
@@ -2109,10 +2393,11 @@ async fn prepare_application_run_internal(
         agent_invocation,
         task_agent_registry,
         generate_session_title,
+        route_transition,
     } = prepared;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
-        .map_err(ApplicationRunPrepareError::configuration)?;
+        .map_err(ApplicationRunPrepareError::provider_unavailable)?;
     let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
         session.provider_name(),
         session.model_name(),
@@ -2160,7 +2445,10 @@ async fn prepare_application_run_internal(
     let terminal_control = ApplicationTerminalTaskControl::new(
         workspace_root.clone(),
         surface.terminal_control.clone(),
-    );
+        session_lease.as_ref(),
+        session.session_scope_id(),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
     let registry = surface.registry;
     let parent_session_ref = SessionRef::new_relative(
         session_path
@@ -2317,6 +2605,7 @@ async fn prepare_application_run_internal(
             conversation_coordinator,
             parent_session_ref,
             pending_session_title,
+            route_transition,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -2376,6 +2665,31 @@ pub fn bind_application_session_with_model_ref(
     connection_id: Option<&ConnectionId>,
     model_name: Option<&str>,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    bind_application_session_with_model_ref_and_attachment(
+        config_path,
+        launch_cwd,
+        session_path,
+        connection_id,
+        model_name,
+    )
+    .map(|(binding, _attachment)| binding)
+}
+
+/// Creates or reopens a durable session while retaining the exact cross-process attachment used
+/// for identity initialization and automatic route recovery.
+pub fn bind_application_session_with_model_ref_and_attachment(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: Option<&Path>,
+    connection_id: Option<&ConnectionId>,
+    model_name: Option<&str>,
+) -> std::result::Result<
+    (
+        ApplicationSessionBinding,
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    ),
+    ApplicationRunPrepareError,
+> {
     let root_config = load_application_root_config(config_path)?;
     let (_, selected_route) =
         application_selected_model_route(&root_config, connection_id, model_name)?;
@@ -2402,14 +2716,42 @@ pub fn bind_application_session_with_model_ref(
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
     let canonical_path = canonical_session_lease_path(&requested_path)
         .map_err(ApplicationRunPrepareError::execution)?;
+    let attachment = Arc::new(
+        crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &canonical_path,
+        )
+        .map_err(|error| match error {
+            crate::interactive_session_attachment::InteractiveSessionAttachmentError::Busy {
+                observed_generation,
+            } => ApplicationRunPrepareError::SessionAlreadyActive {
+                recovery_binding:
+                    crate::interactive_session_attachment::session_attachment_path_recovery_binding(
+                        &canonical_path,
+                        &observed_generation,
+                    ),
+            },
+            error => ApplicationRunPrepareError::execution(error),
+        })?,
+    );
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
-    let session = load_application_session_for_route(&root_config, &selected_route, store)
-        .map_err(ApplicationRunPrepareError::execution)?;
-    Ok(ApplicationSessionBinding {
-        session_scope_id: session.session_scope_id().to_owned(),
-        session_log_path: canonical_path,
-    })
+    let outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
+            &root_config,
+            &selected_route,
+            store,
+            None,
+            None,
+            Some(attachment.as_ref()),
+        )
+        .map_err(application_route_load_prepare_error)?;
+    Ok((
+        ApplicationSessionBinding {
+            session_scope_id: outcome.session.session_scope_id().to_owned(),
+            session_log_path: canonical_path,
+            route_transition: outcome.transition,
+        },
+        attachment,
+    ))
 }
 
 fn application_model_ref_is_selectable(
@@ -2584,7 +2926,7 @@ pub fn bind_existing_application_session(
     config_path: &Path,
     session_path: &Path,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
-    let root_config = load_application_root_config(config_path)?;
+    let _root_config = load_application_root_config(config_path)?;
     let metadata = std::fs::symlink_metadata(session_path)
         .with_context(|| {
             format!(
@@ -2602,15 +2944,132 @@ pub fn bind_existing_application_session(
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", session_path.display()))
         .map_err(ApplicationRunPrepareError::execution)?;
-    let store =
-        JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
-    let (_, fallback_route) = application_selected_model_route(&root_config, None, None)?;
-    let session = load_application_session_for_route(&root_config, &fallback_route, store)
+    let records = JsonlSessionStore::read_event_records(&canonical_path)
         .map_err(ApplicationRunPrepareError::execution)?;
+    let session_scope_id = records
+        .first()
+        .map(|record| record.session_id().to_owned())
+        .ok_or_else(|| {
+            ApplicationRunPrepareError::execution(anyhow!(
+                "existing application session has no durable identity"
+            ))
+        })?;
+    if records
+        .iter()
+        .any(|record| record.session_id() != session_scope_id)
+    {
+        return Err(ApplicationRunPrepareError::execution(anyhow!(
+            "existing application session has mixed durable identity"
+        )));
+    }
+    let entries = records
+        .iter()
+        .map(sigil_kernel::conversation_transcript_entry_from_record)
+        .collect::<Result<Vec<_>>>()
+        .map_err(ApplicationRunPrepareError::execution)?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let route = application_session_route(&entries).ok_or_else(|| {
+        ApplicationRunPrepareError::execution(anyhow!(
+            "existing application session has no resolved route"
+        ))
+    })?;
     Ok(ApplicationSessionBinding {
-        session_scope_id: session.session_scope_id().to_owned(),
+        session_scope_id,
         session_log_path: canonical_path,
+        route_transition: crate::provider_connections::SessionRouteTransitionView {
+            kind: crate::provider_connections::SessionRouteTransitionKind::Exact,
+            connection_id: Some(route.model_ref.connection_id.as_str().to_owned()),
+            model_id: Some(route.model_ref.model_id),
+            remote_context_reset: false,
+        },
     })
+}
+
+/// Reopens and activates an existing durable session under the exact controller attachment.
+///
+/// The returned receipt records automatic same-trust rebinds. Recovery decisions that require
+/// user confirmation remain typed preparation errors so callers can keep a read-only handle.
+pub fn bind_existing_application_session_with_attachment(
+    config_path: &Path,
+    session_path: &Path,
+    attachment: &crate::interactive_session_attachment::InteractiveSessionAttachmentLease,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    let read_binding = bind_existing_application_session(config_path, session_path)?;
+    let root_config = load_application_root_config(config_path)?;
+    let persisted_connection_id = read_binding
+        .route_transition
+        .connection_id
+        .as_deref()
+        .ok_or(ApplicationRunPrepareError::SessionStreamInvalid)
+        .and_then(|value| {
+            ConnectionId::new(value.to_owned())
+                .map_err(|_| ApplicationRunPrepareError::SessionStreamInvalid)
+        })?;
+    let persisted_model_id = read_binding
+        .route_transition
+        .model_id
+        .as_deref()
+        .ok_or(ApplicationRunPrepareError::SessionStreamInvalid)?;
+    let (_, fallback_route) = application_selected_model_route(
+        &root_config,
+        Some(&persisted_connection_id),
+        Some(persisted_model_id),
+    )?;
+    let store = JsonlSessionStore::new(&read_binding.session_log_path)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
+        &root_config,
+        &fallback_route,
+        store,
+        None,
+        None,
+        Some(attachment),
+    )
+    .map_err(application_route_load_prepare_error)?;
+    Ok(ApplicationSessionBinding {
+        session_scope_id: outcome.session.session_scope_id().to_owned(),
+        session_log_path: read_binding.session_log_path,
+        route_transition: outcome.transition,
+    })
+}
+
+fn application_route_load_prepare_error(
+    error: crate::provider_connections::SessionRouteLoadError,
+) -> ApplicationRunPrepareError {
+    match error {
+        crate::provider_connections::SessionRouteLoadError::ConfirmationRequired {
+            recovery_binding,
+            ..
+        } => ApplicationRunPrepareError::SessionRouteConfirmationRequired { recovery_binding },
+        crate::provider_connections::SessionRouteLoadError::SelectionRequired {
+            reason: crate::provider_connections::SessionRouteUnavailableReason::ConnectionNotFound,
+            recovery_binding,
+            ..
+        } => ApplicationRunPrepareError::SessionRouteSelectionRequired { recovery_binding },
+        crate::provider_connections::SessionRouteLoadError::SelectionRequired {
+            reason:
+                crate::provider_connections::SessionRouteUnavailableReason::ConnectionConfigInvalid,
+            ..
+        }
+        | crate::provider_connections::SessionRouteLoadError::SetupRequired {
+            reason: crate::provider_connections::ModelRouteSetupReason::ConfigurationInvalid,
+            ..
+        } => ApplicationRunPrepareError::connection_config_invalid(anyhow!(
+            "connection_config_invalid"
+        )),
+        crate::provider_connections::SessionRouteLoadError::SetupRequired {
+            reason: crate::provider_connections::ModelRouteSetupReason::RouteNotConfigured,
+            ..
+        } => ApplicationRunPrepareError::ModelRouteNotConfigured,
+        crate::provider_connections::SessionRouteLoadError::WriterBusy { recovery_binding } => {
+            ApplicationRunPrepareError::SessionWriterBusy { recovery_binding }
+        }
+        crate::provider_connections::SessionRouteLoadError::Unavailable(_) => {
+            ApplicationRunPrepareError::SessionStreamInvalid
+        }
+    }
 }
 
 fn load_application_root_config(
@@ -2620,10 +3079,12 @@ fn load_application_root_config(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(ApplicationRunPrepareError::ModelRouteNotConfigured);
         }
-        Err(error) => return Err(ApplicationRunPrepareError::configuration(error)),
+        Err(error) => {
+            return Err(ApplicationRunPrepareError::connection_config_invalid(error));
+        }
         Ok(_) => {}
     }
-    RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)
+    RootConfig::load(config_path).map_err(ApplicationRunPrepareError::connection_config_invalid)
 }
 
 fn application_selected_model_route(
@@ -2642,7 +3103,7 @@ fn application_selected_model_route(
                 crate::provider_connections::ResolvedRouteError::NotConfigured => {
                     ApplicationRunPrepareError::ModelRouteNotConfigured
                 }
-                other => ApplicationRunPrepareError::configuration(other),
+                other => ApplicationRunPrepareError::connection_config_invalid(other),
             },
         );
     }
@@ -2657,7 +3118,7 @@ fn application_selected_model_route(
                 crate::provider_connections::ResolvedRouteError::NotConfigured => {
                     ApplicationRunPrepareError::ModelRouteNotConfigured
                 }
-                other => ApplicationRunPrepareError::configuration(other),
+                other => ApplicationRunPrepareError::connection_config_invalid(other),
             }
         })?;
     let Some(model_name) = model_name else {
@@ -2675,41 +3136,24 @@ fn application_selected_model_route(
             message: error.to_string(),
         })?;
     crate::provider_connections::resolve_model_route(root_config, &model_ref)
-        .map_err(ApplicationRunPrepareError::configuration)
+        .map_err(ApplicationRunPrepareError::connection_config_invalid)
 }
 
-pub(crate) fn load_application_session_for_route(
+pub(crate) fn load_application_session_for_route_with_attachment(
     root_config: &RootConfig,
     fallback_route: &ResolvedModelRoute,
     store: JsonlSessionStore,
+    attachment: Option<&crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 ) -> Result<Session> {
-    let existing_entries = JsonlSessionStore::read_entries(store.path())
-        .context("failed to inspect durable session route")?;
-    let fallback_for_new_session = existing_entries.is_empty().then(|| fallback_route.clone());
-    let provider_name =
-        crate::provider_connections::validate_persisted_model_route(root_config, fallback_route)
-            .map_err(anyhow::Error::new)?;
-    let session = Session::load_from_store_with_route(
-        provider_name,
-        fallback_route.model_ref.model_id.clone(),
-        fallback_for_new_session,
+    crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+        root_config,
+        fallback_route,
         store,
-    )?;
-    let persisted = session.resolved_model_route().ok_or_else(|| {
-        anyhow!("session_route_missing: start a new session or fork with the current route")
-    })?;
-    let persisted_provider =
-        crate::provider_connections::validate_persisted_model_route(root_config, persisted)
-            .map_err(anyhow::Error::new)?;
-    anyhow::ensure!(
-        persisted_provider == session.provider_name(),
-        "session_route_drift: durable provider identity does not match its selected route"
-    );
-    anyhow::ensure!(
-        persisted.model_ref.model_id == session.model_name(),
-        "session_route_drift: durable model identity does not match its frozen route"
-    );
-    Ok(session)
+        None,
+        None,
+        attachment,
+    )
+    .map_err(anyhow::Error::new)
 }
 
 /// Projects the current model and bounded context usage for one bound durable session.
@@ -2738,12 +3182,124 @@ pub fn application_run_context_view(
             "session_route_missing: restore the referenced connection or fork with current route"
         )
     })?;
-    let provider_name =
-        crate::provider_connections::validate_persisted_model_route(&root_config, &route)
-            .map_err(anyhow::Error::new)?;
-    let model_name = route.model_ref.model_id.clone();
-    let resolved =
-        crate::resolve_model_context_window_tokens(&root_config, &route.model_ref, &provider_name);
+    let config_snapshot =
+        crate::provider_connections::ResolvedRouteConfigSnapshot::from_root_config(&root_config);
+    let plan = crate::provider_connections::plan_session_route_resume(
+        &config_snapshot,
+        &crate::provider_connections::SessionRouteResumeInput {
+            route: route.clone(),
+            egress_trust_binding: application_session_route_trust_binding(&entries),
+        },
+    );
+    let route_frontier_binding =
+        crate::provider_connections::session_route_frontier_binding(&entries);
+    let route_authority_generation_binding =
+        crate::provider_connections::session_route_authority_generation_binding(&entries);
+    let recovery_binding = config_snapshot.recovery_binding(
+        expected_session_scope_id,
+        &route,
+        &route_frontier_binding,
+        &route_authority_generation_binding,
+    );
+    let (provider_name, effective_route, route_recovery) = match plan {
+        crate::provider_connections::SessionRouteResumePlan::Exact {
+            provider_name,
+            route,
+        }
+        | crate::provider_connections::SessionRouteResumePlan::RebindCurrentModel {
+            provider_name,
+            target_route: route,
+            ..
+        } => (provider_name, route, None),
+        crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation {
+            provider_name,
+            target_route,
+            ..
+        } => (
+            provider_name,
+            target_route,
+            Some(ApplicationSessionRouteRecoveryView {
+                code: ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired,
+                allowed_actions: vec![
+                    ApplicationSessionRouteRecoveryAction::ConfirmCurrentRoute,
+                    ApplicationSessionRouteRecoveryAction::RepairConnection,
+                    ApplicationSessionRouteRecoveryAction::SelectReplacement,
+                    ApplicationSessionRouteRecoveryAction::StartNewSession,
+                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                recovery_binding,
+                retryable: true,
+            }),
+        ),
+        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement {
+            reason: crate::provider_connections::SessionRouteUnavailableReason::ConnectionNotFound,
+            ..
+        } => (
+            application_session_identity(&entries)
+                .map(|(provider, _)| provider)
+                .unwrap_or_else(|| "unavailable".to_owned()),
+            route.clone(),
+            Some(ApplicationSessionRouteRecoveryView {
+                code: ApplicationSessionRouteRecoveryCode::SessionRouteSelectionRequired,
+                allowed_actions: vec![
+                    ApplicationSessionRouteRecoveryAction::RepairConnection,
+                    ApplicationSessionRouteRecoveryAction::SelectReplacement,
+                    ApplicationSessionRouteRecoveryAction::StartNewSession,
+                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                recovery_binding,
+                retryable: true,
+            }),
+        ),
+        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement {
+            reason:
+                crate::provider_connections::SessionRouteUnavailableReason::ConnectionConfigInvalid,
+            ..
+        }
+        | crate::provider_connections::SessionRouteResumePlan::NeedsSetup {
+            reason: crate::provider_connections::ModelRouteSetupReason::ConfigurationInvalid,
+        } => (
+            application_session_identity(&entries)
+                .map(|(provider, _)| provider)
+                .unwrap_or_else(|| "unavailable".to_owned()),
+            route.clone(),
+            Some(ApplicationSessionRouteRecoveryView {
+                code: ApplicationSessionRouteRecoveryCode::ConnectionConfigInvalid,
+                allowed_actions: vec![
+                    ApplicationSessionRouteRecoveryAction::RepairConnection,
+                    ApplicationSessionRouteRecoveryAction::SelectReplacement,
+                    ApplicationSessionRouteRecoveryAction::StartNewSession,
+                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                recovery_binding,
+                retryable: false,
+            }),
+        ),
+        crate::provider_connections::SessionRouteResumePlan::NeedsSetup {
+            reason: crate::provider_connections::ModelRouteSetupReason::RouteNotConfigured,
+        } => (
+            application_session_identity(&entries)
+                .map(|(provider, _)| provider)
+                .unwrap_or_else(|| "unavailable".to_owned()),
+            route.clone(),
+            Some(ApplicationSessionRouteRecoveryView {
+                code: ApplicationSessionRouteRecoveryCode::ModelRouteNotConfigured,
+                allowed_actions: vec![
+                    ApplicationSessionRouteRecoveryAction::RepairConnection,
+                    ApplicationSessionRouteRecoveryAction::StartNewSession,
+                    ApplicationSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                recovery_binding,
+                retryable: false,
+            }),
+        ),
+    };
+    let model_name = effective_route.model_ref.model_id.clone();
+    let resolved = crate::resolve_model_context_window_tokens(
+        &root_config,
+        &effective_route.model_ref,
+        &provider_name,
+    );
     let last_prompt_tokens = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -2753,8 +3309,13 @@ pub fn application_run_context_view(
             _ => None,
         })
         .next_back();
-    let available_reasoning_efforts =
-        crate::reasoning_effort::supported_reasoning_efforts(&provider_name, &model_name);
+    let available_reasoning_efforts = if route_recovery.as_ref().is_some_and(|recovery| {
+        recovery.code != ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired
+    }) {
+        Vec::new()
+    } else {
+        crate::reasoning_effort::supported_reasoning_efforts(&provider_name, &model_name)
+    };
     let mut identity_config = root_config.clone();
     identity_config.agent.runtime_provider = provider_name.clone();
     identity_config.agent.model = model_name.clone();
@@ -2777,7 +3338,7 @@ pub fn application_run_context_view(
     let model_selection_binding =
         application_model_selection_binding(&route.model_ref, &model_options);
     Ok(ApplicationRunContextView {
-        model_ref: route.model_ref,
+        model_ref: effective_route.model_ref,
         provider_name,
         model_name,
         model_options,
@@ -2790,7 +3351,49 @@ pub fn application_run_context_view(
         last_prompt_tokens,
         context_window_source: resolved.source,
         extension_catalog,
+        route_recovery,
     })
+}
+
+fn application_session_route_trust_binding(
+    entries: &[SessionLogEntry],
+) -> Option<sigil_kernel::RouteEgressTrustBinding> {
+    let mut current_fingerprint = None::<String>;
+    let mut binding = None;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route,
+                ..
+            }) => {
+                current_fingerprint = resolved_model_route
+                    .as_ref()
+                    .map(|route| route.semantic_fingerprint.clone());
+                binding = None;
+            }
+            SessionLogEntry::Control(
+                ControlEntry::SessionModelSelected {
+                    resolved_model_route,
+                    ..
+                }
+                | ControlEntry::SessionRouteRebound {
+                    resolved_model_route,
+                    ..
+                },
+            ) => {
+                current_fingerprint = Some(resolved_model_route.semantic_fingerprint.clone());
+                binding = None;
+            }
+            SessionLogEntry::Control(ControlEntry::SessionRouteTrustBound {
+                route_semantic_fingerprint,
+                egress_trust_binding,
+            }) if current_fingerprint.as_deref() == Some(route_semantic_fingerprint.as_str()) => {
+                binding = Some(egress_trust_binding.clone());
+            }
+            _ => {}
+        }
+    }
+    binding
 }
 
 fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedModelRoute> {
@@ -2806,6 +3409,10 @@ fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedMode
                 route = resolved_model_route.clone();
             }
             SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                resolved_model_route,
+                ..
+            })
+            | SessionLogEntry::Control(ControlEntry::SessionRouteRebound {
                 resolved_model_route,
                 ..
             }) if identity_seen => route = Some(resolved_model_route.clone()),
@@ -2827,6 +3434,11 @@ fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, 
                 identity = Some((provider_name.clone(), model_name.clone()));
             }
             SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                provider_name,
+                model_name,
+                ..
+            })
+            | SessionLogEntry::Control(ControlEntry::SessionRouteRebound {
                 provider_name,
                 model_name,
                 ..
@@ -3135,6 +3747,30 @@ pub async fn rerun_application_verification(
     services: &ApplicationRunServices,
     request: &TaskVerificationRerunRequest,
 ) -> Result<VerificationProductView> {
+    rerun_application_verification_with_attachment(
+        config_path,
+        launch_cwd,
+        session_path,
+        expected_session_scope_id,
+        services,
+        request,
+        None,
+    )
+    .await
+}
+
+/// Reruns verification while reusing a controller-owned cross-process session attachment.
+pub async fn rerun_application_verification_with_attachment(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    services: &ApplicationRunServices,
+    request: &TaskVerificationRerunRequest,
+    session_attachment: Option<
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    >,
+) -> Result<VerificationProductView> {
     let config_path = config_path.to_owned();
     let launch_cwd = launch_cwd.to_owned();
     let session_path = session_path.to_owned();
@@ -3146,10 +3782,16 @@ pub async fn rerun_application_verification(
         let workspace_root =
             resolve_workspace_root(&config_path, &launch_cwd, &root_config.workspace.root);
         let store = JsonlSessionStore::new(&session_path)?;
-        let session_lease = session_leases.acquire(store.path())?;
+        let session_lease =
+            session_leases.acquire_with_attachment(store.path(), session_attachment)?;
         let (_, fallback_route) = application_selected_model_route(&root_config, None, None)
             .map_err(|error| anyhow!(error))?;
-        let session = load_application_session_for_route(&root_config, &fallback_route, store)?;
+        let session = load_application_session_for_route_with_attachment(
+            &root_config,
+            &fallback_route,
+            store,
+            Some(session_lease.attachment.as_ref()),
+        )?;
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before verification rerun");
         }
@@ -3194,6 +3836,49 @@ pub fn record_application_preparation_cancellation(
     run_id: &str,
     reason: &str,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    let canonical_path = canonical_session_lease_path(session_path)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let attachment = Arc::new(
+        crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &canonical_path,
+        )
+        .map_err(|error| match error {
+            crate::interactive_session_attachment::InteractiveSessionAttachmentError::Busy {
+                observed_generation,
+            } => ApplicationRunPrepareError::SessionAlreadyActive {
+                recovery_binding:
+                    crate::interactive_session_attachment::session_attachment_path_recovery_binding(
+                        &canonical_path,
+                        &observed_generation,
+                    ),
+            },
+            error => ApplicationRunPrepareError::execution(error),
+        })?,
+    );
+    record_application_preparation_cancellation_with_attachment(
+        config_path,
+        &canonical_path,
+        run_id,
+        reason,
+        attachment,
+    )
+}
+
+/// Durably records a preparation cancellation while reusing a controller-owned attachment.
+///
+/// # Errors
+///
+/// Returns a typed preparation error when the attachment does not match the session,
+/// configuration or route recovery fails, or durable cancellation evidence cannot be appended.
+pub fn record_application_preparation_cancellation_with_attachment(
+    config_path: &Path,
+    session_path: &Path,
+    run_id: &str,
+    reason: &str,
+    session_attachment: Arc<
+        crate::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    >,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
     if run_id.trim().is_empty() || safe_persistence_text(run_id) != run_id {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "run id must be non-empty and persistence-safe".to_owned(),
@@ -3205,8 +3890,20 @@ pub fn record_application_preparation_cancellation(
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
     let (_, fallback_route) = application_selected_model_route(&root_config, None, None)?;
-    let session = load_application_session_for_route(&root_config, &fallback_route, store)
+    let attachment_path = canonical_session_lease_path(session_attachment.session_path())
         .map_err(ApplicationRunPrepareError::execution)?;
+    if attachment_path != canonical_path {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "supplied session attachment belongs to another durable session".to_owned(),
+        });
+    }
+    let session = load_application_session_for_route_with_attachment(
+        &root_config,
+        &fallback_route,
+        store,
+        Some(session_attachment.as_ref()),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
     let recorder = session
         .run_cancellation_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
@@ -3238,6 +3935,16 @@ pub fn record_application_preparation_cancellation(
     Ok(ApplicationSessionBinding {
         session_scope_id: session.session_scope_id().to_owned(),
         session_log_path: canonical_path,
+        route_transition: crate::provider_connections::SessionRouteTransitionView {
+            kind: crate::provider_connections::SessionRouteTransitionKind::Exact,
+            connection_id: session
+                .resolved_model_route()
+                .map(|route| route.model_ref.connection_id.as_str().to_owned()),
+            model_id: session
+                .resolved_model_route()
+                .map(|route| route.model_ref.model_id.clone()),
+            remote_context_reset: false,
+        },
     })
 }
 
@@ -3253,23 +3960,6 @@ pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunI
     let runtime_context =
         context_candidates_from_safe_sources(workspace_root, &prompt, None).unwrap_or_default();
     AgentRunInput::user(prompt).with_runtime_context(runtime_context)
-}
-
-fn spawn_application_session_title(request: ApplicationSessionTitleRequest) {
-    tokio::spawn(async move {
-        let result = crate::generate_and_persist_session_title(
-            request.root_config,
-            request.workspace_root,
-            request.model_ref,
-            request.session_log_path,
-            request.session_id,
-            request.prompt,
-        )
-        .await;
-        if let Err(error) = result {
-            tracing::debug!(error = %error, "semantic session title generation was not applied");
-        }
-    });
 }
 
 #[cfg(test)]
@@ -3306,6 +3996,7 @@ struct BlockingApplicationRunPreparation {
     agent_invocation: Option<(crate::AgentProfileRegistry, AgentProfileId)>,
     task_agent_registry: Option<crate::AgentProfileRegistry>,
     generate_session_title: bool,
+    route_transition: crate::provider_connections::SessionRouteTransitionView,
 }
 
 fn prepare_application_run_blocking(
@@ -3339,8 +4030,16 @@ fn prepare_application_run_blocking(
     let session_path = session_store.path().to_owned();
     let session_lease = Arc::new(
         session_leases
-            .acquire(&session_path)
-            .map_err(ApplicationRunPrepareError::execution)?,
+            .acquire_with_attachment(&session_path, request.session_attachment.clone())
+            .map_err(|error| {
+                if error.is_already_active() {
+                    ApplicationRunPrepareError::SessionAlreadyActive {
+                        recovery_binding: error.recovery_binding().unwrap_or_default().to_owned(),
+                    }
+                } else {
+                    ApplicationRunPrepareError::execution(error)
+                }
+            })?,
     );
     let mutation_recorder = MutationEventRecorder::new(session_store.clone());
     let (_, fallback_route) = application_selected_model_route(
@@ -3348,9 +4047,102 @@ fn prepare_application_run_blocking(
         request.model_connection_id.as_ref(),
         request.model_name.as_deref(),
     )?;
-    let mut session =
-        load_application_session_for_route(&root_config, &fallback_route, session_store)
+    let inspected = crate::provider_connections::inspect_session_for_route_resume(
+        &root_config,
+        &fallback_route,
+        session_store,
+    )
+    .map_err(|_| ApplicationRunPrepareError::SessionStreamInvalid)?;
+    let crate::provider_connections::InspectedSessionRouteResume {
+        mut session,
+        config_snapshot,
+        plan,
+        recovery_binding,
+    } = inspected;
+    let route_authority = session_lease
+        .route_mutation_authority(session.session_scope_id())
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let explicit_model_selection = request.model_connection_id.is_some()
+        && request.model_name.is_some()
+        && request.model_selection_binding.is_some();
+    let mut route_transition_kind = crate::provider_connections::SessionRouteTransitionKind::Exact;
+    let mut route_remote_context_reset = false;
+    match plan {
+        crate::provider_connections::SessionRouteResumePlan::Exact { .. } => {}
+        plan @ crate::provider_connections::SessionRouteResumePlan::RebindCurrentModel {
+            ..
+        } => {
+            let permit = route_authority.issue_quiescence_permit().map_err(|error| {
+                application_route_authority_prepare_error(error, &recovery_binding)
+            })?;
+            let outcome = crate::provider_connections::apply_session_route_resume_plan(
+                &config_snapshot,
+                &mut session,
+                plan,
+                permit,
+            )
             .map_err(ApplicationRunPrepareError::execution)?;
+            route_transition_kind =
+                crate::provider_connections::SessionRouteTransitionKind::Rebound;
+            route_remote_context_reset = outcome.private_state_reset;
+        }
+        crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation { .. }
+            if explicit_model_selection
+                && request.route_recovery_binding.as_deref() == Some(recovery_binding.as_str()) => {
+        }
+        plan @ crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation { .. }
+            if request.route_recovery_binding.as_deref() == Some(recovery_binding.as_str()) =>
+        {
+            let permit = route_authority.issue_quiescence_permit().map_err(|error| {
+                application_route_authority_prepare_error(error, &recovery_binding)
+            })?;
+            let outcome = crate::provider_connections::apply_session_route_confirmation_plan(
+                &config_snapshot,
+                &mut session,
+                plan,
+                &recovery_binding,
+                permit,
+            )
+            .map_err(ApplicationRunPrepareError::execution)?;
+            route_transition_kind =
+                crate::provider_connections::SessionRouteTransitionKind::ExplicitlyConfirmed;
+            route_remote_context_reset = outcome.private_state_reset;
+        }
+        crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation { .. } => {
+            return Err(
+                ApplicationRunPrepareError::SessionRouteConfirmationRequired { recovery_binding },
+            );
+        }
+        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement { .. }
+            if explicit_model_selection
+                && request.route_recovery_binding.as_deref() == Some(recovery_binding.as_str()) => {
+        }
+        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement {
+            reason: crate::provider_connections::SessionRouteUnavailableReason::ConnectionNotFound,
+            ..
+        } => {
+            return Err(ApplicationRunPrepareError::SessionRouteSelectionRequired {
+                recovery_binding,
+            });
+        }
+        crate::provider_connections::SessionRouteResumePlan::NeedsReplacement {
+            reason:
+                crate::provider_connections::SessionRouteUnavailableReason::ConnectionConfigInvalid,
+            ..
+        }
+        | crate::provider_connections::SessionRouteResumePlan::NeedsSetup {
+            reason: crate::provider_connections::ModelRouteSetupReason::ConfigurationInvalid,
+        } => {
+            return Err(ApplicationRunPrepareError::connection_config_invalid(
+                anyhow!("connection_config_invalid"),
+            ));
+        }
+        crate::provider_connections::SessionRouteResumePlan::NeedsSetup {
+            reason: crate::provider_connections::ModelRouteSetupReason::RouteNotConfigured,
+        } => {
+            return Err(ApplicationRunPrepareError::ModelRouteNotConfigured);
+        }
+    }
     let workspace_trust = workspace_trust_from_entries(session.entries(), &workspace_root)
         .map_err(ApplicationRunPrepareError::execution)?;
     let conversation_lifecycle = session
@@ -3398,10 +4190,24 @@ fn prepare_application_run_blocking(
         });
     }
     if let Some((provider_name, selected_route)) = selected_model {
-        session
-            .select_model_route(provider_name, selected_route)
-            .map_err(ApplicationRunPrepareError::execution)?;
+        let permit = route_authority
+            .issue_quiescence_permit()
+            .map_err(|error| application_route_authority_prepare_error(error, &recovery_binding))?;
+        let outcome = crate::provider_connections::apply_explicit_session_route_selection(
+            &config_snapshot,
+            &mut session,
+            &provider_name,
+            selected_route,
+            permit,
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+        route_transition_kind =
+            crate::provider_connections::SessionRouteTransitionKind::ExplicitlyConfirmed;
+        route_remote_context_reset = outcome.private_state_reset;
     }
+    session_lease
+        .acquire_route_execution_owner(session.session_scope_id())
+        .map_err(ApplicationRunPrepareError::execution)?;
     let loaded_skill =
         admit_application_skill_binding(&request, &root_config, &workspace_root, &mut session)?;
     let agent_invocation = admit_application_agent_binding(
@@ -3430,6 +4236,12 @@ fn prepare_application_run_blocking(
             None
         };
     let model_ref = session_route.model_ref.clone();
+    let route_transition = crate::provider_connections::SessionRouteTransitionView {
+        kind: route_transition_kind,
+        connection_id: Some(session_route.model_ref.connection_id.as_str().to_owned()),
+        model_id: Some(session_route.model_ref.model_id.clone()),
+        remote_context_reset: route_remote_context_reset,
+    };
     attach_session_url_capability_store(&mut session)
         .map_err(ApplicationRunPrepareError::execution)?;
 
@@ -3498,7 +4310,23 @@ fn prepare_application_run_blocking(
         agent_invocation,
         task_agent_registry,
         generate_session_title,
+        route_transition,
     })
+}
+
+fn application_route_authority_prepare_error(
+    error: crate::provider_connections::SessionRouteAuthorityError,
+    recovery_binding: &str,
+) -> ApplicationRunPrepareError {
+    match error {
+        crate::provider_connections::SessionRouteAuthorityError::ActiveOwners
+        | crate::provider_connections::SessionRouteAuthorityError::TransitionInProgress => {
+            ApplicationRunPrepareError::SessionWriterBusy {
+                recovery_binding: recovery_binding.to_owned(),
+            }
+        }
+        other => ApplicationRunPrepareError::execution(anyhow::Error::new(other)),
+    }
 }
 
 fn admit_application_skill_binding(

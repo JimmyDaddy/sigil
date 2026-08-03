@@ -938,6 +938,22 @@ fn text_cli_ignores_structured_task_state_events() {
 }
 
 #[test]
+fn text_cli_renders_route_recovery_without_private_binding_material() {
+    let output = super::render_public_run_event(PublicRunEventKind::RouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+        actions: vec![sigil_kernel::PublicRouteRecoveryAction::ConfirmCurrentRoute],
+        recovery_binding: "opaque-private-binding".to_owned(),
+        retryable: true,
+    });
+
+    assert_eq!(
+        output.stderr,
+        "[recovery] the saved session route needs explicit confirmation\n"
+    );
+    assert!(!output.stderr.contains("opaque-private-binding"));
+}
+
+#[test]
 fn cli_parses_run_command_with_explicit_config() -> Result<()> {
     let cli = Cli::try_parse_from(["sigil", "--config", "custom.toml", "run", "hello"])?;
 
@@ -986,6 +1002,8 @@ fn cli_requires_and_preserves_compound_model_route() -> Result<()> {
         "hello".to_owned(),
         Some("openai-personal"),
         Some("gpt-4.1"),
+        None,
+        None,
     )
     .expect("compound route should become one application request");
     assert_eq!(
@@ -1764,7 +1782,16 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let config_path = workspace.join("sigil.toml");
     write_application_run_test_config(&config_path, &server)?;
 
-    super::run_command(&config_path, &workspace, "Say hi".to_owned(), None, None).await?;
+    super::run_command(
+        &config_path,
+        &workspace,
+        "Say hi".to_owned(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
 
     let raw_request = requests
         .lock()

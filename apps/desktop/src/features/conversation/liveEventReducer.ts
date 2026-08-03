@@ -79,6 +79,7 @@ export interface LiveEventState {
   /** Run currently allowed to advance the selected durable Task. */
   latestTaskRunId?: string;
   terminalSignals: ReadonlyMap<string, LiveTerminalSignal>;
+  routeRecovery?: TimelineEvent;
 }
 
 export type LiveEventAction =
@@ -460,6 +461,11 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
 
   const controlUpdate = updateControlEvents(state, event);
   let next = updateTerminalTasks(updateTaskEvents(controlUpdate.state, event), event);
+  if (event.kind === "route_recovery_required" && event.routeRecovery !== undefined) {
+    next = { ...next, routeRecovery: event };
+  } else if (event.kind === "run_started" && next.routeRecovery !== undefined) {
+    next = { ...next, routeRecovery: undefined };
+  }
   const terminalSignal = terminalSignalFromTimelineEvent(event);
   if (terminalSignal !== undefined) {
     return receiveTerminalSignal(next, terminalSignal);
@@ -1025,6 +1031,7 @@ function terminalStatus(event: TimelineEvent): ConversationTerminalStatus | unde
   if (event.kind === "run_failed") {
     return event.status === "interrupted" ? "interrupted" : "failed";
   }
+  if (event.kind === "route_recovery_required") return "failed";
   if (event.kind === "run_cancelled") return "cancelled";
   return undefined;
 }

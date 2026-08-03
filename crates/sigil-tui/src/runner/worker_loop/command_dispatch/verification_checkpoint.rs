@@ -175,9 +175,10 @@ where
                         continue;
                     }
                 };
-                match transition_session(
+                match transition_session_with_attachment(
                     SessionTransitionKind::CheckpointFork,
-                    output.destination_path.clone(),
+                    output.output.destination_path.clone(),
+                    Arc::clone(&output.attachment),
                     runtime,
                     root_config,
                     provider_capabilities,
@@ -187,12 +188,16 @@ where
                     message_tx,
                 ) {
                     Ok(transition) => {
+                        let _ = message_tx.send(WorkerMessage::SessionAttachmentTransferred {
+                            session_log_path: transition.session_log_path.clone(),
+                            attachment: Arc::clone(&transition.session_attachment),
+                        });
                         let _ = message_tx.send(WorkerMessage::ConversationForked {
                             request_id,
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
                             model_name: transition.model_name,
-                            copied_message_count: output.copied_message_count,
+                            copied_message_count: output.output.copied_message_count,
                             entries: transition.entries,
                         });
                         return WorkerCommandDispatchControl::Break;

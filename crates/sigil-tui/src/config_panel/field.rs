@@ -24,6 +24,7 @@ pub(crate) enum ConfigField {
     #[allow(dead_code)]
     VerificationAutoRun,
     MemoryEnabled,
+    MemoryWritable,
     CompactionEnabled,
     CompactionNativeCarrierEnabled,
     CompactionContextWindowTokens,
@@ -88,7 +89,7 @@ impl ConfigField {
         Self::WebSearchRoute,
         Self::WebBundledSearchEnabled,
     ];
-    const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
+    const MEMORY_FIELDS: [Self; 2] = [Self::MemoryEnabled, Self::MemoryWritable];
     const COMPACTION_FIELDS: [Self; 3] = [
         Self::CompactionEnabled,
         Self::CompactionNativeCarrierEnabled,
@@ -150,6 +151,7 @@ impl ConfigField {
             Self::WebBundledSearchEnabled => "bundled_search",
             Self::VerificationAutoRun => "checks",
             Self::MemoryEnabled => "enabled",
+            Self::MemoryWritable => "writable",
             Self::CompactionEnabled => "enabled",
             Self::CompactionNativeCarrierEnabled => "native_carrier",
             Self::CompactionContextWindowTokens => "fallback_window",
@@ -196,6 +198,7 @@ impl ConfigField {
             Self::WebBundledSearchEnabled => "Bundled Exa",
             Self::VerificationAutoRun => "Checks",
             Self::MemoryEnabled => "Memory",
+            Self::MemoryWritable => "Writable memory",
             Self::CompactionEnabled => "Auto compact",
             Self::CompactionNativeCarrierEnabled => "Native carrier",
             Self::CompactionContextWindowTokens => "Fallback window",
@@ -269,6 +272,9 @@ impl ConfigField {
             }
             Self::MemoryEnabled => {
                 "Loads workspace memory documents once at startup for stable session context."
+            }
+            Self::MemoryWritable => {
+                "Registers approval-gated durable memory tools and retrieves active user preferences and current-project facts across sessions. Disabled by default."
             }
             Self::CompactionEnabled => {
                 "Allows manual compaction and safe-boundary automatic epoch rotation."
@@ -380,6 +386,7 @@ impl ConfigField {
             Self::AppearanceColorGroup | Self::AppearanceColorToken => "Enter cycle",
             Self::McpName => "Enter cycle",
             Self::MemoryEnabled
+            | Self::MemoryWritable
             | Self::WebEnabled
             | Self::WebBundledSearchEnabled
             | Self::CompactionEnabled

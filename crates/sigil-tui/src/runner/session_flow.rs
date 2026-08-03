@@ -50,36 +50,21 @@ pub(super) fn load_routed_session_with_runtime_attachments(
     root_config: &RootConfig,
     session_log_path: &Path,
     previous_session: Option<&Session>,
+    attachment: &sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
 ) -> Result<Session> {
     let runtime_attachments = CapturedSessionRuntimeAttachments::from_session(previous_session);
-    let (fallback_provider, fallback_route) =
+    let (_, fallback_route) =
         sigil_runtime::provider_connections::resolve_default_model_route(root_config)
             .map_err(anyhow::Error::new)?;
     let store = JsonlSessionStore::new(session_log_path)?;
-    let mut session = Session::load_from_store_with_route(
-        fallback_provider,
-        fallback_route.model_ref.model_id.clone(),
-        Some(fallback_route),
-        store,
-    )?;
-    let persisted_route = session
-        .resolved_model_route()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "session_route_missing: restore the referenced connection or fork with the current route"
-            )
-        })?
-        .clone();
-    let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
+    let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
         root_config,
-        &persisted_route,
-    )
-    .map_err(anyhow::Error::new)?;
-    anyhow::ensure!(
-        session.provider_name() == provider_name
-            && session.model_name() == persisted_route.model_ref.model_id,
-        "session_route_drift: durable identity does not match its frozen route"
-    );
+        &fallback_route,
+        store,
+        None,
+        None,
+        Some(attachment),
+    )?;
     attach_captured_runtime_attachments(&mut session, &runtime_attachments)?;
     Ok(session)
 }

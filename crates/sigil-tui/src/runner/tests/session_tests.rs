@@ -517,6 +517,7 @@ fn switch_session_restores_identity_and_entries() -> Result<()> {
     let worker = spawn_test_worker(root_config, current_log_path, agent, workspace_root)?;
     worker.send(WorkerCommand::SwitchSession {
         session_log_path: restore_log_path.clone(),
+        attachment_recovery_binding: None,
     })?;
     let switched =
         worker.recv_until(|message| matches!(message, WorkerMessage::SessionSwitched { .. }))?;
@@ -566,11 +567,12 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
             if session_log_path == &new_log_path
                 && provider_name == "deepseek"
                 && model_name == "default-model"
-                && entries.len() == 1
+                && entries.len() == 2
                 && matches!(entries[0], SessionLogEntry::Control(ControlEntry::SessionIdentity { .. }))
+                && matches!(entries[1], SessionLogEntry::Control(ControlEntry::SessionRouteTrustBound { .. }))
     ));
     let entries = JsonlSessionStore::read_entries(&new_log_path)?;
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
 
     worker.shutdown()?;
     Ok(())
@@ -758,6 +760,7 @@ fn switch_session_while_active_run_reports_error() -> Result<()> {
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
     worker.send(WorkerCommand::SwitchSession {
         session_log_path: restore_log_path,
+        attachment_recovery_binding: None,
     })?;
     let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
     assert!(matches!(
@@ -826,16 +829,175 @@ fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
     worker.send(WorkerCommand::SwitchSession {
-        session_log_path: invalid_log_path.clone(),
+        session_log_path: invalid_log_path,
+        attachment_recovery_binding: None,
     })?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let recovery = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::SessionRouteRecoveryRequired { .. })
+    })?;
 
     assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error.contains(&invalid_log_path.display().to_string())
+        recovery,
+        WorkerMessage::SessionRouteRecoveryRequired {
+            code: sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
+            ref actions,
+            retryable: false,
+            target_session: None,
+            ..
+        } if actions == &vec![
+            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+        ]
     ));
 
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn switch_session_reports_typed_busy_recovery_without_run_failed() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let target_log_path = temp.path().join(".sigil/sessions/session-busy.jsonl");
+    let root_config = routed_test_root_config(&workspace_root, "planned-model");
+    let (_, fallback_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    let target_attachment =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &target_log_path,
+        )?;
+    sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+        &root_config,
+        &fallback_route,
+        JsonlSessionStore::new(&target_log_path)?,
+        None,
+        None,
+        Some(&target_attachment),
+    )?;
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, current_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: target_log_path.clone(),
+        attachment_recovery_binding: None,
+    })?;
+    let recovery = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::SessionRouteRecoveryRequired { .. })
+    })?;
+    let WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive,
+        recovery_binding: stale_binding,
+        target_session: None,
+        ..
+    } = recovery
+    else {
+        panic!("expected typed attachment-busy recovery");
+    };
+    assert!(!stale_binding.is_empty());
+    drop(target_attachment);
+
+    let replacement =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &target_log_path,
+        )?;
+    drop(replacement);
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: target_log_path.clone(),
+        attachment_recovery_binding: Some(stale_binding.clone()),
+    })?;
+    let stale = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::SessionRouteRecoveryRequired { .. })
+    })?;
+    let WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive,
+        recovery_binding: refreshed_binding,
+        target_session: None,
+        ..
+    } = stale
+    else {
+        panic!("stale attachment retry must return a refreshed binding");
+    };
+    assert_ne!(refreshed_binding, stale_binding);
+
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: target_log_path.clone(),
+        attachment_recovery_binding: Some(refreshed_binding),
+    })?;
+    let switched =
+        worker.recv_until(|message| matches!(message, WorkerMessage::SessionSwitched { .. }))?;
+    assert!(matches!(
+        switched,
+        WorkerMessage::SessionSwitched {
+            session_log_path,
+            ..
+        } if session_log_path == target_log_path
+    ));
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn switch_session_opens_typed_recovery_for_changed_target_route() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let target_log_path = temp.path().join(".sigil/sessions/session-recovery.jsonl");
+    let original_config = routed_test_root_config(&workspace_root, "planned-model");
+    let (_, original_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&original_config)
+            .map_err(anyhow::Error::new)?;
+    {
+        let attachment = sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &target_log_path,
+        )?;
+        sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+            &original_config,
+            &original_route,
+            JsonlSessionStore::new(&target_log_path)?,
+            None,
+            None,
+            Some(&attachment),
+        )?;
+    }
+    let mut changed_config = original_config;
+    changed_config.connections.insert(
+        "test-default".to_owned(),
+        serde_json::json!({
+            "label": "Test default",
+            "provider": "deepseek",
+            "protocol": "deepseek",
+            "base_url": "https://example.invalid/v1",
+            "credential": {
+                "source": "environment",
+                "name": "SIGIL_API_KEY"
+            }
+        }),
+    );
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(changed_config, current_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: target_log_path.clone(),
+        attachment_recovery_binding: None,
+    })?;
+    let recovery = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::SessionRouteRecoveryRequired { .. })
+    })?;
+    assert!(matches!(
+        recovery,
+        WorkerMessage::SessionRouteRecoveryRequired {
+            code: sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+            recovery_binding,
+            target_session: Some(ref target),
+            ..
+        } if !recovery_binding.is_empty()
+            && target.session_log_path == target_log_path
+            && !target.entries.is_empty()
+    ));
     worker.shutdown()?;
     Ok(())
 }
@@ -859,6 +1021,7 @@ fn switch_session_with_tail_corruption_recovers_and_switches() -> Result<()> {
 
     worker.send(WorkerCommand::SwitchSession {
         session_log_path: invalid_log_path.clone(),
+        attachment_recovery_binding: None,
     })?;
     let switched =
         worker.recv_until(|message| matches!(message, WorkerMessage::SessionSwitched { .. }))?;

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -9,13 +10,10 @@ use std::{
     env, io,
     panic::{self, AssertUnwindSafe},
     process::{Command, Stdio},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(not(test))]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(not(test))]
 use crossterm::{
     cursor::Show,
@@ -38,11 +36,11 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use sigil_kernel::RootConfig;
 #[cfg(not(test))]
 use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
+use sigil_kernel::{JsonlSessionStore, RootConfig};
 #[cfg(not(test))]
 use sigil_runtime::support::SupportBuildInfo;
 #[cfg(not(test))]
@@ -101,12 +99,7 @@ pub fn run_tui_with_build_context(
     build_info: SupportBuildInfo,
     update_info: BuildMetadata,
 ) -> Result<()> {
-    run_tui_with_initial_session(
-        config,
-        InitialSessionTarget::Latest,
-        build_info,
-        update_info,
-    )
+    run_tui_with_initial_session(config, InitialSessionTarget::Fresh, build_info, update_info)
 }
 
 #[cfg(not(test))]
@@ -241,6 +234,7 @@ fn run_tui_with_initial_session(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InitialSessionTarget<'a> {
+    Fresh,
     Latest,
     Selector(&'a str),
 }
@@ -688,7 +682,7 @@ where
         cwd,
         config_path,
         load_result,
-        InitialSessionTarget::Latest,
+        InitialSessionTarget::Fresh,
         spawn_worker_fn,
     )
 }
@@ -709,10 +703,52 @@ where
             let mut app = AppState::from_root_config(&config_path, &root_config);
             if app.workspace_is_trusted_from_history() {
                 restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
-                app.ensure_current_workspace_trust_decision(
+                let trust_ready = match app.ensure_current_workspace_trust_decision(
                     "trusted workspace carried into session",
-                )?;
-                worker = Some(spawn_worker_fn(root_config, &app)?);
+                ) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        if let Some(recovery) = runner::worker_session_route_recovery_message(
+                            &error,
+                            &app.session_log_path,
+                        ) {
+                            app.handle_worker_message(recovery)?;
+                        } else {
+                            app.handle_worker_message(
+                                WorkerMessage::SessionRouteRecoveryRequired {
+                                    code:
+                                        sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
+                                    actions: vec![
+                                    sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                                    sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                                ],
+                                    recovery_binding: String::new(),
+                                    retryable: false,
+                                    target_session: None,
+                                },
+                            )?;
+                        }
+                        false
+                    }
+                };
+                if trust_ready {
+                    match spawn_worker_fn(root_config, &app) {
+                        Ok(runtime) => worker = Some(runtime),
+                        Err(error) => {
+                            if let Some(recovery) = runner::worker_session_route_recovery_message(
+                                &error,
+                                &app.session_log_path,
+                            ) {
+                                app.handle_worker_message(recovery)?;
+                            } else {
+                                let message = format!(
+                                    "agent runtime is unavailable; session controls remain available: {error:#}"
+                                );
+                                report_worker_unavailable(&mut app, &message)?;
+                            }
+                        }
+                    }
+                }
                 flush_pending_worker_commands(&mut app, &mut worker)?;
             } else {
                 app.enter_workspace_trust_gate()?;
@@ -733,6 +769,7 @@ fn restore_initial_session_from_disk(
     initial_session: InitialSessionTarget<'_>,
 ) -> Result<()> {
     match initial_session {
+        InitialSessionTarget::Fresh => Ok(()),
         InitialSessionTarget::Latest => {
             app.restore_latest_session_from_disk(root_config);
             Ok(())
@@ -777,29 +814,51 @@ where
             *app = AppState::from_root_config(&config_path, &root_config);
             app.set_support_build_info(support_build_info);
             app.set_update_build_info(update_build_info);
-            app.ensure_current_workspace_trust_decision("trusted by user during quick setup")?;
-            *worker = Some(spawn_worker_fn(*root_config, app)?);
+            if let Err(error) =
+                app.ensure_current_workspace_trust_decision("trusted by user during quick setup")
+            {
+                apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
+                return Ok(());
+            }
+            match spawn_worker_fn(*root_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!("setup completed; agent runtime remains unavailable: {error:#}"),
+                )?,
+            }
         }
         AppAction::TrustWorkspace => {
-            if let Some(runtime) = worker.take() {
-                let _ = runtime.worker_tx.send(AppState::shutdown_command());
+            if let Err(error) = app.confirm_workspace_trust_gate() {
+                apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
+                return Ok(());
             }
-            app.confirm_workspace_trust_gate()?;
+            shutdown_and_join_worker(worker);
             let Some(root_config) = app.root_config_snapshot().cloned() else {
                 report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
                 return Ok(());
             };
-            *worker = Some(spawn_worker_fn(root_config, app)?);
+            match spawn_worker_fn(root_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!("workspace trusted; agent runtime remains unavailable: {error:#}"),
+                )?,
+            }
         }
         AppAction::ConfigSaved { root_config }
         | AppAction::RuntimeConfigUpdated { root_config } => {
             let Some(runtime_config) = app.runtime_config_for_current_session(*root_config)? else {
                 return Ok(());
             };
-            if let Some(runtime) = worker.take() {
-                let _ = runtime.worker_tx.send(AppState::shutdown_command());
+            shutdown_and_join_worker(worker);
+            match spawn_worker_fn(runtime_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!("configuration saved; agent runtime remains unavailable: {error:#}"),
+                )?,
             }
-            *worker = Some(spawn_worker_fn(runtime_config, app)?);
         }
         AppAction::SetDefaultModel {
             root_config,
@@ -807,6 +866,163 @@ where
         } => {
             root_config.save_if_unchanged(&app.config_path, &expected_root_config)?;
             app.apply_saved_default_model(*root_config);
+        }
+        AppAction::StartNewSession { session_log_path } => {
+            if let Some(runtime) = worker.as_ref()
+                && runtime
+                    .worker_tx
+                    .send(WorkerCommand::StartNewSession {
+                        session_log_path: session_log_path.clone(),
+                    })
+                    .is_ok()
+            {
+                return Ok(());
+            }
+            let root_config = app
+                .root_config_snapshot()
+                .cloned()
+                .context("new session requires the current runtime config")?;
+            let preparation = (|| -> Result<_> {
+                let (_, fallback_route) =
+                    sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+                        .map_err(anyhow::Error::new)?;
+                let attachment = Arc::new(
+                    sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                        &session_log_path,
+                    )
+                    .map_err(anyhow::Error::new)?,
+                );
+                let session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+                    &root_config,
+                    &fallback_route,
+                    JsonlSessionStore::new(&session_log_path)?,
+                    None,
+                    None,
+                    Some(attachment.as_ref()),
+                )
+                .map_err(anyhow::Error::new)?;
+                Ok((attachment, session))
+            })();
+            let (attachment, session) = match preparation {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    apply_worker_startup_recovery(app, &error, &session_log_path)?;
+                    return Ok(());
+                }
+            };
+            let provider_name = session.provider_name().to_owned();
+            let model_name = session.model_name().to_owned();
+            let mut entries = session.entries().to_vec();
+            if let Err(error) = app.ensure_target_workspace_trust_decision_with_attachment(
+                &session_log_path,
+                &mut entries,
+                "trusted workspace carried into new session",
+                attachment.as_ref(),
+            ) {
+                apply_worker_startup_recovery(app, &error, &session_log_path)?;
+                return Ok(());
+            }
+            shutdown_and_join_worker(worker);
+            app.handle_worker_message(WorkerMessage::NewSessionStarted {
+                session_log_path: session_log_path.clone(),
+                provider_name,
+                model_name,
+                entries,
+            })?;
+            let _ = app.take_worker_rebind_required();
+            app.retain_worker_session_attachment(session_log_path, attachment);
+            match spawn_worker_fn(root_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!("new session opened but its agent worker is unavailable: {error:#}"),
+                )?,
+            }
+        }
+        AppAction::SwitchSession { session_log_path } => {
+            let attachment_recovery_binding = app
+                .pending_session_attachment_recovery_binding_for(&session_log_path)
+                .map(str::to_owned);
+            app.mark_pending_session_transition_target(session_log_path.clone());
+            if let Some(runtime) = worker.as_ref()
+                && runtime
+                    .worker_tx
+                    .send(WorkerCommand::SwitchSession {
+                        session_log_path: session_log_path.clone(),
+                        attachment_recovery_binding: attachment_recovery_binding.clone(),
+                    })
+                    .is_ok()
+            {
+                return Ok(());
+            }
+            let root_config = app
+                .root_config_snapshot()
+                .cloned()
+                .context("session switch requires the current runtime config")?;
+            let preparation = (|| -> Result<_> {
+                let (_, fallback_route) =
+                    sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+                        .map_err(anyhow::Error::new)?;
+                let target_attachment = Arc::new(
+                    if let Some(recovery_binding) = attachment_recovery_binding.as_deref() {
+                        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire_for_path_retry(
+                            &session_log_path,
+                            recovery_binding,
+                        )
+                    } else {
+                        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                            &session_log_path,
+                        )
+                    }
+                    .map_err(anyhow::Error::new)?,
+                );
+                let target = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+                    &root_config,
+                    &fallback_route,
+                    JsonlSessionStore::new(&session_log_path)?,
+                    app.pending_session_route_confirmation_binding(),
+                    None,
+                    Some(target_attachment.as_ref()),
+                )
+                .map_err(anyhow::Error::new)?;
+                Ok((target_attachment, target))
+            })();
+            let (target_attachment, target) = match preparation {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    apply_worker_startup_recovery(app, &error, &session_log_path)?;
+                    return Ok(());
+                }
+            };
+            let provider_name = target.provider_name().to_owned();
+            let model_name = target.model_name().to_owned();
+            let mut entries = target.entries().to_vec();
+            if let Err(error) = app.ensure_target_workspace_trust_decision_with_attachment(
+                &session_log_path,
+                &mut entries,
+                "trusted workspace carried into restored session",
+                target_attachment.as_ref(),
+            ) {
+                apply_worker_startup_recovery(app, &error, &session_log_path)?;
+                return Ok(());
+            }
+            shutdown_and_join_worker(worker);
+            app.handle_worker_message(WorkerMessage::SessionSwitched {
+                session_log_path: session_log_path.clone(),
+                provider_name,
+                model_name,
+                entries,
+            })?;
+            app.retain_worker_session_attachment(session_log_path, target_attachment);
+            match spawn_worker_fn(root_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => report_worker_unavailable(
+                    app,
+                    &format!(
+                        "session opened read-only; its agent worker is unavailable: {error:#}"
+                    ),
+                )?,
+            }
         }
         AppAction::CopyToClipboard { text } => {
             match clipboard::copy_text(&text, app.terminal_osc52_clipboard_enabled()) {
@@ -867,6 +1083,25 @@ where
     }
     flush_pending_worker_commands(app, worker)?;
     Ok(())
+}
+
+fn apply_worker_startup_recovery(
+    app: &mut AppState,
+    error: &anyhow::Error,
+    session_log_path: &Path,
+) -> Result<()> {
+    let recovery = runner::worker_session_route_recovery_message(error, session_log_path)
+        .unwrap_or_else(|| WorkerMessage::SessionRouteRecoveryRequired {
+            code: sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
+            actions: vec![
+                sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+            ],
+            recovery_binding: String::new(),
+            retryable: false,
+            target_session: None,
+        });
+    app.handle_worker_message(recovery)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1024,20 +1259,12 @@ fn drain_worker_messages_inner(
     let mut startup_failed = false;
     app.begin_timeline_render_batch();
     while let Some(message) = try_recv_worker_message(runtime) {
-        if matches!(message, WorkerMessage::WorkerReady) {
-            runtime.ready = true;
-        } else if !runtime.ready && matches!(message, WorkerMessage::RunFailed(_)) {
-            startup_failed = true;
-        }
-        if let Some(attention) = attention.as_deref_mut() {
-            attention.observe(&message, Instant::now());
-        }
+        startup_failed |= apply_worker_message_state(runtime, attention.as_deref_mut(), &message);
         app.handle_worker_message(message)?;
         dirty = true;
     }
     if startup_failed {
-        let _ = app.drain_pending_worker_commands();
-        *worker = None;
+        shutdown_and_join_worker(worker);
     }
     Ok(dirty | app.flush_timeline_render_batch())
 }
@@ -1071,19 +1298,41 @@ fn apply_received_worker_message(
     let Some(runtime) = worker.as_mut() else {
         return Ok(false);
     };
-    let startup_failed = !runtime.ready && matches!(message, WorkerMessage::RunFailed(_));
-    if matches!(message, WorkerMessage::WorkerReady) {
-        runtime.ready = true;
-    }
-    attention.observe(&message, Instant::now());
     app.begin_timeline_render_batch();
+    let startup_failed = apply_worker_message_state(runtime, Some(attention), &message);
     app.handle_worker_message(message)?;
     app.flush_timeline_render_batch();
     if startup_failed {
-        let _ = app.drain_pending_worker_commands();
-        *worker = None;
+        shutdown_and_join_worker(worker);
     }
     Ok(true)
+}
+
+fn apply_worker_message_state(
+    runtime: &mut WorkerRuntime,
+    attention: Option<&mut AttentionController>,
+    message: &WorkerMessage,
+) -> bool {
+    let route_transition_recovery = matches!(
+        message,
+        WorkerMessage::SessionRouteRecoveryRequired {
+            target_session: Some(_),
+            ..
+        }
+    );
+    let startup_failed = route_transition_recovery
+        || (!runtime.ready
+            && matches!(
+                message,
+                WorkerMessage::RunFailed(_) | WorkerMessage::SessionRouteRecoveryRequired { .. }
+            ));
+    if matches!(message, WorkerMessage::WorkerReady) {
+        runtime.ready = true;
+    }
+    if let Some(attention) = attention {
+        attention.observe(message, Instant::now());
+    }
+    startup_failed
 }
 
 fn restart_worker_after_session_transition<F>(
@@ -1097,7 +1346,7 @@ where
     if !app.take_worker_rebind_required() {
         return Ok(false);
     }
-    *worker = None;
+    shutdown_and_join_worker(worker);
     let Some(root_config) = app.root_config_snapshot().cloned() else {
         report_worker_unavailable(
             app,
@@ -1130,31 +1379,26 @@ fn flush_pending_worker_commands(
     }
     let commands = app.drain_pending_worker_commands();
     let dirty = !commands.is_empty();
-    for command in commands {
-        if send_worker_command(app, worker, command)? {
-            continue;
+    let mut commands = commands.into_iter();
+    while let Some(command) = commands.next() {
+        let Some(runtime) = worker.as_ref() else {
+            app.enqueue_worker_command(command);
+            for remaining in commands {
+                app.enqueue_worker_command(remaining);
+            }
+            break;
+        };
+        if let Err(error) = runtime.worker_tx.send(command) {
+            app.enqueue_worker_command(*error.0);
+            for remaining in commands {
+                app.enqueue_worker_command(remaining);
+            }
+            shutdown_and_join_worker(worker);
+            report_worker_unavailable(app, "agent worker stopped before accepting command")?;
+            break;
         }
-        break;
     }
     Ok(dirty)
-}
-
-fn send_worker_command(
-    app: &mut AppState,
-    worker: &mut Option<WorkerRuntime>,
-    command: WorkerCommand,
-) -> Result<bool> {
-    let Some(runtime) = worker.as_ref() else {
-        return Ok(false);
-    };
-    match runtime.worker_tx.send(command) {
-        Ok(()) => Ok(true),
-        Err(_) => {
-            *worker = None;
-            report_worker_unavailable(app, "agent worker stopped before accepting command")?;
-            Ok(false)
-        }
-    }
 }
 
 fn send_worker_command_with_restart<F>(
@@ -1174,8 +1418,9 @@ where
         match runtime.worker_tx.send(command) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                *worker = None;
-                *error.0
+                let command = *error.0;
+                shutdown_and_join_worker(worker);
+                command
             }
         }
     } else {
@@ -1183,6 +1428,7 @@ where
     };
 
     let Some(root_config) = app.root_config_snapshot().cloned() else {
+        app.enqueue_worker_command(command);
         report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
         return Ok(());
     };
@@ -1192,6 +1438,7 @@ where
             *worker = Some(runtime);
         }
         Err(error) => {
+            app.enqueue_worker_command(command);
             report_worker_unavailable(app, &format!("failed to restart agent worker: {error:#}"))?;
             return Ok(());
         }
@@ -1202,16 +1449,43 @@ where
             app.enqueue_worker_command(command);
             return Ok(());
         }
-        if runtime.worker_tx.send(command).is_ok() {
-            return Ok(());
+        match runtime.worker_tx.send(command) {
+            Ok(()) => return Ok(()),
+            Err(error) => app.enqueue_worker_command(*error.0),
         }
     }
-    *worker = None;
+    shutdown_and_join_worker(worker);
     report_worker_unavailable(app, "agent worker stopped before accepting command")
 }
 
 fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
-    app.handle_worker_message(WorkerMessage::RunFailed(message.to_owned()))
+    app.handle_worker_message(WorkerMessage::Notice(message.to_owned()))?;
+    app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable,
+        actions: vec![
+            sigil_kernel::PublicRouteRecoveryAction::RetryProvider,
+            sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
+            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+        ],
+        recovery_binding: String::new(),
+        retryable: true,
+        target_session: None,
+    })
+}
+
+fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) {
+    let Some(runtime) = worker.take() else {
+        return;
+    };
+    let _ = runtime.worker_tx.send(AppState::shutdown_command());
+    #[cfg(not(test))]
+    {
+        let mut runtime = runtime;
+        if let Some(join_handle) = runtime.join_handle.take() {
+            let _ = join_handle.join();
+        }
+    }
 }
 
 fn apply_mouse_outcome<F>(
@@ -1613,6 +1887,8 @@ struct WorkerRuntime {
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     #[cfg(not(test))]
     worker_rx: WorkerMessageInbox,
+    #[cfg(not(test))]
+    join_handle: Option<std::thread::JoinHandle<()>>,
     ready: bool,
 }
 
@@ -1651,15 +1927,23 @@ impl WorkerMessageInbox {
 
 #[cfg(not(test))]
 fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime> {
-    let (worker_tx, worker_rx) = runner::spawn_agent_worker(
+    let spawned = runner::spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
         app.session_log_path.clone(),
         app.workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
+        runner::WorkerSessionRouteDirective {
+            recovery_confirmation: app
+                .pending_session_route_confirmation_binding()
+                .map(str::to_owned),
+            explicit_selection: app.pending_session_route_selection().cloned(),
+        },
+        app.worker_session_attachment(),
     )?;
     Ok(WorkerRuntime {
-        worker_tx,
-        worker_rx: WorkerMessageInbox::forward_from(worker_rx)?,
+        worker_tx: spawned.command_tx,
+        worker_rx: WorkerMessageInbox::forward_from(spawned.message_rx)?,
+        join_handle: Some(spawned.join_handle),
         ready: false,
     })
 }

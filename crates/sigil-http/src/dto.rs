@@ -524,6 +524,9 @@ pub struct HttpSessionOpenRequest {
     /// Optional process-local label. The first successful open wins for duplicate requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Exact attachment recovery capability echoed by a retry action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_binding: Option<String>,
 }
 
 /// Exact durable catalog identity and new bounded display name.
@@ -749,11 +752,37 @@ pub struct HttpSessionSnapshot {
     pub run_ids: Vec<String>,
     /// Durable V2 session scope bound to this process-local adapter session.
     pub durable_session_scope_id: String,
-    /// Durable JSONL session path selected by the runtime adapter.
+    /// Server-private durable JSONL path selected by the runtime adapter.
+    #[serde(skip_serializing)]
     pub session_log_path: String,
     /// Current foreground run, when this session is leased for execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_run_id: Option<String>,
+    /// Last machine-readable route transition receipt observed for this handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_transition: Option<HttpSessionRouteTransitionView>,
+    /// Recovery required before this read handle can become write-active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_recovery: Option<HttpSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSessionRouteTransitionKind {
+    Exact,
+    Rebound,
+    ExplicitlyConfirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpSessionRouteTransitionView {
+    pub kind: HttpSessionRouteTransitionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub remote_context_reset: bool,
 }
 
 /// Read-only durable frontier revalidated for one bound session.
@@ -1767,6 +1796,10 @@ pub struct HttpSessionBinding {
     pub session_scope_id: String,
     /// Canonical durable JSONL session path exposed to the local authenticated adapter.
     pub session_log_path: String,
+    /// Route transition observed while activating this binding, if activation was possible.
+    pub route_transition: Option<HttpSessionRouteTransitionView>,
+    /// Recovery required before this binding can become write-active.
+    pub route_recovery: Option<HttpSessionRouteRecoveryView>,
 }
 
 /// Request body for starting one run inside an HTTP adapter session.
@@ -1781,6 +1814,9 @@ pub struct HttpRunStartRequest {
     /// Opaque run-context binding required with an explicit model selection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_selection_binding: Option<String>,
+    /// Exact opaque recovery binding returned by the current run-context projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_recovery_binding: Option<String>,
     /// Explicit user-facing permission mode for the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<HttpPermissionMode>,
@@ -2075,6 +2111,43 @@ pub struct HttpRunContextView {
     pub context_window_source: HttpContextWindowSource,
     /// Bounded command, skill, and agent metadata for this workspace and session.
     pub extension_catalog: HttpApplicationExtensionCatalog,
+    /// Exact-bound route recovery state while transcript/catalog reads remain available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_recovery: Option<HttpSessionRouteRecoveryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSessionRouteRecoveryCode {
+    SessionRouteConfirmationRequired,
+    SessionRouteSelectionRequired,
+    ModelRouteNotConfigured,
+    ConnectionConfigInvalid,
+    ProviderUnavailable,
+    SessionAlreadyActive,
+    SessionWriterBusy,
+    SessionStreamInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpSessionRouteRecoveryAction {
+    ConfirmCurrentRoute,
+    RepairConnection,
+    SelectReplacement,
+    StartNewSession,
+    RetryProvider,
+    RetrySessionAttach,
+    BackToSessionLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpSessionRouteRecoveryView {
+    pub code: HttpSessionRouteRecoveryCode,
+    pub allowed_actions: Vec<HttpSessionRouteRecoveryAction>,
+    pub recovery_binding: String,
+    pub retryable: bool,
 }
 
 impl HttpPermissionMode {

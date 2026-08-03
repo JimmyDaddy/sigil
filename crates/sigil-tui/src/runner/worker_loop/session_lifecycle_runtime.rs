@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -75,7 +76,7 @@ pub(in crate::runner) fn fork_local_session(
     active_session: Option<(&Path, &Session)>,
     root_config: &RootConfig,
     current_model_route: &ResolvedModelRoute,
-) -> Result<ConversationForkOutput> {
+) -> Result<AttachedConversationForkOutput> {
     let canonical_source = fs::canonicalize(source_path)
         .with_context(|| format!("failed to canonicalize {}", source_path.display()))?;
     let active_session = active_session
@@ -105,6 +106,12 @@ pub(in crate::runner) fn fork_local_session(
         .parent()
         .ok_or_else(|| anyhow!("source session has no parent directory"))?;
     let destination_path = allocate_fork_path(parent, current_unix_time_ms());
+    let destination_attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &destination_path,
+        )
+        .map_err(anyhow::Error::new)?,
+    );
     let source_store = JsonlSessionStore::new(&canonical_source)?;
     let resolved_model_route = source_route_for_fork(&records, root_config, current_model_route)?;
     let provider_name = sigil_runtime::provider_connections::validate_persisted_model_route(
@@ -112,7 +119,7 @@ pub(in crate::runner) fn fork_local_session(
         &resolved_model_route,
     )
     .map_err(anyhow::Error::new)?;
-    fork_conversation_at_turn(
+    let output = fork_conversation_at_turn(
         &source_store,
         &records,
         &ConversationTurnForkRequest {
@@ -123,7 +130,27 @@ pub(in crate::runner) fn fork_local_session(
             model_name: resolved_model_route.model_ref.model_id.clone(),
             resolved_model_route: Some(resolved_model_route),
         },
-    )
+    )?;
+    Ok(AttachedConversationForkOutput {
+        output,
+        attachment: destination_attachment,
+    })
+}
+
+pub(in crate::runner) struct AttachedConversationForkOutput {
+    pub(in crate::runner) output: ConversationForkOutput,
+    pub(in crate::runner) attachment:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+}
+
+impl std::fmt::Debug for AttachedConversationForkOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AttachedConversationForkOutput")
+            .field("output", &self.output)
+            .field("attachment", &"<retained>")
+            .finish()
+    }
 }
 
 fn source_route_for_fork(
@@ -133,13 +160,22 @@ fn source_route_for_fork(
 ) -> Result<ResolvedModelRoute> {
     let mut persisted = None;
     for record in records {
-        if let Some(SessionLogEntry::Control(ControlEntry::SessionIdentity {
-            resolved_model_route: Some(route),
-            ..
-        })) = sigil_kernel::conversation_transcript_entry_from_record(record)?
+        if let Some(SessionLogEntry::Control(
+            ControlEntry::SessionIdentity {
+                resolved_model_route: Some(route),
+                ..
+            }
+            | ControlEntry::SessionModelSelected {
+                resolved_model_route: route,
+                ..
+            }
+            | ControlEntry::SessionRouteRebound {
+                resolved_model_route: route,
+                ..
+            },
+        )) = sigil_kernel::conversation_transcript_entry_from_record(record)?
         {
             persisted = Some(route);
-            break;
         }
     }
     if let Some(route) = persisted

@@ -665,7 +665,7 @@ pub fn http_openapi_document() -> Value {
                         "400": { "$ref": "#/components/responses/BadRequest" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
-                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "409": { "$ref": "#/components/responses/RunAdmissionConflict" },
                         "500": { "$ref": "#/components/responses/InternalError" },
                         "503": { "$ref": "#/components/responses/Unavailable" }
                     }
@@ -1056,6 +1056,7 @@ pub fn http_openapi_document() -> Value {
                 "Unauthorized": { "description": "Bearer token is missing or invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "NotFound": { "description": "Session, run, or route was not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "Conflict": { "description": "Command is stale, mismatched, expired, or not pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                "RunAdmissionConflict": { "description": "The session route requires recovery or another interactive controller owns the session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunAdmissionErrorResponse" } } } },
                 "InternalError": { "description": "Session binding, driver routing, or command completion failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "Unavailable": { "description": "The durable command identity store is unavailable or at capacity", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
             },
@@ -1384,7 +1385,8 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 512, "pattern": "^[^/\\\\]+\\.jsonl$" },
                         "session_id": { "type": "string", "maxLength": 512 },
-                        "label": { "type": ["string", "null"], "maxLength": 160 }
+                        "label": { "type": ["string", "null"], "maxLength": 160 },
+                        "recovery_binding": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 }
                     }
                 },
                 "SessionRenameRequest": {
@@ -1460,14 +1462,26 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionSnapshot": {
                     "type": "object",
-                    "required": ["id", "run_ids", "durable_session_scope_id", "session_log_path"],
+                    "required": ["id", "run_ids", "durable_session_scope_id"],
                     "properties": {
                         "id": { "type": "string" },
                         "label": { "type": ["string", "null"] },
                         "run_ids": { "type": "array", "items": { "type": "string" } },
                         "durable_session_scope_id": { "type": "string" },
-                        "session_log_path": { "type": "string" },
-                        "foreground_run_id": { "type": ["string", "null"] }
+                        "foreground_run_id": { "type": ["string", "null"] },
+                        "route_transition": { "oneOf": [{ "$ref": "#/components/schemas/SessionRouteTransitionView" }, { "type": "null" }] },
+                        "route_recovery": { "oneOf": [{ "$ref": "#/components/schemas/SessionRouteRecoveryView" }, { "type": "null" }] }
+                    }
+                },
+                "SessionRouteTransitionView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "remote_context_reset"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["exact", "rebound", "explicitly_confirmed"] },
+                        "connection_id": { "type": ["string", "null"] },
+                        "model_id": { "type": ["string", "null"] },
+                        "remote_context_reset": { "type": "boolean" }
                     }
                 },
                 "DurableSessionFrontier": {
@@ -2691,6 +2705,7 @@ pub fn http_openapi_document() -> Value {
                         "permission_mode": { "$ref": "#/components/schemas/PermissionMode" },
                         "model_ref": { "oneOf": [{ "$ref": "#/components/schemas/ProviderModelRef" }, { "type": "null" }] },
                         "model_selection_binding": { "type": ["string", "null"] },
+                        "route_recovery_binding": { "type": ["string", "null"] },
                         "reasoning_effort": { "oneOf": [{ "$ref": "#/components/schemas/ReasoningEffort" }, { "type": "null" }] },
                         "reasoning_effort_binding": { "type": ["string", "null"] },
                         "skill_binding": { "oneOf": [{ "$ref": "#/components/schemas/ApplicationSkillBinding" }, { "type": "null" }] },
@@ -2767,7 +2782,29 @@ pub fn http_openapi_document() -> Value {
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
                         "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
                         "context_window_source": { "type": "string", "enum": ["connection", "provider", "config", "unavailable"] },
-                        "extension_catalog": { "$ref": "#/components/schemas/ApplicationExtensionCatalog" }
+                        "extension_catalog": { "$ref": "#/components/schemas/ApplicationExtensionCatalog" },
+                        "route_recovery": { "oneOf": [{ "$ref": "#/components/schemas/SessionRouteRecoveryView" }, { "type": "null" }] }
+                    }
+                },
+                "SessionRouteRecoveryView": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["code", "allowed_actions", "recovery_binding", "retryable"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                        },
+                        "allowed_actions": {
+                            "type": "array",
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "enum": ["confirm_current_route", "repair_connection", "select_replacement", "start_new_session", "retry_provider", "retry_session_attach", "back_to_session_library"]
+                            }
+                        },
+                        "recovery_binding": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "retryable": { "type": "boolean" }
                     }
                 },
                 "ApplicationExtensionCatalog": {
@@ -3641,6 +3678,26 @@ pub fn http_openapi_document() -> Value {
                             }
                         }
                     }
+                },
+                "RunAdmissionErrorResponse": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["error"],
+                    "properties": {
+                        "error": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["code", "message", "route_recovery"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                                },
+                                "message": { "type": "string" },
+                                "route_recovery": { "$ref": "#/components/schemas/SessionRouteRecoveryView" }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3796,6 +3853,20 @@ fn public_event_schemas() -> Map<String, Value> {
         }),
     );
     schemas.insert(
+        "PublicSessionRouteTransitionView".to_owned(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "connection_id", "model_id", "remote_context_reset"],
+            "properties": {
+                "kind": { "type": "string", "enum": ["exact", "rebound", "explicitly_confirmed"] },
+                "connection_id": { "type": ["string", "null"] },
+                "model_id": { "type": ["string", "null"] },
+                "remote_context_reset": { "type": "boolean" }
+            }
+        }),
+    );
+    schemas.insert(
         "PublicTaskPlanStep".to_owned(),
         json!({
             "type": "object",
@@ -3902,6 +3973,17 @@ fn public_event_schemas() -> Map<String, Value> {
 
 fn public_event_variants() -> Vec<(&'static str, Value)> {
     vec![
+        (
+            "RouteTransitionEvent",
+            public_event_variant(
+                "route_transition",
+                &["transition"],
+                json_properties(json!({
+                    "transition": { "$ref": "#/components/schemas/PublicSessionRouteTransitionView" }
+                })),
+                true,
+            ),
+        ),
         (
             "RunStartedEvent",
             public_event_variant(
@@ -4051,6 +4133,30 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                 "run_failed",
                 &["error"],
                 json_properties(json!({ "error": { "type": "string" } })),
+                true,
+            ),
+        ),
+        (
+            "RouteRecoveryRequiredEvent",
+            public_event_variant(
+                "route_recovery_required",
+                &["code", "actions", "recovery_binding", "retryable"],
+                json_properties(json!({
+                    "code": {
+                        "type": "string",
+                        "enum": ["session_route_confirmation_required", "session_route_selection_required", "model_route_not_configured", "connection_config_invalid", "provider_unavailable", "session_already_active", "session_writer_busy", "session_stream_invalid"]
+                    },
+                    "actions": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                            "type": "string",
+                            "enum": ["confirm_current_route", "repair_connection", "select_replacement", "start_new_session", "retry_provider", "retry_session_attach", "back_to_session_library"]
+                        }
+                    },
+                    "recovery_binding": { "type": "string", "maxLength": 128 },
+                    "retryable": { "type": "boolean" }
+                })),
                 true,
             ),
         ),

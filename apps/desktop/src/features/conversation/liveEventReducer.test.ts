@@ -431,6 +431,33 @@ describe("live event reducer", () => {
     });
   });
 
+  it("retains typed route recovery actions while terminating the unavailable run", () => {
+    let state = createLiveEventState(SESSION_ID);
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "route_recovery_required",
+      runSequence: "10",
+      status: "recovery_required",
+      routeRecovery: {
+        code: "session_route_confirmation_required",
+        actions: ["repair_connection", "start_new_session", "back_to_session_library"],
+        recoveryBinding: "route-binding-1",
+        retryable: true,
+      },
+    }));
+
+    expect(state.routeRecovery?.routeRecovery).toEqual({
+      code: "session_route_confirmation_required",
+      actions: ["repair_connection", "start_new_session", "back_to_session_library"],
+      recoveryBinding: "route-binding-1",
+      retryable: true,
+    });
+    expect(selectTerminalSignals(state)).toEqual([{
+      runId: "run-1",
+      runSequence: "10",
+      status: "failed",
+    }]);
+  });
+
   it("keeps the exact pending approval guard and removes it on resolution", () => {
     const approval = exactApproval();
     let state = createLiveEventState(SESSION_ID);

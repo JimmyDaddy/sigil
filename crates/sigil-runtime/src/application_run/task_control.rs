@@ -9,6 +9,9 @@ pub struct ApplicationTaskContinuationRequest {
     pub launch_cwd: PathBuf,
     /// Exact durable V2 session path.
     pub session_path: PathBuf,
+    /// Optional controller-owned cross-process attachment for the exact durable session.
+    pub session_attachment:
+        Option<Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>>,
     /// Durable session scope rendered to the application before this command.
     pub expected_session_scope_id: String,
     /// Adapter-owned run identifier for this continuation attempt.
@@ -86,6 +89,7 @@ pub struct ApplicationTaskContinuationExecution {
     conversation_lifecycle: ConversationRunLifecycleRecorder,
     conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
+    route_transition: crate::provider_connections::SessionRouteTransitionView,
     _session_lease: Arc<ApplicationSessionLease>,
 }
 
@@ -104,6 +108,8 @@ pub struct ApplicationTaskContinuationOutput {
     pub task_status: TaskRunStatus,
     /// Terminal application classification projected from `task_status`.
     pub terminal_status: ApplicationRunTerminalStatus,
+    /// Machine-readable receipt for the route admitted by this continuation.
+    pub route_transition: crate::provider_connections::SessionRouteTransitionView,
     /// Safe final answer when the Task completed.
     pub final_text: Option<String>,
 }
@@ -162,11 +168,13 @@ pub async fn prepare_application_task_continuation(
         prompt: public_prompt.clone(),
         run_id: request.run_id,
         session_path: Some(request.session_path),
+        session_attachment: request.session_attachment,
         interaction: request.interaction,
         permission_mode: request.permission_mode,
         model_connection_id: None,
         model_name: None,
         model_selection_binding: None,
+        route_recovery_binding: None,
         reasoning_effort: None,
         reasoning_effort_binding: None,
         skill_binding: None,
@@ -199,6 +207,7 @@ pub async fn prepare_application_task_continuation(
         interaction,
         redactor,
         task_agent_registry,
+        route_transition,
         ..
     } = prepared;
     if session.session_scope_id() != request.expected_session_scope_id {
@@ -230,7 +239,7 @@ pub async fn prepare_application_task_continuation(
         })?;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
-        .map_err(ApplicationRunPrepareError::configuration)?;
+        .map_err(ApplicationRunPrepareError::provider_unavailable)?;
     let provider_capabilities = provider.capabilities();
     let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
         session.provider_name(),
@@ -286,8 +295,13 @@ pub async fn prepare_application_task_continuation(
         ),
         role_provider_builder: Arc::clone(role_provider_builder),
     };
-    let terminal_control =
-        ApplicationTerminalTaskControl::new(workspace_root.clone(), surface.terminal_control);
+    let terminal_control = ApplicationTerminalTaskControl::new(
+        workspace_root.clone(),
+        surface.terminal_control,
+        session_lease.as_ref(),
+        session.session_scope_id(),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
     Ok(PreparedApplicationTaskContinuation {
         execution: ApplicationTaskContinuationExecution {
             task: task.clone(),
@@ -306,6 +320,7 @@ pub async fn prepare_application_task_continuation(
             conversation_lifecycle: conversation_lifecycle.clone(),
             conversation_start: conversation_start.clone(),
             events: events.clone(),
+            route_transition,
             _session_lease: Arc::clone(&session_lease),
         },
         control: ApplicationRunControl {
@@ -383,6 +398,9 @@ impl ApplicationTaskContinuationExecution {
         let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler);
         bridge.emit(PublicRunEventKind::RunStarted {
             prompt: self.public_prompt,
+        })?;
+        bridge.emit(PublicRunEventKind::RouteTransition {
+            transition: application_public_route_transition(&self.route_transition),
         })?;
         for warning in std::mem::take(&mut self.warnings) {
             bridge.emit(PublicRunEventKind::Notice { message: warning })?;
@@ -466,6 +484,7 @@ impl ApplicationTaskContinuationExecution {
             session_log_path: self.session_log_path,
             task_status,
             terminal_status,
+            route_transition: self.route_transition,
             final_text: final_answer.map(|answer| answer.text),
         })
     }

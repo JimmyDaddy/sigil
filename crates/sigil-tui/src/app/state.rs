@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
     time::Instant,
 };
 
@@ -115,6 +116,10 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) balance_snapshot: BalanceSnapshot,
     pub(crate) next_background_request_id: u64,
     pub(crate) pending_worker_commands: Vec<WorkerCommand>,
+    pub(crate) pending_session_route_recovery_binding: Option<String>,
+    pub(crate) pending_session_route_recovery_code: Option<sigil_kernel::PublicRouteRecoveryCode>,
+    pub(crate) pending_session_route_recovery_target: Option<PathBuf>,
+    pub(crate) pending_session_route_selection: Option<(String, sigil_kernel::ResolvedModelRoute)>,
     pub(crate) worker_rebind_required: bool,
     pub(crate) active_balance_refresh_id: Option<u64>,
     pub(in crate::app) active_model_picker_refresh: Option<PendingModelPickerRefresh>,

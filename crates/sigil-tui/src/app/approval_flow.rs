@@ -992,6 +992,8 @@ fn approval_operation_label(operation: ToolOperation) -> &'static str {
         ToolOperation::MessageAgent => "message agent",
         ToolOperation::CloseAgent => "close agent",
         ToolOperation::LoadSkill => "load skill",
+        ToolOperation::RememberMemory => "remember durable memory",
+        ToolOperation::ForgetMemory => "forget durable memory",
         ToolOperation::InvokePlugin => "invoke plugin",
     }
 }

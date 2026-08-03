@@ -846,26 +846,23 @@ run-as: child-session
 }
 
 #[test]
-fn spawn_agent_worker_reports_provider_configuration_error() -> Result<()> {
+fn spawn_agent_worker_rejects_provider_configuration_error_before_thread_start() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
     let root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
 
-    let (_command_tx, message_rx) = spawn_agent_worker(
+    let error = match spawn_agent_worker(
         root_config,
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
-    )?;
+    ) {
+        Ok(_) => panic!("invalid route configuration must fail before worker start"),
+        Err(error) => error,
+    };
 
-    let message = message_rx.recv_timeout(Duration::from_secs(3))?;
-
-    assert!(matches!(
-        message,
-        WorkerMessage::RunFailed(ref error)
-            if error.contains("model_route_not_configured")
-    ));
+    assert!(error.to_string().contains("model_route_not_configured"));
     Ok(())
 }
 
@@ -1310,7 +1307,7 @@ fn check_changed_files_diagnostics_is_rejected_while_run_is_active() -> Result<(
 }
 
 #[test]
-fn spawn_agent_worker_reports_provider_build_failure() -> Result<()> {
+fn spawn_agent_worker_rejects_missing_provider_route_before_thread_start() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -1318,19 +1315,17 @@ fn spawn_agent_worker_reports_provider_build_failure() -> Result<()> {
         .join(".sigil/sessions/session-spawn-failure.jsonl");
     let root_config = test_root_config(&workspace_root, "missing-provider", "planned-model");
 
-    let (_command_tx, message_rx) = spawn_agent_worker(
+    let error = match spawn_agent_worker(
         root_config,
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
-    )?;
-    let failure = message_rx.recv_timeout(std::time::Duration::from_secs(3))?;
+    ) {
+        Ok(_) => panic!("missing provider route must fail before worker start"),
+        Err(error) => error,
+    };
 
-    assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error.contains("model_route_not_configured")
-    ));
+    assert!(error.to_string().contains("model_route_not_configured"));
     Ok(())
 }
 

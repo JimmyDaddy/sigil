@@ -341,14 +341,13 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
     let server_generated = Arc::clone(&generated);
     let server = thread::spawn(move || -> Result<()> {
         let deadline = Instant::now() + PROCESS_TIMEOUT;
-        let mut generation_requests = 0_u8;
         loop {
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline {
-                            bail!("catalog fixture did not receive a request");
+                            bail!("provider fixture did not receive the first user request");
                         }
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -384,9 +383,8 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
                 body.len()
             )?;
             stream.flush()?;
-            server_generated.store(true, Ordering::Release);
-            generation_requests = generation_requests.saturating_add(1);
-            if generation_requests >= 2 {
+            if request.contains("reply with the first-run canary") {
+                server_generated.store(true, Ordering::Release);
                 return Ok(());
             }
         }
@@ -534,6 +532,49 @@ fn run_tui_process_with_optional_config(
 }
 
 #[test]
+fn real_plain_tui_process_starts_fresh_instead_of_reopening_latest() -> Result<()> {
+    let workspace = test_workspace()?;
+    let config_path = workspace.join("sigil.toml");
+    let session_dir = workspace.join("sessions");
+    fs::create_dir(&session_dir)?;
+    write_config(&config_path, &workspace, &session_dir)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let (_, model_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    let existing_path = session_dir.join("session-existing.jsonl");
+    write_trusted_finalized_session(&existing_path, &workspace, Some(model_route))?;
+
+    run_tui_process(
+        &config_path,
+        &workspace,
+        "deepseek-v4-flash",
+        |output, _writer| {
+            let screen = captured_text(output);
+            assert!(!screen.contains("process lifecycle fixture"));
+            assert!(!screen.contains("fixture completed"));
+            Ok(())
+        },
+    )?;
+
+    let session_logs = fs::read_dir(&session_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(session_logs.len(), 2);
+    assert!(session_logs.contains(&existing_path));
+    assert!(JsonlSessionStore::read_entries(&existing_path)?
+        .iter()
+        .any(|entry| matches!(entry, sigil_kernel::SessionLogEntry::User(message) if message.content.as_deref() == Some("process lifecycle fixture"))));
+
+    fs::remove_dir_all(&workspace)?;
+    Ok(())
+}
+
+#[test]
 fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -654,10 +695,15 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
         .join()
         .map_err(|_| anyhow!("catalog fixture thread panicked"))?;
     let cleanup = fs::remove_dir_all(&workspace);
-    result?;
-    catalog_result?;
-    cleanup?;
-    Ok(())
+    match (result, catalog_result, cleanup) {
+        (Err(run_error), Err(fixture_error), _) => {
+            Err(run_error.context(format!("provider fixture also failed: {fixture_error:#}")))
+        }
+        (Err(run_error), _, _) => Err(run_error),
+        (Ok(()), Err(fixture_error), _) => Err(fixture_error),
+        (Ok(()), Ok(()), Err(cleanup_error)) => Err(cleanup_error.into()),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 #[test]

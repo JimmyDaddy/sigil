@@ -823,6 +823,8 @@ async fn terminal_snapshot(
         tool_execution: None,
         task: None,
         terminal_task: None,
+        route_recovery: None,
+        route_transition: None,
     };
     owner.record_event(timeline.clone()).await;
     let _ = app.emit(DESKTOP_RUN_EVENT_NAME, timeline);
@@ -867,6 +869,8 @@ fn terminal_snapshot_timeline(
         tool_execution: None,
         task: None,
         terminal_task: Some(task),
+        route_recovery: None,
+        route_transition: None,
     }
 }
 

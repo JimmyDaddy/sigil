@@ -382,7 +382,8 @@ enabled = true
             Vec::new(),
         ))?;
     }
-    let (selected_session, selected_model_ref) = load_application_compaction_session(&root, store)?;
+    let (selected_session, selected_model_ref) =
+        load_application_compaction_session(&root, store, None)?;
     assert_eq!(
         selected_model_ref, model_ref,
         "compaction must retain the durable connection instead of the configured default"

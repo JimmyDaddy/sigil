@@ -11,10 +11,10 @@ use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
     IntentDropRequestV1, IntentOperationExecutionV1, IntentOperationPreviewV1, IntentVersionRef,
     MutationArtifactCleanupTarget, PlanApprovalPermission, PlanDecisionRecordedEntry,
-    PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1, ReasoningEffort,
-    ResolvedModelRoute, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
-    TaskIntegrationReviewRequest, TaskPauseRequest, TaskRunStatus, TaskVerificationRerunRequest,
-    TerminalTaskEntry, V2CompactionPreview,
+    PlanTaskStartMode, PreEgressDisclosure, PublicIntentStackStateV1, PublicRouteRecoveryAction,
+    PublicRouteRecoveryCode, ReasoningEffort, ResolvedModelRoute, RunEvent, SessionLogEntry,
+    TaskCreatedFromPlanEntry, TaskIntegrationReviewRequest, TaskPauseRequest, TaskRunStatus,
+    TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
@@ -446,6 +446,7 @@ pub enum WorkerCommand {
     },
     SwitchSession {
         session_log_path: PathBuf,
+        attachment_recovery_binding: Option<String>,
     },
     Shutdown,
 }
@@ -588,6 +589,18 @@ impl std::error::Error for WorkerCommandSendError {}
 #[derive(Debug)]
 pub enum WorkerMessage {
     WorkerReady,
+    SessionAttachmentTransferred {
+        session_log_path: PathBuf,
+        attachment:
+            Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    },
+    SessionRouteRecoveryRequired {
+        code: PublicRouteRecoveryCode,
+        actions: Vec<PublicRouteRecoveryAction>,
+        recovery_binding: String,
+        retryable: bool,
+        target_session: Option<WorkerRouteRecoverySessionTarget>,
+    },
     Event(Box<RunEvent>),
     ApprovalCommandReceipt(WorkerApprovalCommandReceipt),
     Notice(String),
@@ -875,6 +888,14 @@ pub enum WorkerMessage {
         receipt_tx: EgressDisclosureReceiptTx,
     },
     RunFailed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerRouteRecoverySessionTarget {
+    pub(crate) session_log_path: PathBuf,
+    pub(crate) provider_name: String,
+    pub(crate) model_name: String,
+    pub(crate) entries: Vec<SessionLogEntry>,
 }
 
 /// Bounded, path-free failure surface for user-initiated artifact inspection.

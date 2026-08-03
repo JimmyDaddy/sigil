@@ -148,7 +148,7 @@ fn transient_system_messages_precede_durable_user_messages() -> Result<()> {
 
     let request = session.build_request_with_transient_messages(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -3840,7 +3840,7 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
 
     let request = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: true },
+        &MemoryConfig::with_enabled(true),
         Vec::new(),
         None,
         None,
@@ -3899,7 +3899,7 @@ fn build_request_persists_bounded_prefix_snapshot_for_materialization_over_event
 
     let request = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -3945,7 +3945,7 @@ fn build_request_reuses_an_identical_durable_prefix_snapshot() -> Result<()> {
 
     let first = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -3953,7 +3953,7 @@ fn build_request_reuses_an_identical_durable_prefix_snapshot() -> Result<()> {
     )?;
     let second = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4003,7 +4003,7 @@ fn build_request_injects_context_v1_dynamic_suffix_from_session_archive() -> Res
 
     let first = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4035,7 +4035,7 @@ fn build_request_injects_context_v1_dynamic_suffix_from_session_archive() -> Res
 
     let second = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4075,7 +4075,7 @@ fn build_request_injects_context_v1_from_runtime_candidates() -> Result<()> {
 
     let request = session.build_request_with_transient_messages_and_context(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4137,7 +4137,7 @@ fn prefix_snapshot_caps_runtime_context_rows_without_persisting_item_content() -
 
     session.build_request_with_transient_messages_and_context(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4210,7 +4210,7 @@ fn build_request_context_v1_payload_distinguishes_memory_archive_and_evidence_so
 
     let request = session.build_request_with_transient_messages_and_context(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4265,7 +4265,7 @@ fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> 
 
     let request = session.build_request_with_transient_messages_and_context(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4311,7 +4311,7 @@ fn build_request_retrieves_context_v1_from_long_history_tail() -> Result<()> {
 
     let request = session.build_request(
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -4337,7 +4337,7 @@ fn build_request_refreshes_session_memory_snapshot_after_disk_memory_changes() -
     crate::session::append_current_test_session_identity(&store)?;
     fs::write(temp.path().join("AGENTS.md"), "repo rules v1\n")?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
-    let memory_config = MemoryConfig { enabled: true };
+    let memory_config = MemoryConfig::with_enabled(true);
 
     session.append_user_message(ModelMessage::user("first"))?;
     let first = session.build_request(temp.path(), &memory_config, Vec::new(), None, None, None)?;
@@ -5176,7 +5176,7 @@ fn build_request_only_includes_matching_provider_continuation_states() -> Result
 
     let request = session.build_request(
         std::env::temp_dir().as_path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,

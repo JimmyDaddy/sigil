@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::Path, sync::Arc, time::Duration};
 
 use sigil_kernel::SessionRef;
 use thiserror::Error as ThisError;
@@ -13,8 +13,8 @@ use crate::dto::{
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpIntentDropExecution,
     HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackView, HttpPermissionMode,
     HttpProviderModelRef, HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot,
-    HttpSessionBinding, HttpSessionSnapshot, HttpSessionTranscriptPage,
-    HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
+    HttpRunStartRequest, HttpSessionBinding, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
+    HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTaskPauseRequest,
     HttpTerminalLifecycleView, HttpToolArtifactPage, HttpToolArtifactReadRequest,
     HttpVerificationRerunRequest, HttpVerificationView,
@@ -33,6 +33,8 @@ pub struct HttpRunDriverStart {
     pub model_ref: Option<HttpProviderModelRef>,
     /// Opaque model-selection binding supplied with an explicit selection.
     pub model_selection_binding: Option<String>,
+    /// Exact route-recovery binding explicitly confirmed by the client.
+    pub route_recovery_binding: Option<String>,
     /// Opaque exact provider/model effort binding.
     pub reasoning_effort_binding: Option<String>,
     /// Exact inline-skill binding selected from the current run context.
@@ -117,6 +119,32 @@ pub struct HttpQueuedRunDriverStart {
     pub admission: HttpQueuedRunAdmission,
 }
 
+/// Lifetime guard proving that one exact durable session is safe for a catalog mutation.
+#[derive(Debug)]
+pub struct HttpDurableSessionAttachmentGuard {
+    _attachment: Option<
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    >,
+}
+
+impl HttpDurableSessionAttachmentGuard {
+    #[must_use]
+    pub fn unmanaged() -> Self {
+        Self { _attachment: None }
+    }
+
+    #[must_use]
+    pub fn attached(
+        attachment: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
+    ) -> Self {
+        Self {
+            _attachment: Some(attachment),
+        }
+    }
+}
+
 /// Idempotent identity and exact payload for one queue mutation.
 ///
 /// The application owner uses this identity to derive stable durable entry ids. This prevents a
@@ -183,6 +211,7 @@ pub trait HttpRunDriver: Send + Sync {
         &self,
         _session_ref: &SessionRef,
         _expected_session_id: &str,
+        _recovery_binding: Option<&str>,
     ) -> Result<HttpSessionBinding, HttpSessionOpenBindingError> {
         Err(HttpSessionOpenBindingError::Unavailable)
     }
@@ -192,6 +221,24 @@ pub trait HttpRunDriver: Send + Sync {
     /// The durable deletion path calls this only after the catalog mutation succeeds. The default
     /// is a no-op for drivers that retain no session-scoped secrets or caches.
     fn purge_session_local_state(&self, _durable_session_scope_id: &str) {}
+
+    /// Acquires exact cross-process ownership for one ready durable catalog mutation.
+    fn acquire_durable_session_mutation_attachment(
+        &self,
+        _durable_session_scope_id: &str,
+        _session_log_path: &Path,
+    ) -> Result<HttpDurableSessionAttachmentGuard, HttpRunAdmissionError> {
+        Ok(HttpDurableSessionAttachmentGuard::unmanaged())
+    }
+
+    /// Acquires write ownership and validates route recovery before registry run allocation.
+    fn admit_run_start(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpRunStartRequest,
+    ) -> Result<(), HttpRunAdmissionError> {
+        Ok(())
+    }
 
     /// Starts execution for a registered run.
     ///
@@ -528,6 +575,17 @@ pub trait HttpRunDriver: Send + Sync {
     }
 }
 
+/// Typed, secret-free run admission failures returned before a run id is allocated.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum HttpRunAdmissionError {
+    #[error("session route recovery is required")]
+    RouteRecovery(HttpSessionRouteRecoveryView),
+    #[error("session is already active")]
+    SessionAlreadyActive { recovery_binding: String },
+    #[error("session write admission is unavailable")]
+    Unavailable,
+}
+
 /// Bounded failure classes for the typed Intent Stack application adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
 pub enum HttpIntentStackDriverError {
@@ -544,7 +602,7 @@ pub enum HttpIntentStackDriverError {
 }
 
 /// Bounded, path-free failure direction returned while reopening an existing durable session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum HttpSessionOpenBindingError {
     /// The requested direct-child source is absent from current workspace truth.
     #[error("durable session was not found")]
@@ -555,6 +613,9 @@ pub enum HttpSessionOpenBindingError {
     /// The source identity no longer matches the catalog candidate selected by the client.
     #[error("durable session identity changed")]
     IdentityChanged,
+    /// Another controller owns the exact cross-process session attachment.
+    #[error("durable session is already active")]
+    AlreadyActive { recovery_binding: String },
     /// Current bounded lifecycle or durable stream validation could not complete.
     #[error("durable session is unavailable")]
     Unavailable,

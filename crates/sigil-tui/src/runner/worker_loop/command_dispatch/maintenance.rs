@@ -40,8 +40,8 @@ where
                 );
             }
             state.refresh.provider_status_tasks.abort_all();
-            state.compaction.preparation_tasks.abort_all();
-            state.artifact_gc.tasks.abort_all();
+            state.compaction.preparation_tasks.cancel_and_join(runtime);
+            state.artifact_gc.tasks.cancel_and_join(runtime);
             cancel_all_mcp_oauth_flows(state);
             WorkerCommandDispatchControl::Break
         }

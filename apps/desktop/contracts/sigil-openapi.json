@@ -67,6 +67,16 @@
         },
         "description": "Session, run, or route was not found"
       },
+      "RunAdmissionConflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RunAdmissionErrorResponse"
+            }
+          }
+        },
+        "description": "The session route requires recovery or another interactive controller owns the session"
+      },
       "Unauthorized": {
         "content": {
           "application/json": {
@@ -5013,6 +5023,9 @@
       "PublicRunEventPayload": {
         "oneOf": [
           {
+            "$ref": "#/components/schemas/RouteTransitionEvent"
+          },
+          {
             "$ref": "#/components/schemas/RunStartedEvent"
           },
           {
@@ -5044,6 +5057,9 @@
           },
           {
             "$ref": "#/components/schemas/RunFailedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RouteRecoveryRequiredEvent"
           },
           {
             "$ref": "#/components/schemas/RunCancelledEvent"
@@ -5094,6 +5110,41 @@
             "$ref": "#/components/schemas/NoticeEvent"
           }
         ]
+      },
+      "PublicSessionRouteTransitionView": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "exact",
+              "rebound",
+              "explicitly_confirmed"
+            ],
+            "type": "string"
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_context_reset": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "connection_id",
+          "model_id",
+          "remote_context_reset"
+        ],
+        "type": "object"
       },
       "PublicTaskPhase": {
         "enum": [
@@ -5315,6 +5366,115 @@
         ],
         "type": "string"
       },
+      "RouteRecoveryRequiredEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actions": {
+            "items": {
+              "enum": [
+                "confirm_current_route",
+                "repair_connection",
+                "select_replacement",
+                "start_new_session",
+                "retry_provider",
+                "retry_session_attach",
+                "back_to_session_library"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "code": {
+            "enum": [
+              "session_route_confirmation_required",
+              "session_route_selection_required",
+              "model_route_not_configured",
+              "connection_config_invalid",
+              "provider_unavailable",
+              "session_already_active",
+              "session_writer_busy",
+              "session_stream_invalid"
+            ],
+            "type": "string"
+          },
+          "recovery_binding": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "type": {
+            "const": "route_recovery_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "code",
+          "actions",
+          "recovery_binding",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "RouteTransitionEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "transition": {
+            "$ref": "#/components/schemas/PublicSessionRouteTransitionView"
+          },
+          "type": {
+            "const": "route_transition",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "transition"
+        ],
+        "type": "object"
+      },
+      "RunAdmissionErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "session_route_confirmation_required",
+                  "session_route_selection_required",
+                  "model_route_not_configured",
+                  "connection_config_invalid",
+                  "provider_unavailable",
+                  "session_already_active",
+                  "session_writer_busy",
+                  "session_stream_invalid"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "route_recovery": {
+                "$ref": "#/components/schemas/SessionRouteRecoveryView"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "route_recovery"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
       "RunCancelCommand": {
         "allOf": [
           {
@@ -5483,6 +5643,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "route_recovery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionRouteRecoveryView"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -5705,6 +5875,12 @@
             ]
           },
           "reasoning_effort_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_recovery_binding": {
             "type": [
               "string",
               "null"
@@ -6504,6 +6680,14 @@
               "null"
             ]
           },
+          "recovery_binding": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "session_id": {
             "maxLength": 512,
             "type": "string"
@@ -6596,6 +6780,88 @@
         ],
         "type": "object"
       },
+      "SessionRouteRecoveryView": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "confirm_current_route",
+                "repair_connection",
+                "select_replacement",
+                "start_new_session",
+                "retry_provider",
+                "retry_session_attach",
+                "back_to_session_library"
+              ],
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "code": {
+            "enum": [
+              "session_route_confirmation_required",
+              "session_route_selection_required",
+              "model_route_not_configured",
+              "connection_config_invalid",
+              "provider_unavailable",
+              "session_already_active",
+              "session_writer_busy",
+              "session_stream_invalid"
+            ],
+            "type": "string"
+          },
+          "recovery_binding": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "allowed_actions",
+          "recovery_binding",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "SessionRouteTransitionView": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "exact",
+              "rebound",
+              "explicitly_confirmed"
+            ],
+            "type": "string"
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_context_reset": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "remote_context_reset"
+        ],
+        "type": "object"
+      },
       "SessionSnapshot": {
         "properties": {
           "durable_session_scope_id": {
@@ -6616,21 +6882,37 @@
               "null"
             ]
           },
+          "route_recovery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionRouteRecoveryView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "route_transition": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionRouteTransitionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "run_ids": {
             "items": {
               "type": "string"
             },
             "type": "array"
-          },
-          "session_log_path": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "run_ids",
-          "durable_session_scope_id",
-          "session_log_path"
+          "durable_session_scope_id"
         ],
         "type": "object"
       },
@@ -9892,7 +10174,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/RunAdmissionConflict"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"

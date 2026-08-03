@@ -17,8 +17,8 @@ fn memory_loader_walks_root_files_and_imports_in_stable_order() -> Result<()> {
     fs::write(temp.path().join("docs/guide.md"), "guide\n")?;
     fs::write(temp.path().join("SIGIL.local.md"), "local\n")?;
 
-    let report = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })?;
-    let materialized = materialize_memory(temp.path(), &MemoryConfig { enabled: true })?;
+    let report = inspect_memory_documents(temp.path(), &MemoryConfig::with_enabled(true))?;
+    let materialized = materialize_memory(temp.path(), &MemoryConfig::with_enabled(true))?;
 
     assert_eq!(report.document_count, 3);
     assert_eq!(materialized.report.document_count, 3);
@@ -51,7 +51,7 @@ fn memory_loader_rejects_import_cycles() -> Result<()> {
     fs::create_dir_all(temp.path().join("docs"))?;
     fs::write(temp.path().join("docs/guide.md"), "@../AGENTS.md\n")?;
 
-    let error = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })
+    let error = inspect_memory_documents(temp.path(), &MemoryConfig::with_enabled(true))
         .expect_err("expected import cycle to fail");
 
     assert!(error.to_string().contains("memory import cycle detected"));
@@ -63,7 +63,7 @@ fn memory_loader_skips_empty_documents_and_applies_report_fingerprint() -> Resul
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("AGENTS.md"), "\n")?;
 
-    let materialized = materialize_memory(temp.path(), &MemoryConfig { enabled: true })?;
+    let materialized = materialize_memory(temp.path(), &MemoryConfig::with_enabled(true))?;
 
     assert_eq!(materialized.report.document_count, 1);
     assert_eq!(materialized.messages.len(), 1);
@@ -87,12 +87,12 @@ fn memory_loader_returns_empty_report_when_disabled() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("AGENTS.md"), "repo rules\n")?;
 
-    let report = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: false })?;
-    let materialized = materialize_memory(temp.path(), &MemoryConfig { enabled: false })?;
+    let report = inspect_memory_documents(temp.path(), &MemoryConfig::with_enabled(false))?;
+    let materialized = materialize_memory(temp.path(), &MemoryConfig::with_enabled(false))?;
 
     assert!(!report.enabled);
     assert_eq!(report.document_count, 0);
-    assert_eq!(report.fingerprint, "none");
+    assert_ne!(report.fingerprint, "none");
     assert_eq!(materialized.messages.len(), 1);
     Ok(())
 }
@@ -101,12 +101,12 @@ fn memory_loader_returns_empty_report_when_disabled() -> Result<()> {
 fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()> {
     let temp = tempfile::tempdir()?;
 
-    let report = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })?;
-    let materialized = materialize_memory(temp.path(), &MemoryConfig { enabled: true })?;
+    let report = inspect_memory_documents(temp.path(), &MemoryConfig::with_enabled(true))?;
+    let materialized = materialize_memory(temp.path(), &MemoryConfig::with_enabled(true))?;
 
     assert!(report.enabled);
     assert_eq!(report.document_count, 0);
-    assert_eq!(report.fingerprint, "none");
+    assert_ne!(report.fingerprint, "none");
     assert_eq!(materialized.messages.len(), 1);
     assert_eq!(materialized.messages[0].id, "system:base");
     let base_content = materialized.messages[0]
@@ -125,6 +125,36 @@ fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()
             && !base_content.contains("Direct task/subagent tool calls")
             && !base_content.contains("/plan flow")
     );
+    assert!(base_content.contains("Writable memory tools are unavailable"));
+    assert!(base_content.contains("only keep it in the current session"));
+    Ok(())
+}
+
+#[test]
+fn writable_memory_prompt_delegates_intent_recognition_to_the_model() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config = MemoryConfig {
+        enabled: false,
+        writable: true,
+    };
+
+    let materialized = materialize_memory(temp.path(), &config)?;
+    let base_content = materialized.messages[0]
+        .content
+        .as_deref()
+        .expect("base prompt should have content");
+
+    assert!(base_content.contains("Decide from the user's meaning, not keyword matching"));
+    assert!(base_content.contains("remember_user_preference"));
+    assert!(base_content.contains("remember_project_fact"));
+    assert!(base_content.contains("returned a durable receipt"));
+    assert!(base_content.contains("scope, memory_id, and version"));
+    assert_ne!(materialized.report.fingerprint, "none");
+    let disabled = materialize_memory(temp.path(), &MemoryConfig::with_enabled(false))?;
+    assert_ne!(
+        disabled.report.fingerprint, materialized.report.fingerprint,
+        "changing writable-memory capability must invalidate the stable prompt snapshot"
+    );
     Ok(())
 }
 
@@ -135,7 +165,7 @@ fn memory_loader_reports_missing_workspace_root() {
         .path()
         .join(format!("sigil-memory-missing-{}", uuid::Uuid::new_v4()));
 
-    let error = inspect_memory_documents(&missing_root, &MemoryConfig { enabled: true })
+    let error = inspect_memory_documents(&missing_root, &MemoryConfig::with_enabled(true))
         .expect_err("missing root should fail");
 
     assert!(error.to_string().contains("failed to canonicalize"));
@@ -151,7 +181,7 @@ fn memory_loader_skips_duplicate_imports() -> Result<()> {
     )?;
     fs::write(temp.path().join("docs/guide.md"), "guide\n")?;
 
-    let report = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })?;
+    let report = inspect_memory_documents(temp.path(), &MemoryConfig::with_enabled(true))?;
 
     assert_eq!(report.document_count, 2);
     Ok(())
@@ -166,7 +196,7 @@ fn memory_loader_rejects_absolute_imports() -> Result<()> {
         format!("@{}\n", outside.display()),
     )?;
 
-    let error = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })
+    let error = inspect_memory_documents(temp.path(), &MemoryConfig::with_enabled(true))
         .expect_err("absolute imports should fail");
 
     assert!(error.to_string().contains("memory import must be relative"));
@@ -181,7 +211,7 @@ fn memory_loader_rejects_workspace_escape_imports() -> Result<()> {
     fs::write(workspace_root.join("AGENTS.md"), "@../outside.md\n")?;
     fs::write(parent.path().join("outside.md"), "outside\n")?;
 
-    let error = inspect_memory_documents(&workspace_root, &MemoryConfig { enabled: true })
+    let error = inspect_memory_documents(&workspace_root, &MemoryConfig::with_enabled(true))
         .expect_err("imports outside the workspace should fail");
 
     assert!(error.to_string().contains("escapes workspace root"));

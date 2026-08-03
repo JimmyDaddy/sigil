@@ -412,7 +412,7 @@ fn test_run_options(workspace_root: &Path) -> AgentRunOptions {
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
         permission_context: PermissionEvaluationContext::default(),
-        memory_config: MemoryConfig { enabled: false },
+        memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
     }
 }

@@ -24,6 +24,9 @@ impl WorkerLoopState {
     pub(in crate::runner) fn new(
         session_log_path: PathBuf,
         session: Option<Session>,
+        attachment_lease: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
         agent_supervisor: sigil_runtime::AgentSupervisor,
         background_agent_runs: sigil_runtime::AgentToolBackgroundRuns,
         event_tx: mpsc::Sender<WorkerEvent>,
@@ -63,6 +66,7 @@ impl WorkerLoopState {
             session: SessionWorkerState {
                 log_path: session_log_path,
                 current: session,
+                attachment_lease,
                 detached_durable_controls: Vec::new(),
                 exact_prompts: ExactConversationPromptStore::new(),
                 active_projection_subscription: None,
@@ -94,6 +98,7 @@ impl WorkerLoopState {
             run: RunWorkerState {
                 result_tx: WorkerEventPayloadSender::run(event_tx.clone()),
                 active: None,
+                route_execution_owner: None,
                 discarded_ids: BTreeSet::new(),
                 next_id: 1,
                 pending_task_handoffs: Vec::new(),
@@ -164,6 +169,61 @@ impl WorkerLoopState {
         run_id
     }
 
+    pub(in crate::runner) fn synchronize_route_execution_owner(
+        &mut self,
+    ) -> std::result::Result<(), String> {
+        let provider_execution_active = self.run.active.is_some()
+            || self.agent.background_runs.has_any()
+            || !self.session.active_terminal_task_ids.is_empty();
+        if !provider_execution_active {
+            self.run.route_execution_owner = None;
+            return Ok(());
+        }
+        let session_scope_id = self
+            .session
+            .current
+            .as_ref()
+            .map(|session| session.session_scope_id().to_owned());
+        let Some(session_scope_id) = session_scope_id else {
+            return Ok(());
+        };
+        self.acquire_route_execution_owner_for_scope(&session_scope_id)
+    }
+
+    pub(in crate::runner) fn acquire_route_execution_owner(
+        &mut self,
+    ) -> std::result::Result<(), String> {
+        if self.run.route_execution_owner.is_some() {
+            return Ok(());
+        }
+        let Some(session) = self.session.current.as_ref() else {
+            // Some isolated test/runtime harnesses intentionally run without a durable session.
+            // Production workers always install the routed session before reporting readiness.
+            return Ok(());
+        };
+        let session_scope_id = session.session_scope_id().to_owned();
+        self.acquire_route_execution_owner_for_scope(&session_scope_id)
+    }
+
+    pub(in crate::runner) fn acquire_route_execution_owner_for_scope(
+        &mut self,
+        session_scope_id: &str,
+    ) -> std::result::Result<(), String> {
+        if self.run.route_execution_owner.is_some() {
+            return Ok(());
+        }
+        let authority = self
+            .session
+            .attachment_lease
+            .route_mutation_authority(session_scope_id)
+            .map_err(|error| format!("session route authority is unavailable: {error:#}"))?;
+        self.run.route_execution_owner =
+            Some(authority.acquire_execution_owner().map_err(|error| {
+                format!("session route execution owner is unavailable: {error}")
+            })?);
+        Ok(())
+    }
+
     pub(in crate::runner) fn nearest_deadline(&self) -> Option<Instant> {
         let mcp_deadline = (self.run.active.is_none()
             && !self.refresh.pending_mcp_servers.is_empty())
@@ -211,6 +271,8 @@ pub(in crate::runner) struct McpOAuthWorkerState {
 pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) log_path: PathBuf,
     pub(in crate::runner) current: Option<Session>,
+    pub(in crate::runner) attachment_lease:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     pub(in crate::runner) detached_durable_controls: Vec<ControlEntry>,
     pub(in crate::runner) exact_prompts: ExactConversationPromptStore,
     pub(in crate::runner) active_projection_subscription: Option<ActiveProjectionSubscription>,
@@ -257,6 +319,8 @@ impl SessionWorkerState {
 pub(in crate::runner) struct RunWorkerState {
     pub(in crate::runner) result_tx: WorkerEventPayloadSender<RunTaskResult>,
     pub(in crate::runner) active: Option<ActiveRun>,
+    pub(in crate::runner) route_execution_owner:
+        Option<sigil_runtime::provider_connections::SessionRouteExecutionOwner>,
     pub(in crate::runner) discarded_ids: BTreeSet<u64>,
     pub(in crate::runner) next_id: u64,
     pub(in crate::runner) pending_task_handoffs: Vec<StartDurableTaskAction>,

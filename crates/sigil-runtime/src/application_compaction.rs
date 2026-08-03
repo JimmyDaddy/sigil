@@ -1,6 +1,6 @@
 //! Shared application-facing preview and apply contract for portable context compaction.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,8 @@ pub struct PendingApplicationCompaction {
     target_material: PortableTargetRequestMaterial,
     folded_event_count: usize,
     native_carrier: Option<PendingApplicationNativeCarrier>,
+    session_attachment:
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 }
 
 /// Exact local-only compaction plan retained before the user authorizes a billed summary call.
@@ -183,6 +185,8 @@ pub struct PendingApplicationCompactionPreview {
     preview_id: String,
     session_scope_id: String,
     preview: sigil_kernel::V2CompactionPreview,
+    session_attachment:
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 }
 
 impl PendingApplicationCompactionPreview {
@@ -209,6 +213,10 @@ impl PendingApplicationCompactionPreview {
             bail!("local application compaction preview binding is stale");
         }
         let store = JsonlSessionStore::new(session_path)?;
+        anyhow::ensure!(
+            self.session_attachment.session_path() == store.path(),
+            "local application compaction attachment belongs to another durable session"
+        );
         let active = store.active_projection_snapshot()?;
         let pressure = active.tool_output_pressure();
         let batch = sigil_kernel::ToolOutputAgingBatchV1::select(
@@ -294,6 +302,11 @@ impl PendingApplicationCompaction {
         expected_session_scope_id: &str,
         expected_preview_id: &str,
     ) -> Result<ApplicationCompactionReceipt> {
+        let _route_execution_owner = self
+            .session_attachment
+            .route_mutation_authority(&self.session_scope_id)?
+            .acquire_execution_owner()
+            .map_err(anyhow::Error::new)?;
         let (mut receipt, native_carrier) =
             self.apply_portable(session_path, expected_session_scope_id, expected_preview_id)?;
         if !NATIVE_COMPACTION_RESUME_ENABLED {
@@ -342,8 +355,13 @@ impl PendingApplicationCompaction {
         if self.preview_id != expected_preview_id {
             bail!("application compaction preview binding is stale");
         }
-        let outcome = JsonlSessionStore::new(session_path)?
-            .execute_portable_semantic_compaction(self.preflight, self.target_material)?;
+        let store = JsonlSessionStore::new(session_path)?;
+        anyhow::ensure!(
+            self.session_attachment.session_path() == store.path(),
+            "reviewed application compaction attachment belongs to another durable session"
+        );
+        let outcome =
+            store.execute_portable_semantic_compaction(self.preflight, self.target_material)?;
         Ok((
             ApplicationCompactionReceipt {
                 compaction_id: outcome.compaction_id,
@@ -373,12 +391,46 @@ pub fn preview_application_compaction(
     ApplicationCompactionReview,
     Option<PendingApplicationCompactionPreview>,
 )> {
+    let attachment = Arc::new(
+        crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            session_path,
+        )?,
+    );
+    preview_application_compaction_with_attachment(
+        config_path,
+        launch_cwd,
+        session_path,
+        expected_session_scope_id,
+        attachment,
+    )
+}
+
+/// Builds a local compaction review under a controller-owned session attachment.
+///
+/// # Errors
+///
+/// Returns an error when the supplied attachment does not belong to the session or when the
+/// durable route, workspace snapshot, or compaction projection cannot be validated.
+pub fn preview_application_compaction_with_attachment(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    attachment: Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+) -> Result<(
+    ApplicationCompactionReview,
+    Option<PendingApplicationCompactionPreview>,
+)> {
     let root_config = RootConfig::load(config_path)?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let store = JsonlSessionStore::new(session_path)?;
+    anyhow::ensure!(
+        attachment.session_path() == store.path(),
+        "supplied session attachment belongs to another durable session"
+    );
     let (session, exact_model_ref) =
-        load_application_compaction_session(&root_config, store.clone())?;
+        load_application_compaction_session(&root_config, store.clone(), Some(&attachment))?;
     if session.session_scope_id() != expected_session_scope_id {
         bail!("application compaction session scope mismatch");
     }
@@ -481,6 +533,7 @@ pub fn preview_application_compaction(
             preview_id,
             session_scope_id: expected_session_scope_id.to_owned(),
             preview,
+            session_attachment: attachment,
         }),
     ))
 }
@@ -512,6 +565,11 @@ async fn prepare_application_compaction(
         session_path,
         expected_session_scope_id,
         None,
+        Arc::new(
+            crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                session_path,
+            )?,
+        ),
     )
     .await
 }
@@ -527,15 +585,52 @@ pub async fn prepare_application_compaction_from_preview(
     ApplicationCompactionReview,
     Option<PendingApplicationCompaction>,
 )> {
+    let attachment = Arc::clone(&preview.session_attachment);
+    prepare_application_compaction_from_preview_with_attachment(
+        config_path,
+        launch_cwd,
+        session_path,
+        expected_session_scope_id,
+        preview,
+        attachment,
+    )
+    .await
+}
+
+/// Generates one billed semantic summary under a controller-owned session attachment.
+///
+/// The attachment supplies the shared route authority. A live execution owner is retained for
+/// the entire provider operation so a concurrent route mutation cannot cross the request.
+///
+/// # Errors
+///
+/// Returns an error when the preview binding, attachment, route, provider, or durable session
+/// state cannot be validated.
+pub async fn prepare_application_compaction_from_preview_with_attachment(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: &Path,
+    expected_session_scope_id: &str,
+    preview: PendingApplicationCompactionPreview,
+    attachment: Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+) -> Result<(
+    ApplicationCompactionReview,
+    Option<PendingApplicationCompaction>,
+)> {
     if preview.session_scope_id != expected_session_scope_id {
         bail!("local application compaction preview belongs to a different session scope");
     }
+    anyhow::ensure!(
+        Arc::ptr_eq(&preview.session_attachment, &attachment),
+        "local application compaction preview belongs to another attachment generation"
+    );
     prepare_application_compaction_for_preview(
         config_path,
         launch_cwd,
         session_path,
         expected_session_scope_id,
         Some(preview),
+        attachment,
     )
     .await
 }
@@ -546,6 +641,7 @@ async fn prepare_application_compaction_for_preview(
     session_path: &Path,
     expected_session_scope_id: &str,
     forced_preview: Option<PendingApplicationCompactionPreview>,
+    attachment: Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 ) -> Result<(
     ApplicationCompactionReview,
     Option<PendingApplicationCompaction>,
@@ -555,10 +651,19 @@ async fn prepare_application_compaction_for_preview(
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let store = JsonlSessionStore::new(session_path)?;
     let mutation_recorder = MutationEventRecorder::new(store.clone());
-    let (mut session, exact_model_ref) = load_application_compaction_session(&root_config, store)?;
+    anyhow::ensure!(
+        attachment.session_path() == store.path(),
+        "supplied session attachment belongs to another durable session"
+    );
+    let (mut session, exact_model_ref) =
+        load_application_compaction_session(&root_config, store, Some(&attachment))?;
     if session.session_scope_id() != expected_session_scope_id {
         bail!("application compaction session scope mismatch");
     }
+    let _route_execution_owner = attachment
+        .route_mutation_authority(session.session_scope_id())?
+        .acquire_execution_owner()
+        .map_err(anyhow::Error::new)?;
     let effective_config = crate::effective_compaction_config_for_model_ref(
         &root_config,
         &exact_model_ref,
@@ -777,6 +882,7 @@ async fn prepare_application_compaction_for_preview(
             target_material,
             folded_event_count,
             native_carrier,
+            session_attachment: attachment,
         }),
     ))
 }
@@ -784,14 +890,16 @@ async fn prepare_application_compaction_for_preview(
 fn load_application_compaction_session(
     root_config: &RootConfig,
     store: JsonlSessionStore,
+    attachment: Option<&crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 ) -> Result<(Session, sigil_kernel::ModelRef)> {
     let (_, fallback_route) = crate::provider_connections::resolve_default_model_route(root_config)
         .map_err(anyhow::Error::new)
         .context("failed to resolve the configured fallback model route")?;
-    let session = crate::application_run::load_application_session_for_route(
+    let session = crate::application_run::load_application_session_for_route_with_attachment(
         root_config,
         &fallback_route,
         store,
+        attachment,
     )
     .context("failed to load the exact durable compaction route")?;
     let model_ref = session

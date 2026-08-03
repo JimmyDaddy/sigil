@@ -141,7 +141,7 @@ fn v2_context_projection_preserves_raw_messages_until_applied_then_uses_v2_bound
 
     let request = session.build_request(
         temp.path(),
-        &crate::MemoryConfig { enabled: false },
+        &crate::MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -368,7 +368,7 @@ fn pre_turn_candidate_request_keeps_exact_transient_input_out_of_session_mutatio
 
     let request = session.build_pre_turn_candidate_request(
         temp.path(),
-        &crate::MemoryConfig { enabled: false },
+        &crate::MemoryConfig::with_enabled(false),
         Vec::new(),
         Some(1024),
         None,

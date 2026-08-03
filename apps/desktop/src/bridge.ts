@@ -181,6 +181,7 @@ export interface DesktopBridge {
     reasoningEffortBinding?: string,
     skillBinding?: SkillBinding,
     agentBinding?: AgentBinding,
+    routeRecoveryBinding?: string,
   ): Promise<RunSummary>;
   continueTask(
     workspaceId: string,
@@ -371,6 +372,7 @@ export const desktopBridge: DesktopBridge = {
     reasoningEffortBinding,
     skillBinding,
     agentBinding,
+    routeRecoveryBinding,
   ) =>
     invoke<RunSummary>("desktop_start_run", {
       workspaceId,
@@ -380,6 +382,7 @@ export const desktopBridge: DesktopBridge = {
         permissionMode,
         modelRef,
         modelSelectionBinding,
+        routeRecoveryBinding,
         reasoningEffort,
         reasoningEffortBinding,
         skillBinding,

@@ -140,9 +140,10 @@ where
                         continue;
                     }
                 };
-                match transition_session(
+                match transition_session_with_attachment(
                     SessionTransitionKind::LocalFork,
-                    output.destination_path.clone(),
+                    output.output.destination_path.clone(),
+                    Arc::clone(&output.attachment),
                     runtime,
                     root_config,
                     provider_capabilities,
@@ -152,12 +153,16 @@ where
                     message_tx,
                 ) {
                     Ok(transition) => {
+                        let _ = message_tx.send(WorkerMessage::SessionAttachmentTransferred {
+                            session_log_path: transition.session_log_path.clone(),
+                            attachment: Arc::clone(&transition.session_attachment),
+                        });
                         let _ = message_tx.send(WorkerMessage::LocalSessionForked {
                             request_id,
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
                             model_name: transition.model_name,
-                            copied_message_count: output.copied_message_count,
+                            copied_message_count: output.output.copied_message_count,
                             entries: transition.entries,
                         });
                         return WorkerCommandDispatchControl::Break;
@@ -274,6 +279,18 @@ where
                     continue;
                 }
                 let service = local_session_lifecycle_service(root_config, workspace_root);
+                let _target_attachment = match sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                    &preview.source_path,
+                ) {
+                    Ok(attachment) => attachment,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                            request_id,
+                            error: format!("session delete target is busy: {error}"),
+                        });
+                        continue;
+                    }
+                };
                 match apply_local_session_delete(
                     &service,
                     &preview,
@@ -333,6 +350,26 @@ where
                     continue;
                 }
                 let service = local_session_lifecycle_service(root_config, workspace_root);
+                let mut _target_attachments = Vec::with_capacity(preview.candidates.len());
+                let mut attachment_error = None;
+                for candidate in &preview.candidates {
+                    match sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                        &candidate.delete_preview.source_path,
+                    ) {
+                        Ok(attachment) => _target_attachments.push(attachment),
+                        Err(error) => {
+                            attachment_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = attachment_error {
+                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
+                        request_id,
+                        error: format!("session retention target is busy: {error}"),
+                    });
+                    continue;
+                }
                 match apply_session_retention(
                     &service,
                     &preview,
@@ -350,11 +387,15 @@ where
                     }
                 }
             }
-            SessionCommand::SwitchSession { session_log_path } => {
-                cancel_all_mcp_oauth_flows(state);
-                match transition_session(
+            SessionCommand::SwitchSession {
+                session_log_path,
+                attachment_recovery_binding,
+            } => {
+                let recovery_path = session_log_path.clone();
+                match transition_session_with_attachment_recovery(
                     SessionTransitionKind::Switch,
                     session_log_path,
+                    attachment_recovery_binding.as_deref(),
                     runtime,
                     root_config,
                     provider_capabilities,
@@ -364,7 +405,12 @@ where
                     message_tx,
                 ) {
                     Ok(transition) => {
+                        cancel_all_mcp_oauth_flows(state);
                         state.clear_approval_command_receipts();
+                        let _ = message_tx.send(WorkerMessage::SessionAttachmentTransferred {
+                            session_log_path: transition.session_log_path.clone(),
+                            attachment: Arc::clone(&transition.session_attachment),
+                        });
                         let _ = message_tx.send(WorkerMessage::SessionSwitched {
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
@@ -374,12 +420,26 @@ where
                         return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        if let Some((attachment, recovery)) =
+                            session_transition_recovery_message(&error)
+                        {
+                            let _ = message_tx.send(attachment);
+                            let _ = message_tx.send(recovery);
+                            return WorkerCommandDispatchControl::Break;
+                        }
+                        if let Some(recovery) = crate::runner::worker_session_route_recovery_message(
+                            &error,
+                            &recovery_path,
+                        ) {
+                            let _ = message_tx.send(recovery);
+                        } else {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        }
                     }
                 }
             }
             SessionCommand::StartNewSession { session_log_path } => {
-                cancel_all_mcp_oauth_flows(state);
+                let recovery_path = session_log_path.clone();
                 match transition_session(
                     SessionTransitionKind::StartNew,
                     session_log_path,
@@ -392,7 +452,12 @@ where
                     message_tx,
                 ) {
                     Ok(transition) => {
+                        cancel_all_mcp_oauth_flows(state);
                         state.clear_approval_command_receipts();
+                        let _ = message_tx.send(WorkerMessage::SessionAttachmentTransferred {
+                            session_log_path: transition.session_log_path.clone(),
+                            attachment: Arc::clone(&transition.session_attachment),
+                        });
                         let _ = message_tx.send(WorkerMessage::NewSessionStarted {
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
@@ -402,7 +467,14 @@ where
                         return WorkerCommandDispatchControl::Break;
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        if let Some(recovery) = crate::runner::worker_session_route_recovery_message(
+                            &error,
+                            &recovery_path,
+                        ) {
+                            let _ = message_tx.send(recovery);
+                        } else {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        }
                     }
                 }
             }

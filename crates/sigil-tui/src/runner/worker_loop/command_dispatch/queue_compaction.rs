@@ -197,6 +197,10 @@ where
                     ));
                     continue;
                 }
+                if let Err(error) = state.acquire_route_execution_owner() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let Some(session) = state.session.current.as_ref() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
@@ -244,10 +248,11 @@ where
                         let runtime_handle = runtime.handle().clone();
                         let direct_context_resolver = context_resolver.clone();
                         let preparation_agent = std::sync::Arc::clone(agent);
-                        state.compaction.preparation_tasks.start_manual(
+                        let start_result = state.compaction.preparation_tasks.start_manual(
                             runtime,
                             request_id,
                             expected_session_scope_id.clone(),
+                            std::sync::Arc::clone(&state.session.attachment_lease),
                             state.compaction.preparation_tx.clone(),
                             move || {
                                 let Some(mut session) = stable_snapshot
@@ -286,6 +291,10 @@ where
                                 })
                             },
                         );
+                        if let Err(error) = start_result {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            continue;
+                        }
                         let _ = message_tx.send(WorkerMessage::Notice(
                             "generating and validating one semantic compaction checkpoint"
                                 .to_owned(),
@@ -370,10 +379,11 @@ where
                         let root_config = root_config.clone();
                         let workspace_root = workspace_root.clone();
                         let session_log_path = state.session.log_path.clone();
-                        state.compaction.preparation_tasks.start_manual(
+                        let start_result = state.compaction.preparation_tasks.start_manual(
                             runtime,
                             request_id,
                             expected_session_scope_id.clone(),
+                            std::sync::Arc::clone(&state.session.attachment_lease),
                             state.compaction.preparation_tx.clone(),
                             move || {
                                 let Some(session) = stable_snapshot
@@ -406,6 +416,9 @@ where
                                 })
                             },
                         );
+                        if let Err(error) = start_result {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        }
                     }
                     Ok(None) => {
                         let durable_message_count = session
@@ -502,10 +515,11 @@ where
                     let manual_context_resolver = context_resolver.clone();
                     let preparation_agent = std::sync::Arc::clone(agent);
                     let preview = local_preview.preview().clone();
-                    state.compaction.preparation_tasks.start_manual(
+                    let start_result = state.compaction.preparation_tasks.start_manual(
                         runtime,
                         request_id,
                         expected_session_scope_id.clone(),
+                        std::sync::Arc::clone(&state.session.attachment_lease),
                         state.compaction.preparation_tx.clone(),
                         move || {
                             let Some(mut session) = stable_snapshot
@@ -545,6 +559,11 @@ where
                             })
                         },
                     );
+                    if let Err(error) = start_result {
+                        let _ = message_tx
+                            .send(WorkerMessage::V2CompactionApplyFailed { request_id, error });
+                        continue;
+                    }
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "generating one billed semantic compaction summary".to_owned(),
                     ));
@@ -568,7 +587,14 @@ where
                     });
                     continue;
                 }
+                if let Err(error) = state.acquire_route_execution_owner() {
+                    state.compaction.pending = Some(pending);
+                    let _ = message_tx
+                        .send(WorkerMessage::V2CompactionApplyFailed { request_id, error });
+                    continue;
+                }
                 let Some(session) = state.session.current.as_ref() else {
+                    state.compaction.pending = Some(pending);
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
                         error: "session state is unavailable".to_owned(),

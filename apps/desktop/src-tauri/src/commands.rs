@@ -54,13 +54,15 @@ use crate::{
         DesktopSessionCreateInput, DesktopSessionDeleteInput,
         DesktopSessionInvalidSourceDeleteInput, DesktopSessionInvalidSourceDeleteSummary,
         DesktopSessionMutationSummary, DesktopSessionOpenInput, DesktopSessionQuarantineInput,
-        DesktopSessionQuarantineSummary, DesktopSessionRenameInput, DesktopSessionSummary,
-        DesktopSupportDoctorSummary, DesktopSupportSaveSummary, DesktopTaskContinuationInput,
-        DesktopTaskIntegrationAcceptInput, DesktopTaskIntegrationAcceptanceSummary,
-        DesktopTaskIntegrationReviewSummary, DesktopTaskPauseInput, DesktopTerminalTaskCancelInput,
-        DesktopTerminalTaskCancelSummary, DesktopToolArtifactPage, DesktopToolArtifactReadInput,
-        DesktopToolArtifactSelector, DesktopTranscriptPage, DesktopTranscriptRequest,
-        DesktopVerificationRerunInput, DesktopVerificationSummary, DesktopWorkspaceSelection,
+        DesktopSessionQuarantineSummary, DesktopSessionRenameInput,
+        DesktopSessionRouteRecoverySummary, DesktopSessionSummary, DesktopSupportDoctorSummary,
+        DesktopSupportSaveSummary, DesktopTaskContinuationInput, DesktopTaskIntegrationAcceptInput,
+        DesktopTaskIntegrationAcceptanceSummary, DesktopTaskIntegrationReviewSummary,
+        DesktopTaskPauseInput, DesktopTerminalTaskCancelInput, DesktopTerminalTaskCancelSummary,
+        DesktopToolArtifactPage, DesktopToolArtifactReadInput, DesktopToolArtifactSelector,
+        DesktopTranscriptPage, DesktopTranscriptRequest, DesktopVerificationRerunInput,
+        DesktopVerificationSummary, DesktopWorkspaceSelection,
+        desktop_session_route_recovery_summary,
     },
     recent::RecentWorkspaceStoreError,
     state::DesktopAppState,
@@ -78,6 +80,8 @@ pub(crate) struct DesktopCommandError {
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) recovery_actions: Vec<DesktopRecoveryAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) route_recovery: Option<Box<DesktopSessionRouteRecoverySummary>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -95,7 +99,16 @@ impl DesktopCommandError {
             code,
             message: message.into(),
             recovery_actions: Vec::new(),
+            route_recovery: None,
         }
+    }
+
+    fn with_route_recovery(
+        mut self,
+        recovery: sigil_desktop::DesktopSessionRouteRecoveryView,
+    ) -> Self {
+        self.route_recovery = Some(Box::new(desktop_session_route_recovery_summary(recovery)));
+        self
     }
 
     fn with_recovery_actions(
@@ -994,6 +1007,7 @@ pub(crate) async fn desktop_start_run(
                     }
                 }),
                 model_selection_binding: input.model_selection_binding,
+                route_recovery_binding: input.route_recovery_binding,
                 reasoning_effort: input.reasoning_effort,
                 reasoning_effort_binding: input.reasoning_effort_binding,
                 skill_binding: input.skill_binding.map(|binding| {
@@ -1063,6 +1077,7 @@ pub(crate) async fn desktop_continue_task(
                 permission_mode: input.permission_mode,
                 model_ref: None,
                 model_selection_binding: None,
+                route_recovery_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -1604,7 +1619,7 @@ pub(crate) async fn desktop_create_session(
         })
         .await
         .map(Into::into)
-        .map_err(project_client_error)
+        .map_err(project_session_open_client_error)
 }
 
 #[tauri::command]
@@ -1627,6 +1642,7 @@ pub(crate) async fn desktop_open_session(
             session_ref: input.session_ref,
             session_id: input.session_id,
             label: input.label,
+            recovery_binding: input.recovery_binding,
         })
         .await
         .map(Into::into)
@@ -2546,6 +2562,7 @@ fn project_task_control_client_error(error: DesktopClientError) -> DesktopComman
     if let DesktopClientError::Rejected {
         status,
         code: Some(code),
+        ..
     } = &error
     {
         let projected = match code.as_str() {
@@ -2609,6 +2626,20 @@ fn project_intent_stack_client_error(error: DesktopClientError) -> DesktopComman
         return projected;
     }
     project_client_error(error)
+}
+
+fn project_session_open_client_error(error: DesktopClientError) -> DesktopCommandError {
+    match error {
+        DesktopClientError::Rejected {
+            route_recovery: Some(recovery),
+            ..
+        } => DesktopCommandError::new(
+            "session_open_recovery_required",
+            "The saved conversation is available read-only until recovery succeeds.",
+        )
+        .with_route_recovery(recovery),
+        other => project_client_error(other),
+    }
 }
 
 fn project_client_error(error: DesktopClientError) -> DesktopCommandError {

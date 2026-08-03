@@ -1348,16 +1348,17 @@ fn config_provider_selection_switches_route_without_replacing_the_session() -> R
                 if message.content.as_deref() == Some("keep this conversation")
         )
     }));
-    assert!(app.session_browser.current_entries.iter().any(|entry| {
+    assert!(matches!(
+        app.pending_session_route_selection(),
+        Some((provider_name, resolved_model_route))
+            if provider_name == "openai_compat"
+                && resolved_model_route.model_ref.model_id == "gpt-4.1"
+                && resolved_model_route.model_ref.connection_id.as_str() == "secondary"
+    ));
+    assert!(!app.session_browser.current_entries.iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
-                provider_name,
-                model_name,
-                resolved_model_route,
-            }) if provider_name == "openai_compat"
-                && model_name == "gpt-4.1"
-                && resolved_model_route.model_ref.connection_id.as_str() == "secondary"
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
         )
     }));
     assert!(
@@ -2169,14 +2170,9 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
     assert_ne!(initial_theme_bg, updated_theme_bg);
     assert_eq!(
         app.session_browser.current_entries.len(),
-        initial_control_entries + 2
+        initial_control_entries
     );
-    assert!(app.session_browser.current_entries.iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
-        )
-    }));
+    assert!(app.pending_session_route_selection().is_some());
     let rendered = std::fs::read_to_string(&config_path)?;
     assert!(rendered.contains("theme = \"solarized_dark\""));
     Ok(())
@@ -3692,6 +3688,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.provider_fim_model = "deepseek-v4-flash".to_owned();
     state.draft.permission_mode = sigil_kernel::PermissionMode::AutoEdit;
     state.draft.memory_enabled = false;
+    state.draft.memory_writable = true;
     state.draft.compaction_context_window_tokens = "64000".to_owned();
     state.draft.code_intelligence_enabled = true;
     state.draft.code_intelligence_server_startup = sigil_kernel::CodeIntelStartup::Eager;
@@ -3716,6 +3713,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
         sigil_kernel::PermissionMode::AutoEdit
     );
     assert!(!root_config.memory.enabled);
+    assert!(root_config.memory.writable);
     assert_eq!(root_config.compaction.context_window_tokens, Some(64_000));
     assert!(root_config.code_intelligence.enabled);
     assert_eq!(
@@ -3747,6 +3745,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
         sigil_kernel::PermissionMode::AutoEdit
     );
     assert!(!saved.memory.enabled);
+    assert!(saved.memory.writable);
     assert_eq!(saved.compaction.context_window_tokens, Some(64_000));
     assert!(saved.code_intelligence.enabled);
     assert_eq!(
@@ -3991,6 +3990,31 @@ fn config_clean_save_skips_worker_restart_even_when_busy() -> Result<()> {
     assert!(app.is_config_mode());
     assert!(!app.config_is_dirty());
     assert!(!app.config_close_guard_armed());
+    assert_eq!(app.last_notice(), Some("saved config"));
+    Ok(())
+}
+
+#[test]
+fn config_clean_save_retries_an_exact_pending_route_confirmation() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = test_config();
+    config.save(&config_path)?;
+
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.open_config_panel();
+    app.set_pending_session_route_recovery_binding(Some("route-binding-exact".to_owned()));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("clean save should restart the worker with the exact recovery binding");
+    };
+    assert_eq!(root_config.workspace.root, config.workspace.root);
+    assert_eq!(
+        app.pending_session_route_recovery_binding(),
+        Some("route-binding-exact")
+    );
     assert_eq!(app.last_notice(), Some("saved config"));
     Ok(())
 }
@@ -4837,6 +4861,22 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .expect("config state should exist")
             .draft
             .memory_enabled
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.selected_field = Some(ConfigField::MemoryWritable);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .memory_writable
     );
 
     {

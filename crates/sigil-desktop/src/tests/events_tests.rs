@@ -457,6 +457,7 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
         json!({"type": "task_step_changed", "task_id": "task-1", "plan_version": 1, "step_id": "step-1", "attempt_id": "attempt-1", "status": "running"}),
         json!({"type": "integration_lane_changed", "task_id": "task-1", "plan_version": 1, "plan_id": "plan-1", "lane_id": "lane-1", "status": "running", "conflicts": []}),
         json!({"type": "run_failed", "error": "failed"}),
+        json!({"type": "route_recovery_required", "code": "session_route_confirmation_required", "actions": ["repair_connection", "start_new_session"], "recovery_binding": "binding-1", "retryable": true}),
         json!({"type": "run_cancelled"}),
         json!({"type": "text_delta", "text": "text"}),
         json!({"type": "reasoning_delta", "text": "reasoning"}),
@@ -497,4 +498,43 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
         serde_json::from_value::<DesktopPublicRunEventKind>(event)
             .expect("known public event should deserialize");
     }
+}
+
+#[test]
+fn route_recovery_event_projects_bounded_renderer_actions() {
+    let event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "route_recovery_required",
+            "code": "session_route_selection_required",
+            "actions": ["select_replacement", "start_new_session", "back_to_session_library"],
+            "recovery_binding": "route-binding-1",
+            "retryable": true
+        }),
+    );
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "session-1")
+        .expect("route recovery event should project");
+
+    assert_eq!(
+        timeline.kind,
+        DesktopTimelineEventKind::RouteRecoveryRequired
+    );
+    assert_eq!(timeline.status.as_deref(), Some("recovery_required"));
+    let recovery = timeline.route_recovery.expect("typed route recovery");
+    assert_eq!(
+        recovery.code,
+        DesktopRouteRecoveryCode::SessionRouteSelectionRequired
+    );
+    assert_eq!(
+        recovery.actions,
+        vec![
+            DesktopRouteRecoveryAction::SelectReplacement,
+            DesktopRouteRecoveryAction::StartNewSession,
+            DesktopRouteRecoveryAction::BackToSessionLibrary,
+        ]
+    );
+    assert_eq!(recovery.recovery_binding, "route-binding-1");
+    assert!(recovery.retryable);
 }

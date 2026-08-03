@@ -105,6 +105,7 @@ interface ConversationPanelProps {
   onOpenSettings: () => void;
   onOpenSupport: () => void;
   onOpenFork: (sessionRef: string, sessionId: string) => Promise<void>;
+  onRetrySessionAttach?: (recoveryBinding: string) => Promise<boolean>;
 }
 
 interface PendingPrompt {
@@ -112,6 +113,18 @@ interface PendingPrompt {
   readonly text: string;
   readonly skill?: MessageView["skill"];
   readonly runId?: string;
+}
+
+interface RetryableRunStartRequest {
+  readonly prompt: string;
+  readonly permissionMode: PermissionMode;
+  readonly modelRef?: ProviderModelRef;
+  readonly modelSelectionBinding?: string;
+  readonly reasoningEffort?: ReasoningEffort;
+  readonly reasoningEffortBinding?: string;
+  readonly skillBinding?: SkillBinding;
+  readonly agentBinding?: AgentBinding;
+  readonly routeRecoveryBinding?: string;
 }
 
 interface TimelineAnchor {
@@ -143,6 +156,7 @@ export function ConversationPanel({
   onOpenSettings,
   onOpenSupport,
   onOpenFork,
+  onRetrySessionAttach,
 }: ConversationPanelProps) {
   const { t } = useLocale();
   const { notify } = useNotifications();
@@ -156,6 +170,7 @@ export function ConversationPanel({
   const [runContextBusy, setRunContextBusy] = useState(false);
   const [runContextError, setRunContextError] = useState(false);
   const [runContextReload, setRunContextReload] = useState(0);
+  const [confirmedRouteRecoveryBinding, setConfirmedRouteRecoveryBinding] = useState<string>();
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("manual");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>();
   const [selectedModelRef, setSelectedModelRef] = useState<ProviderModelRef>();
@@ -258,6 +273,7 @@ export function ConversationPanel({
   const initialLoadReportedSessionId = useRef<string | undefined>(undefined);
   const catalogChangeReportedRunId = useRef<string | undefined>(undefined);
   const startRunPendingRef = useRef(false);
+  const retryableRunStartRef = useRef<RetryableRunStartRequest | undefined>(undefined);
   const markTimelineScrollIntent = useCallback(() => {
     timelineUserScrollIntentUntil.current =
       window.performance.now() + TIMELINE_USER_SCROLL_INTENT_MS;
@@ -390,6 +406,7 @@ export function ConversationPanel({
     setRunContext(undefined);
     setRunContextBusy(false);
     setRunContextError(false);
+    setConfirmedRouteRecoveryBinding(undefined);
     setPermissionMode("manual");
     setReasoningEffort(undefined);
     setSelectedModelRef(undefined);
@@ -397,6 +414,7 @@ export function ConversationPanel({
     dispatchLiveEvent({ type: "session_selected", sessionId: session.id });
     setPendingPrompt(undefined);
     pendingPromptRef.current = undefined;
+    retryableRunStartRef.current = undefined;
     livePromptSkillsByRunId.current.clear();
     catalogChangeReportedRunId.current = undefined;
     setStreamStatus(undefined);
@@ -1414,10 +1432,12 @@ export function ConversationPanel({
     nextPrompt: string,
     skillBinding?: SkillBinding,
     agentBinding?: AgentBinding,
+    recoveryRetry = false,
+    exactRetry?: RetryableRunStartRequest,
   ): Promise<boolean> => {
     if (
       nextPrompt === ""
-      || (!active && submissionBlocked)
+      || (!active && submissionBlocked && !recoveryRetry)
       || submitting
       || conversationQueueBusy
       || (active && conversationQueueLoading)
@@ -1455,7 +1475,12 @@ export function ConversationPanel({
         selectedModelOption?.availableReasoningEfforts.includes(reasoningEffort)
         ? reasoningEffort
         : undefined;
-      if (modelChanged && runContext !== undefined && selectedModelRef !== undefined) {
+      if (
+        exactRetry === undefined
+        && modelChanged
+        && runContext !== undefined
+        && selectedModelRef !== undefined
+      ) {
         const selectedConnection = providerInventory?.connections.find(
           (connection) => connection.id === selectedModelRef.connectionId,
         );
@@ -1483,19 +1508,32 @@ export function ConversationPanel({
       };
       pendingPromptRef.current = optimisticPrompt;
       setPendingPrompt(optimisticPrompt);
-      const started = await bridge.startRun(
-        workspaceId,
-        session.id,
-        nextPrompt,
+      const runRequest: RetryableRunStartRequest = exactRetry ?? {
+        prompt: nextPrompt,
         permissionMode,
-        modelChanged ? selectedModelOption?.modelRef : undefined,
-        modelChanged ? runContext?.modelSelectionBinding : undefined,
-        selectedReasoningEffort,
-        selectedReasoningEffort === undefined
+        modelRef: modelChanged ? selectedModelOption?.modelRef : undefined,
+        modelSelectionBinding: modelChanged ? runContext?.modelSelectionBinding : undefined,
+        reasoningEffort: selectedReasoningEffort,
+        reasoningEffortBinding: selectedReasoningEffort === undefined
           ? undefined
           : selectedModelOption?.reasoningEffortBinding,
         skillBinding,
         agentBinding,
+        routeRecoveryBinding: confirmedRouteRecoveryBinding,
+      };
+      retryableRunStartRef.current = runRequest;
+      const started = await bridge.startRun(
+        workspaceId,
+        session.id,
+        runRequest.prompt,
+        runRequest.permissionMode,
+        runRequest.modelRef,
+        runRequest.modelSelectionBinding,
+        runRequest.reasoningEffort,
+        runRequest.reasoningEffortBinding,
+        runRequest.skillBinding,
+        runRequest.agentBinding,
+        runRequest.routeRecoveryBinding,
       );
       activeRunIdRef.current = started.id;
       startedRunProjectionExpected.current = started.id;
@@ -1504,13 +1542,26 @@ export function ConversationPanel({
       dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
       setContinuityMessage(undefined);
       setPermissionMode(started.permissionMode);
-      setReasoningEffort(started.reasoningEffort ?? selectedReasoningEffort);
-      if (modelChanged) setRunContextReload((current) => current + 1);
+      setReasoningEffort(started.reasoningEffort ?? runRequest.reasoningEffort);
+      setConfirmedRouteRecoveryBinding(undefined);
+      if (exactRetry !== undefined || runRequest.routeRecoveryBinding !== undefined) {
+        setRunContext((current) => current === undefined
+          ? current
+          : { ...current, routeRecovery: undefined });
+      }
+      if (
+        modelChanged
+        || exactRetry !== undefined
+        || runRequest.routeRecoveryBinding !== undefined
+      ) {
+        setRunContextReload((current) => current + 1);
+      }
       setContinuityReload((current) => current + 1);
       return true;
     } catch {
       pendingPromptRef.current = undefined;
       setPendingPrompt(undefined);
+      setRunContextReload((current) => current + 1);
       dispatchContinuity({ type: "recovery_retry_started", sessionId: session.id });
       setContinuityReload((current) => current + 1);
       onNotice(t("runStartFailed"), true);
@@ -1874,6 +1925,18 @@ export function ConversationPanel({
   };
 
   const continuityLoading = conversationLoadingCopy(continuityState.lifecycle, t);
+  const canonicalRouteRecovery = runContext === undefined
+    ? session.routeRecovery
+    : runContext.routeRecovery;
+  const routeRecovery = liveEventState.routeRecovery?.routeRecovery
+    ?? (canonicalRouteRecovery === undefined
+      ? undefined
+      : {
+          code: canonicalRouteRecovery.code,
+          actions: canonicalRouteRecovery.allowedActions,
+          recoveryBinding: canonicalRouteRecovery.recoveryBinding,
+          retryable: canonicalRouteRecovery.retryable,
+        });
   return (
     <div className="conversation-layout">
       <section
@@ -2030,6 +2093,87 @@ export function ConversationPanel({
           onAction={() => setRunContextReload((value) => value + 1)}
         />
       ) : null}
+
+      {routeRecovery === undefined ? null : (
+        <section className="continuity-recovery sg-bounded-content" role="alert">
+          <span className="continuity-recovery-icon" aria-hidden="true"><Icon name="warning" /></span>
+          <div className="continuity-recovery-copy">
+            <strong>{t("routeRecoveryTitle")}</strong>
+            <p>{t(
+              routeRecovery.code === "session_route_confirmation_required"
+                ? "routeRecoveryConfirmation"
+                : routeRecovery.code === "session_route_selection_required"
+                  ? "routeRecoveryReplacement"
+                  : routeRecovery.code === "session_already_active"
+                    ? "routeRecoveryBusy"
+                    : "routeRecoverySetup",
+            )}</p>
+          </div>
+          <div className="continuity-recovery-actions">
+            {routeRecovery.actions.includes("retry_session_attach") ? (
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={runContextBusy || onRetrySessionAttach === undefined}
+                onClick={() => {
+                  if (onRetrySessionAttach === undefined) return;
+                  setRunContextBusy(true);
+                  void onRetrySessionAttach(routeRecovery.recoveryBinding)
+                    .finally(() => setRunContextReload((value) => value + 1));
+                }}
+              >
+                {runContextBusy ? t("retrying") : t("retrySessionAttach")}
+              </Button>
+            ) : null}
+            {routeRecovery.actions.includes("retry_provider") ? (
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={submitting || retryableRunStartRef.current === undefined}
+                onClick={() => {
+                  const request = retryableRunStartRef.current;
+                  if (request === undefined) return;
+                  void submit(
+                    request.prompt,
+                    request.skillBinding,
+                    request.agentBinding,
+                    true,
+                    request,
+                  );
+                }}
+              >
+                {submitting ? t("retrying") : t("retryProvider")}
+              </Button>
+            ) : null}
+            {routeRecovery.actions.includes("confirm_current_route") ? (
+              <Button
+                type="button"
+                variant="quiet"
+                onClick={() => setConfirmedRouteRecoveryBinding(routeRecovery.recoveryBinding)}
+              >
+                {t("confirmCurrentRoute")}
+              </Button>
+            ) : null}
+            {routeRecovery.actions.some((action) => (
+              action === "repair_connection" || action === "select_replacement"
+            )) ? (
+              <Button type="button" variant="quiet" onClick={onOpenSettings}>
+                {t("reviewRoute")}
+              </Button>
+            ) : null}
+            {routeRecovery.actions.includes("start_new_session") ? (
+              <Button type="button" variant="quiet" onClick={() => void onNewSession()}>
+                {t("newConversation")}
+              </Button>
+            ) : null}
+            {routeRecovery.actions.includes("back_to_session_library") ? (
+              <Button type="button" variant="quiet" onClick={() => onOpenSessionPicker("")}>
+                {t("openConversationLibrary")}
+              </Button>
+            ) : null}
+          </div>
+        </section>
+      )}
 
       {continuityLoading === undefined || initialLoadReportedSessionId.current !== session.id ? null : (
         <LoadingState
@@ -2653,6 +2797,7 @@ function terminalStatusForEvent(event: TimelineEvent): RunSummary["status"] | un
   if (event.kind === "run_failed") {
     return event.status === "interrupted" ? "interrupted" : "failed";
   }
+  if (event.kind === "route_recovery_required") return "failed";
   if (event.kind === "run_cancelled") return "cancelled";
   return undefined;
 }

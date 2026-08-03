@@ -1144,6 +1144,7 @@ fn stricter_sensitivity(
         (PotentialSecret, _) | (_, PotentialSecret) => PotentialSecret,
         (External, _) | (_, External) => External,
         (Repository, _) | (_, Repository) => Repository,
+        (UserPrivate, _) | (_, UserPrivate) => UserPrivate,
         _ => Public,
     }
 }

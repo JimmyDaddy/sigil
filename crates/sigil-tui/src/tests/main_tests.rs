@@ -56,7 +56,7 @@ fn test_config() -> RootConfig {
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: true },
+        memory: MemoryConfig::with_enabled(true),
         skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
@@ -179,6 +179,56 @@ fn restore_initial_session_from_disk_uses_requested_selector() -> Result<()> {
         app.timeline
             .iter()
             .any(|entry| entry.text.contains("restore this session"))
+    );
+    Ok(())
+}
+
+#[test]
+fn restore_initial_session_from_disk_latest_reopens_the_most_recent_session() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let config = test_config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&config_path, &config);
+    let session_log_path = app.session_log_dir.join("session-latest-existing.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session =
+        sigil_kernel::Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    session.append_user_message(ModelMessage::user("latest session marker"))?;
+
+    restore_initial_session_from_disk(&mut app, &config, InitialSessionTarget::Latest)?;
+
+    assert_eq!(app.session_id, "latest-existing");
+    assert_eq!(app.session_log_path, session_log_path);
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("latest session marker"))
+    );
+    Ok(())
+}
+
+#[test]
+fn fresh_initial_session_target_does_not_reopen_existing_history() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let config = test_config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&config_path, &config);
+    let fresh_session_id = app.session_id.clone();
+    let fresh_session_path = app.session_log_path.clone();
+    let existing_path = app.session_log_dir.join("session-existing.jsonl");
+    let store = JsonlSessionStore::new(&existing_path)?;
+    let mut existing =
+        sigil_kernel::Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    existing.append_user_message(ModelMessage::user("must stay in history"))?;
+
+    restore_initial_session_from_disk(&mut app, &config, InitialSessionTarget::Fresh)?;
+
+    assert_eq!(app.session_id, fresh_session_id);
+    assert_eq!(app.session_log_path, fresh_session_path);
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("must stay in history"))
     );
     Ok(())
 }
@@ -695,13 +745,13 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
     assert!(worker.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("agent worker stopped before accepting command")
+        Some("provider is temporarily unavailable; retry or repair the connection")
     );
-    assert!(
-        app.timeline
-            .iter()
-            .any(|entry| entry.text.contains("Run failed: agent worker stopped"))
-    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry
+            .text
+            .contains("Session unavailable: provider is temporarily unavailable")
+    }));
     Ok(())
 }
 
@@ -713,22 +763,10 @@ fn process_app_action_reports_restart_failure_without_runtime() -> anyhow::Resul
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
 
     assert!(worker.is_none());
-    assert!(
-        app.last_notice()
-            .is_some_and(|notice| notice.contains("test wrapper should not spawn"))
+    assert_eq!(
+        app.last_notice(),
+        Some("provider is temporarily unavailable; retry or repair the connection")
     );
-    Ok(())
-}
-
-#[test]
-fn send_worker_command_returns_false_when_runtime_is_missing() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let mut worker = None;
-
-    let sent = super::send_worker_command(&mut app, &mut worker, WorkerCommand::Shutdown)?;
-
-    assert!(!sent);
-    assert!(worker.is_none());
     Ok(())
 }
 
@@ -754,7 +792,7 @@ fn send_worker_command_with_restart_reports_missing_runtime_config() -> Result<(
     assert!(worker.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("agent worker stopped; runtime config unavailable")
+        Some("provider is temporarily unavailable; retry or repair the connection")
     );
     Ok(())
 }
@@ -956,10 +994,14 @@ fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result
     assert!(flush_pending_worker_commands(&mut app, &mut worker)?);
 
     assert!(worker.is_none());
-    assert!(!app.has_pending_worker_commands());
+    assert!(app.has_pending_worker_commands());
+    assert!(matches!(
+        app.drain_pending_worker_commands().as_slice(),
+        [WorkerCommand::RefreshProviderBalance { .. }]
+    ));
     assert_eq!(
         app.last_notice(),
-        Some("agent worker stopped before accepting command")
+        Some("provider is temporarily unavailable; retry or repair the connection")
     );
     Ok(())
 }
@@ -1281,6 +1323,39 @@ fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<(
 }
 
 #[test]
+fn new_session_action_uses_launcher_control_path_when_worker_is_unavailable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root_config = test_config_for_workspace(temp.path());
+    let config_path = temp.path().join("sigil.toml");
+    let mut app = AppState::from_root_config(&config_path, &root_config);
+    let previous_session_id = app.session_id.clone();
+    let new_session_path = app.session_log_dir.join("session-control-new.jsonl");
+    let mut worker = None;
+    let (runtime, _commands) = fake_worker_runtime();
+    let mut runtime = Some(runtime);
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::StartNewSession {
+            session_log_path: new_session_path.clone(),
+        },
+        |_root_config, _app| Ok(runtime.take().expect("spawner is called once")),
+    )?;
+
+    assert_ne!(app.session_id, previous_session_id);
+    assert_eq!(app.session_id, "control-new");
+    assert_eq!(app.session_log_path, new_session_path);
+    assert!(worker.is_some());
+    let entries = JsonlSessionStore::read_entries(&app.session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionRouteTrustBound { .. })
+    )));
+    Ok(())
+}
+
+#[test]
 fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
@@ -1477,7 +1552,7 @@ fn drain_worker_messages_marks_runtime_ready() -> Result<()> {
 }
 
 #[test]
-fn drain_worker_messages_retires_an_unready_worker_after_startup_failure() -> Result<()> {
+fn drain_worker_messages_retires_unready_worker_without_dropping_pending_input() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.enqueue_worker_command(WorkerCommand::SubmitPrompt {
         prompt: "queued while starting".to_owned(),
@@ -1496,13 +1571,76 @@ fn drain_worker_messages_retires_an_unready_worker_after_startup_failure() -> Re
 
     assert!(drain_worker_messages(&mut app, &mut worker)?);
     assert!(worker.is_none());
-    assert!(!app.has_pending_worker_commands());
+    assert!(app.has_pending_worker_commands());
     assert!(app.timeline.iter().any(|entry| {
         entry
             .text
             .contains("native credential store rejected the read")
             && !entry.text.contains("did not become ready")
     }));
+    Ok(())
+}
+
+#[test]
+fn typed_startup_route_recovery_preserves_pending_input_and_avoids_run_failure_copy() -> Result<()>
+{
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.enqueue_worker_command(WorkerCommand::SubmitPrompt {
+        prompt: "queued while route recovery is required".to_owned(),
+        reasoning_effort: sigil_kernel::ReasoningEffort::Max,
+    });
+    let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
+    let (message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: false,
+    });
+    message_tx.send(WorkerMessage::SessionRouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+        actions: vec![
+            sigil_kernel::PublicRouteRecoveryAction::ConfirmCurrentRoute,
+            sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
+        ],
+        recovery_binding: "route-binding-exact".to_owned(),
+        retryable: true,
+        target_session: None,
+    })?;
+
+    assert!(drain_worker_messages(&mut app, &mut worker)?);
+    assert!(worker.is_none());
+    assert!(app.has_pending_worker_commands());
+    assert_eq!(
+        app.pending_session_route_recovery_binding(),
+        Some("route-binding-exact")
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.text.starts_with("Session unavailable:")
+            && !entry.text.to_ascii_lowercase().contains("run failed")
+    }));
+    Ok(())
+}
+
+#[test]
+fn startup_failure_preserves_a_queued_new_session_command_before_worker_readiness() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.enqueue_worker_command(WorkerCommand::StartNewSession {
+        session_log_path: app.session_log_dir.join("session-new.jsonl"),
+    });
+    let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
+    let (message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: false,
+    });
+    message_tx.send(WorkerMessage::RunFailed(
+        "session route cannot be restored".to_owned(),
+    ))?;
+
+    assert!(drain_worker_messages(&mut app, &mut worker)?);
+    assert!(worker.is_none());
+    assert!(app.has_pending_worker_commands());
     Ok(())
 }
 

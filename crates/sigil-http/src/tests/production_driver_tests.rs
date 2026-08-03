@@ -33,6 +33,24 @@ use crate::{
     HttpTaskContinuationRequest,
 };
 
+#[test]
+fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
+    let error = anyhow::Error::new(
+        sigil_runtime::application_run::ApplicationRunPrepareError::SessionRouteConfirmationRequired {
+            recovery_binding: "route-binding-1".to_owned(),
+        },
+    );
+    assert!(matches!(
+        public_preparation_failure_event(&error),
+        PublicRunEventKind::RouteRecoveryRequired {
+            code: PublicRouteRecoveryCode::SessionRouteConfirmationRequired,
+            recovery_binding,
+            retryable: true,
+            ..
+        } if recovery_binding == "route-binding-1"
+    ));
+}
+
 fn call() -> ToolCall {
     ToolCall {
         id: "call-1".to_owned(),
@@ -203,6 +221,255 @@ async fn production_driver_attaches_the_shared_application_task_executor() {
 }
 
 #[tokio::test]
+async fn production_run_admission_reports_external_attachment_before_allocating_a_run() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "attachment-admission");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-attachment.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind without taking write ownership");
+    driver
+        .session_attachments
+        .lock()
+        .expect("attachment state should not be poisoned")
+        .clear();
+    let _external_owner =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session.session_log_path,
+        )
+        .expect("external controller should own the session attachment");
+
+    let error = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "must not allocate a run".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                model_ref: None,
+                model_selection_binding: None,
+                route_recovery_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: None,
+            },
+        )
+        .expect_err("external attachment must reject before run allocation");
+
+    let crate::HttpRegistryError::SessionRunRecoveryRequired { recovery } = error else {
+        panic!("expected typed session recovery conflict");
+    };
+    assert_eq!(
+        recovery.code,
+        crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive
+    );
+    assert!(recovery.retryable);
+    assert!(!recovery.recovery_binding.is_empty());
+    assert_eq!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain registered")
+            .run_ids,
+        Vec::<String>::new()
+    );
+}
+
+#[tokio::test]
+async fn production_session_switch_releases_the_previous_idle_attachment() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "attachment-switch");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-switch.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let first = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("first session should bind");
+    let second = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("second session should bind and become the active controller target");
+
+    let first_owner =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &first.session_log_path,
+        )
+        .expect("switching away must release the previous idle session attachment");
+    let second_busy =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &second.session_log_path,
+        )
+        .expect_err("the current controller target must stay attached");
+    assert_eq!(
+        second_busy.code(),
+        sigil_runtime::interactive_session_attachment::SESSION_ATTACHMENT_BUSY_CODE
+    );
+    drop(first_owner);
+}
+
+#[tokio::test]
+async fn production_catalog_mutation_gate_rejects_an_external_attachment_owner() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "catalog-mutation-attachment");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-catalog-mutation.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    driver
+        .session_attachments
+        .lock()
+        .expect("attachment state should not be poisoned")
+        .clear();
+    let before = std::fs::read(&session.session_log_path).expect("session bytes should read");
+    let _external_owner =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session.session_log_path,
+        )
+        .expect("external controller should attach");
+
+    let error = driver
+        .acquire_durable_session_mutation_attachment(
+            &session.durable_session_scope_id,
+            std::path::Path::new(&session.session_log_path),
+        )
+        .expect_err("catalog mutation must reject the external owner");
+    assert!(matches!(
+        error,
+        HttpRunAdmissionError::SessionAlreadyActive { recovery_binding }
+            if !recovery_binding.is_empty()
+    ));
+    assert_eq!(
+        std::fs::read(&session.session_log_path).expect("session bytes should remain readable"),
+        before
+    );
+}
+
+#[tokio::test]
+async fn production_selection_recovery_requires_exact_route_and_catalog_bindings() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "selection-admission");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-selection.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("original route should bind");
+    std::fs::write(
+        temp.path().join("sigil.toml"),
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "replacement"
+model = "gpt-replacement"
+
+[connections.replacement]
+label = "Replacement"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:2"
+credential = { source = "none" }
+"#,
+    )
+    .expect("replacement config should write");
+    let context = driver
+        .run_context_view(&session)
+        .expect("replacement run context should project");
+    assert!(matches!(
+        context
+            .route_recovery
+            .as_ref()
+            .map(|recovery| recovery.code),
+        Some(crate::HttpSessionRouteRecoveryCode::SessionRouteSelectionRequired)
+    ));
+    let replacement = context
+        .model_options
+        .iter()
+        .find(|option| option.availability != "configured_unavailable")
+        .expect("replacement option should be selectable")
+        .model_ref
+        .clone();
+    let route_recovery_binding = context
+        .route_recovery
+        .as_ref()
+        .expect("selection recovery should remain projected")
+        .recovery_binding
+        .clone();
+
+    let missing_route_error = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "must not allocate without the exact route binding".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                model_ref: Some(replacement.clone()),
+                model_selection_binding: Some(context.model_selection_binding.clone()),
+                route_recovery_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: None,
+            },
+        )
+        .expect_err("missing route binding must reject synchronously");
+    assert!(matches!(
+        missing_route_error,
+        crate::HttpRegistryError::SessionRunRecoveryRequired { recovery }
+            if recovery.code
+                == crate::HttpSessionRouteRecoveryCode::SessionRouteSelectionRequired
+    ));
+
+    let stale_catalog_error = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "must not allocate with stale catalog binding".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                model_ref: Some(replacement),
+                model_selection_binding: Some("stale-selection-binding".to_owned()),
+                route_recovery_binding: Some(route_recovery_binding),
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: None,
+            },
+        )
+        .expect_err("stale model selection binding must reject synchronously");
+    assert!(matches!(
+        stale_catalog_error,
+        crate::HttpRegistryError::SessionRunRecoveryRequired { recovery }
+            if recovery.code
+                == crate::HttpSessionRouteRecoveryCode::SessionRouteSelectionRequired
+    ));
+    assert!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain registered")
+            .run_ids
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn production_supervisor_routes_typed_task_continuation_to_shared_preparer() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
@@ -267,6 +534,7 @@ enabled = true
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
                 model_selection_binding: None,
+                route_recovery_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -327,6 +595,8 @@ fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpS
         durable_session_scope_id,
         session_log_path: session_path.display().to_string(),
         foreground_run_id: None,
+        route_transition: None,
+        route_recovery: None,
     }
 }
 
@@ -615,6 +885,8 @@ async fn production_driver_bounds_retained_session_projections_with_scope_safe_l
             .display()
             .to_string(),
         foreground_run_id: None,
+        route_transition: None,
+        route_recovery: None,
     };
 
     for index in 0..MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES {
@@ -2451,13 +2723,28 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
         session_ref: "session-history.jsonl".to_owned(),
         session_id: durable_session_id.clone(),
         label: Some("History".to_owned()),
+        recovery_binding: None,
     };
+    let external_attachment =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )
+        .expect("external controller should own the fixture attachment");
 
     let opened = registry
         .open_session(request.clone())
-        .expect("current durable source should reopen");
+        .expect("busy current durable source should still reopen read-only");
 
     assert_eq!(opened.durable_session_scope_id, durable_session_id);
+    assert!(opened.route_transition.is_none());
+    let attachment_recovery = opened
+        .route_recovery
+        .as_ref()
+        .expect("busy read handle should carry exact attachment recovery");
+    assert_eq!(
+        attachment_recovery.code,
+        crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive
+    );
     let transcript = registry
         .transcript_page(&opened.id, None, 50)
         .expect("production transcript should project");
@@ -2506,6 +2793,42 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
             .canonicalize()
             .expect("session path should resolve")
     );
+    let recovery_binding = attachment_recovery.recovery_binding.clone();
+    drop(external_attachment);
+    let replacement_attachment =
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &session_path,
+        )
+        .expect("replacement controller should advance the attachment generation");
+    let refreshed_recovery_binding = match registry.open_session(HttpSessionOpenRequest {
+        recovery_binding: Some(recovery_binding),
+        ..request.clone()
+    }) {
+        Err(crate::HttpRegistryError::SessionRunRecoveryRequired { recovery }) => {
+            assert_eq!(
+                recovery.code,
+                crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive
+            );
+            recovery.recovery_binding
+        }
+        other => panic!("stale retry must return a refreshed exact binding: {other:?}"),
+    };
+    drop(replacement_attachment);
+    let activated = registry
+        .open_session(HttpSessionOpenRequest {
+            recovery_binding: Some(refreshed_recovery_binding),
+            ..request.clone()
+        })
+        .expect("exact retry should activate the existing read handle");
+    assert_eq!(activated.id, opened.id);
+    assert!(activated.route_recovery.is_none());
+    assert_eq!(
+        activated
+            .route_transition
+            .as_ref()
+            .map(|transition| transition.kind),
+        Some(crate::HttpSessionRouteTransitionKind::Exact)
+    );
     assert_eq!(
         registry
             .open_session(request)
@@ -2518,8 +2841,120 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
             session_ref: "session-history.jsonl".to_owned(),
             session_id: "stale-id".to_owned(),
             label: None,
+            recovery_binding: None,
         }),
         Err(crate::HttpRegistryError::DurableSessionIdentityChanged)
+    );
+}
+
+#[tokio::test]
+async fn production_open_reports_one_automatic_same_trust_route_rebind() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let config_path = temp.path().join("sigil.toml");
+    write_production_test_config(&config_path, ".");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+    let session_path = sessions.join("session-rebind.jsonl");
+    let (binding, attachment) =
+        sigil_runtime::application_run::bind_application_session_with_model_ref_and_attachment(
+            &config_path,
+            temp.path(),
+            Some(&session_path),
+            None,
+            None,
+        )
+        .expect("application binding should persist the initial route trust boundary");
+    let durable_session_id = binding.session_scope_id;
+    drop(attachment);
+
+    let changed = std::fs::read_to_string(&config_path)
+        .expect("original config should read")
+        .replace(
+            "base_url = \"http://127.0.0.1:1\"",
+            "base_url = \"http://127.0.0.1:1/v2\"",
+        );
+    std::fs::write(&config_path, changed).expect("same-trust route config should update");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-rebind.json"), 8)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures-rebind.json"), 8)
+            .expect("disclosure journal should initialize"),
+    );
+    let lifecycle = sigil_runtime::LocalSessionLifecycleService::new(
+        "workspace-rebind",
+        &sessions,
+        temp.path().join("exports-rebind"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path())
+                .with_session_lifecycle(lifecycle),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-rebind.json"), 8)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let request = HttpSessionOpenRequest {
+        session_ref: "session-rebind.jsonl".to_owned(),
+        session_id: durable_session_id,
+        label: Some("Rebound".to_owned()),
+        recovery_binding: None,
+    };
+
+    let opened = registry
+        .open_session(request.clone())
+        .expect("same-trust drift should rebind automatically");
+    let receipt = opened
+        .route_transition
+        .as_ref()
+        .expect("automatic rebind should return a transition receipt");
+    assert_eq!(receipt.kind, crate::HttpSessionRouteTransitionKind::Rebound);
+    assert_eq!(receipt.connection_id.as_deref(), Some("local-test"));
+    assert_eq!(receipt.model_id.as_deref(), Some("gpt-test"));
+    assert!(receipt.remote_context_reset);
+    assert!(opened.route_recovery.is_none());
+    let rebound_count = sigil_kernel::JsonlSessionStore::read_entries(&session_path)
+        .expect("rebound session should remain readable")
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                sigil_kernel::SessionLogEntry::Control(ControlEntry::SessionRouteRebound { .. })
+            )
+        })
+        .count();
+    assert_eq!(rebound_count, 1);
+
+    let reopened = registry
+        .open_session(request)
+        .expect("repeat open should be idempotent");
+    assert_eq!(
+        reopened
+            .route_transition
+            .as_ref()
+            .map(|transition| transition.kind),
+        Some(crate::HttpSessionRouteTransitionKind::Exact)
+    );
+    assert_eq!(
+        sigil_kernel::JsonlSessionStore::read_entries(&session_path)
+            .expect("idempotently reopened session should remain readable")
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                sigil_kernel::SessionLogEntry::Control(ControlEntry::SessionRouteRebound { .. })
+            ))
+            .count(),
+        1
     );
 }
 
@@ -2765,6 +3200,7 @@ async fn preparation_deadline_quarantines_before_ack_and_retains_the_owner_for_r
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
                 model_selection_binding: None,
+                route_recovery_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,
@@ -2981,6 +3417,7 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
                 permission_mode: Some(HttpPermissionMode::Manual),
                 model_ref: None,
                 model_selection_binding: None,
+                route_recovery_binding: None,
                 reasoning_effort: None,
                 reasoning_effort_binding: None,
                 skill_binding: None,

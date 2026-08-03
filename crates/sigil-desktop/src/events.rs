@@ -256,6 +256,9 @@ pub struct DesktopPublicControlEvent {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DesktopPublicRunEventKind {
+    RouteTransition {
+        transition: DesktopPublicSessionRouteTransitionView,
+    },
     RunStarted {
         prompt: String,
     },
@@ -314,6 +317,12 @@ pub enum DesktopPublicRunEventKind {
     },
     RunFailed {
         error: String,
+    },
+    RouteRecoveryRequired {
+        code: DesktopRouteRecoveryCode,
+        actions: Vec<DesktopRouteRecoveryAction>,
+        recovery_binding: String,
+        retryable: bool,
     },
     RunCancelled,
     TextDelta {
@@ -389,6 +398,7 @@ pub enum DesktopPublicRunEventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopTimelineEventKind {
+    RouteTransition,
     RunStarted,
     TaskRunStarted,
     TaskRunFinished,
@@ -413,6 +423,7 @@ pub enum DesktopTimelineEventKind {
     Control,
     RunFinished,
     RunFailed,
+    RouteRecoveryRequired,
     RunCancelled,
     Other,
 }
@@ -534,6 +545,74 @@ pub struct DesktopTimelineEvent {
     pub task: Option<DesktopTimelineTask>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_task: Option<DesktopTimelineTerminalTask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_recovery: Option<DesktopTimelineRouteRecovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_transition: Option<DesktopTimelineRouteTransition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopRouteTransitionKind {
+    Exact,
+    Rebound,
+    ExplicitlyConfirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPublicSessionRouteTransitionView {
+    pub kind: DesktopRouteTransitionKind,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    pub remote_context_reset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineRouteTransition {
+    pub kind: DesktopRouteTransitionKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub remote_context_reset: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopRouteRecoveryCode {
+    SessionRouteConfirmationRequired,
+    SessionRouteSelectionRequired,
+    ModelRouteNotConfigured,
+    ConnectionConfigInvalid,
+    ProviderUnavailable,
+    SessionAlreadyActive,
+    SessionWriterBusy,
+    SessionStreamInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopRouteRecoveryAction {
+    ConfirmCurrentRoute,
+    RepairConnection,
+    SelectReplacement,
+    StartNewSession,
+    RetryProvider,
+    RetrySessionAttach,
+    BackToSessionLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineRouteRecovery {
+    pub code: DesktopRouteRecoveryCode,
+    pub actions: Vec<DesktopRouteRecoveryAction>,
+    pub recovery_binding: String,
+    pub retryable: bool,
 }
 
 /// Exact bounded execution transition projected from an opaque public control payload.
@@ -625,7 +704,47 @@ impl DesktopProtocolEvent {
             }
             _ => None,
         };
+        let route_recovery = match event {
+            DesktopPublicRunEventKind::RouteRecoveryRequired {
+                code,
+                actions,
+                recovery_binding,
+                retryable,
+            } => Some(DesktopTimelineRouteRecovery {
+                code: *code,
+                actions: actions.clone(),
+                recovery_binding: bounded_machine_label(recovery_binding)?,
+                retryable: *retryable,
+            }),
+            _ => None,
+        };
+        let route_transition = match event {
+            DesktopPublicRunEventKind::RouteTransition { transition } => {
+                Some(DesktopTimelineRouteTransition {
+                    kind: transition.kind,
+                    connection_id: transition.connection_id.clone(),
+                    model_id: transition.model_id.clone(),
+                    remote_context_reset: transition.remote_context_reset,
+                })
+            }
+            _ => None,
+        };
         let (kind, text, item_id, status) = match event {
+            DesktopPublicRunEventKind::RouteTransition { transition } => (
+                DesktopTimelineEventKind::RouteTransition,
+                transition.remote_context_reset.then(|| {
+                    "Connection settings changed; remote provider context was reset.".to_owned()
+                }),
+                None,
+                Some(
+                    match transition.kind {
+                        DesktopRouteTransitionKind::Exact => "exact",
+                        DesktopRouteTransitionKind::Rebound => "rebound",
+                        DesktopRouteTransitionKind::ExplicitlyConfirmed => "explicitly_confirmed",
+                    }
+                    .to_owned(),
+                ),
+            ),
             DesktopPublicRunEventKind::RunStarted { prompt } => (
                 DesktopTimelineEventKind::RunStarted,
                 Some(bounded_text(prompt)),
@@ -780,6 +899,40 @@ impl DesktopProtocolEvent {
                 None,
                 Some("failed".to_owned()),
             ),
+            DesktopPublicRunEventKind::RouteRecoveryRequired { code, .. } => (
+                DesktopTimelineEventKind::RouteRecoveryRequired,
+                Some(
+                    match code {
+                        DesktopRouteRecoveryCode::SessionRouteConfirmationRequired => {
+                            "Session route changed and needs confirmation before another run."
+                        }
+                        DesktopRouteRecoveryCode::SessionRouteSelectionRequired => {
+                            "The saved connection is unavailable; select a replacement route."
+                        }
+                        DesktopRouteRecoveryCode::ModelRouteNotConfigured => {
+                            "Provider setup must be completed before another run."
+                        }
+                        DesktopRouteRecoveryCode::ConnectionConfigInvalid => {
+                            "The connection configuration is invalid and must be repaired."
+                        }
+                        DesktopRouteRecoveryCode::ProviderUnavailable => {
+                            "The provider is temporarily unavailable."
+                        }
+                        DesktopRouteRecoveryCode::SessionAlreadyActive => {
+                            "This session is already active in another Sigil surface."
+                        }
+                        DesktopRouteRecoveryCode::SessionWriterBusy => {
+                            "The session writer is busy; retry after it becomes available."
+                        }
+                        DesktopRouteRecoveryCode::SessionStreamInvalid => {
+                            "The session stream is invalid and cannot be activated."
+                        }
+                    }
+                    .to_owned(),
+                ),
+                None,
+                Some("recovery_required".to_owned()),
+            ),
             DesktopPublicRunEventKind::RunCancelled => (
                 DesktopTimelineEventKind::RunCancelled,
                 None,
@@ -819,6 +972,8 @@ impl DesktopProtocolEvent {
             tool_execution,
             task,
             terminal_task,
+            route_recovery,
+            route_transition,
         })
     }
 
@@ -1133,6 +1288,8 @@ impl DesktopPendingApproval {
             tool_execution: None,
             task: None,
             terminal_task: None,
+            route_recovery: None,
+            route_transition: None,
         })
     }
 }

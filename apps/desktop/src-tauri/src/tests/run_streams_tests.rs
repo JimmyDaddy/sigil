@@ -225,6 +225,8 @@ fn timeline(sequence: u64, kind: DesktopTimelineEventKind) -> DesktopTimelineEve
         tool_execution: None,
         task: None,
         terminal_task: None,
+        route_recovery: None,
+        route_transition: None,
     }
 }
 

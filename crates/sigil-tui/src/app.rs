@@ -311,6 +311,14 @@ pub struct AppState {
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub session_id: String,
+    pending_worker_session_attachment: std::cell::RefCell<
+        Option<(
+            PathBuf,
+            std::sync::Arc<
+                sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+            >,
+        )>,
+    >,
     support_build_info: SupportBuildInfo,
     update_state: update_flow::UpdateUiState,
     pub(crate) runtime: RuntimeStatusState,
@@ -608,6 +616,37 @@ fn configured_runtime_route(
 }
 
 impl AppState {
+    pub(crate) fn retain_worker_session_attachment(
+        &self,
+        session_log_path: PathBuf,
+        attachment: std::sync::Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
+    ) {
+        *self.pending_worker_session_attachment.borrow_mut() = Some((session_log_path, attachment));
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn worker_session_attachment(
+        &self,
+    ) -> Option<
+        std::sync::Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
+    > {
+        let mut pending = self.pending_worker_session_attachment.borrow_mut();
+        match pending.as_ref() {
+            Some((session_log_path, _)) if session_log_path == &self.session_log_path => pending
+                .as_ref()
+                .map(|(_, attachment)| std::sync::Arc::clone(attachment)),
+            Some(_) => {
+                *pending = None;
+                None
+            }
+            None => None,
+        }
+    }
+
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {
         let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let workspace_root =
@@ -655,6 +694,7 @@ impl AppState {
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
+            pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
             runtime: RuntimeStatusState {
@@ -686,6 +726,10 @@ impl AppState {
                 },
                 next_background_request_id: 1,
                 pending_worker_commands: Vec::new(),
+                pending_session_route_recovery_binding: None,
+                pending_session_route_recovery_code: None,
+                pending_session_route_recovery_target: None,
+                pending_session_route_selection: None,
                 worker_rebind_required: false,
                 active_balance_refresh_id: None,
                 active_model_picker_refresh: None,
@@ -778,6 +822,7 @@ impl AppState {
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
+            pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
             runtime: RuntimeStatusState {
@@ -809,6 +854,10 @@ impl AppState {
                 },
                 next_background_request_id: 1,
                 pending_worker_commands: Vec::new(),
+                pending_session_route_recovery_binding: None,
+                pending_session_route_recovery_code: None,
+                pending_session_route_recovery_target: None,
+                pending_session_route_selection: None,
                 worker_rebind_required: false,
                 active_balance_refresh_id: None,
                 active_model_picker_refresh: None,

@@ -47,7 +47,7 @@ pub(in crate::runner) fn fork_current_conversation(
     current_session: Option<&Session>,
     root_config: &RootConfig,
     request: &ControlledCheckpointRestoreRequest,
-) -> Result<ConversationForkOutput, String> {
+) -> Result<AttachedCheckpointForkOutput, String> {
     let session = current_session.ok_or_else(|| "session state is unavailable".to_owned())?;
     let resolved_model_route = session.resolved_model_route().cloned().map_or_else(
         || {
@@ -73,11 +73,17 @@ pub(in crate::runner) fn fork_current_conversation(
     let source_session_ref = SessionRef::new_relative(file_name)
         .map_err(|error| format!("failed to bind source session: {error:#}"))?;
     let destination_path = next_fork_path(parent, session.session_scope_id(), request)?;
+    let destination_attachment = Arc::new(
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &destination_path,
+        )
+        .map_err(|error| format!("failed to attach conversation fork destination: {error}"))?,
+    );
     let store = JsonlSessionStore::new(session_log_path)
         .map_err(|error| format!("failed to open source session store: {error:#}"))?;
     let records = JsonlSessionStore::read_event_records(session_log_path)
         .map_err(|error| format!("failed to read conversation fork stream: {error:#}"))?;
-    sigil_kernel::fork_conversation_at_checkpoint(
+    let output = sigil_kernel::fork_conversation_at_checkpoint(
         &store,
         &records,
         &ConversationForkRequest {
@@ -90,7 +96,17 @@ pub(in crate::runner) fn fork_current_conversation(
             resolved_model_route: Some(resolved_model_route),
         },
     )
-    .map_err(|error| format!("failed to fork conversation: {error:#}"))
+    .map_err(|error| format!("failed to fork conversation: {error:#}"))?;
+    Ok(AttachedCheckpointForkOutput {
+        output,
+        attachment: destination_attachment,
+    })
+}
+
+pub(in crate::runner) struct AttachedCheckpointForkOutput {
+    pub(in crate::runner) output: ConversationForkOutput,
+    pub(in crate::runner) attachment:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 }
 
 fn next_fork_path(

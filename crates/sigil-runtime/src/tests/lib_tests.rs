@@ -1718,6 +1718,51 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
     Ok(())
 }
 
+#[test]
+fn writable_memory_tools_follow_the_independent_default_off_capability() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let provider_capabilities =
+        provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");
+    let mut config = test_root_config("deepseek");
+    config.memory.enabled = false;
+    config.memory.writable = false;
+
+    let disabled = build_tool_registry_without_eager_mcp(
+        &config,
+        &provider_capabilities,
+        temp.path().to_path_buf(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )?;
+    assert!(
+        disabled
+            .spec_for(super::REMEMBER_USER_PREFERENCE_TOOL_NAME)
+            .is_none()
+    );
+
+    config.memory.writable = true;
+    let enabled = build_tool_registry_without_eager_mcp(
+        &config,
+        &provider_capabilities,
+        temp.path().to_path_buf(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )?;
+    assert!(
+        enabled
+            .spec_for(super::REMEMBER_USER_PREFERENCE_TOOL_NAME)
+            .is_some()
+    );
+    assert!(
+        enabled
+            .spec_for(super::REMEMBER_PROJECT_FACT_TOOL_NAME)
+            .is_some()
+    );
+    assert!(enabled.spec_for(super::INSPECT_MEMORY_TOOL_NAME).is_some());
+    assert!(enabled.spec_for(super::FORGET_MEMORY_TOOL_NAME).is_some());
+    Ok(())
+}
+
 #[tokio::test]
 async fn runtime_tool_surface_shares_code_intelligence_with_context_resolver() -> Result<()> {
     let temp = tempfile::tempdir()?;

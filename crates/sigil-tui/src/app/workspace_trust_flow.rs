@@ -67,6 +67,26 @@ impl AppState {
     }
 
     pub(crate) fn ensure_current_workspace_trust_decision(&mut self, reason: &str) -> Result<()> {
+        let attachment = std::sync::Arc::new(
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                &self.session_log_path,
+            )
+            .map_err(anyhow::Error::new)?,
+        );
+        self.ensure_current_workspace_trust_decision_with_attachment(reason, &attachment)?;
+        self.retain_worker_session_attachment(self.session_log_path.clone(), attachment);
+        Ok(())
+    }
+
+    pub(crate) fn ensure_current_workspace_trust_decision_with_attachment(
+        &mut self,
+        reason: &str,
+        attachment: &sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            attachment.session_path() == JsonlSessionStore::new(&self.session_log_path)?.path(),
+            "workspace trust attachment belongs to another durable session"
+        );
         let workspace_id = stable_workspace_id(&self.workspace_root)?;
         if workspace_trust_from_entries(&self.session_browser.current_entries, &workspace_id)
             == Some(WorkspaceTrust::Trusted)
@@ -78,6 +98,30 @@ impl AppState {
         let store = JsonlSessionStore::new(&self.session_log_path)?;
         store.append(&SessionLogEntry::Control(control.clone()))?;
         self.append_current_session_control(control);
+        Ok(())
+    }
+
+    pub(crate) fn ensure_target_workspace_trust_decision_with_attachment(
+        &self,
+        session_log_path: &std::path::Path,
+        entries: &mut Vec<SessionLogEntry>,
+        reason: &str,
+        attachment: &sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            attachment.session_path() == JsonlSessionStore::new(session_log_path)?.path(),
+            "workspace trust attachment belongs to another durable session"
+        );
+        let workspace_id = stable_workspace_id(&self.workspace_root)?;
+        if workspace_trust_from_entries(entries, &workspace_id) == Some(WorkspaceTrust::Trusted) {
+            return Ok(());
+        }
+        let control = ControlEntry::WorkspaceTrustDecision(
+            self.workspace_trust_decision_entry(workspace_id, reason),
+        );
+        JsonlSessionStore::new(session_log_path)?
+            .append(&SessionLogEntry::Control(control.clone()))?;
+        entries.push(SessionLogEntry::Control(control));
         Ok(())
     }
 

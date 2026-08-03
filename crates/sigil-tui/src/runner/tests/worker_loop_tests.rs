@@ -597,7 +597,7 @@ fn root_config_with_checks(
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: false },
+        memory: MemoryConfig::with_enabled(false),
         skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: CodeIntelligenceConfig::default(),

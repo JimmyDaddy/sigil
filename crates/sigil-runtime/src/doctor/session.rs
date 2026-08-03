@@ -189,6 +189,158 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
     }
 }
 
+pub(super) fn check_session_route_compatibility(
+    report: &mut DoctorReport,
+    session_dir: &Path,
+    root_config: &RootConfig,
+) {
+    let Ok(mut paths) = session_log_paths(session_dir) else {
+        return;
+    };
+    paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
+    let snapshot =
+        crate::provider_connections::ResolvedRouteConfigSnapshot::from_root_config(root_config);
+    let mut exact = 0usize;
+    let mut rebindable = 0usize;
+    let mut confirmation = 0usize;
+    let mut missing = 0usize;
+    let mut invalid = 0usize;
+    for path in paths {
+        if session_stream_too_large_for_doctor(&path) {
+            continue;
+        }
+        let Ok(records) = JsonlSessionStore::read_event_records(&path) else {
+            invalid += 1;
+            continue;
+        };
+        let entries = records
+            .iter()
+            .filter_map(|record| {
+                sigil_kernel::conversation_transcript_entry_from_record(record)
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let Some(route) = doctor_session_route(&entries) else {
+            invalid += 1;
+            continue;
+        };
+        let plan = crate::provider_connections::plan_session_route_resume(
+            &snapshot,
+            &crate::provider_connections::SessionRouteResumeInput {
+                route,
+                egress_trust_binding: doctor_session_route_trust(&entries),
+            },
+        );
+        match plan {
+            crate::provider_connections::SessionRouteResumePlan::Exact { .. } => exact += 1,
+            crate::provider_connections::SessionRouteResumePlan::RebindCurrentModel { .. } => {
+                rebindable += 1;
+            }
+            crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation { .. } => {
+                confirmation += 1;
+            }
+            crate::provider_connections::SessionRouteResumePlan::NeedsReplacement { .. } => {
+                missing += 1;
+            }
+            crate::provider_connections::SessionRouteResumePlan::NeedsSetup { .. } => invalid += 1,
+        }
+    }
+    let message = format!(
+        "exact={exact}, rebindable={rebindable}, confirmation_required={confirmation}, missing={missing}, invalid={invalid}"
+    );
+    if invalid > 0 {
+        report.push_with_remediation(
+            DoctorStatus::Error,
+            "session:route_resume",
+            message,
+            Some("repair provider configuration or inspect the invalid session before resuming"),
+        );
+    } else if confirmation > 0 || missing > 0 {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:route_resume",
+            message,
+            Some("open the session and confirm or select a connection; its transcript remains readable"),
+        );
+    } else {
+        report.push(DoctorStatus::Ok, "session:route_resume", message);
+    }
+}
+
+fn doctor_session_route(
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> Option<sigil_kernel::ResolvedModelRoute> {
+    let mut route = None;
+    for entry in entries {
+        match entry {
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionIdentity {
+                    resolved_model_route,
+                    ..
+                },
+            ) if route.is_none() => route = resolved_model_route.clone(),
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionModelSelected {
+                    resolved_model_route,
+                    ..
+                }
+                | sigil_kernel::ControlEntry::SessionRouteRebound {
+                    resolved_model_route,
+                    ..
+                },
+            ) => route = Some(resolved_model_route.clone()),
+            _ => {}
+        }
+    }
+    route
+}
+
+fn doctor_session_route_trust(
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> Option<sigil_kernel::RouteEgressTrustBinding> {
+    let mut fingerprint = None::<String>;
+    let mut binding = None;
+    for entry in entries {
+        match entry {
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionIdentity {
+                    resolved_model_route,
+                    ..
+                },
+            ) => {
+                fingerprint = resolved_model_route
+                    .as_ref()
+                    .map(|route| route.semantic_fingerprint.clone());
+                binding = None;
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionModelSelected {
+                    resolved_model_route,
+                    ..
+                }
+                | sigil_kernel::ControlEntry::SessionRouteRebound {
+                    resolved_model_route,
+                    ..
+                },
+            ) => {
+                fingerprint = Some(resolved_model_route.semantic_fingerprint.clone());
+                binding = None;
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::SessionRouteTrustBound {
+                    route_semantic_fingerprint,
+                    egress_trust_binding,
+                },
+            ) if fingerprint.as_deref() == Some(route_semantic_fingerprint.as_str()) => {
+                binding = Some(egress_trust_binding.clone());
+            }
+            _ => {}
+        }
+    }
+    binding
+}
+
 fn check_session_stream_permissions(
     report: &mut DoctorReport,
     session_paths: &[PathBuf],

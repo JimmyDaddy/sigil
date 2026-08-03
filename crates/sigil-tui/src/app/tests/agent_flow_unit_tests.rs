@@ -30,7 +30,7 @@ fn test_root_config() -> RootConfig {
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: true },
+        memory: MemoryConfig::with_enabled(true),
         skills: SkillConfig {
             user_skills: false,
             user_agents: false,

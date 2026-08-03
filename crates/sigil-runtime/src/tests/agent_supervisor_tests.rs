@@ -1171,7 +1171,7 @@ fn root_config() -> RootConfig {
         },
         permission: PermissionConfig::default(),
         model_request: Default::default(),
-        memory: MemoryConfig { enabled: true },
+        memory: MemoryConfig::with_enabled(true),
         skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
@@ -1225,7 +1225,7 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
         permission_context: sigil_kernel::PermissionEvaluationContext::default(),
-        memory_config: MemoryConfig { enabled: false },
+        memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
     }
 }

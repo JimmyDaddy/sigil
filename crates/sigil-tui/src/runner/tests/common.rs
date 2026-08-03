@@ -26,7 +26,7 @@ use super::super::{
     worker_event::WorkerMcpRuntimeEventSender,
     worker_loop::{
         RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, WorkerLoopMcpHandlers,
-        WorkerLoopTerminalRuntime, run_worker_loop,
+        WorkerLoopSessionAttachment, WorkerLoopTerminalRuntime, run_worker_loop,
     },
 };
 
@@ -50,7 +50,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig { enabled: false },
+        memory: MemoryConfig::with_enabled(false),
         skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
@@ -230,12 +230,16 @@ where
                 .expect("test runtime should build");
             let context_resolver =
                 sigil_runtime::RequestContextResolver::request_local(workspace_root.clone());
+            let attachment_lease = sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                &session_log_path,
+            )
+            .expect("test worker should acquire its session attachment");
             run_worker_loop(
                 runtime,
                 agent,
                 root_config,
                 workspace_root,
-                session_log_path,
+                WorkerLoopSessionAttachment::new(session_log_path, attachment_lease),
                 options,
                 (event_tx, event_rx, urgent_rx),
                 message_tx,

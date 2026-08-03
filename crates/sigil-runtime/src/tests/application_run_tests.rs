@@ -46,11 +46,12 @@ use super::{
     application_task_integration_review_view, application_terminal_projection,
     application_verification_view, attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_application_session_with_model_ref,
-    bind_existing_application_session, constrain_application_tool_registry,
-    continue_application_task_handoff, default_application_session_path,
-    optional_eager_mcp_warning, prepare_application_run, prepare_application_run_blocking,
-    prepare_application_task_continuation, record_application_preparation_cancellation,
-    rerun_application_verification, validate_execution_contract,
+    bind_application_session_with_model_ref_and_attachment, bind_existing_application_session,
+    constrain_application_tool_registry, continue_application_task_handoff,
+    default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
+    prepare_application_run_blocking, prepare_application_task_continuation,
+    record_application_preparation_cancellation, rerun_application_verification,
+    validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -716,7 +717,7 @@ fn adapter_session_binding_accepts_connection_models_and_rejects_unknown_connect
     );
     assert!(matches!(
         rejected,
-        Err(ApplicationRunPrepareError::Configuration { .. })
+        Err(ApplicationRunPrepareError::ConnectionConfigInvalid { .. })
     ));
     Ok(())
 }
@@ -810,6 +811,269 @@ fn session_reopen_binding_rejects_a_route_less_current_session() -> Result<()> {
 
     assert!(bind_existing_application_session(&config_path, &session_path).is_err());
     assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
+#[test]
+fn run_context_exposes_exact_bound_confirmation_and_application_applies_it() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let write_config = |port: u16| -> Result<()> {
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:{port}/v1"
+credential = {{ source = "none" }}
+"#
+            ),
+        )?;
+        Ok(())
+    };
+    write_config(1)?;
+    let session_path = temp.path().join("state/sessions/confirmation.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    write_config(2)?;
+
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    let recovery = context
+        .route_recovery
+        .expect("changed origin must require confirmation");
+    assert_eq!(
+        recovery.code,
+        super::ApplicationSessionRouteRecoveryCode::SessionRouteConfirmationRequired
+    );
+    assert!(!recovery.recovery_binding.contains("127.0.0.1"));
+
+    let mut unconfirmed = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "continue",
+        "run-unconfirmed",
+    );
+    unconfirmed.session_path = Some(binding.session_log_path.clone());
+    let error = match prepare_application_run_blocking(
+        unconfirmed,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    ) {
+        Ok(_) => panic!("unconfirmed egress change must not prepare a run"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.class(),
+        ApplicationRunPrepareErrorClass::SessionRouteConfirmationRequired
+    );
+
+    JsonlSessionStore::new(&binding.session_log_path)?.append(&SessionLogEntry::User(
+        sigil_kernel::ModelMessage::user("durable frontier advanced"),
+    ))?;
+    let mut stale_confirmation = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "continue",
+        "run-stale-confirmation",
+    );
+    stale_confirmation.session_path = Some(binding.session_log_path.clone());
+    stale_confirmation.route_recovery_binding = Some(recovery.recovery_binding.clone());
+    let stale_error = match prepare_application_run_blocking(
+        stale_confirmation,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    ) {
+        Ok(_) => panic!("a recovery binding must stale when the durable frontier advances"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        stale_error.class(),
+        ApplicationRunPrepareErrorClass::SessionRouteConfirmationRequired
+    );
+    let refreshed_recovery = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?
+    .route_recovery
+    .expect("route recovery remains required")
+    .recovery_binding;
+
+    let mut confirmed = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "continue",
+        "run-confirmed",
+    );
+    confirmed.session_path = Some(binding.session_log_path.clone());
+    confirmed.route_recovery_binding = Some(refreshed_recovery);
+    let prepared = prepare_application_run_blocking(
+        confirmed,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    )?;
+    assert_eq!(
+        prepared.session.session_scope_id(),
+        binding.session_scope_id
+    );
+    assert!(prepared.session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
+    )));
+    assert!(!prepared.session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionRouteRebound { .. })
+    )));
+    Ok(())
+}
+
+#[test]
+fn attached_bind_rejects_external_owner_before_route_recovery_writes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let write_config = |port: u16| -> Result<()> {
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:{port}/v1"
+credential = {{ source = "none" }}
+"#
+            ),
+        )?;
+        Ok(())
+    };
+    write_config(1)?;
+    let session_path = temp.path().join("state/sessions/attached-bind.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    write_config(2)?;
+    let before = std::fs::read(&binding.session_log_path)?;
+    let owner = crate::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+        &binding.session_log_path,
+    )?;
+
+    let error = bind_application_session_with_model_ref_and_attachment(
+        &config_path,
+        temp.path(),
+        Some(&binding.session_log_path),
+        None,
+        None,
+    )
+    .expect_err("external owner must reject before route recovery loads or appends");
+    assert_eq!(
+        error.class(),
+        ApplicationRunPrepareErrorClass::SessionAlreadyActive
+    );
+    assert!(
+        error
+            .recovery_binding()
+            .is_some_and(|binding| !binding.is_empty())
+    );
+    assert_eq!(std::fs::read(&binding.session_log_path)?, before);
+    drop(owner);
+    Ok(())
+}
+
+#[test]
+fn same_origin_endpoint_correction_rebinds_without_blocking_run_context() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let write_config = |path: &str| -> Result<()> {
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1{path}"
+credential = {{ source = "none" }}
+"#
+            ),
+        )?;
+        Ok(())
+    };
+    write_config("/wrong")?;
+    let session_path = temp.path().join("state/sessions/rebind.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    write_config("/v1")?;
+    assert_eq!(
+        bind_existing_application_session(&config_path, &binding.session_log_path)?,
+        binding
+    );
+
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert!(context.route_recovery.is_none());
+    let mut request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "continue",
+        "run-rebound",
+    );
+    request.session_path = Some(binding.session_log_path.clone());
+    let prepared = prepare_application_run_blocking(
+        request,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    )?;
+    assert_eq!(
+        prepared.session.session_scope_id(),
+        binding.session_scope_id
+    );
+    assert_eq!(
+        prepared
+            .session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionRouteRebound { .. })
+            ))
+            .count(),
+        1
+    );
     Ok(())
 }
 
@@ -1110,6 +1374,134 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     assert_eq!(switched.model_ref.connection_id.as_str(), "deepseek-team");
     assert_eq!(switched.provider_name, "deepseek");
     assert_eq!(switched.model_name, "deepseek-v4-flash");
+    Ok(())
+}
+
+#[test]
+fn recovery_model_selection_requires_exact_route_and_catalog_bindings() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "original"
+model = "gpt-original"
+
+[connections.original]
+label = "Original"
+provider = "custom"
+protocol = "responses"
+base_url = "http://127.0.0.1:1/v1"
+credential = { source = "none" }
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/replacement-binding.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "replacement"
+model = "gpt-replacement"
+
+[connections.replacement]
+label = "Replacement"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:2/v1"
+credential = { source = "none" }
+"#,
+    )?;
+    let context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    let recovery = context
+        .route_recovery
+        .as_ref()
+        .expect("missing original connection should require replacement");
+    assert_eq!(
+        recovery.code,
+        super::ApplicationSessionRouteRecoveryCode::SessionRouteSelectionRequired
+    );
+    let replacement = context
+        .model_options
+        .iter()
+        .find(|option| {
+            option.availability
+                != crate::provider_connections::ModelAvailability::ConfiguredUnavailable
+        })
+        .expect("replacement route should be selectable")
+        .model_ref
+        .clone();
+    let before = std::fs::read(&binding.session_log_path)?;
+    let request = |route_recovery_binding: Option<String>, model_selection_binding: String| {
+        let mut request = ApplicationRunRequest::non_interactive(
+            &config_path,
+            temp.path(),
+            "continue on replacement",
+            "run-replacement-binding",
+        );
+        request.session_path = Some(binding.session_log_path.clone());
+        request.model_connection_id = Some(replacement.connection_id.clone());
+        request.model_name = Some(replacement.model_id.clone());
+        request.model_selection_binding = Some(model_selection_binding);
+        request.route_recovery_binding = route_recovery_binding;
+        request
+    };
+
+    for rejected in [
+        request(None, context.model_selection_binding.clone()),
+        request(
+            Some("stale-route-recovery-binding".to_owned()),
+            context.model_selection_binding.clone(),
+        ),
+    ] {
+        let error = match prepare_application_run_blocking(
+            rejected,
+            Arc::new(ApplicationSessionLeaseManager::new()),
+            false,
+        ) {
+            Ok(_) => panic!("replacement selection must require the exact route binding"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.class(),
+            ApplicationRunPrepareErrorClass::SessionRouteSelectionRequired
+        );
+        assert_eq!(std::fs::read(&binding.session_log_path)?, before);
+    }
+
+    let prepared = prepare_application_run_blocking(
+        request(
+            Some(recovery.recovery_binding.clone()),
+            context.model_selection_binding,
+        ),
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+    )?;
+    assert_eq!(
+        prepared.session.session_scope_id(),
+        binding.session_scope_id
+    );
+    assert_eq!(
+        prepared
+            .session
+            .resolved_model_route()
+            .map(|route| &route.model_ref),
+        Some(&replacement)
+    );
     Ok(())
 }
 
@@ -2189,6 +2581,7 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
             config_path,
             launch_cwd: temp.path().to_path_buf(),
             session_path: session_path.clone(),
+            session_attachment: None,
             expected_session_scope_id: session_scope_id.clone(),
             run_id: "run-application-task-continuation".to_owned(),
             task_id: task_id.clone(),
@@ -2325,6 +2718,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
             config_path,
             launch_cwd: temp.path().to_path_buf(),
             session_path: session_path.clone(),
+            session_attachment: None,
             expected_session_scope_id: "stale-session-scope".to_owned(),
             run_id: "run-stale-task-continuation".to_owned(),
             task_id,

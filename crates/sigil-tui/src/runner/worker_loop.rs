@@ -175,7 +175,8 @@ pub(in crate::runner) use queue_driver::{
     prepare_next_queued_conversation_pressure_admission, queue_conversation_input,
 };
 pub(in crate::runner) use scheduler::{
-    WorkerLoopTerminalRuntime, finish_idle_auto_compaction, run_worker_loop,
+    WorkerLoopSessionAttachment, WorkerLoopTerminalRuntime, finish_idle_auto_compaction,
+    run_worker_loop,
 };
 pub use scheduler::{WorkerReactorMetricsSnapshot, worker_reactor_metrics};
 pub(in crate::runner) use session_lifecycle_runtime::{
@@ -185,7 +186,9 @@ pub(in crate::runner) use session_lifecycle_runtime::{
     preview_session_retention, set_local_session_pin,
 };
 pub(in crate::runner) use session_transition::{
-    SessionTransitionKind, ensure_session_transition_allowed, transition_session,
+    SessionTransitionKind, ensure_session_transition_allowed, session_transition_recovery_message,
+    transition_session, transition_session_with_attachment,
+    transition_session_with_attachment_recovery,
 };
 pub(in crate::runner) use state::{WorkerLoopState, register_worker_active_projection_observer};
 pub(in crate::runner) use task_runtime::{

@@ -66,6 +66,7 @@ pub(in crate::runner) enum CompactionPreparationTaskResult {
 #[derive(Default)]
 pub(in crate::runner) struct CompactionPreparationTaskManager {
     active: Option<ActiveCompactionPreparationTask>,
+    retired: Vec<JoinHandle<()>>,
 }
 
 struct ActiveCompactionPreparationTask {
@@ -85,16 +86,24 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
+        session_attachment: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
         result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
-    ) where
+    ) -> Result<(), String>
+    where
         F: FnOnce() -> Result<ManualV2CompactionPreparation, String> + Send + 'static,
     {
         self.abort_all();
+        let route_owner = compaction_route_owner(&session_attachment, &session_scope_id)?;
+        let task_attachment = Arc::clone(&session_attachment);
         let cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&cancelled);
         let result_session_scope_id = session_scope_id.clone();
         let handle = runtime.spawn_blocking(move || {
+            let _route_owner = route_owner;
+            let _session_attachment = task_attachment;
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -114,6 +123,7 @@ impl CompactionPreparationTaskManager {
             cancelled,
             handle,
         });
+        Ok(())
     }
 
     pub(in crate::runner) fn start_idle<F>(
@@ -121,16 +131,24 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
+        session_attachment: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
         result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
-    ) where
+    ) -> Result<(), String>
+    where
         F: FnOnce() -> Result<IdleV2CompactionPreparation, String> + Send + 'static,
     {
         self.abort_all();
+        let route_owner = compaction_route_owner(&session_attachment, &session_scope_id)?;
+        let task_attachment = Arc::clone(&session_attachment);
         let cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&cancelled);
         let result_session_scope_id = session_scope_id.clone();
         let handle = runtime.spawn_blocking(move || {
+            let _route_owner = route_owner;
+            let _session_attachment = task_attachment;
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -150,6 +168,7 @@ impl CompactionPreparationTaskManager {
             cancelled,
             handle,
         });
+        Ok(())
     }
 
     pub(in crate::runner) fn start_pre_turn<F>(
@@ -157,16 +176,24 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
+        session_attachment: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
         result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
-    ) where
+    ) -> Result<(), String>
+    where
         F: FnOnce() -> Result<PreTurnV2CompactionPreparation, String> + Send + 'static,
     {
         self.abort_all();
+        let route_owner = compaction_route_owner(&session_attachment, &session_scope_id)?;
+        let task_attachment = Arc::clone(&session_attachment);
         let cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&cancelled);
         let result_session_scope_id = session_scope_id.clone();
         let handle = runtime.spawn_blocking(move || {
+            let _route_owner = route_owner;
+            let _session_attachment = task_attachment;
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -186,6 +213,7 @@ impl CompactionPreparationTaskManager {
             cancelled,
             handle,
         });
+        Ok(())
     }
 
     pub(in crate::runner) fn start_overflow<F>(
@@ -193,16 +221,24 @@ impl CompactionPreparationTaskManager {
         runtime: &Runtime,
         request_id: u64,
         session_scope_id: String,
+        session_attachment: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
         result_tx: WorkerEventPayloadSender<CompactionPreparationTaskResult>,
         prepare: F,
-    ) where
+    ) -> Result<(), String>
+    where
         F: FnOnce() -> Result<OverflowV2CompactionPreparation, String> + Send + 'static,
     {
         self.abort_all();
+        let route_owner = compaction_route_owner(&session_attachment, &session_scope_id)?;
+        let task_attachment = Arc::clone(&session_attachment);
         let cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&cancelled);
         let result_session_scope_id = session_scope_id.clone();
         let handle = runtime.spawn_blocking(move || {
+            let _route_owner = route_owner;
+            let _session_attachment = task_attachment;
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -222,10 +258,15 @@ impl CompactionPreparationTaskManager {
             cancelled,
             handle,
         });
+        Ok(())
     }
 
     pub(in crate::runner) fn has_active(&self) -> bool {
-        self.active.is_some()
+        self.active.is_some() || self.retired.iter().any(|handle| !handle.is_finished())
+    }
+
+    pub(in crate::runner) fn reap_finished(&mut self) {
+        self.retired.retain(|handle| !handle.is_finished());
     }
 
     pub(in crate::runner) fn accept_result(
@@ -236,7 +277,12 @@ impl CompactionPreparationTaskManager {
         if self.active.as_ref().is_some_and(|task| {
             task.request_id == request_id && task.session_scope_id == session_scope_id
         }) {
-            self.active = None;
+            if let Some(task) = self.active.take()
+                && !task.handle.is_finished()
+            {
+                self.retired.push(task.handle);
+            }
+            self.reap_finished();
             true
         } else {
             false
@@ -260,8 +306,30 @@ impl CompactionPreparationTaskManager {
         if let Some(task) = self.active.take() {
             task.cancelled.store(true, Ordering::Release);
             task.handle.abort();
+            self.retired.push(task.handle);
+        }
+        self.reap_finished();
+    }
+
+    pub(in crate::runner) fn cancel_and_join(&mut self, runtime: &Runtime) {
+        self.abort_all();
+        for handle in self.retired.drain(..) {
+            let _ = runtime.block_on(handle);
         }
     }
+}
+
+fn compaction_route_owner(
+    attachment: &Arc<
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    >,
+    session_scope_id: &str,
+) -> Result<sigil_runtime::provider_connections::SessionRouteExecutionOwner, String> {
+    attachment
+        .route_mutation_authority(session_scope_id)
+        .map_err(|error| format!("session route authority is unavailable: {error:#}"))?
+        .acquire_execution_owner()
+        .map_err(|error| format!("session route execution owner is unavailable: {error}"))
 }
 
 impl Drop for CompactionPreparationTaskManager {

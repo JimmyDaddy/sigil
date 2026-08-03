@@ -3067,7 +3067,7 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         app.into_worker_command(AppAction::SwitchSession {
             session_log_path: std::path::PathBuf::from("session.jsonl"),
         }),
-        WorkerCommand::SwitchSession { session_log_path }
+        WorkerCommand::SwitchSession { session_log_path, .. }
             if session_log_path == std::path::Path::new("session.jsonl")
     ));
     assert!(matches!(
@@ -3081,6 +3081,37 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         })
     }));
     assert!(panic.is_err());
+}
+
+#[test]
+fn attachment_retry_binding_is_scoped_to_the_exact_resume_target() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let busy_target = std::path::PathBuf::from("session-busy.jsonl");
+    let other_target = std::path::PathBuf::from("session-other.jsonl");
+    app.mark_pending_session_transition_target(busy_target.clone());
+    app.set_pending_session_route_recovery(
+        sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive,
+        "busy-generation-binding".to_owned(),
+    );
+
+    assert!(matches!(
+        app.into_worker_command(AppAction::SwitchSession {
+            session_log_path: other_target.clone(),
+        }),
+        WorkerCommand::SwitchSession {
+            session_log_path,
+            attachment_recovery_binding: None,
+        } if session_log_path == other_target
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::SwitchSession {
+            session_log_path: busy_target.clone(),
+        }),
+        WorkerCommand::SwitchSession {
+            session_log_path,
+            attachment_recovery_binding: Some(binding),
+        } if session_log_path == busy_target && binding == "busy-generation-binding"
+    ));
 }
 
 #[test]

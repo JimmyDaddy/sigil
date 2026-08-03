@@ -100,6 +100,7 @@ pub mod hosted_finalizer;
 mod hosted_web_search;
 pub mod image_attachment;
 pub mod integration_lanes;
+pub mod interactive_session_attachment;
 pub mod isolated_workspace;
 pub mod machine_protocol;
 pub mod mcp_declaration;
@@ -130,6 +131,7 @@ mod web_fetch_tool;
 pub mod web_search_connector;
 mod web_search_tool;
 pub mod webfetch;
+mod writable_memory;
 pub use agent_profile_registry::{
     AgentProfileIndexContext, AgentProfileRegistry, BUILD_PROFILE_ID, EXPLORE_PROFILE_ID,
     ModelVisibleAgentIndex, ModelVisibleAgentIndexEntry, PLAN_PROFILE_ID, ResolvedAgentProfile,
@@ -350,6 +352,12 @@ pub use webfetch::{
     WebFetchExecutionError, WebFetchExecutionOutcome, WebFetchExecutionRequest, WebFetchExecutor,
     WebFetchHopTransport,
 };
+pub use writable_memory::{
+    DurableMemoryForgetReceipt, DurableMemoryInspectEntry, DurableMemoryReceipt,
+    FORGET_MEMORY_TOOL_NAME, INSPECT_MEMORY_TOOL_NAME, REMEMBER_PROJECT_FACT_TOOL_NAME,
+    REMEMBER_USER_PREFERENCE_TOOL_NAME, WritableMemoryScope,
+};
+pub(crate) use writable_memory::{WritableMemoryStore, register_writable_memory_tools};
 
 pub use mcp_registry::{
     LazyMcpActivationResult, McpDeclarationRegistrationOptions, McpPluginTrustSource,

@@ -121,6 +121,10 @@ enum Commands {
         connection: Option<String>,
         #[arg(long, requires = "connection")]
         model: Option<String>,
+        #[arg(long, value_name = "JSONL_PATH")]
+        session: Option<PathBuf>,
+        #[arg(long, value_name = "BINDING", requires = "session")]
+        route_recovery_binding: Option<String>,
     },
     Resume {
         session: Option<String>,
@@ -407,6 +411,8 @@ async fn run_main() -> Result<u8> {
             output: RunOutput::Text,
             connection,
             model,
+            session,
+            route_recovery_binding,
         } => {
             run_command(
                 &config_path,
@@ -414,6 +420,8 @@ async fn run_main() -> Result<u8> {
                 prompt,
                 connection.as_deref(),
                 model.as_deref(),
+                session.as_deref(),
+                route_recovery_binding.as_deref(),
             )
             .await?
         }
@@ -422,6 +430,8 @@ async fn run_main() -> Result<u8> {
             output,
             connection,
             model,
+            session,
+            route_recovery_binding,
         } => {
             let code = run_machine_command(
                 &config_path,
@@ -430,6 +440,8 @@ async fn run_main() -> Result<u8> {
                 output,
                 connection.as_deref(),
                 model.as_deref(),
+                session.as_deref(),
+                route_recovery_binding.as_deref(),
             )
             .await
             .as_i32();
@@ -1342,6 +1354,8 @@ fn cli_application_run_request(
     prompt: String,
     connection: Option<&str>,
     model: Option<&str>,
+    session_path: Option<&Path>,
+    route_recovery_binding: Option<&str>,
 ) -> std::result::Result<ApplicationRunRequest, ApplicationRunPrepareError> {
     let mut request = ApplicationRunRequest::non_interactive(
         config_path,
@@ -1349,6 +1363,8 @@ fn cli_application_run_request(
         prompt,
         uuid::Uuid::new_v4().to_string(),
     );
+    request.session_path = session_path.map(Path::to_path_buf);
+    request.route_recovery_binding = route_recovery_binding.map(str::to_owned);
     match (connection, model) {
         (None, None) => {}
         (Some(connection), Some(model)) => {
@@ -1376,11 +1392,21 @@ async fn run_command(
     prompt: String,
     connection: Option<&str>,
     model: Option<&str>,
+    session_path: Option<&Path>,
+    route_recovery_binding: Option<&str>,
 ) -> Result<()> {
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
     let services = ApplicationRunServices::new(disclosure_presenter);
-    let request = cli_application_run_request(config_path, launch_cwd, prompt, connection, model)?;
+    let request = cli_application_run_request(
+        config_path,
+        launch_cwd,
+        prompt,
+        connection,
+        model,
+        session_path,
+        route_recovery_binding,
+    )?;
     let prepared = prepare_application_run(request, &services).await?;
     let (execution, _control) = prepared.into_parts();
     let mut handler = StdoutEventHandler;
@@ -1403,6 +1429,8 @@ async fn run_machine_command(
     output: RunOutput,
     connection: Option<&str>,
     model: Option<&str>,
+    session_path: Option<&Path>,
+    route_recovery_binding: Option<&str>,
 ) -> MachineExitCode {
     let mut stdout = io::stdout();
     let mut cancellation =
@@ -1423,6 +1451,8 @@ async fn run_machine_command(
         output,
         connection,
         model,
+        session_path,
+        route_recovery_binding,
         &mut stdout,
         cancellation,
     )
@@ -1445,6 +1475,8 @@ where
         launch_cwd,
         prompt,
         output,
+        None,
+        None,
         None,
         None,
         writer,
@@ -1473,6 +1505,8 @@ where
         output,
         None,
         None,
+        None,
+        None,
         writer,
         cancellation,
     )
@@ -1487,6 +1521,8 @@ async fn run_machine_command_with_route_and_cancellation<W, F>(
     output: RunOutput,
     connection: Option<&str>,
     model: Option<&str>,
+    session_path: Option<&Path>,
+    route_recovery_binding: Option<&str>,
     writer: &mut W,
     cancellation: F,
 ) -> MachineExitCode
@@ -1499,18 +1535,25 @@ where
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
     let services = ApplicationRunServices::new(disclosure_presenter);
     let mut cancellation = Box::pin(cancellation);
-    let request =
-        match cli_application_run_request(config_path, launch_cwd, prompt, connection, model) {
-            Ok(request) => request,
-            Err(error) => {
-                let machine_error = machine_error_from_prepare(&error);
-                return write_machine_terminal(
-                    writer,
-                    MachineRecord::error(machine_error.clone()),
-                    MachineExitCode::for_error(machine_error.code),
-                );
-            }
-        };
+    let request = match cli_application_run_request(
+        config_path,
+        launch_cwd,
+        prompt,
+        connection,
+        model,
+        session_path,
+        route_recovery_binding,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            let machine_error = machine_error_from_prepare(&error);
+            return write_machine_terminal(
+                writer,
+                MachineRecord::error(machine_error.clone()),
+                MachineExitCode::for_error(machine_error.code),
+            );
+        }
+    };
     let mut preparation = Box::pin(prepare_application_run(request, &services));
     let prepared = tokio::select! {
         biased;
@@ -1599,6 +1642,7 @@ where
                         run_id,
                         status: MachineRunStatus::Cancelled,
                         final_text: String::new(),
+                        route_transition: None,
                         session_log_path,
                     }),
                     MachineExitCode::Cancelled,
@@ -1642,6 +1686,11 @@ where
                 run_id: run.run_id,
                 status,
                 final_text: run.agent_output.result.final_text,
+                route_transition: Some(
+                    sigil_runtime::application_run::application_public_route_transition(
+                        &run.route_transition,
+                    ),
+                ),
                 session_log_path,
             };
             write_machine_terminal(
@@ -1706,16 +1755,98 @@ where
 }
 
 fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineError {
+    use sigil_kernel::PublicRouteRecoveryAction as Action;
+
     let code = match error.class() {
         ApplicationRunPrepareErrorClass::InvalidInvocation => MachineErrorCode::InvalidInvocation,
         ApplicationRunPrepareErrorClass::Configuration => MachineErrorCode::ConfigurationInvalid,
+        ApplicationRunPrepareErrorClass::ConnectionConfigInvalid => {
+            MachineErrorCode::ConnectionConfigInvalid
+        }
+        ApplicationRunPrepareErrorClass::ProviderUnavailable => {
+            MachineErrorCode::ProviderUnavailable
+        }
         ApplicationRunPrepareErrorClass::ModelRouteNotConfigured => {
             MachineErrorCode::ModelRouteNotConfigured
+        }
+        ApplicationRunPrepareErrorClass::SessionRouteConfirmationRequired => {
+            MachineErrorCode::SessionRouteConfirmationRequired
+        }
+        ApplicationRunPrepareErrorClass::SessionRouteSelectionRequired => {
+            MachineErrorCode::SessionRouteSelectionRequired
+        }
+        ApplicationRunPrepareErrorClass::SessionAlreadyActive => {
+            MachineErrorCode::SessionAlreadyActive
+        }
+        ApplicationRunPrepareErrorClass::SessionWriterBusy => MachineErrorCode::SessionWriterBusy,
+        ApplicationRunPrepareErrorClass::SessionStreamInvalid => {
+            MachineErrorCode::SessionStreamInvalid
         }
         ApplicationRunPrepareErrorClass::Execution => MachineErrorCode::ExecutionFailed,
         ApplicationRunPrepareErrorClass::Internal => MachineErrorCode::Internal,
     };
-    MachineError::new(code, error.to_string(), false)
+    let (retryable, allowed_actions) = match error.class() {
+        ApplicationRunPrepareErrorClass::SessionRouteConfirmationRequired => (
+            true,
+            vec![
+                Action::ConfirmCurrentRoute,
+                Action::RepairConnection,
+                Action::SelectReplacement,
+                Action::StartNewSession,
+                Action::BackToSessionLibrary,
+            ],
+        ),
+        ApplicationRunPrepareErrorClass::SessionRouteSelectionRequired => (
+            true,
+            vec![
+                Action::RepairConnection,
+                Action::SelectReplacement,
+                Action::StartNewSession,
+                Action::BackToSessionLibrary,
+            ],
+        ),
+        ApplicationRunPrepareErrorClass::ModelRouteNotConfigured
+        | ApplicationRunPrepareErrorClass::Configuration
+        | ApplicationRunPrepareErrorClass::ConnectionConfigInvalid => (
+            false,
+            vec![
+                Action::RepairConnection,
+                Action::StartNewSession,
+                Action::BackToSessionLibrary,
+            ],
+        ),
+        ApplicationRunPrepareErrorClass::ProviderUnavailable => (
+            true,
+            vec![
+                Action::RetryProvider,
+                Action::RepairConnection,
+                Action::StartNewSession,
+                Action::BackToSessionLibrary,
+            ],
+        ),
+        ApplicationRunPrepareErrorClass::SessionAlreadyActive => (
+            true,
+            vec![
+                Action::RetrySessionAttach,
+                Action::StartNewSession,
+                Action::BackToSessionLibrary,
+            ],
+        ),
+        ApplicationRunPrepareErrorClass::SessionWriterBusy => (
+            true,
+            vec![Action::StartNewSession, Action::BackToSessionLibrary],
+        ),
+        ApplicationRunPrepareErrorClass::SessionStreamInvalid => (
+            false,
+            vec![Action::StartNewSession, Action::BackToSessionLibrary],
+        ),
+        ApplicationRunPrepareErrorClass::InvalidInvocation
+        | ApplicationRunPrepareErrorClass::Execution
+        | ApplicationRunPrepareErrorClass::Internal => (false, Vec::new()),
+    };
+    MachineError::new(code, error.to_string(), retryable)
+        .with_allowed_actions(allowed_actions)
+        .with_recovery_binding(error.recovery_binding())
 }
 
 fn write_machine_terminal<W>(
@@ -1964,7 +2095,40 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
             stderr: format!("[notice] {message}\n"),
             ..RenderedOutput::default()
         },
-        PublicRunEventKind::RunStarted { .. }
+        PublicRunEventKind::RouteRecoveryRequired { code, .. } => {
+            let message = match code {
+                sigil_kernel::PublicRouteRecoveryCode::SessionRouteConfirmationRequired => {
+                    "the saved session route needs explicit confirmation"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::SessionRouteSelectionRequired => {
+                    "the saved session route is unavailable; select a replacement"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::ModelRouteNotConfigured => {
+                    "no model route is configured"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid => {
+                    "the connection configuration is invalid"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable => {
+                    "the provider is temporarily unavailable"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive => {
+                    "the session is already active in another surface"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy => {
+                    "the session writer is busy"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid => {
+                    "the session stream is invalid"
+                }
+            };
+            RenderedOutput {
+                stderr: format!("[recovery] {message}\n"),
+                ..RenderedOutput::default()
+            }
+        }
+        PublicRunEventKind::RouteTransition { .. }
+        | PublicRunEventKind::RunStarted { .. }
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::TaskRunFinished { .. }

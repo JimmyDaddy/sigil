@@ -3248,6 +3248,154 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByRole("button", { name: "Continue read-only" })).toBeNull();
   });
 
+  it("renders session attachment busy separately and retries without losing the draft", async () => {
+    const user = userEvent.setup();
+    const runContext = vi.fn()
+      .mockResolvedValueOnce({
+        ...defaultRunContext,
+        routeRecovery: {
+          code: "session_already_active" as const,
+          allowedActions: ["retry_session_attach" as const, "start_new_session" as const],
+          recoveryBinding: `sha256:${"c".repeat(64)}`,
+          retryable: true,
+        },
+      })
+      .mockResolvedValue(defaultRunContext);
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "busy-route.jsonl",
+          sessionId: "durable-busy-route",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Busy route session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-busy-route", label: "Busy route session", runCount: 0 }),
+      runContext,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Busy route session/ }));
+    expect(await screen.findByText(/active in another Sigil window/)).toBeTruthy();
+    const composer = screen.getByRole("combobox", { name: "Message Sigil" });
+    await user.type(composer, "keep this exact draft");
+    await user.click(screen.getByRole("button", { name: "Retry attachment" }));
+
+    await waitFor(() => expect(runContext).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/active in another Sigil window/)).toBeNull());
+    expect((composer as HTMLTextAreaElement).value).toBe("keep this exact draft");
+  });
+
+  it("does not revive stale session recovery after the canonical run context is clean", async () => {
+    const user = userEvent.setup();
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "stale-session-recovery.jsonl",
+          sessionId: "durable-stale-session-recovery",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Recovered route session",
+          userMessageCount: 1,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({
+        id: "http-stale-session-recovery",
+        label: "Recovered route session",
+        runCount: 0,
+        routeRecovery: {
+          code: "session_already_active" as const,
+          allowedActions: ["retry_session_attach" as const],
+          recoveryBinding: `sha256:${"d".repeat(64)}`,
+          retryable: true,
+        },
+      }),
+      runContext: async () => defaultRunContext,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Recovered route session/ }));
+    await screen.findByRole("combobox", { name: "Message Sigil" });
+    await waitFor(() => {
+      expect(screen.queryByText(/active in another Sigil window/)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry attachment" })).toBeNull();
+    });
+  });
+
+  it("clears provider recovery after an exact retry starts successfully", async () => {
+    const user = userEvent.setup();
+    const unavailableContext: RunContext = {
+      ...defaultRunContext,
+      routeRecovery: {
+        code: "provider_unavailable",
+        allowedActions: ["retry_provider"],
+        recoveryBinding: "",
+        retryable: true,
+      },
+    };
+    const runContext = vi.fn()
+      .mockResolvedValueOnce(unavailableContext)
+      .mockResolvedValueOnce(unavailableContext)
+      .mockResolvedValue(defaultRunContext);
+    const startRun = vi.fn()
+      .mockRejectedValueOnce(new Error("provider unavailable"))
+      .mockResolvedValue({
+        id: "run-provider-retry",
+        sessionId: "http-provider-retry",
+        status: "running" as const,
+        permissionMode: "manual" as const,
+        streamSequence: 0,
+      });
+    render(<App bridge={bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({
+        ...emptyCatalog,
+        entries: [{
+          sessionRef: "provider-retry.jsonl",
+          sessionId: "durable-provider-retry",
+          sourceState: "ready",
+          sourceBytes: 512,
+          sourceModifiedAtUnixMs: 1_784_419_200_000,
+          title: "Provider retry session",
+          userMessageCount: 0,
+          assistantMessageCount: 0,
+          toolResultCount: 0,
+          pinned: false,
+        }],
+      }),
+      openSession: async () => ({ id: "http-provider-retry", label: "Provider retry session", runCount: 0 }),
+      runContext,
+      startRun,
+    })} />);
+
+    await user.click(await screen.findByRole("button", { name: /^Provider retry session/ }));
+    expect(await screen.findByText("Provider setup must be completed before this conversation can run.")).toBeTruthy();
+    const composer = screen.getByRole("combobox", { name: "Message Sigil" });
+    await user.type(composer, "retry this exact request");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(startRun).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(runContext).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Retry provider" }));
+
+    await waitFor(() => expect(startRun).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.queryByText("Provider setup must be completed before this conversation can run.")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry provider" })).toBeNull();
+    });
+  });
+
   it("routes every projected recovery action without inventing retry or read-only controls", async () => {
     const user = userEvent.setup();
     const pickWorkspace = vi.fn(async () => ({ cancelled: true as const }));

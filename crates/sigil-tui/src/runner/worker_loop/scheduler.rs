@@ -62,12 +62,40 @@ impl WorkerLoopTerminalRuntime {
     }
 }
 
+pub(in crate::runner) struct WorkerLoopSessionAttachment {
+    pub(in crate::runner) log_path: PathBuf,
+    pub(in crate::runner) lease:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+}
+
+impl WorkerLoopSessionAttachment {
+    #[cfg(test)]
+    pub(in crate::runner) fn new(
+        log_path: PathBuf,
+        lease: sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    ) -> Self {
+        Self {
+            log_path,
+            lease: Arc::new(lease),
+        }
+    }
+
+    pub(in crate::runner) fn from_shared(
+        log_path: PathBuf,
+        lease: Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
+    ) -> Self {
+        Self { log_path, lease }
+    }
+}
+
 pub(in crate::runner) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
     mut agent: Arc<Agent<P>>,
     root_config: RootConfig,
     workspace_root: PathBuf,
-    session_log_path: PathBuf,
+    session_attachment: WorkerLoopSessionAttachment,
     options: AgentRunOptions,
     event_inbox: WorkerEventInbox,
     message_tx: mpsc::Sender<WorkerMessage>,
@@ -76,6 +104,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    let WorkerLoopSessionAttachment {
+        log_path: session_log_path,
+        lease: attachment_lease,
+    } = session_attachment;
     let provider_capabilities = agent.provider_capabilities();
     let (event_tx, event_rx, urgent_command_rx) = event_inbox;
     let WorkerLoopMcpHandlers {
@@ -226,6 +258,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let mut state = WorkerLoopState::new(
         session_log_path,
         initial_session,
+        attachment_lease,
         agent_supervisor,
         background_agent_runs,
         event_tx,
@@ -241,6 +274,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let _ = message_tx.send(WorkerMessage::WorkerReady);
 
     loop {
+        state.compaction.preparation_tasks.reap_finished();
+        state.artifact_gc.tasks.reap_finished();
+        if let Err(error) = state.synchronize_route_execution_owner() {
+            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+            break;
+        }
         if let Some(command) = pop_next_urgent_command(&urgent_command_rx, &mut state.readiness) {
             if matches!(
                 dispatch_worker_command(
@@ -372,8 +411,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
     }
 
     state.refresh.provider_status_tasks.abort_all();
-    state.compaction.preparation_tasks.abort_all();
-    state.artifact_gc.tasks.abort_all();
+    state.compaction.preparation_tasks.cancel_and_join(&runtime);
+    state.artifact_gc.tasks.cancel_and_join(&runtime);
 }
 
 fn pop_next_urgent_command(
@@ -1072,6 +1111,7 @@ mod reactor_tests {
         }));
         readiness.ingest(WorkerEvent::Command(WorkerCommand::SwitchSession {
             session_log_path: PathBuf::from("recover-session.jsonl"),
+            attachment_recovery_binding: None,
         }));
         readiness.ingest(WorkerEvent::Command(WorkerCommand::CancelRun));
 
@@ -1081,7 +1121,7 @@ mod reactor_tests {
         ));
         assert!(matches!(
             pop_next_ordinary_command(&mut readiness, true, false),
-            Some(WorkerCommand::SwitchSession { session_log_path })
+            Some(WorkerCommand::SwitchSession { session_log_path, .. })
                 if session_log_path == std::path::Path::new("recover-session.jsonl")
         ));
         assert!(pop_next_ordinary_command(&mut readiness, true, false).is_none());

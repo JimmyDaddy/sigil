@@ -1555,7 +1555,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 404: components["responses"]["NotFound"];
-                409: components["responses"]["Conflict"];
+                409: components["responses"]["RunAdmissionConflict"];
                 500: components["responses"]["InternalError"];
                 503: components["responses"]["Unavailable"];
             };
@@ -3201,7 +3201,14 @@ export interface components {
             sequence: number;
             session_id: string;
         };
-        PublicRunEventPayload: components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        PublicRunEventPayload: components["schemas"]["RouteTransitionEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["TaskRunStartedEvent"] | components["schemas"]["RunFinishedEvent"] | components["schemas"]["TaskRunFinishedEvent"] | components["schemas"]["TaskRoutingChangedEvent"] | components["schemas"]["TaskPhaseChangedEvent"] | components["schemas"]["TaskPlanUpdatedEvent"] | components["schemas"]["TaskBatchChangedEvent"] | components["schemas"]["TaskStepChangedEvent"] | components["schemas"]["IntegrationLaneChangedEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["RouteRecoveryRequiredEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["TextDeltaEvent"] | components["schemas"]["ReasoningDeltaEvent"] | components["schemas"]["ToolCallStartedEvent"] | components["schemas"]["ToolCallArgsDeltaEvent"] | components["schemas"]["ToolCallCompletedEvent"] | components["schemas"]["ApprovalRequestedEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["ToolResultEvent"] | components["schemas"]["ToolProgressEvent"] | components["schemas"]["TerminalLifecycleEvent"] | components["schemas"]["UsageEvent"] | components["schemas"]["ContinuationStateEvent"] | components["schemas"]["ControlEvent"] | components["schemas"]["AssistantMessageEvent"] | components["schemas"]["NoticeEvent"];
+        PublicSessionRouteTransitionView: {
+            connection_id: string | null;
+            /** @enum {string} */
+            kind: "exact" | "rebound" | "explicitly_confirmed";
+            model_id: string | null;
+            remote_context_reset: boolean;
+        };
         /** @enum {string} */
         PublicTaskPhase: "routing" | "planning" | "execution" | "integration" | "synthesis" | "terminal";
         PublicTaskPlanStep: {
@@ -3256,6 +3263,28 @@ export interface components {
         };
         /** @enum {string} */
         ReasoningEffort: "low" | "medium" | "high" | "max";
+        RouteRecoveryRequiredEvent: {
+            actions: ("confirm_current_route" | "repair_connection" | "select_replacement" | "start_new_session" | "retry_provider" | "retry_session_attach" | "back_to_session_library")[];
+            /** @enum {string} */
+            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+            recovery_binding: string;
+            retryable: boolean;
+            /** @constant */
+            type: "route_recovery_required";
+        };
+        RouteTransitionEvent: {
+            transition: components["schemas"]["PublicSessionRouteTransitionView"];
+            /** @constant */
+            type: "route_transition";
+        };
+        RunAdmissionErrorResponse: {
+            error: {
+                /** @enum {string} */
+                code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+                message: string;
+                route_recovery: components["schemas"]["SessionRouteRecoveryView"];
+            };
+        };
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
         };
@@ -3296,6 +3325,7 @@ export interface components {
             model_selection_binding: string;
             provider_name: string;
             reasoning_effort_binding?: string | null;
+            route_recovery?: components["schemas"]["SessionRouteRecoveryView"] | null;
         };
         RunFailedEvent: {
             error: string;
@@ -3341,6 +3371,7 @@ export interface components {
             prompt: string;
             reasoning_effort?: components["schemas"]["ReasoningEffort"] | null;
             reasoning_effort_binding?: string | null;
+            route_recovery_binding?: string | null;
             skill_binding?: components["schemas"]["ApplicationSkillBinding"] | null;
             task_continuation?: components["schemas"]["TaskContinuationRequest"] | null;
         };
@@ -3535,6 +3566,7 @@ export interface components {
         };
         SessionOpenRequest: {
             label?: string | null;
+            recovery_binding?: string | null;
             session_id: string;
             session_ref: string;
         };
@@ -3557,13 +3589,28 @@ export interface components {
             session_id: string;
             session_ref: string;
         };
+        SessionRouteRecoveryView: {
+            allowed_actions: ("confirm_current_route" | "repair_connection" | "select_replacement" | "start_new_session" | "retry_provider" | "retry_session_attach" | "back_to_session_library")[];
+            /** @enum {string} */
+            code: "session_route_confirmation_required" | "session_route_selection_required" | "model_route_not_configured" | "connection_config_invalid" | "provider_unavailable" | "session_already_active" | "session_writer_busy" | "session_stream_invalid";
+            recovery_binding: string;
+            retryable: boolean;
+        };
+        SessionRouteTransitionView: {
+            connection_id?: string | null;
+            /** @enum {string} */
+            kind: "exact" | "rebound" | "explicitly_confirmed";
+            model_id?: string | null;
+            remote_context_reset: boolean;
+        };
         SessionSnapshot: {
             durable_session_scope_id: string;
             foreground_run_id?: string | null;
             id: string;
             label?: string | null;
+            route_recovery?: components["schemas"]["SessionRouteRecoveryView"] | null;
+            route_transition?: components["schemas"]["SessionRouteTransitionView"] | null;
             run_ids: string[];
-            session_log_path: string;
         };
         SessionTranscriptMessage: {
             /** @enum {string|null} */
@@ -4050,6 +4097,15 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description The session route requires recovery or another interactive controller owns the session */
+        RunAdmissionConflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["RunAdmissionErrorResponse"];
             };
         };
         /** @description Bearer token is missing or invalid */

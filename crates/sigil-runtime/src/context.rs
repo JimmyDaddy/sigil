@@ -77,6 +77,7 @@ pub struct WarmLspContextProvider {
 pub struct RequestContextResolver {
     workspace_root: PathBuf,
     code_intelligence: Option<CodeIntelligenceService>,
+    writable_memory: Option<crate::WritableMemoryStore>,
 }
 
 impl std::fmt::Debug for RequestContextResolver {
@@ -88,6 +89,7 @@ impl std::fmt::Debug for RequestContextResolver {
                 "code_intelligence",
                 &self.code_intelligence.as_ref().map(|_| "shared"),
             )
+            .field("writable_memory", &self.writable_memory.is_some())
             .finish()
     }
 }
@@ -101,7 +103,14 @@ impl RequestContextResolver {
         Self {
             workspace_root,
             code_intelligence,
+            writable_memory: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_writable_memory(mut self, store: crate::WritableMemoryStore) -> Self {
+        self.writable_memory = Some(store);
+        self
     }
 
     #[must_use]
@@ -138,9 +147,15 @@ impl RequestContextResolver {
             LspContextSnapshot::unavailable("code intelligence disabled or unavailable")
         };
         let workspace_root = self.workspace_root.clone();
+        let writable_memory = self.writable_memory.clone();
         let query = query.to_owned();
         tokio::task::spawn_blocking(move || {
-            context_candidates_from_safe_sources(&workspace_root, &query, Some(&snapshot))
+            let mut candidates =
+                context_candidates_from_safe_sources(&workspace_root, &query, Some(&snapshot))?;
+            if let Some(store) = writable_memory {
+                candidates.extend(store.retrieve_context(&query)?);
+            }
+            Ok(candidates)
         })
         .await
         .context("request context resolver task failed")?

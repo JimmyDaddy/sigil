@@ -893,6 +893,8 @@ fn context_source_label(source: &ContextSource) -> &'static str {
         ContextSource::CurrentDiff => "diff",
         ContextSource::SessionArchive => "session archive",
         ContextSource::TaskDigest => "memory context",
+        ContextSource::UserMemory => "user memory",
+        ContextSource::ProjectMemory => "project memory",
         ContextSource::ExtensionProvided => "extension",
         ContextSource::ExternalSource => "external source",
     }

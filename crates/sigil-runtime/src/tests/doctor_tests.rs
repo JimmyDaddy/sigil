@@ -1160,6 +1160,57 @@ credential = {{ source = "none" }}
 }
 
 #[test]
+fn doctor_classifies_rebindable_sessions_without_exposing_endpoint_material() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path();
+    let config_path = workspace.join("sigil.toml");
+    let write_config = |suffix: &str| -> Result<()> {
+        fs::write(
+            &config_path,
+            format!(
+                r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local"
+model = "gpt-test"
+
+[connections.local]
+label = "Local"
+provider = "custom"
+protocol = "responses"
+base_url = "http://127.0.0.1:11434{suffix}"
+credential = {{ source = "none" }}
+"#
+            ),
+        )?;
+        Ok(())
+    };
+    write_config("/wrong-private-path")?;
+    let root_config = RootConfig::load(&config_path)?;
+    let paths = crate::resolve_sigil_paths(&root_config.storage, &root_config.session, workspace);
+    crate::application_run::bind_application_session(
+        &config_path,
+        workspace,
+        Some(&paths.session_log_dir.join("doctor-route.jsonl")),
+    )?;
+    write_config("/v1")?;
+
+    let report = build_doctor_report(&config_path, workspace);
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.name == "session:route_resume")
+        .expect("route resume diagnosis should be present");
+    assert!(check.message.contains("rebindable=1"));
+    assert!(!check.message.contains("wrong-private-path"));
+    assert!(!check.message.contains("127.0.0.1"));
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_code_intelligence_empty_plan_remediation() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();

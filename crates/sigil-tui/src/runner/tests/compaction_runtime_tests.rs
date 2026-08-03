@@ -388,7 +388,7 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
         },
         model_request: Default::default(),
         permission: Default::default(),
-        memory: MemoryConfig { enabled: false },
+        memory: MemoryConfig::with_enabled(false),
         skills: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
@@ -514,7 +514,7 @@ fn queued_pre_turn_admission_blocks_without_local_proof_and_never_mutates_sessio
         &NoopProvider,
         &mut session,
         &exact_prompts,
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -566,7 +566,7 @@ fn queued_portable_preflight_with_no_prior_history_is_read_only_and_not_ready() 
         &session,
         &exact_prompts,
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -584,7 +584,7 @@ fn queued_portable_preflight_with_no_prior_history_is_read_only_and_not_ready() 
                 store.path(),
                 &NoopProvider,
                 &mut session,
-                &MemoryConfig { enabled: false },
+                &MemoryConfig::with_enabled(false),
                 *candidate,
             ))?
             .is_none()
@@ -642,7 +642,7 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
         &session,
         &exact_prompts,
         temp.path(),
-        &MemoryConfig { enabled: false },
+        &MemoryConfig::with_enabled(false),
         Vec::new(),
         None,
         None,
@@ -659,7 +659,7 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
             store.path(),
             &NoopProvider,
             &mut session,
-            &MemoryConfig { enabled: false },
+            &MemoryConfig::with_enabled(false),
             *candidate,
         ))
         .expect_err("missing local target proof must block pre-turn compaction");

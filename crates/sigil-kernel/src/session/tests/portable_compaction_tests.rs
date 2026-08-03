@@ -753,7 +753,7 @@ fn portable_preflight_materializes_the_full_candidate_without_durable_writes() -
 
     let target_request = session.build_portable_compaction_candidate_request(
         temp.path(),
-        &crate::MemoryConfig { enabled: false },
+        &crate::MemoryConfig::with_enabled(false),
         preflight.checkpoint(),
         preflight.task_memory(),
         preflight.candidate_messages().to_vec(),

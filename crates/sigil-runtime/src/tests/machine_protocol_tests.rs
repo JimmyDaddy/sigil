@@ -45,6 +45,7 @@ fn result_record_has_one_stable_terminal_payload() {
         run_id: "run-1".to_owned(),
         status: MachineRunStatus::Succeeded,
         final_text: "done".to_owned(),
+        route_transition: None,
         session_log_path: "/tmp/session-1.jsonl".to_owned(),
     });
 
@@ -79,7 +80,22 @@ fn error_record_uses_stable_code_without_provider_payload() {
         value["error"]["message"],
         "required API key environment variable is missing"
     );
+    assert!(value["error"].get("recovery_binding").is_none());
     assert!(value.get("provider_payload").is_none());
+}
+
+#[test]
+fn recovery_error_preserves_only_the_opaque_binding() {
+    let record = MachineRecord::error(
+        MachineError::new(
+            MachineErrorCode::SessionAlreadyActive,
+            "session is already active",
+            true,
+        )
+        .with_recovery_binding(Some("sha256:opaque")),
+    );
+    let value = serde_json::to_value(record).expect("machine recovery error should serialize");
+    assert_eq!(value["error"]["recovery_binding"], "sha256:opaque");
 }
 
 #[test]
@@ -112,6 +128,18 @@ fn exit_codes_are_stable_for_terminal_status_and_error_class() {
     assert_eq!(
         MachineExitCode::for_error(MachineErrorCode::ModelRouteNotConfigured),
         MachineExitCode::InvalidInput
+    );
+    assert_eq!(
+        MachineExitCode::for_error(MachineErrorCode::SessionRouteConfirmationRequired),
+        MachineExitCode::InvalidInput
+    );
+    assert_eq!(
+        MachineExitCode::for_error(MachineErrorCode::SessionRouteSelectionRequired),
+        MachineExitCode::InvalidInput
+    );
+    assert_eq!(
+        MachineExitCode::for_error(MachineErrorCode::SessionAlreadyActive),
+        MachineExitCode::ExecutionFailed
     );
     assert_eq!(
         MachineExitCode::for_error(MachineErrorCode::ExecutionFailed),
