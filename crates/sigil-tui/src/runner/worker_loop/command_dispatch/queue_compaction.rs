@@ -193,11 +193,7 @@ where
                     ));
                     continue;
                 };
-                let effective_config = effective_compaction_config(
-                    session.provider_name(),
-                    session.model_name(),
-                    &options.compaction_config,
-                );
+                let effective_config = options.compaction_config.clone();
                 if !effective_config.enabled {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "compaction is disabled".to_owned(),
@@ -328,11 +324,7 @@ where
                     ));
                     continue;
                 };
-                let effective_config = effective_compaction_config(
-                    session.provider_name(),
-                    session.model_name(),
-                    &options.compaction_config,
-                );
+                let effective_config = options.compaction_config.clone();
                 if !effective_config.enabled {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "compaction is disabled".to_owned(),

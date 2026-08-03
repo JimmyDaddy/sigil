@@ -875,6 +875,7 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
             credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
             api_key: None,
             model_id: "local-first-run-coder".to_owned(),
+            context_window_tokens: Some(262_144),
             label: Some("Local first run".to_owned()),
             replace_invalid_config: false,
         })
@@ -888,6 +889,7 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
     assert_eq!(saved.inventory.connections[0].label, "Local first run");
     let persisted = fs::read_to_string(&config_path).expect("first-run config should persist");
     assert!(persisted.contains("local-first-run-coder"));
+    assert!(persisted.contains("262144"));
     assert!(!persisted.contains("api_key"));
 
     let report = manager
@@ -958,6 +960,7 @@ async fn desktop_typed_client_explicitly_replaces_invalid_config_against_real_se
             credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
             api_key: None,
             model_id: "local-repair-coder".to_owned(),
+            context_window_tokens: None,
             label: Some("Recovered local provider".to_owned()),
             replace_invalid_config: true,
         })
@@ -1025,6 +1028,7 @@ async fn desktop_config_repair_refuses_to_overwrite_a_concurrently_valid_config(
             credential_source: sigil_desktop::DesktopProviderSetupCredentialSource::None,
             api_key: None,
             model_id: "local-race-coder".to_owned(),
+            context_window_tokens: None,
             label: Some("Must not replace".to_owned()),
             replace_invalid_config: true,
         })

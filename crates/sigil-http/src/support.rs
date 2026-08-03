@@ -18,10 +18,10 @@ use sigil_runtime::{
         ProviderConnectionConfig, ProviderFamily, ProviderModelCatalogService, ProviderProtocol,
         RootConfigPublisher, connection_inventory_native, connection_semantic_fingerprint,
         default_setup_root_config, load_provider_connections, materialize_root_config,
-        provider_connection_template, resolve_model_route, save_connection_config,
-        save_connection_config_replacing_invalid,
+        provider_connection_template, resolve_model_route, runtime_provider_name,
+        save_connection_config, save_connection_config_replacing_invalid,
     },
-    resolve_sigil_paths, secret_redactor_for_root_config,
+    provider_context_window_tokens, resolve_sigil_paths, secret_redactor_for_root_config,
     support::{
         DoctorSupportProjectionContext, DoctorSupportReportV1, SupportBuildInfo, SupportBundleV1,
         SupportEnvironmentV1, SupportPathKind, SupportPathRedaction,
@@ -147,6 +147,7 @@ impl HttpSupportContext {
                 request.api_key,
                 None,
                 None,
+                None,
                 request.replace_invalid_config,
             )
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
@@ -173,6 +174,7 @@ impl HttpSupportContext {
                 request.credential_source,
                 request.api_key,
                 Some(request.model_id),
+                request.context_window_tokens,
                 request.label,
                 request.replace_invalid_config,
             )
@@ -230,10 +232,10 @@ impl HttpSupportContext {
         })
     }
 
-    /// Atomically changes the shared default route without rewriting a connection or credential.
+    /// Atomically changes the shared default route and its optional exact context-window limit.
     ///
-    /// Existing sessions retain their durable exact route. The new default is used only when a
-    /// product surface creates a fresh session without an explicit model reference.
+    /// The endpoint does not rewrite credentials. Product surfaces remain responsible for applying
+    /// the new route to an active worker when their session lifecycle permits same-session rebinding.
     pub(crate) fn save_provider_default_model(
         &self,
         request: HttpProviderDefaultModelSaveRequest,
@@ -262,15 +264,32 @@ impl HttpSupportContext {
         if !connection_is_usable {
             return Err(HttpProviderSetupFailure::Invalid);
         }
-        let mut next = current.clone();
-        next.agent.connection = Some(model_ref.connection_id.clone());
-        next.agent.model = model_ref.model_id.clone();
+        let mut connections = loaded
+            .connections
+            .into_iter()
+            .map(|(id, connection)| (id, connection.config))
+            .collect::<BTreeMap<_, _>>();
+        let connection = connections
+            .get_mut(&model_ref.connection_id)
+            .ok_or(HttpProviderSetupFailure::Invalid)?;
+        if let Some(tokens) = request.context_window_tokens {
+            if tokens == 0 {
+                return Err(HttpProviderSetupFailure::Invalid);
+            }
+            connection
+                .model_context_windows
+                .insert(model_ref.model_id.clone(), tokens);
+        } else {
+            connection.model_context_windows.remove(&model_ref.model_id);
+        }
+        connection
+            .validate()
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        let next = materialize_root_config(&current, &connections, &model_ref)
+            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         next.save_if_unchanged(&self.config_path, &current)
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        inventory.default_model = Some(model_ref.clone());
-        for entry in &mut inventory.entries {
-            entry.default_model = (entry.id == model_ref.connection_id).then(|| model_ref.clone());
-        }
+        inventory = connection_inventory_native(&next);
         Ok(HttpProviderDefaultModelSaveResult {
             default_model: project_model_ref(model_ref),
             inventory: project_provider_connections(inventory),
@@ -286,6 +305,7 @@ impl HttpSupportContext {
         credential_source: HttpProviderSetupCredentialSource,
         api_key: Option<String>,
         model_id: Option<String>,
+        context_window_tokens: Option<u32>,
         label: Option<String>,
         replace_invalid_config: bool,
     ) -> Result<PreparedProviderSetup> {
@@ -374,10 +394,15 @@ impl HttpSupportContext {
                 None
             }
         };
-        connection.validate()?;
-
         let model_id = model_id.unwrap_or(provider_default_model);
         let default_model = ModelRef::new(connection_id.clone(), model_id)?;
+        if let Some(tokens) = context_window_tokens {
+            anyhow::ensure!(tokens > 0, "context window must be greater than zero");
+            connection
+                .model_context_windows
+                .insert(default_model.model_id.clone(), tokens);
+        }
+        connection.validate()?;
         let mut connections = loaded
             .connections
             .into_iter()
@@ -576,6 +601,10 @@ fn project_setup_catalog(
                 sigil_runtime::provider_connections::ModelCatalogProvenance::Manual => "manual",
             }
             .to_owned(),
+            context_window_tokens: provider_context_window_tokens(
+                runtime_provider_name(connection),
+                &entry.model_ref.model_id,
+            ),
         })
         .collect::<Vec<_>>();
     let suggested_model = models
@@ -652,6 +681,7 @@ fn project_provider_connections(inventory: ConnectionInventory) -> HttpProviderC
                     ConnectionReadiness::Unverified => HttpProviderConnectionReadiness::Unverified,
                     ConnectionReadiness::Invalid => HttpProviderConnectionReadiness::Invalid,
                 },
+                model_context_windows: entry.model_context_windows,
                 default_model: entry.default_model.map(project_model_ref),
                 issue: entry.issue.map(|issue| HttpProviderConnectionIssue {
                     code: issue.code,

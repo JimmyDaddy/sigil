@@ -282,11 +282,7 @@ pub(in crate::runner) fn idle_auto_compaction_preflight(
         session.model_name(),
         provider_context_capabilities,
     ));
-    let effective_compaction = sigil_runtime::effective_compaction_config(
-        session.provider_name(),
-        session.model_name(),
-        configured_compaction,
-    );
+    let effective_compaction = configured_compaction.clone();
     let prompt_tokens = session.stats().last_prompt_tokens;
     let threshold_status = effective_compaction.threshold_status(prompt_tokens);
     evidence.prompt_tokens = Some(prompt_tokens);
@@ -832,11 +828,7 @@ where
     if provider.name() != session.provider_name() {
         bail!("overflow recovery provider does not match the durable session provider");
     }
-    let effective_config = sigil_runtime::effective_compaction_config(
-        session.provider_name(),
-        session.model_name(),
-        &options.compaction_config,
-    );
+    let effective_config = options.compaction_config.clone();
     if !effective_config.enabled {
         bail!("overflow recovery requires enabled compaction");
     }
@@ -1005,11 +997,7 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         return Ok(IdleAutoCompactionPreparation::NotRequested);
     }
 
-    let effective_config = sigil_runtime::effective_compaction_config(
-        session.provider_name(),
-        session.model_name(),
-        &options.compaction_config,
-    );
+    let effective_config = options.compaction_config.clone();
     let threshold_status = effective_config.threshold_status(session.stats().last_prompt_tokens);
     let threshold_allows_preparation = !matches!(
         threshold_status,
@@ -1844,10 +1832,10 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
                     }
                 }
                 let queue_id = candidate.promotion.queue_id.clone();
-                let effective_config = sigil_runtime::effective_compaction_config(
+                let effective_config = sigil_runtime::effective_compaction_config_for_runtime_model(
+                    root_config,
                     session.provider_name(),
                     session.model_name(),
-                    &root_config.compaction,
                 );
                 if !effective_config.enabled {
                     return Ok(QueuedConversationPreTurnAdmission::Blocked {
@@ -1900,10 +1888,10 @@ async fn prepare_queued_portable_preflight(
     memory_config: &sigil_kernel::MemoryConfig,
     mut candidate: PreparedQueuedConversationCandidate,
 ) -> Result<Option<PendingQueuedConversationPortablePreflight>> {
-    let effective_config = sigil_runtime::effective_compaction_config(
+    let effective_config = sigil_runtime::effective_compaction_config_for_runtime_model(
+        root_config,
         session.provider_name(),
         session.model_name(),
-        &root_config.compaction,
     );
     let Some(preview) =
         sigil_runtime::context_window::compaction_preview_for_strategy(session, &effective_config)?

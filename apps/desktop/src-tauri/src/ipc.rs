@@ -279,6 +279,7 @@ pub(crate) struct DesktopProviderSetupSaveInput {
     credential_source: DesktopProviderSetupCredentialSourceInput,
     api_key: Option<String>,
     model_id: String,
+    context_window_tokens: Option<u32>,
     label: Option<String>,
     #[serde(default)]
     replace_invalid_config: bool,
@@ -288,6 +289,7 @@ pub(crate) struct DesktopProviderSetupSaveInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopProviderDefaultModelSaveInput {
     model_ref: DesktopProviderModelRefInput,
+    context_window_tokens: Option<u32>,
 }
 
 impl DesktopProviderDefaultModelSaveInput {
@@ -297,6 +299,7 @@ impl DesktopProviderDefaultModelSaveInput {
                 connection_id: self.model_ref.connection_id,
                 model_id: self.model_ref.model_id,
             },
+            context_window_tokens: self.context_window_tokens,
         }
     }
 }
@@ -310,6 +313,7 @@ impl DesktopProviderSetupSaveInput {
             credential_source: self.credential_source.into(),
             api_key: self.api_key,
             model_id: self.model_id,
+            context_window_tokens: self.context_window_tokens,
             label: self.label,
             replace_invalid_config: self.replace_invalid_config,
         }
@@ -336,6 +340,7 @@ struct DesktopProviderConnectionSummary {
     endpoint_display: String,
     credential_source: &'static str,
     readiness: &'static str,
+    model_context_windows: std::collections::BTreeMap<String, u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_model: Option<DesktopProviderModelRefSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -370,6 +375,7 @@ impl From<DesktopProviderConnectionInventory> for DesktopProviderConnectionInven
                         connection.credential_source,
                     ),
                     readiness: provider_readiness_label(connection.readiness),
+                    model_context_windows: connection.model_context_windows,
                     default_model: connection.default_model.map(Into::into),
                     issue: connection
                         .issue
@@ -411,6 +417,8 @@ struct DesktopProviderSetupModelSummary {
     availability: String,
     recommended: bool,
     provenance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_tokens: Option<u32>,
 }
 
 impl From<DesktopProviderSetupCatalog> for DesktopProviderSetupCatalogSummary {
@@ -428,6 +436,7 @@ impl From<DesktopProviderSetupCatalog> for DesktopProviderSetupCatalogSummary {
                     availability: model.availability,
                     recommended: model.recommended,
                     provenance: model.provenance,
+                    context_window_tokens: model.context_window_tokens,
                 })
                 .collect(),
             suggested_model: value.suggested_model,
@@ -3066,6 +3075,7 @@ impl From<DesktopRunContextView> for DesktopRunContext {
             context_window_tokens: value.context_window_tokens,
             last_prompt_tokens: value.last_prompt_tokens,
             context_window_source: match value.context_window_source {
+                DesktopContextWindowSource::Connection => "connection",
                 DesktopContextWindowSource::Provider => "provider",
                 DesktopContextWindowSource::Config => "config",
                 DesktopContextWindowSource::Unavailable => "unavailable",

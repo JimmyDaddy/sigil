@@ -2742,11 +2742,8 @@ pub fn application_run_context_view(
         crate::provider_connections::validate_persisted_model_route(&root_config, &route)
             .map_err(anyhow::Error::new)?;
     let model_name = route.model_ref.model_id.clone();
-    let resolved = crate::resolve_context_window_tokens(
-        &provider_name,
-        &model_name,
-        root_config.compaction.context_window_tokens,
-    );
+    let resolved =
+        crate::resolve_model_context_window_tokens(&root_config, &route.model_ref, &provider_name);
     let last_prompt_tokens = entries
         .iter()
         .filter_map(|entry| match entry {

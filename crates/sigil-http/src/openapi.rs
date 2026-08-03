@@ -1140,7 +1140,7 @@ pub fn http_openapi_document() -> Value {
                 "ProviderConnectionEntry": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["id", "label", "provider_label", "protocol_label", "endpoint_display", "credential_source", "readiness"],
+                    "required": ["id", "label", "provider_label", "protocol_label", "endpoint_display", "credential_source", "readiness", "model_context_windows"],
                     "properties": {
                         "id": { "type": "string" },
                         "label": { "type": "string" },
@@ -1149,6 +1149,10 @@ pub fn http_openapi_document() -> Value {
                         "endpoint_display": { "type": "string" },
                         "credential_source": { "$ref": "#/components/schemas/ProviderCredentialSource" },
                         "readiness": { "$ref": "#/components/schemas/ProviderConnectionReadiness" },
+                        "model_context_windows": {
+                            "type": "object",
+                            "additionalProperties": { "type": "integer", "format": "uint32", "minimum": 1 }
+                        },
                         "default_model": {
                             "anyOf": [
                                 { "$ref": "#/components/schemas/ProviderModelRef" },
@@ -1224,7 +1228,8 @@ pub fn http_openapi_document() -> Value {
                         "display_name": { "type": "string" },
                         "availability": { "type": "string", "enum": ["available", "unverified", "configured_unavailable"] },
                         "recommended": { "type": "boolean" },
-                        "provenance": { "type": "string", "enum": ["remote", "cache", "bundled", "configured", "manual"] }
+                        "provenance": { "type": "string", "enum": ["remote", "cache", "bundled", "configured", "manual"] },
+                        "context_window_tokens": { "type": ["integer", "null"], "format": "uint32", "minimum": 1 }
                     }
                 },
                 "ProviderSetupCatalog": {
@@ -1259,6 +1264,7 @@ pub fn http_openapi_document() -> Value {
                         "credential_source": { "$ref": "#/components/schemas/ProviderSetupCredentialSource" },
                         "api_key": { "type": ["string", "null"], "format": "password", "maxLength": 16384, "writeOnly": true },
                         "model_id": { "type": "string" },
+                        "context_window_tokens": { "type": ["integer", "null"], "format": "uint32", "minimum": 1 },
                         "label": { "type": ["string", "null"], "maxLength": 160 },
                         "replace_invalid_config": { "type": "boolean", "default": false }
                     }
@@ -1278,7 +1284,8 @@ pub fn http_openapi_document() -> Value {
                     "additionalProperties": false,
                     "required": ["model_ref"],
                     "properties": {
-                        "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" }
+                        "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
+                        "context_window_tokens": { "type": ["integer", "null"], "format": "uint32", "minimum": 1 }
                     }
                 },
                 "ProviderDefaultModelSaveResult": {
@@ -2759,7 +2766,7 @@ pub fn http_openapi_document() -> Value {
                         "reasoning_effort_binding": { "type": ["string", "null"] },
                         "context_window_tokens": { "type": ["integer", "null"], "format": "uint32" },
                         "last_prompt_tokens": { "type": ["integer", "null"], "format": "uint64" },
-                        "context_window_source": { "type": "string", "enum": ["provider", "config", "unavailable"] },
+                        "context_window_source": { "type": "string", "enum": ["connection", "provider", "config", "unavailable"] },
                         "extension_catalog": { "$ref": "#/components/schemas/ApplicationExtensionCatalog" }
                     }
                 },

@@ -171,8 +171,12 @@ pub use context::{
     context_items_from_plugin_hook_output, context_items_from_task_memory,
 };
 pub use context_window::{
-    ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
-    resolve_context_window_tokens,
+    ContextWindowSource, ResolvedContextWindow, configured_model_context_window_tokens,
+    configured_runtime_model_context_window_tokens, effective_compaction_config,
+    effective_compaction_config_for_model_ref, effective_compaction_config_for_runtime_model,
+    effective_compaction_config_with_override, provider_context_window_tokens,
+    resolve_context_window_tokens, resolve_context_window_tokens_with_override,
+    resolve_model_context_window_tokens,
 };
 pub use conversation_coordinator::{ConversationCoordinator, ConversationSourceTurn};
 pub use egress_ordering::{

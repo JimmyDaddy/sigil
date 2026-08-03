@@ -163,12 +163,19 @@ fn render_config_header(
 ) {
     let content_width = area.width as usize;
     let section = app.config_section_title().unwrap_or("Config");
-    let (state, state_kind) = if app.config_is_dirty() {
+    let (state, state_kind) = if app.config_save_error().is_some() {
+        ("save failed", StatusKind::Error)
+    } else if app.config_is_dirty() {
         ("unsaved", StatusKind::Warning)
     } else {
         ("saved", StatusKind::Success)
     };
-    let state_style = if app.config_is_dirty() {
+    let state_style = if app.config_save_error().is_some() {
+        Style::default()
+            .fg(palette.button_selected_fg)
+            .bg(palette.config_danger)
+            .add_modifier(Modifier::BOLD)
+    } else if app.config_is_dirty() {
         Style::default()
             .fg(palette.button_selected_fg)
             .bg(palette.config_warning)
@@ -679,7 +686,7 @@ fn render_config_footer(
     let status_width = (area.width as usize)
         .saturating_sub(actions_width)
         .saturating_sub(gap_width);
-    let status_style = if app.config_close_guard_armed() {
+    let status_style = if app.config_close_guard_armed() || app.config_save_error().is_some() {
         Style::default()
             .fg(palette.config_danger)
             .add_modifier(Modifier::BOLD)
@@ -933,6 +940,22 @@ fn render_config_line_with_palette(
             content_width,
             palette,
         );
+    }
+    if let Some(error) = line.strip_prefix("! ") {
+        return Line::from(vec![
+            Span::styled(
+                "! ",
+                Style::default()
+                    .fg(palette.config_danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                error.to_owned(),
+                Style::default()
+                    .fg(palette.config_danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
     }
     if let Some(line) = render_theme_preview_line_with_palette(line, content_width, palette) {
         return line;

@@ -204,6 +204,7 @@ pub(super) struct SecretInputState {
 pub(super) enum TextInputTarget {
     SetupModel,
     SetupEndpoint,
+    SetupContextWindow,
     ConfigManualModel,
     ConfigField(ConfigField),
     SkillArguments,
@@ -215,6 +216,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "Model ID",
             Self::SetupEndpoint => "Custom Endpoint",
+            Self::SetupContextWindow => "Context Window",
             Self::ConfigManualModel => "Model ID",
             Self::ConfigField(field) => field.display_label(),
             Self::SkillArguments => "Use Skill",
@@ -227,6 +229,9 @@ impl TextInputTarget {
             Self::SetupModel => "Custom model id.",
             Self::SetupEndpoint => {
                 "HTTPS is required except for an explicit loopback development endpoint."
+            }
+            Self::SetupContextWindow => {
+                "Optional exact token limit for this model. Leave empty to use automatic metadata or fallback."
             }
             Self::ConfigManualModel => {
                 "Custom model id admitted by the verified connection catalog."
@@ -243,6 +248,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel | Self::ConfigManualModel => "model",
             Self::SetupEndpoint => "endpoint",
+            Self::SetupContextWindow => "tokens",
             Self::ConfigField(_) => "value",
             Self::SkillArguments => "instructions",
             Self::ToolArtifactSearch => "literal",
@@ -251,7 +257,7 @@ impl TextInputTarget {
 
     fn config_key(self) -> Option<&'static str> {
         match self {
-            Self::SetupModel | Self::SetupEndpoint => None,
+            Self::SetupModel | Self::SetupEndpoint | Self::SetupContextWindow => None,
             Self::ConfigManualModel => Some(ConfigField::ProviderModel.label()),
             Self::ConfigField(field) => Some(field.label()),
             Self::SkillArguments | Self::ToolArtifactSearch => None,
@@ -1720,15 +1726,21 @@ impl AppState {
                 match target {
                     ModelPickerTarget::Setup => {
                         if let Some(state) = self.setup_state.as_mut() {
-                            state.model = value.clone();
-                            state.refresh_orchestration_rollout();
+                            state.set_model(value.clone());
                         }
                         self.last_notice = Some(format!("selected model {value}"));
                     }
                     ModelPickerTarget::Provider => {
                         if let Some(state) = self.config_state.as_mut() {
-                            state.draft.provider_model = value.clone();
-                            state.mark_dirty();
+                            match state.draft.set_provider_model(value.clone()) {
+                                Ok(true) => state.mark_dirty(),
+                                Ok(false) => {}
+                                Err(error) => {
+                                    self.last_notice =
+                                        Some(format!("could not select model: {error:#}"));
+                                    return;
+                                }
+                            }
                         }
                         self.last_notice = Some(format!("selected model {value}"));
                     }
@@ -1774,8 +1786,7 @@ impl AppState {
                 TextInputTarget::SetupModel => {
                     if let Some(state) = self.setup_state.as_mut() {
                         if !value.trim().is_empty() {
-                            state.model = value.clone();
-                            state.refresh_orchestration_rollout();
+                            state.set_model(value.clone());
                             self.last_notice = Some(format!("updated model {value}"));
                         } else {
                             self.last_notice = Some("model cannot be empty".to_owned());
@@ -1789,12 +1800,23 @@ impl AppState {
                     }
                     self.last_notice = Some("updated custom endpoint".to_owned());
                 }
+                TextInputTarget::SetupContextWindow => {
+                    if let Some(state) = self.setup_state.as_mut() {
+                        state.context_window_tokens = value;
+                        state.bump_revision();
+                    }
+                    self.last_notice = Some("updated context window".to_owned());
+                }
                 TextInputTarget::ConfigManualModel => {
                     if let Some(state) = self.config_state.as_mut() {
-                        let changed = state.draft.provider_model != value;
-                        state.draft.provider_model = value.clone();
-                        if changed {
-                            state.mark_dirty();
+                        match state.draft.set_provider_model(value.clone()) {
+                            Ok(true) => state.mark_dirty(),
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.last_notice =
+                                    Some(format!("could not update model: {error:#}"));
+                                return;
+                            }
                         }
                     }
                     self.last_notice =
@@ -1809,7 +1831,7 @@ impl AppState {
                             {
                                 Ok(changed) => {
                                     if changed {
-                                        state.dirty = true;
+                                        state.mark_edited();
                                     }
                                 }
                                 Err(error) => {
@@ -1822,7 +1844,7 @@ impl AppState {
                             let changed = *target != value;
                             *target = value.clone();
                             if changed {
-                                state.dirty = true;
+                                state.mark_edited();
                             }
                         }
                     }
@@ -2055,6 +2077,7 @@ fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> b
         TextInputTarget::SetupModel
         | TextInputTarget::SetupEndpoint
         | TextInputTarget::ConfigManualModel => !character.is_control(),
+        TextInputTarget::SetupContextWindow => character.is_ascii_digit(),
         TextInputTarget::ConfigField(field) => config_field_accepts_char(field, character),
         TextInputTarget::SkillArguments | TextInputTarget::ToolArtifactSearch => {
             !character.is_control()

@@ -29,6 +29,7 @@ pub fn connection_inventory_offline(
                 protocol_label: connection.config.protocol.label().to_owned(),
                 endpoint_display: endpoint_display(&connection.config.base_url),
                 credential_source,
+                model_context_windows: connection.config.model_context_windows.clone(),
                 readiness: if default_model
                     .as_ref()
                     .is_some_and(|model| model.connection_id == connection.config.id)

@@ -59,6 +59,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) base_root_config: RootConfig,
     pub(crate) provider_name: String,
     pub(crate) provider_model: String,
+    pub(crate) provider_context_window_tokens: String,
     pub(crate) provider_api_key: SecretString,
     pub(crate) provider_base_url: String,
     connection_drafts: BTreeMap<ConnectionId, ProviderConnectionDraft>,
@@ -107,6 +108,10 @@ impl fmt::Debug for ConfigDraft {
             .debug_struct("ConfigDraft")
             .field("provider_name", &self.provider_name)
             .field("provider_model", &self.provider_model)
+            .field(
+                "provider_context_window_tokens",
+                &self.provider_context_window_tokens,
+            )
             .field("provider_api_key", &"[redacted]")
             .field("provider_base_url", &"[redacted endpoint]")
             .field("connection_count", &self.connection_drafts.len())
@@ -147,6 +152,7 @@ pub(crate) struct ConfigState {
     pub(crate) source_revision: Option<[u8; 32]>,
     pub(crate) draft_revision: u64,
     pub(crate) dirty: bool,
+    pub(crate) save_error: Option<String>,
     pub(crate) close_guard_armed: bool,
     pub(crate) pending_connection_delete: Option<ConnectionId>,
 }
@@ -180,6 +186,7 @@ impl ConfigState {
             source_revision: None,
             draft_revision: 0,
             dirty: false,
+            save_error: None,
             close_guard_armed: false,
             pending_connection_delete: None,
         }
@@ -187,7 +194,13 @@ impl ConfigState {
 
     pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.save_error = None;
         self.draft_revision = self.draft_revision.saturating_add(1);
+    }
+
+    pub(crate) fn mark_edited(&mut self) {
+        self.dirty = true;
+        self.save_error = None;
     }
 
     pub(crate) fn bump_draft_revision(&mut self) {

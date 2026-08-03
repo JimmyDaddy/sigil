@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -126,6 +126,8 @@ pub struct DesktopProviderConnectionEntry {
     pub credential_source: DesktopProviderCredentialSource,
     pub readiness: DesktopProviderConnectionReadiness,
     #[serde(default)]
+    pub model_context_windows: BTreeMap<String, u32>,
+    #[serde(default)]
     pub default_model: Option<DesktopProviderModelRef>,
     #[serde(default)]
     pub issue: Option<DesktopProviderConnectionIssue>,
@@ -192,6 +194,8 @@ pub struct DesktopProviderSetupModel {
     pub availability: String,
     pub recommended: bool,
     pub provenance: String,
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -222,6 +226,8 @@ pub struct DesktopProviderSetupSaveRequest {
     pub api_key: Option<String>,
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub replace_invalid_config: bool,
 }
@@ -238,6 +244,8 @@ pub struct DesktopProviderSetupSaveResult {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct DesktopProviderDefaultModelSaveRequest {
     pub model_ref: DesktopProviderModelRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1108,6 +1116,7 @@ pub enum DesktopModelSelectionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopContextWindowSource {
+    Connection,
     Provider,
     Config,
     Unavailable,

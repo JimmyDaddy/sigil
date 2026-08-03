@@ -246,6 +246,13 @@
 .theme-option-copy strong { overflow: hidden; color: var(--sg-sys-color-on-surface); text-overflow: ellipsis; white-space: nowrap; }
 .theme-option-copy small { color: var(--sg-sys-color-on-surface-subtle); font-size: 10px; font-weight: 500; line-height: 1.35; }
 .settings-section > .sg-field { width: min(420px, 100%); }
+.settings-model-controls { display: grid; gap: var(--sg-sys-space-3); }
+.settings-context-window-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--sg-sys-space-2);
+}
 .settings-control-unavailable { margin: 0; color: var(--sg-sys-color-on-surface-variant); font-size: 13px; line-height: 1.5; }
 .settings-inline-error { display: flex; grid-column: 2; align-items: center; justify-content: space-between; gap: var(--sg-sys-space-3); color: var(--sg-sys-color-error); }
 .settings-boundary { grid-template-columns: minmax(0, 1fr); }

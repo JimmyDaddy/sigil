@@ -22,17 +22,25 @@ pub(crate) enum SetupField {
     Endpoint,
     ApiKey,
     Model,
+    ContextWindow,
     Save,
 }
 
 impl SetupField {
-    const STANDARD_ORDER: [Self; 4] = [Self::Provider, Self::ApiKey, Self::Model, Self::Save];
-    const CUSTOM_ORDER: [Self; 6] = [
+    const STANDARD_ORDER: [Self; 5] = [
+        Self::Provider,
+        Self::ApiKey,
+        Self::Model,
+        Self::ContextWindow,
+        Self::Save,
+    ];
+    const CUSTOM_ORDER: [Self; 7] = [
         Self::Provider,
         Self::Protocol,
         Self::Endpoint,
         Self::ApiKey,
         Self::Model,
+        Self::ContextWindow,
         Self::Save,
     ];
 
@@ -77,6 +85,7 @@ impl SetupField {
             Self::Endpoint => "endpoint",
             Self::ApiKey => "authentication",
             Self::Model => "model",
+            Self::ContextWindow => "context window",
             Self::Save => "review",
         }
     }
@@ -102,6 +111,7 @@ impl SetupCredentialSource {
 #[derive(Debug, Clone)]
 struct SetupProviderDraft {
     model: String,
+    context_window_tokens: String,
     api_key: SecretString,
     base_url: String,
     credential_source: SetupCredentialSource,
@@ -116,6 +126,7 @@ pub(crate) struct SetupState {
     pub(crate) protocol: ProviderProtocol,
     pub(crate) base_url: String,
     pub(crate) model: String,
+    pub(crate) context_window_tokens: String,
     pub(crate) credential_source: SetupCredentialSource,
     pub(crate) api_key: SecretString,
     pub(crate) draft_revision: u64,
@@ -134,6 +145,7 @@ impl fmt::Debug for SetupState {
             .field("protocol", &self.protocol)
             .field("base_url", &"[redacted endpoint]")
             .field("model", &self.model)
+            .field("context_window_tokens", &self.context_window_tokens)
             .field("credential_source", &self.credential_source)
             .field("api_key", &"[redacted]")
             .field("draft_revision", &self.draft_revision)
@@ -158,6 +170,7 @@ impl SetupState {
             config_path,
             selected_field: SetupField::Provider,
             model,
+            context_window_tokens: String::new(),
             api_key: SecretString::default(),
             draft_revision: 0,
             provider_name,
@@ -206,6 +219,7 @@ impl SetupState {
         let provider_name = self.provider_name.clone();
         if let Some(draft) = self.provider_drafts.get(&provider_name).cloned() {
             self.model = draft.model;
+            self.context_window_tokens = draft.context_window_tokens;
             self.api_key = draft.api_key;
             self.base_url = draft.base_url;
             self.credential_source = draft.credential_source;
@@ -215,6 +229,7 @@ impl SetupState {
             self.base_url = default_endpoint(&provider_name, self.protocol).to_owned();
             self.model =
                 default_provider_model(&provider_name).unwrap_or_else(|| "gpt-4.1".to_owned());
+            self.context_window_tokens.clear();
             self.api_key.clear();
             self.credential_source = default_credential_source(&provider_name);
         }
@@ -360,11 +375,24 @@ impl SetupState {
         Self::provider_choice_label(&self.provider_name)
     }
 
+    pub(crate) fn set_model(&mut self, model: String) -> bool {
+        let model = model.trim().to_owned();
+        if self.model == model {
+            return false;
+        }
+        self.model = model;
+        self.context_window_tokens.clear();
+        self.bump_revision();
+        self.refresh_orchestration_rollout();
+        true
+    }
+
     fn capture_current_provider_draft(&mut self) {
         self.provider_drafts.insert(
             self.provider_name.clone(),
             SetupProviderDraft {
                 model: self.model.clone(),
+                context_window_tokens: self.context_window_tokens.clone(),
                 api_key: self.api_key.clone(),
                 base_url: self.base_url.clone(),
                 credential_source: self.credential_source,

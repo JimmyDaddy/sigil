@@ -120,6 +120,7 @@ impl ConfigDraft {
     }
 
     pub(crate) fn capture_selected_connection(&mut self) -> Result<()> {
+        self.capture_selected_model_context_window()?;
         let selected = self
             .connection_drafts
             .get(&self.selected_connection_id)
@@ -171,6 +172,48 @@ impl ConfigDraft {
         }
         self.connection_drafts
             .insert(self.selected_connection_id.clone(), next);
+        Ok(())
+    }
+
+    pub(crate) fn set_provider_model(&mut self, model: String) -> Result<bool> {
+        let model = model.trim().to_owned();
+        anyhow::ensure!(!model.is_empty(), "model cannot be empty");
+        if self.provider_model == model {
+            return Ok(false);
+        }
+        self.capture_selected_model_context_window()?;
+        self.provider_model = model;
+        self.load_selected_model_context_window()?;
+        Ok(true)
+    }
+
+    fn capture_selected_model_context_window(&mut self) -> Result<()> {
+        let model = self.provider_model.trim().to_owned();
+        ModelRef::new(self.selected_connection_id.clone(), model.clone())?;
+        let tokens = parse_model_context_window_tokens(&self.provider_context_window_tokens)?;
+        let selected = self
+            .connection_drafts
+            .get_mut(&self.selected_connection_id)
+            .context("selected connection is unavailable")?;
+        if let Some(tokens) = tokens {
+            selected.config.model_context_windows.insert(model, tokens);
+        } else {
+            selected.config.model_context_windows.remove(&model);
+        }
+        Ok(())
+    }
+
+    fn load_selected_model_context_window(&mut self) -> Result<()> {
+        let selected = self
+            .connection_drafts
+            .get(&self.selected_connection_id)
+            .context("selected connection is unavailable")?;
+        self.provider_context_window_tokens = selected
+            .config
+            .model_context_windows
+            .get(self.provider_model.trim())
+            .map(u32::to_string)
+            .unwrap_or_default();
         Ok(())
     }
 
@@ -270,6 +313,7 @@ impl ConfigDraft {
     ) -> Result<()> {
         self.validate_selected_connection_deletion(current_session)?;
         let removed = self.selected_connection_id.clone();
+        let removed_default = removed == self.default_model.connection_id;
         self.connection_drafts.remove(&removed);
         self.selected_connection_id = self
             .connection_drafts
@@ -277,7 +321,11 @@ impl ConfigDraft {
             .next()
             .cloned()
             .context("connection registry became empty")?;
-        self.load_selected_connection()
+        self.load_selected_connection()?;
+        if removed_default {
+            self.set_selected_as_default()?;
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_selected_connection_deletion(
@@ -288,10 +336,6 @@ impl ConfigDraft {
         anyhow::ensure!(
             self.connection_drafts.len() > 1,
             "at least one connection must remain"
-        );
-        anyhow::ensure!(
-            self.selected_connection_id != self.default_model.connection_id,
-            "set another saved default before deleting this connection"
         );
         anyhow::ensure!(
             current_session
@@ -382,11 +426,32 @@ impl ConfigDraft {
             .context("selected connection is unavailable")?;
         self.provider_name = provider_key_for_connection(&selected.config).to_owned();
         self.provider_model = selected.model;
+        self.provider_context_window_tokens = selected
+            .config
+            .model_context_windows
+            .get(&self.provider_model)
+            .map(u32::to_string)
+            .unwrap_or_default();
         self.provider_base_url = selected.config.base_url;
         self.provider_api_key.clear();
         load_deepseek_options(self, &selected.config.options);
         Ok(())
     }
+}
+
+fn parse_model_context_window_tokens(value: &str) -> Result<Option<u32>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let tokens = value
+        .parse::<u32>()
+        .context("model context_window_tokens must be a positive integer")?;
+    anyhow::ensure!(
+        tokens > 0,
+        "model context_window_tokens must be greater than 0"
+    );
+    Ok(Some(tokens))
 }
 
 fn add_provider_choice(provider_name: &str, label: &str) -> ConnectionPickerChoice {

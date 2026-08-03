@@ -54,6 +54,7 @@ export function ProviderSetup({
   const [catalog, setCatalog] = useState<ProviderSetupCatalog>();
   const [modelId, setModelId] = useState("");
   const [manualModelId, setManualModelId] = useState("");
+  const [contextWindowTokens, setContextWindowTokens] = useState("");
   const [error, setError] = useState<string>();
   const catalogRequestRevision = useRef(0);
 
@@ -63,13 +64,20 @@ export function ProviderSetup({
     && catalog?.models.some((model) => (
       model.modelId === modelId && model.availability === "configured_unavailable"
     )) === true;
+  const contextWindowValue = contextWindowTokens.trim();
+  const contextWindowValid = contextWindowValue === ""
+    || (/^\d+$/.test(contextWindowValue) && Number(contextWindowValue) > 0);
+  const suggestedContextWindow = modelId === "__manual__"
+    ? undefined
+    : catalog?.models.find((model) => model.modelId === modelId)?.contextWindowTokens;
   const canLoadModels = template !== undefined
     && (credentialSource !== "secure_store" || apiKey.trim().length > 0)
     && (!isCustom || endpoint.trim().length > 0);
   const canSave = effectiveModelId.length > 0
     && state !== "saving"
     && catalog !== undefined
-    && !selectedModelUnavailable;
+    && !selectedModelUnavailable
+    && contextWindowValid;
   const progress = step === "provider" ? 1 : step === "authentication" ? 2 : 3;
 
   const catalogInput = useMemo<ProviderSetupCatalogInput | undefined>(() => {
@@ -143,6 +151,7 @@ export function ProviderSetup({
     setCatalog(undefined);
     setModelId("");
     setManualModelId("");
+    setContextWindowTokens("");
     setError(undefined);
     setState("idle");
   }
@@ -172,6 +181,9 @@ export function ProviderSetup({
       const result = await bridge.saveProviderSetup(workspaceId, {
         ...catalogInput,
         modelId: effectiveModelId,
+        contextWindowTokens: contextWindowValue === ""
+          ? undefined
+          : Number(contextWindowValue),
       });
       setApiKey("");
       setState("idle");
@@ -346,7 +358,10 @@ export function ProviderSetup({
                 value={model.modelId}
                 checked={modelId === model.modelId}
                 disabled={model.availability === "configured_unavailable"}
-                onChange={() => setModelId(model.modelId)}
+                onChange={() => {
+                  setModelId(model.modelId);
+                  setContextWindowTokens("");
+                }}
               />
             ))}
             <Radio
@@ -355,7 +370,10 @@ export function ProviderSetup({
               description={t("enterModelManuallyDetail")}
               value="__manual__"
               checked={modelId === "__manual__"}
-              onChange={() => setModelId("__manual__")}
+              onChange={() => {
+                setModelId("__manual__");
+                setContextWindowTokens("");
+              }}
             />
           </fieldset>
           {modelId === "__manual__" ? (
@@ -365,6 +383,17 @@ export function ProviderSetup({
               onChange={(event) => setManualModelId(event.currentTarget.value)}
             />
           ) : null}
+          <TextField
+            type="number"
+            min={1}
+            inputMode="numeric"
+            label={t("contextWindow")}
+            description={t("contextWindowSetupDetail")}
+            value={contextWindowTokens}
+            placeholder={suggestedContextWindow?.toString() ?? t("automatic")}
+            error={contextWindowValid ? undefined : t("contextWindowInvalid")}
+            onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
+          />
           <div className="provider-setup-actions">
             <Button
               type="button"

@@ -60,6 +60,7 @@ pub struct ConnectionInventoryEntry {
     pub endpoint_display: String,
     pub credential_source: CredentialSourceView,
     pub readiness: ConnectionReadiness,
+    pub model_context_windows: BTreeMap<String, u32>,
     pub default_model: Option<ModelRef>,
     pub issue: Option<ConnectionIssueView>,
 }

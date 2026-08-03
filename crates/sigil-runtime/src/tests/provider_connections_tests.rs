@@ -532,6 +532,30 @@ fn connection_config_rejects_unknown_fields_and_unsafe_auth_or_endpoint() {
 }
 
 #[test]
+fn connection_config_round_trips_optional_per_model_context_windows() {
+    let id = ConnectionId::new("custom-local").expect("connection id");
+    let raw = json!({
+        "label": "Local",
+        "provider": "custom",
+        "protocol": "chat_completions",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "credential": {"source": "none"},
+        "model_context_windows": {"qwen3-coder": 262144},
+        "options": {}
+    });
+
+    let config = ProviderConnectionConfig::from_raw(id, raw).expect("valid connection");
+    assert_eq!(
+        config.model_context_windows.get("qwen3-coder"),
+        Some(&262_144)
+    );
+    assert_eq!(
+        config.to_raw().expect("serialized connection")["model_context_windows"]["qwen3-coder"],
+        262_144
+    );
+}
+
+#[test]
 fn v2_loader_keeps_valid_connections_when_a_sibling_is_malformed() {
     let root: RootConfig = toml::from_str(
         r#"

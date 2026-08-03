@@ -377,14 +377,15 @@ pub fn preview_application_compaction(
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let store = JsonlSessionStore::new(session_path)?;
-    let (session, _) = load_application_compaction_session(&root_config, store.clone())?;
+    let (session, exact_model_ref) =
+        load_application_compaction_session(&root_config, store.clone())?;
     if session.session_scope_id() != expected_session_scope_id {
         bail!("application compaction session scope mismatch");
     }
-    let effective_config = crate::effective_compaction_config(
+    let effective_config = crate::effective_compaction_config_for_model_ref(
+        &root_config,
+        &exact_model_ref,
         session.provider_name(),
-        session.model_name(),
-        &root_config.compaction,
     );
     if !effective_config.enabled {
         return Ok((
@@ -558,10 +559,10 @@ async fn prepare_application_compaction_for_preview(
     if session.session_scope_id() != expected_session_scope_id {
         bail!("application compaction session scope mismatch");
     }
-    let effective_config = crate::effective_compaction_config(
+    let effective_config = crate::effective_compaction_config_for_model_ref(
+        &root_config,
+        &exact_model_ref,
         session.provider_name(),
-        session.model_name(),
-        &root_config.compaction,
     );
     if !effective_config.enabled {
         return Ok((
@@ -634,6 +635,7 @@ async fn prepare_application_compaction_for_preview(
         workspace_root.clone(),
         InteractionMode::Interactive,
     );
+    options.compaction_config = effective_config.clone();
     let mut reasoning_config = root_config.clone();
     reasoning_config.agent.runtime_provider = session.provider_name().to_owned();
     reasoning_config.agent.model = session.model_name().to_owned();

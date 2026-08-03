@@ -251,6 +251,7 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
 
     let mut save_request = catalog_request;
     save_request["model_id"] = json!("local-coder");
+    save_request["context_window_tokens"] = json!(262_144);
     let (status, saved) = http_raw_request(
         address,
         http_post(
@@ -269,11 +270,16 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
         })
     );
     assert_eq!(saved["save_warning"], false);
+    assert_eq!(
+        saved["inventory"]["connections"][0]["model_context_windows"]["local-coder"],
+        262_144
+    );
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     assert!(config_path.exists());
     let persisted = fs::read_to_string(&config_path).expect("saved config should read");
     assert!(persisted.contains("openai-compatible-1"));
     assert!(persisted.contains("local-coder"));
+    assert!(persisted.contains("262144"));
     assert!(!persisted.contains("api_key"));
 
     let secret_canary = "setup-secret-canary";
@@ -304,7 +310,7 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
 }
 
 #[tokio::test]
-async fn provider_default_model_switch_updates_only_the_shared_future_session_route() {
+async fn provider_default_model_switch_updates_route_and_exact_model_context_window() {
     let temp = tempfile::tempdir().expect("temporary directory should open");
     let config_path = temp.path().join("sigil.toml");
     fs::write(
@@ -376,7 +382,8 @@ credential = { source = "none" }
                 "model_ref": {
                     "connection_id": "beta",
                     "model_id": "beta-model"
-                }
+                },
+                "context_window_tokens": 131072
             })
             .to_string(),
         ),
@@ -387,14 +394,42 @@ credential = { source = "none" }
     assert_eq!(saved["default_model"]["connection_id"], "beta");
     assert_eq!(saved["default_model"]["model_id"], "beta-model");
     assert_eq!(
+        saved["inventory"]["connections"][1]["model_context_windows"]["beta-model"],
+        131_072
+    );
+    assert_eq!(
         saved["inventory"]["connections"].as_array().map(Vec::len),
         Some(2)
     );
     let persisted = fs::read_to_string(&config_path).expect("saved config should read");
     assert!(persisted.contains("connection = \"beta\""));
     assert!(persisted.contains("model = \"beta-model\""));
+    assert!(persisted.contains("131072"));
     assert!(persisted.contains("[connections.alpha]"));
     assert!(persisted.contains("[connections.beta]"));
+
+    let (status, cleared) = http_raw_request(
+        address,
+        http_put(
+            "/settings/provider-connections/default-model",
+            Some("secret-token"),
+            &json!({
+                "model_ref": {
+                    "connection_id": "beta",
+                    "model_id": "beta-model"
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "context-window clear response: {cleared}");
+    assert_eq!(
+        cleared["inventory"]["connections"][1]["model_context_windows"],
+        json!({})
+    );
+    let persisted = fs::read_to_string(&config_path).expect("cleared config should read");
+    assert!(!persisted.contains("131072"));
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving

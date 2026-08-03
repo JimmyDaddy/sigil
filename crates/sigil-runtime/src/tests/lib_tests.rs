@@ -863,6 +863,43 @@ fn build_role_run_options_applies_reasoning_override() {
 }
 
 #[test]
+fn build_role_run_options_uses_exact_role_model_context_window() -> Result<()> {
+    let mut config = test_root_config("deepseek");
+    let openai = test_root_config("openai_compat");
+    let (connection_id, loaded_connection) =
+        crate::provider_connections::load_provider_connections(&openai)
+            .connections
+            .into_iter()
+            .next()
+            .expect("OpenAI-compatible connection");
+    let mut connection = loaded_connection.config;
+    connection
+        .model_context_windows
+        .insert("gpt-role".to_owned(), 262_144);
+    config
+        .connections
+        .insert(connection_id.to_string(), connection.to_raw()?);
+    config.task.planner = RoleModelConfig {
+        connection: Some(connection_id),
+        model: Some("gpt-role".to_owned()),
+        ..RoleModelConfig::default()
+    };
+
+    let options = build_role_run_options(
+        &config,
+        Path::new("/tmp/sigil-runtime-test").to_path_buf(),
+        InteractionMode::Interactive,
+        AgentRole::Planner,
+    );
+
+    assert_eq!(
+        options.compaction_config.context_window_tokens,
+        Some(262_144)
+    );
+    Ok(())
+}
+
+#[test]
 fn build_role_provider_uses_role_provider_override() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "openai-role-test-secret")]);

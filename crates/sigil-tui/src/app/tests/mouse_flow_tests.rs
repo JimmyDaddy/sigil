@@ -361,7 +361,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
     );
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let save_index = 3;
+    let save_index = 4;
     let (column, row) = setup_field_point(&layout, save_index);
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;

@@ -26,6 +26,7 @@ impl ConfigDraft {
             base_root_config: root_config.clone(),
             provider_name: provider_name.clone(),
             provider_model: selected_connection.model.clone(),
+            provider_context_window_tokens: String::new(),
             provider_api_key: SecretString::default(),
             provider_base_url: selected_connection.config.base_url.clone(),
             connection_drafts,

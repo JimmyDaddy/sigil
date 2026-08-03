@@ -451,6 +451,7 @@ fn setup_builder_persists_the_selected_provider() -> Result<()> {
     let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
     state.provider_name = "anthropic".to_owned();
     state.model = "claude-sonnet-4-5".to_owned();
+    state.context_window_tokens = "200000".to_owned();
     state.credential_source = SetupCredentialSource::SecureStore;
     state.api_key = SecretString::new("anthropic-test-key");
 
@@ -464,8 +465,28 @@ fn setup_builder_persists_the_selected_provider() -> Result<()> {
     );
     assert_eq!(root_config.agent.model, "claude-sonnet-4-5");
     assert!(root_config.connections.contains_key("anthropic-default"));
+    assert_eq!(
+        sigil_runtime::provider_connections::load_provider_connections(&root_config).connections
+            [&sigil_kernel::ConnectionId::new("anthropic-default")?]
+            .config
+            .model_context_windows
+            .get("claude-sonnet-4-5"),
+        Some(&200_000)
+    );
     assert!(!toml::to_string(&root_config)?.contains("anthropic-test-key"));
     Ok(())
+}
+
+#[test]
+fn setup_builder_rejects_an_invalid_optional_context_window() {
+    let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
+    state.credential_source = SetupCredentialSource::SecureStore;
+    state.api_key = SecretString::new("test-key");
+    state.context_window_tokens = "0".to_owned();
+
+    let error = build_setup_root_config(&state).expect_err("zero must not be saved");
+
+    assert!(error.to_string().contains("greater than 0"));
 }
 
 #[test]

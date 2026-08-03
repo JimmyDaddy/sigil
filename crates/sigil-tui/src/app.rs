@@ -61,7 +61,8 @@ use sigil_kernel::{
 };
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths, build_run_options,
-    effective_compaction_config, resolve_sigil_paths, support::SupportBuildInfo,
+    configured_model_context_window_tokens, effective_compaction_config_with_override,
+    resolve_sigil_paths, support::SupportBuildInfo,
 };
 use uuid::Uuid;
 
@@ -620,9 +621,14 @@ impl AppState {
         let permission_mode = root_config.permission.mode.as_str().to_owned();
         let (configured_provider_name, configured_model_name, configured_model_route) =
             configured_runtime_route(root_config);
-        let initial_compaction_status = effective_compaction_config(
+        let initial_model_context_window_tokens =
+            configured_model_route.as_ref().and_then(|route| {
+                configured_model_context_window_tokens(root_config, &route.model_ref)
+            });
+        let initial_compaction_status = effective_compaction_config_with_override(
             &configured_provider_name,
             &configured_model_name,
+            initial_model_context_window_tokens,
             &root_config.compaction,
         )
         .threshold_status(0)

@@ -214,6 +214,10 @@ fn config_footer_action_navigation_wraps() {
 #[test]
 fn compaction_context_field_uses_short_fallback_label() {
     assert_eq!(
+        ConfigField::ProviderContextWindowTokens.display_label(),
+        "Context window"
+    );
+    assert_eq!(
         ConfigField::CompactionContextWindowTokens.label(),
         "fallback_window"
     );
@@ -259,6 +263,30 @@ fn add_connection_uses_a_provider_owned_default_without_inheriting_active_model(
     assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
     assert_eq!(state.draft.provider_model, "gpt-4.1");
     assert!(!state.draft.provider_base_url.is_empty());
+}
+
+#[test]
+fn deleting_the_selected_default_chooses_a_remaining_connection() {
+    let mut state = ConfigState::from_root_config(&test_root_config());
+    state
+        .draft
+        .add_connection_for_provider(OPENAI_COMPAT_PROVIDER_KEY)
+        .expect("connection should add");
+    state
+        .draft
+        .set_selected_as_default()
+        .expect("added connection should become the selected default");
+
+    state
+        .draft
+        .delete_selected_connection(None)
+        .expect("an unused selected default should be removable");
+
+    assert_eq!(state.draft.connection_rows().len(), 1);
+    assert_eq!(
+        state.draft.default_model.connection_id,
+        state.draft.selected_connection_id
+    );
 }
 
 #[test]
@@ -978,6 +1006,7 @@ fn config_state_moves_fields_and_footer_boundaries() {
 fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Result<()> {
     let mut draft = ConfigDraft::from_root_config(&test_root_config());
     draft.provider_model = " deepseek-v4-pro ".to_owned();
+    draft.provider_context_window_tokens = "256000".to_owned();
     draft.provider_api_key = SecretString::new(" ");
     draft.provider_base_url = " https://proxy.example.test ".to_owned();
     draft.provider_beta_base_url = " https://proxy.example.test/beta ".to_owned();
@@ -1025,6 +1054,10 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     assert_eq!(config.model_request.request_timeout_secs, 60);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 90);
     assert_eq!(provider.base_url, "https://proxy.example.test");
+    assert_eq!(
+        provider.model_context_windows.get("deepseek-v4-pro"),
+        Some(&256_000)
+    );
     assert_eq!(
         provider.credential,
         sigil_runtime::provider_connections::CredentialRefConfig::Environment {
@@ -1163,6 +1196,19 @@ fn config_draft_validates_provider_and_compaction_values() {
                 draft,
                 "model_request.request_timeout_secs must be greater than 0",
             )
+        },
+        {
+            let mut draft = base.clone();
+            draft.provider_context_window_tokens = "abc".to_owned();
+            (
+                draft,
+                "model context_window_tokens must be a positive integer",
+            )
+        },
+        {
+            let mut draft = base.clone();
+            draft.provider_context_window_tokens = "0".to_owned();
+            (draft, "model context_window_tokens must be greater than 0")
         },
         {
             let mut draft = base.clone();

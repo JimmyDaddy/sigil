@@ -3096,6 +3096,9 @@ export interface components {
             id: string;
             issue?: components["schemas"]["ProviderConnectionIssue"] | null;
             label: string;
+            model_context_windows: {
+                [key: string]: number;
+            };
             protocol_label: string;
             provider_label: string;
             readiness: components["schemas"]["ProviderConnectionReadiness"];
@@ -3115,6 +3118,8 @@ export interface components {
         /** @enum {string} */
         ProviderCredentialSource: "environment" | "stored" | "none";
         ProviderDefaultModelSaveRequest: {
+            /** Format: uint32 */
+            context_window_tokens?: number | null;
             model_ref: components["schemas"]["ProviderModelRef"];
         };
         ProviderDefaultModelSaveResult: {
@@ -3149,6 +3154,8 @@ export interface components {
         ProviderSetupModel: {
             /** @enum {string} */
             availability: "available" | "unverified" | "configured_unavailable";
+            /** Format: uint32 */
+            context_window_tokens?: number | null;
             display_name: string;
             model_id: string;
             /** @enum {string} */
@@ -3160,6 +3167,8 @@ export interface components {
         ProviderSetupSaveRequest: {
             /** Format: password */
             api_key?: string | null;
+            /** Format: uint32 */
+            context_window_tokens?: number | null;
             credential_source: components["schemas"]["ProviderSetupCredentialSource"];
             endpoint?: string | null;
             label?: string | null;
@@ -3271,7 +3280,7 @@ export interface components {
             available_permission_modes: components["schemas"]["PermissionMode"][];
             available_reasoning_efforts: components["schemas"]["ReasoningEffort"][];
             /** @enum {string} */
-            context_window_source: "provider" | "config" | "unavailable";
+            context_window_source: "connection" | "provider" | "config" | "unavailable";
             /** Format: uint32 */
             context_window_tokens?: number | null;
             default_permission_mode: components["schemas"]["PermissionMode"];

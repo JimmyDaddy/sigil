@@ -4,9 +4,9 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
     lines.push("[connections]".to_owned());
     lines.extend(config_state.draft.connection_rows());
     lines.push("  Enter on Connection to choose or add".to_owned());
-    lines.push("  A add · D set default · Ctrl-D delete".to_owned());
+    lines.push("  A add · Ctrl-D delete".to_owned());
     lines.push(String::new());
-    lines.push("[default for new sessions]".to_owned());
+    lines.push("[active after save]".to_owned());
     lines.push(render_config_value_row(
         config_state,
         ConfigField::ProviderName,
@@ -17,10 +17,17 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
         config_state,
         ConfigField::ProviderModel,
     ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::ProviderContextWindowTokens,
+    ));
+    lines.push(render_config_hint_row(
+        "Optional per-model limit; empty uses provider metadata or the global fallback",
+    ));
     lines.push(String::new());
     lines.push("[route status]".to_owned());
     lines.push(render_config_readonly_row(
-        "Saved default",
+        "Selected route",
         &format!(
             "{}/{}",
             config_state.draft.default_model.connection_id,
@@ -36,7 +43,7 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
             .unwrap_or_else(|| "unavailable".to_owned()),
     ));
     lines.push(render_config_hint_row(
-        "Press D to set selected route as saved default; current session is unchanged",
+        "Saving keeps this conversation and uses the selected route for the next turn",
     ));
     lines.push(String::new());
     lines.push("[connection details]".to_owned());

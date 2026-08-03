@@ -160,9 +160,12 @@ V1 采用以下方案：
 9. config save 使用 copy-on-write credential rotation 与 atomic file publish。Unix parent 为
    `0700`，config/cache/credential file 为 `0600`；file mode 是受权限保护的独立 plaintext
    credential store，不得被描述为加密存储。
-10. 修改 saved default 不改变当前 session。切换 connection/model 只能在 idle 边界向当前 session
-    追加完整 route-selection event；active run 不做 mid-turn route mutation，边界前 provider-native
-    continuation 不得跨 route 复用。
+10. `/config` 保存选中的 provider/model 时，同时更新 saved default，并在 idle 边界向当前 session
+    追加完整 route-selection event；session id 与对话历史保持不变。active run 不做 mid-turn route
+    mutation，边界前 provider-native continuation 不得跨 route 复用。独立的 set-default mutation
+    仍只修改 saved default。任何 validation、credential 或 atomic publish 失败都保留 draft 和 dirty
+    状态，在 header、detail 与 footer 持续显示 save failure；typed error 能映射到字段时自动聚焦，
+    用户再次编辑后才清除旧错误，不能把失败表现成无响应的 submit。
 11. V1 的“Recommended”在选择时解析为一个确定 model ID。V1 不引入跨 provider 动态 `Auto`
     router，避免不可审计的隐式 route 漂移。
 12. 本 RFC 初始评审先冻结 contract；R56.1-R56.7 完成后，R56.8 继续收敛连接管理、
@@ -471,7 +474,7 @@ Provider section 改为 connection-first：
   Local gateway            needs model · no auth
   + Add connection
 
-[default for new sessions]
+[active after save]
   connection               : OpenAI (personal)
   model                    : gpt-5.4
 
@@ -498,7 +501,8 @@ connection 切换与新增统一通过一个显式选择器完成：
 - `A` 和 `Ctrl-N` 只把焦点定位到新增组，不创建草稿；
 - 只有用户选择具体 Provider template 后才创建未保存 connection；
 - Up/Down 是普通 macOS 键盘的主导航；PageUp/PageDown 只可作为不展示的兼容别名；
-- 切换已保存 connection 不产生 dirty state，新增具体 Provider 才产生 dirty state。
+- 选择已保存 connection 或新增具体 Provider 都会把它设为待保存 route，并产生 dirty state；保存后
+  同时用于当前 session 后续请求与新 session 默认值，不再要求额外按 `D`。
 
 模型目录成功后按 `connection_id + semantic fingerprint` 保留最多 64 份进程内 view。十分钟内
 重新进入 picker 直接复用，不显示 loading；更旧 view 先按 unverified/stale 展示并后台刷新。
@@ -539,8 +543,10 @@ DeepSeek (work)
 - `D` 或显式 footer action `Set default` 才更新下次启动默认值；
 - UI 同时显示 `current session` 与 `saved default`，两者不同时不得省略。
 
-从 `/config` 保存新的 default 也不修改当前 session。切换当前 session route 与修改 saved default
-始终是两个独立 mutation。
+`/config` 是面向普通用户的组合操作：保存选中的 provider/model 会同时更新 saved default，并在
+当前 idle session 追加同一 route-selection boundary。session id、对话历史和任务状态保持不变；
+不能跨 provider 复用的 continuation/cache 在该边界失效。`/model` 与独立 set-default mutation
+仍保持上面的解耦语义。
 
 ### 6.7 Custom connection
 
@@ -767,6 +773,9 @@ protocol = "responses"
 base_url = "https://api.openai.com/v1"
 credential = { source = "stored", id = "3b2c8d6e-3fc0-4f52-9daa-15c0ddfe8571" }
 
+[connections.openai-personal.model_context_windows]
+"gpt-5.4" = 1048576
+
 [connections.deepseek-work]
 label = "DeepSeek (work)"
 provider = "deepseek"
@@ -785,6 +794,7 @@ strict_tools_mode = "auto"
 
 - `[agent].connection + [agent].model` 共同组成 saved default `ModelRef`；
 - model 不再复制进 connection block；
+- `model_context_windows` 是可选的 connection-local model ID 到 token 上限映射；首次设置和普通设置都可独立维护，留空不阻塞配置；
 - `protocol` 是持久化字段，不能只靠 endpoint 猜测；
 - 标准 provider 创建时写入明确默认值，避免未来 binary default 改变旧配置语义；
 - provider-specific options 位于 connection 下，不能进入 kernel；
@@ -979,6 +989,7 @@ pub enum ModelCatalogProvenance {
 
 remote response 中的 context window、price、feature、owner、display name 都是不可信 metadata。
 只有 provider-owned exact mapping 可以把已验证字段提升为 capability；unknown model 保守处理。
+运行时上下文窗口按“显式 connection/model 配置 → provider-owned exact mapping → 全局 fallback”解析；远端 catalog 不参与该优先级。
 
 ### 9.3 Source precedence
 

@@ -1131,6 +1131,7 @@ describe("desktop workspace and history shell", () => {
         availability: "available" as const,
         recommended: true,
         provenance: "remote" as const,
+        contextWindowTokens: 1_000_000,
       }],
       suggestedModel: "deepseek-v4-flash",
       manualEntryAllowed: false,
@@ -1148,6 +1149,7 @@ describe("desktop workspace and history shell", () => {
           endpointDisplay: "api.deepseek.com",
           credentialSource: "stored" as const,
           readiness: "ready" as const,
+          modelContextWindows: { "deepseek-v4-flash": 262_144 },
           defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
         }],
         issues: [],
@@ -1178,6 +1180,8 @@ describe("desktop workspace and history shell", () => {
     await user.type(screen.getByLabelText("API key"), "secret-canary");
     await user.click(screen.getByRole("button", { name: "Continue to models" }));
     expect(await screen.findByRole("radio", { name: /DeepSeek V4 Flash/ })).toBeTruthy();
+    expect(screen.getByLabelText("Context window").getAttribute("placeholder")).toBe("1000000");
+    await user.type(screen.getByLabelText("Context window"), "262144");
     await user.click(screen.getByRole("button", { name: "Save and continue" }));
 
     await waitFor(() => expect(saveProviderSetup).toHaveBeenCalledWith(
@@ -1187,10 +1191,14 @@ describe("desktop workspace and history shell", () => {
         credentialSource: "secure_store",
         apiKey: "secret-canary",
         modelId: "deepseek-v4-flash",
+        contextWindowTokens: 262144,
       }),
     ));
     expect(await screen.findByRole("heading", { name: "Select a conversation" })).toBeTruthy();
     expect(createSession).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
+    expect(screen.getByLabelText("Context window").getAttribute("value")).toBe("262144");
   });
 
   it("ignores a completed first-run provider setup after switching workspaces", async () => {
@@ -1668,6 +1676,21 @@ describe("desktop workspace and history shell", () => {
     await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenCalledWith(
       workspace.id,
       { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+    ));
+    const contextWindowInput = screen.getByLabelText("Context window");
+    await user.type(contextWindowInput, "524288");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenLastCalledWith(
+      workspace.id,
+      { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+      524288,
+    ));
+    await user.clear(contextWindowInput);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saveProviderDefaultModel).toHaveBeenLastCalledWith(
+      workspace.id,
+      { connectionId: "deepseek-default", modelId: "deepseek-v4-pro" },
+      undefined,
     ));
     await user.click(screen.getByRole("button", { name: "Back to conversations" }));
     await user.click(screen.getByRole("button", { name: "New conversation" }));

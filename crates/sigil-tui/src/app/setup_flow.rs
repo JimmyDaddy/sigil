@@ -27,8 +27,8 @@ impl AppState {
             Some(state) if state.selected_field == SetupField::Provider => {
                 (3..3 + SETUP_PROVIDER_ORDER.len()).collect()
             }
-            Some(state) if state.is_custom() => (3..=8).collect(),
-            Some(_) => (3..=6).collect(),
+            Some(state) if state.is_custom() => (3..=9).collect(),
+            Some(_) => (3..=7).collect(),
             None => Vec::new(),
         }
     }
@@ -114,6 +114,17 @@ impl AppState {
                 &state.model,
                 Some("Enter choose · type model ID"),
             ),
+            render_setup_value_row(
+                SetupField::ContextWindow,
+                state.selected_field,
+                "context window",
+                if state.context_window_tokens.trim().is_empty() {
+                    "automatic"
+                } else {
+                    state.context_window_tokens.trim()
+                },
+                Some("Enter optional token limit"),
+            ),
             render_setup_action_row(
                 SetupField::Save,
                 state.selected_field,
@@ -132,6 +143,14 @@ impl AppState {
             ),
             format!("authentication: {}", state.auth_summary()),
             format!("model: {}", state.model),
+            format!(
+                "context window: {}",
+                if state.context_window_tokens.trim().is_empty() {
+                    "automatic (provider metadata or fallback)"
+                } else {
+                    state.context_window_tokens.trim()
+                }
+            ),
             format!(
                 "orchestration: {} / {} ({})",
                 state.orchestration_rollout.routing_policy.as_str(),
@@ -321,6 +340,15 @@ impl AppState {
                 self.open_model_picker(ModelPickerTarget::Setup, &current);
                 return Ok(None);
             }
+            KeyCode::Enter if selected_field == SetupField::ContextWindow => {
+                let current = self
+                    .setup_state
+                    .as_ref()
+                    .map(|state| state.context_window_tokens.clone())
+                    .unwrap_or_default();
+                self.open_text_input(TextInputTarget::SetupContextWindow, &current);
+                return Ok(None);
+            }
             KeyCode::Backspace => return Ok(None),
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if selected_field == SetupField::ApiKey
@@ -333,6 +361,10 @@ impl AppState {
                 }
                 if selected_field == SetupField::Model {
                     self.open_text_input_with_char(TextInputTarget::SetupModel, character);
+                    return Ok(None);
+                }
+                if selected_field == SetupField::ContextWindow && character.is_ascii_digit() {
+                    self.open_text_input_with_char(TextInputTarget::SetupContextWindow, character);
                     return Ok(None);
                 }
                 if selected_field == SetupField::Endpoint {
@@ -360,9 +392,15 @@ impl AppState {
         }
         match state.selected_field {
             SetupField::Model => {
-                state.model = value.clone();
-                state.refresh_orchestration_rollout();
+                state.set_model(value.clone());
                 self.last_notice = Some(format!("updated model {value}"));
+            }
+            SetupField::ContextWindow
+                if value.chars().all(|character| character.is_ascii_digit()) =>
+            {
+                state.context_window_tokens = value;
+                state.bump_revision();
+                self.last_notice = Some("updated context window".to_owned());
             }
             SetupField::Endpoint if state.is_custom() => {
                 state.base_url = value;
@@ -378,6 +416,7 @@ impl AppState {
             | SetupField::Protocol
             | SetupField::Endpoint
             | SetupField::ApiKey
+            | SetupField::ContextWindow
             | SetupField::Save => {}
         }
     }
@@ -561,6 +600,17 @@ fn build_setup_draft(
         SetupCredentialSource::SecureStore => connection.credential,
         SetupCredentialSource::NoAuthentication => CredentialRefConfig::None,
     };
+    if !state.context_window_tokens.trim().is_empty() {
+        let tokens = state
+            .context_window_tokens
+            .trim()
+            .parse::<u32>()
+            .context("context window must be a positive integer")?;
+        anyhow::ensure!(tokens > 0, "context window must be greater than 0");
+        connection
+            .model_context_windows
+            .insert(model.to_owned(), tokens);
+    }
     connection.validate()?;
     let default_model = ModelRef::new(connection_id.clone(), model)?;
     let base = default_setup_root_config();

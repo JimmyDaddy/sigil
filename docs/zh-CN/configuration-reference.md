@@ -38,13 +38,15 @@
 | `[connections.<id>].protocol` | 必填 | `deepseek`、`responses`、`chat_completions`、`anthropic_messages` 或 `generate_content`，并受 provider 约束。 |
 | `[connections.<id>].base_url` | provider 默认值 | 此 connection 独立拥有的端点；带凭据的远端必须使用 HTTPS，无认证 HTTP 仅限回环地址。 |
 | `[connections.<id>].credential` | 快速设置中的选择 | `{ source = "environment", name = "..." }`、`{ source = "stored", id = "..." }` 或 `{ source = "none" }`。stored ID 由 Sigil 生成，不应手写。 |
+| `[connections.<id>].model_context_windows.<model-id>` | 未设置 | 为此连接上的单个模型配置可选的精确 token 上限。TUI 和 Desktop 的首次设置及普通设置都能添加或清空，不依赖模型目录。 |
 | `[connections.<id>].options` | provider 默认值 | 由 provider 校验的 wire 选项；类似凭据的键会被拒绝。 |
 | `[model_request].request_timeout_secs` | `120` | 模型请求等待上限；单次启动可用 `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_idle_timeout_secs` | `180` | 两个流式响应事件之间的最长等待时间；可用 `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_total_timeout_secs` | 未设置 | 整个流式响应的可选时限；可用 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 覆盖。 |
 
-活动会话会保留自己的 `connection-id/model-id` 解析 route。修改保存默认值不会重写当前会话；
-空闲状态切换到 ready route 时会创建新会话。旧 `[agent].provider` 与 `[providers.*]` 文件会被
+活动会话会保留自己的 `connection-id/model-id` 解析 route。`/model` 会在空闲时切换该 route，
+但不替换会话；其中显式的设为默认操作只修改保存默认值。TUI `/config` 保存 provider/model 选择时，
+则会把同一 route 同时应用到当前会话和保存默认值。旧 `[agent].provider` 与 `[providers.*]` 文件会被
 拒绝，需要直接替换为当前 connection schema。
 
 provider 模板、凭据来源、模型发现与排障见[模型服务指南](providers.md)。

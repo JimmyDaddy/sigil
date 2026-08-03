@@ -8,7 +8,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been recorded after `v0.0.1-beta.2` yet.
+- TUI and Desktop now configure an optional context-window size independently for each connection/model pair, including first-run setup. Empty values keep automatic provider metadata and global fallback behavior, so providers without a model catalog are not blocked.
 
 ## v0.0.1-beta.2 - 2026-08-03
 

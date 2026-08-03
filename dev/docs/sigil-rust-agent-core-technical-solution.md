@@ -312,7 +312,9 @@ Provider connection 配置采用 V2 复合身份。kernel 只定义中立的 `Co
 `ModelRef` 与 durable `ResolvedModelRoute`；runtime 拥有
 `ProviderConnectionConfig`、V1 -> V2 投影、credential reference、connection inventory、
 provider-native catalog 及其 exact-fingerprint cache。`sigil.toml` 只保存连接、endpoint、
-协议选项、默认 `ModelRef` 和 credential reference，不保存新输入的密钥。凭据可来自命名环境
+协议选项、默认 `ModelRef`、可选的 connection/model context-window 映射和 credential reference，
+不保存新输入的密钥。显式单模型窗口优先于 provider-owned exact metadata，再回退全局
+`fallback_context_window_tokens`；remote catalog 的附加 metadata 不参与该解析。凭据可来自命名环境
 变量、OS credential store，或 owner-only `~/.sigil/credentials.json`；新配置默认使用 file
 backend。`auto` 也是严格的 non-interactive file-only 策略，不查询或清理旧 native record；
 `keyring` 是唯一允许平台认证 UI 的显式 native-store 策略。旧 native record 不自动迁移或读取。
@@ -321,10 +323,15 @@ backend。`auto` 也是严格的 non-interactive file-only 策略，不查询或
 “任何凭据绝不在本机持久化”。TUI 首启与 `/config` 采用 connection-first 流程；启动只投影
 secret-free offline readiness，用户主动进入配置流程后才异步验证 stored credential。native
 调用在 blocking worker 中 process-global 串行执行，不以无法取消底层系统 prompt 的短 timeout
-制造伪失败。Desktop 只消费不含 secret 的 exact model option 和 freshness/availability
+制造伪失败。TUI 与 Desktop 的首次设置和普通设置都提供可留空的单模型 context-window 入口，
+没有模型目录的兼容站点仍可用手动 model ID 完成配置。Desktop 只消费不含 secret 的 exact model option 和 freshness/availability
 元数据；application run context 按 connection 投影全部已配置连接的有界已知模型，Desktop 与 TUI
 选择值都保持完整 `ModelRef`。设置 saved default 使用共享 typed mutation，不保存 renderer-local
-Provider/model override。session identity 建立 initial exact route，后续只允许在 idle 边界追加完整、
+Provider/model override；TUI `/config` 选择 connection/model 并保存时，会同时更新 saved default，
+并在当前 idle session 追加同一 route-selection boundary 后重绑 worker，而不是创建新 session。
+配置校验、credential rotation 或 atomic publish 失败时，TUI 保留 draft/dirty state，并在 header、
+detail 和 footer 投影持久 save-error；可识别字段会获得焦点，后续编辑清除旧错误状态。
+session identity 建立 initial exact route，后续只允许在 idle 边界追加完整、
 可审计的 route-selection event；endpoint/protocol semantic fingerprint 漂移时 fail closed，
 fork/restore 不得静默改写既有事件，切换 connection 或 model 后不得复用边界前 provider-private
 continuation/cache material。
@@ -1203,7 +1210,8 @@ policy 不兼容时追加失效审计并直接从 portable checkpoint 组装请�
 `ResolvedModelRoute` 的 `SessionModelSelected` 控制事件，从下一次运行生效。该事件是
 provider-native continuation/cache 的隔离边界，边界前 material 不得被新 route 复用；Desktop 与 TUI
 重建 provider worker 时保持原 session id、对话历史和任务状态。每次实际 provider attempt 继续记录精确
-provider/model，saved default 只由独立的显式操作修改。
+provider/model。`/model` 不隐式修改 saved default；`/config` 的 provider 保存操作则把用户选中的
+route 同时用作 saved default 与当前 session 的后续 route，减少设置页中的双重确认。
 
 除此之外，还应加一条和成本直接相关的策略：
 

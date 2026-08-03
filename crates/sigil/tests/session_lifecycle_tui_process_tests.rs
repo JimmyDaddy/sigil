@@ -566,9 +566,11 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                 thread::sleep(Duration::from_millis(100));
                 write_input(writer, &[0x7f; 64])?;
                 write_input(writer, fixture.base_url.as_bytes())?;
-                let endpoint_apply_offset = captured_len(output);
                 write_input(writer, b"\r")?;
-                wait_for_text_after(output, endpoint_apply_offset, "credential: <not staged>")?;
+                // Ratatui may redraw only the changed suffix after the modal closes, so there is no
+                // stable full-line marker to await here. The later persisted-config and live-request
+                // assertions verify that this endpoint submission actually took effect.
+                thread::sleep(Duration::from_millis(150));
 
                 let authentication_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\x1b[C")?;
@@ -600,7 +602,8 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                     "Custom endpoint · Chat Completions",
                 )?;
 
-                write_input(writer, b"\x1b[B\r")?;
+                // Context window is optional. Leave it automatic and move to the save action.
+                write_input(writer, b"\x1b[B\x1b[B\r")?;
 
                 let deadline = Instant::now() + PROCESS_TIMEOUT;
                 while !config_path.exists() {

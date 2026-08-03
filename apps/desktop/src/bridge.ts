@@ -100,6 +100,7 @@ export interface DesktopBridge {
   saveProviderDefaultModel(
     workspaceId: string,
     modelRef: ProviderModelRef,
+    contextWindowTokens?: number,
   ): Promise<ProviderDefaultModelSaveResult>;
   pickWorkspace(): Promise<WorkspaceSelection>;
   openRecentWorkspace(recentId: string): Promise<WorkspaceSummary>;
@@ -268,10 +269,10 @@ export const desktopBridge: DesktopBridge = {
     invoke<ProviderSetupCatalog>("desktop_provider_setup_catalog", { workspaceId, input }),
   saveProviderSetup: (workspaceId, input) =>
     invoke<ProviderSetupSaveResult>("desktop_save_provider_setup", { workspaceId, input }),
-  saveProviderDefaultModel: (workspaceId, modelRef) =>
+  saveProviderDefaultModel: (workspaceId, modelRef, contextWindowTokens) =>
     invoke<ProviderDefaultModelSaveResult>("desktop_save_provider_default_model", {
       workspaceId,
-      input: { modelRef },
+      input: { modelRef, contextWindowTokens },
     }),
   pickWorkspace: () =>
     invoke<WorkspaceSelection>("desktop_pick_workspace"),

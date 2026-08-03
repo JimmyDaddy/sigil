@@ -278,7 +278,7 @@ impl ConfigState {
             self.footer_selected = false;
             self.selected_field = None;
         }
-        self.dirty = true;
+        self.mark_edited();
     }
 
     #[allow(dead_code)]
@@ -293,7 +293,7 @@ impl ConfigState {
         if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
             self.selected_field = None;
         }
-        self.dirty = true;
+        self.mark_edited();
         true
     }
 

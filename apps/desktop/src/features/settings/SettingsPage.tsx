@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import type { ThemePreference } from "../../appearance/contract";
@@ -15,7 +15,7 @@ import type {
 } from "../../types";
 import { Icon } from "../../ui/icons";
 import { useNotifications } from "../../ui/feedback";
-import { Button, Checkbox, Select } from "../../ui/primitives";
+import { Button, Checkbox, Select, TextField } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
 import { ProviderSetup } from "./ProviderSetup";
 import { DesktopUpdateCard } from "./DesktopUpdateCard";
@@ -67,6 +67,17 @@ export function SettingsPage({
   const defaultModelConnection = providerInventory?.connections.find(
     (connection) => connection.id === (effectiveDefaultModel?.connectionId ?? modelContext?.modelRef.connectionId),
   );
+  const [contextWindowTokens, setContextWindowTokens] = useState("");
+  const contextWindowValue = contextWindowTokens.trim();
+  const contextWindowValid = contextWindowValue === ""
+    || (/^\d+$/.test(contextWindowValue) && Number(contextWindowValue) > 0);
+
+  useEffect(() => {
+    const configured = effectiveDefaultModel === undefined
+      ? undefined
+      : defaultModelConnection?.modelContextWindows?.[effectiveDefaultModel.modelId];
+    setContextWindowTokens(configured?.toString() ?? "");
+  }, [defaultModelConnection, effectiveDefaultModel]);
 
   const updateStartup = (enabled: boolean) => {
     if (!writeReopenLastWorkspace(enabled)) {
@@ -104,12 +115,46 @@ export function SettingsPage({
     }
     setDefaultModelSaving(true);
     try {
-      const result = await bridge.saveProviderDefaultModel(workspaceId, selected.modelRef);
+      const configuredContextWindow = connection.modelContextWindows?.[selected.modelRef.modelId];
+      const result = configuredContextWindow === undefined
+        ? await bridge.saveProviderDefaultModel(workspaceId, selected.modelRef)
+        : await bridge.saveProviderDefaultModel(
+          workspaceId,
+          selected.modelRef,
+          configuredContextWindow,
+        );
       if (!onProviderInventoryChange(result.inventory)) return;
       onDefaultModelChange(result.defaultModel);
       notify({
         tone: result.saveWarning ? "warning" : "success",
         message: result.saveWarning ? t("defaultModelSaveWarning") : t("defaultModelSaved"),
+      });
+    } catch {
+      if (isWorkspaceActive()) {
+        notify({ tone: "error", message: t("settingsSaveFailed") });
+      }
+    } finally {
+      if (isWorkspaceActive()) setDefaultModelSaving(false);
+    }
+  };
+  const saveContextWindow = async () => {
+    if (
+      workspaceId === undefined
+      || effectiveDefaultModel === undefined
+      || !contextWindowValid
+    ) return;
+    setDefaultModelSaving(true);
+    try {
+      const result = await bridge.saveProviderDefaultModel(
+        workspaceId,
+        effectiveDefaultModel,
+        contextWindowValue === "" ? undefined : Number(contextWindowValue),
+      );
+      if (!onProviderInventoryChange(result.inventory)) return;
+      onDefaultModelChange(result.defaultModel);
+      notify({
+        tone: result.saveWarning ? "warning" : "success",
+        message: result.saveWarning ? t("defaultModelSaveWarning") : t("contextWindowSaved"),
       });
     } catch {
       if (isWorkspaceActive()) {
@@ -256,51 +301,85 @@ export function SettingsPage({
               <p>{t("defaultModelDetail")}</p>
             </div>
           </div>
-          {modelContext === undefined ? (
-            <p className="settings-control-unavailable">{t("defaultModelUnavailable")}</p>
-          ) : (
-            <Select
-              label={t("defaultModel")}
-              description={t("defaultModelProvider", {
-                connection: defaultModelConnection?.label ?? modelContext.modelRef.connectionId,
-                provider: defaultModelConnection?.providerLabel ?? modelContext.providerName,
-              })}
-              value={
-                effectiveDefaultModel === undefined ? "" : modelRefKey(effectiveDefaultModel)
-              }
-              disabled={defaultModelSaving}
-              onChange={(event) => void updateDefaultModel(event.currentTarget.value)}
-            >
-              {modelContext.modelOptions.map((option) => (
-                <option
-                  key={modelRefKey(option.modelRef)}
-                  value={modelRefKey(option.modelRef)}
-                  disabled={
-                    !modelOptionIsSelectable(option)
-                    || !providerInventory?.connections.some(
-                      (connection) => connection.id === option.modelRef.connectionId
-                        && ["ready", "unverified"].includes(connection.readiness),
-                    )
-                  }
+          <div className="settings-model-controls">
+            {modelContext === undefined ? (
+              <p className="settings-control-unavailable">
+                {effectiveDefaultModel === undefined
+                  ? t("defaultModelUnavailable")
+                  : t("defaultModelPickerUnavailable")}
+              </p>
+            ) : (
+              <Select
+                label={t("defaultModel")}
+                description={t("defaultModelProvider", {
+                  connection: defaultModelConnection?.label ?? modelContext.modelRef.connectionId,
+                  provider: defaultModelConnection?.providerLabel ?? modelContext.providerName,
+                })}
+                value={
+                  effectiveDefaultModel === undefined ? "" : modelRefKey(effectiveDefaultModel)
+                }
+                disabled={defaultModelSaving}
+                onChange={(event) => void updateDefaultModel(event.currentTarget.value)}
+              >
+                {modelContext.modelOptions.map((option) => (
+                  <option
+                    key={modelRefKey(option.modelRef)}
+                    value={modelRefKey(option.modelRef)}
+                    disabled={
+                      !modelOptionIsSelectable(option)
+                      || !providerInventory?.connections.some(
+                        (connection) => connection.id === option.modelRef.connectionId
+                          && ["ready", "unverified"].includes(connection.readiness),
+                      )
+                    }
+                  >
+                    {providerInventory?.connections.find(
+                      (connection) => connection.id === option.modelRef.connectionId,
+                    )?.providerLabel ?? option.modelRef.connectionId}
+                    {" · "}
+                    {providerInventory?.connections.find(
+                      (connection) => connection.id === option.modelRef.connectionId,
+                    )?.label ?? option.modelRef.connectionId}
+                    {" · "}
+                    {option.displayName === option.modelName
+                      ? option.modelName
+                      : `${option.displayName} · ${option.modelName}`}
+                    {option.availability === "configured_unavailable"
+                      ? ` · ${t("unavailable")}`
+                      : ""}
+                  </option>
+                ))}
+              </Select>
+            )}
+            {effectiveDefaultModel === undefined ? null : (
+              <div className="settings-context-window-control">
+                <TextField
+                  type="number"
+                  min={1}
+                  inputMode="numeric"
+                  label={t("contextWindow")}
+                  description={t("contextWindowSettingsDetail", {
+                    connection: defaultModelConnection?.label
+                      ?? effectiveDefaultModel.connectionId,
+                    model: effectiveDefaultModel.modelId,
+                  })}
+                  value={contextWindowTokens}
+                  placeholder={t("automatic")}
+                  error={contextWindowValid ? undefined : t("contextWindowInvalid")}
+                  disabled={defaultModelSaving}
+                  onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={defaultModelSaving || !contextWindowValid}
+                  onClick={() => void saveContextWindow()}
                 >
-                  {providerInventory?.connections.find(
-                    (connection) => connection.id === option.modelRef.connectionId,
-                  )?.providerLabel ?? option.modelRef.connectionId}
-                  {" · "}
-                  {providerInventory?.connections.find(
-                    (connection) => connection.id === option.modelRef.connectionId,
-                  )?.label ?? option.modelRef.connectionId}
-                  {" · "}
-                  {option.displayName === option.modelName
-                    ? option.modelName
-                    : `${option.displayName} · ${option.modelName}`}
-                  {option.availability === "configured_unavailable"
-                    ? ` · ${t("unavailable")}`
-                    : ""}
-                </option>
-              ))}
-            </Select>
-          )}
+                  {defaultModelSaving ? t("savingProvider") : t("save")}
+                </Button>
+              </div>
+            )}
+            </div>
         </section>
 
         <section className="settings-section" aria-labelledby="settings-appearance">

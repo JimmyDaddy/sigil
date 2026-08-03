@@ -3,7 +3,8 @@ use sigil_kernel::{
     CompactionThresholdStatus,
 };
 use sigil_runtime::{
-    ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
+    ContextWindowSource, configured_model_context_window_tokens,
+    effective_compaction_config_with_override, resolve_context_window_tokens_with_override,
 };
 
 use super::formatting::{format_token_compact, format_token_count, ratio_to_percent};
@@ -175,19 +176,30 @@ impl AppState {
     }
 
     fn resolved_context_window(&self) -> sigil_runtime::ResolvedContextWindow {
-        resolve_context_window_tokens(
+        resolve_context_window_tokens_with_override(
             &self.runtime.provider_name,
             &self.runtime.model_name,
+            self.current_model_context_window_tokens(),
             self.compaction_config.context_window_tokens,
         )
     }
 
     fn resolved_compaction_config(&self) -> CompactionConfig {
-        effective_compaction_config(
+        effective_compaction_config_with_override(
             &self.runtime.provider_name,
             &self.runtime.model_name,
+            self.current_model_context_window_tokens(),
             &self.compaction_config,
         )
+    }
+
+    fn current_model_context_window_tokens(&self) -> Option<u32> {
+        self.config_snapshot
+            .as_ref()
+            .zip(self.runtime.model_route.as_ref())
+            .and_then(|(root_config, route)| {
+                configured_model_context_window_tokens(root_config, &route.model_ref)
+            })
     }
 
     fn context_usage_percent(&self, cap: u32) -> u64 {
@@ -243,6 +255,7 @@ impl AppState {
 
 pub(crate) fn context_window_source_label(source: ContextWindowSource) -> &'static str {
     match source {
+        ContextWindowSource::Connection => "configured",
         ContextWindowSource::Provider => "provider",
         ContextWindowSource::Config => "fallback",
         ContextWindowSource::None => "n/a",

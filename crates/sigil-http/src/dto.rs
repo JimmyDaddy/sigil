@@ -318,6 +318,7 @@ pub struct HttpProviderConnectionEntry {
     pub endpoint_display: String,
     pub credential_source: HttpProviderCredentialSource,
     pub readiness: HttpProviderConnectionReadiness,
+    pub model_context_windows: std::collections::BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<HttpProviderModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,6 +391,8 @@ pub struct HttpProviderSetupModel {
     pub availability: String,
     pub recommended: bool,
     pub provenance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
 }
 
 /// Exact connection-scoped catalog view used by a first-run or settings wizard.
@@ -421,6 +424,8 @@ pub struct HttpProviderSetupSaveRequest {
     pub api_key: Option<String>,
     pub model_id: String,
     #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
     pub replace_invalid_config: bool,
@@ -435,14 +440,16 @@ pub struct HttpProviderSetupSaveResult {
     pub save_warning: bool,
 }
 
-/// Existing exact route selected as the shared default for future sessions.
+/// Existing exact route and optional context limit selected as the shared default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HttpProviderDefaultModelSaveRequest {
     pub model_ref: HttpProviderModelRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
 }
 
-/// Secret-free result after atomically changing only the saved default route.
+/// Secret-free result after atomically changing the saved default and optional model limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HttpProviderDefaultModelSaveResult {
@@ -1866,6 +1873,8 @@ pub enum HttpModelSelectionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpContextWindowSource {
+    /// Exact connection/model configuration supplied the limit.
+    Connection,
     /// Provider-owned model metadata supplied the limit.
     Provider,
     /// User configuration supplied the limit.

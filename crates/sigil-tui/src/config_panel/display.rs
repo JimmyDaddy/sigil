@@ -12,6 +12,9 @@ impl ConfigState {
         match field {
             ConfigField::ProviderName => Some(&self.draft.provider_name),
             ConfigField::ProviderModel => Some(&self.draft.provider_model),
+            ConfigField::ProviderContextWindowTokens => {
+                Some(&self.draft.provider_context_window_tokens)
+            }
             ConfigField::ProviderApiKey => Some(self.draft.provider_api_key.expose_secret()),
             ConfigField::ModelRequestTimeoutSecs => Some(&self.draft.model_request_timeout_secs),
             ConfigField::ModelRequestStreamIdleTimeoutSecs => {
@@ -76,6 +79,9 @@ impl ConfigState {
         match field {
             ConfigField::ProviderName => Some(&mut self.draft.provider_name),
             ConfigField::ProviderModel => Some(&mut self.draft.provider_model),
+            ConfigField::ProviderContextWindowTokens => {
+                Some(&mut self.draft.provider_context_window_tokens)
+            }
             ConfigField::ProviderApiKey => None,
             ConfigField::ModelRequestTimeoutSecs => {
                 Some(&mut self.draft.model_request_timeout_secs)
@@ -268,6 +274,10 @@ impl ConfigState {
             ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
                 "provider/model metadata".to_owned()
             }
+            ConfigField::ProviderContextWindowTokens if text_value.trim().is_empty() => {
+                "automatic".to_owned()
+            }
+            ConfigField::ProviderContextWindowTokens => format!("{text_value} tokens"),
             ConfigField::CompactionContextWindowTokens => format!("{text_value} tokens"),
             _ => text_value.to_owned(),
         }
@@ -302,7 +312,8 @@ pub(crate) fn render_config_readonly_row(label: &str, value: &str) -> String {
 
 pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> bool {
     match field {
-        ConfigField::CompactionContextWindowTokens
+        ConfigField::ProviderContextWindowTokens
+        | ConfigField::CompactionContextWindowTokens
         | ConfigField::ModelRequestTimeoutSecs
         | ConfigField::ModelRequestStreamIdleTimeoutSecs
         | ConfigField::TerminalScrollSensitivity

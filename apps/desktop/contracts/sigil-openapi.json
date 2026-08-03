@@ -4545,6 +4545,14 @@
           "label": {
             "type": "string"
           },
+          "model_context_windows": {
+            "additionalProperties": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": "object"
+          },
           "protocol_label": {
             "type": "string"
           },
@@ -4562,7 +4570,8 @@
           "protocol_label",
           "endpoint_display",
           "credential_source",
-          "readiness"
+          "readiness",
+          "model_context_windows"
         ],
         "type": "object"
       },
@@ -4640,6 +4649,14 @@
       "ProviderDefaultModelSaveRequest": {
         "additionalProperties": false,
         "properties": {
+          "context_window_tokens": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "model_ref": {
             "$ref": "#/components/schemas/ProviderModelRef"
           }
@@ -4787,6 +4804,14 @@
             ],
             "type": "string"
           },
+          "context_window_tokens": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "display_name": {
             "type": "string"
           },
@@ -4834,6 +4859,14 @@
               "null"
             ],
             "writeOnly": true
+          },
+          "context_window_tokens": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "credential_source": {
             "$ref": "#/components/schemas/ProviderSetupCredentialSource"
@@ -5384,6 +5417,7 @@
           },
           "context_window_source": {
             "enum": [
+              "connection",
               "provider",
               "config",
               "unavailable"

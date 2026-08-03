@@ -973,7 +973,7 @@ export interface RunContext {
   reasoningEffortBinding?: string;
   contextWindowTokens?: number;
   lastPromptTokens?: number;
-  contextWindowSource: "provider" | "config" | "unavailable";
+  contextWindowSource: "connection" | "provider" | "config" | "unavailable";
   extensionCatalog: ExtensionCatalog;
 }
 
@@ -1008,6 +1008,7 @@ export interface ProviderConnection {
   endpointDisplay: string;
   credentialSource: ProviderCredentialSource;
   readiness: ProviderConnectionReadiness;
+  modelContextWindows?: Record<string, number>;
   defaultModel?: ProviderModelRef;
   issue?: ProviderConnectionIssue;
 }
@@ -1043,6 +1044,7 @@ export interface ProviderSetupModel {
   availability: "available" | "unverified" | "configured_unavailable";
   recommended: boolean;
   provenance: "remote" | "cache" | "bundled" | "configured" | "manual";
+  contextWindowTokens?: number;
 }
 
 export interface ProviderSetupCatalog {
@@ -1056,6 +1058,7 @@ export interface ProviderSetupCatalog {
 
 export interface ProviderSetupSaveInput extends ProviderSetupCatalogInput {
   modelId: string;
+  contextWindowTokens?: number;
   label?: string;
 }
 

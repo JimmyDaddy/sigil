@@ -870,6 +870,13 @@ fn effective_context_window_helper_prefers_provider_then_fallback() {
         "1,000,000 tokens  source=provider"
     );
 
+    state.draft.provider_context_window_tokens = "262144".to_owned();
+    assert_eq!(
+        render_effective_context_window(&state),
+        "262,144 tokens  source=configured"
+    );
+
+    state.draft.provider_context_window_tokens.clear();
     state.draft.provider_model = "custom-model".to_owned();
     state.draft.compaction_context_window_tokens = "2048".to_owned();
     assert_eq!(
@@ -881,6 +888,17 @@ fn effective_context_window_helper_prefers_provider_then_fallback() {
     assert_eq!(
         render_effective_context_window(&state),
         "unknown  source=none"
+    );
+}
+
+#[test]
+fn provider_context_window_save_error_targets_the_exact_field() {
+    assert_eq!(
+        config_save_error_target("model context_window_tokens must be greater than 0"),
+        Some((
+            ConfigSection::Provider,
+            ConfigField::ProviderContextWindowTokens,
+        ))
     );
 }
 
@@ -929,7 +947,12 @@ fn config_private_helpers_cover_missing_snapshot_and_save_guards() -> anyhow::Re
         .expect("config state should exist")
         .dirty = true;
     assert!(app.save_config_draft()?.is_none());
-    assert_eq!(app.last_notice.as_deref(), Some("model cannot be empty"));
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("save failed: model cannot be empty")
+    );
+    assert_eq!(app.config_save_error(), Some("model cannot be empty"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
     assert!(app.events.iter().any(|event| {
         event.label == "config:error" && event.detail.contains("model cannot be empty")
     }));

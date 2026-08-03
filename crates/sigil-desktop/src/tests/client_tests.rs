@@ -1285,6 +1285,7 @@ async fn save_provider_default_model_uses_the_exact_put_route_and_compound_ident
                 connection_id: "gateway-team".to_owned(),
                 model_id: "deepseek-v4-flash".to_owned(),
             },
+            context_window_tokens: None,
         })
         .await
         .expect("exact default route should save");

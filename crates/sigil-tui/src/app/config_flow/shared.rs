@@ -25,9 +25,17 @@ pub(super) fn render_effective_context_window(config_state: &ConfigState) -> Str
         .parse::<u32>()
         .ok()
         .filter(|tokens| *tokens > 0);
-    let resolved = resolve_context_window_tokens(
+    let model_tokens = config_state
+        .draft
+        .provider_context_window_tokens
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|tokens| *tokens > 0);
+    let resolved = resolve_context_window_tokens_with_override(
         &config_state.draft.provider_name,
         config_state.draft.provider_model.trim(),
+        model_tokens,
         fallback_tokens,
     );
 
@@ -43,6 +51,7 @@ pub(super) fn render_effective_context_window(config_state: &ConfigState) -> Str
 
 pub(super) fn config_context_window_source_label(source: ContextWindowSource) -> &'static str {
     match source {
+        ContextWindowSource::Connection => "configured",
         ContextWindowSource::Provider => "provider",
         ContextWindowSource::Config => "fallback",
         ContextWindowSource::None => "none",

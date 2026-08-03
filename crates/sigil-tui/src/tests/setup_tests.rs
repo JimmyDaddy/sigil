@@ -16,16 +16,26 @@ fn setup_field_index_and_labels_cover_standard_and_custom_values() {
     assert_eq!(SetupField::from_index(0, false), Some(SetupField::Provider));
     assert_eq!(SetupField::from_index(1, false), Some(SetupField::ApiKey));
     assert_eq!(SetupField::from_index(2, false), Some(SetupField::Model));
-    assert_eq!(SetupField::from_index(3, false), Some(SetupField::Save));
-    assert_eq!(SetupField::from_index(4, false), None);
+    assert_eq!(
+        SetupField::from_index(3, false),
+        Some(SetupField::ContextWindow)
+    );
+    assert_eq!(SetupField::from_index(4, false), Some(SetupField::Save));
+    assert_eq!(SetupField::from_index(5, false), None);
     assert_eq!(SetupField::from_index(1, true), Some(SetupField::Protocol));
     assert_eq!(SetupField::from_index(2, true), Some(SetupField::Endpoint));
+    assert_eq!(
+        SetupField::from_index(5, true),
+        Some(SetupField::ContextWindow)
+    );
+    assert_eq!(SetupField::from_index(6, true), Some(SetupField::Save));
 
     assert_eq!(SetupField::Provider.label(), "provider");
     assert_eq!(SetupField::Protocol.label(), "protocol");
     assert_eq!(SetupField::Endpoint.label(), "endpoint");
     assert_eq!(SetupField::ApiKey.label(), "authentication");
     assert_eq!(SetupField::Model.label(), "model");
+    assert_eq!(SetupField::ContextWindow.label(), "context window");
     assert_eq!(SetupField::Save.label(), "review");
 }
 
@@ -60,12 +70,14 @@ fn setup_state_starts_on_provider_field_and_keeps_startup_error() {
 fn setup_provider_cycle_uses_provider_defaults_and_restores_drafts() {
     let mut state = SetupState::new(PathBuf::from("/tmp/sigil.toml"), None);
     state.model = "deepseek-custom".to_owned();
+    state.context_window_tokens = "262144".to_owned();
     state.api_key = SecretString::new("deepseek-key");
     state.credential_source = SetupCredentialSource::SecureStore;
 
     state.cycle_provider();
     assert_eq!(state.provider_name, "openai_responses");
     assert_eq!(state.model, "gpt-4.1");
+    assert!(state.context_window_tokens.is_empty());
     assert!(state.api_key.is_empty());
 
     state.model = "openai-custom".to_owned();
@@ -77,6 +89,7 @@ fn setup_provider_cycle_uses_provider_defaults_and_restores_drafts() {
 
     assert_eq!(state.provider_name, "deepseek");
     assert_eq!(state.model, "deepseek-custom");
+    assert_eq!(state.context_window_tokens, "262144");
     assert_eq!(state.api_key, "deepseek-key");
 
     state.cycle_provider();

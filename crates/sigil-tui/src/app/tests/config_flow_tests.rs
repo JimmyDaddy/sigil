@@ -1179,7 +1179,7 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
     assert!(detail.contains("[connections]"));
-    assert!(detail.contains("[default for new sessions]"));
+    assert!(detail.contains("[active after save]"));
     assert!(detail.contains("[route status]"));
     assert!(detail.contains("[advanced]"));
     assert!(detail.contains("[details]"));
@@ -1193,6 +1193,115 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     assert!(!detail.contains("anthropic_base_url"));
     assert!(!detail.contains("strict_tools_mode"));
     assert!(!detail.contains("request_timeout_secs"));
+}
+
+#[test]
+fn config_provider_selection_switches_route_without_replacing_the_session() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let mut config = config_for_workspace(temp.path());
+    config.agent.runtime_provider.clear();
+    config.connections.insert(
+        "secondary".to_owned(),
+        serde_json::json!({
+            "label": "Secondary",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "credential": { "source": "none" }
+        }),
+    );
+    config.save(&config_path)?;
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.ensure_current_session_identity()?;
+    let preserved_message =
+        SessionLogEntry::User(sigil_kernel::ModelMessage::user("keep this conversation"));
+    JsonlSessionStore::new(&app.session_log_path)?.append(&preserved_message)?;
+    app.session_browser
+        .current_entries
+        .push(preserved_message.clone());
+    let original_session_id = app.session_id.clone();
+    let original_session_path = app.session_log_path.clone();
+
+    app.open_config_panel();
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should remain open");
+    assert!(state.dirty);
+    assert_eq!(
+        state.draft.default_model.connection_id.as_str(),
+        "secondary"
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("selected Secondary (2/2); save to continue this session with it")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("provider save should return config saved action");
+    };
+
+    assert_eq!(app.session_id, original_session_id);
+    assert_eq!(app.session_log_path, original_session_path);
+    assert_eq!(app.runtime.provider_name, "openai_compat");
+    assert_eq!(app.runtime.model_name, "gpt-4.1");
+    assert_eq!(
+        app.runtime
+            .model_route
+            .as_ref()
+            .map(|route| route.model_ref.connection_id.as_str()),
+        Some("secondary")
+    );
+    assert_eq!(
+        root_config
+            .agent
+            .connection
+            .as_ref()
+            .map(ConnectionId::as_str),
+        Some("secondary")
+    );
+    let worker_config = app
+        .runtime_config_for_current_session((*root_config).clone())?
+        .expect("saved provider route should produce a replacement worker config");
+    assert_eq!(
+        worker_config
+            .agent
+            .connection
+            .as_ref()
+            .map(ConnectionId::as_str),
+        Some("secondary")
+    );
+    assert_eq!(worker_config.agent.model, "gpt-4.1");
+    assert!(app.session_browser.current_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::User(message)
+                if message.content.as_deref() == Some("keep this conversation")
+        )
+    }));
+    assert!(app.session_browser.current_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
+                provider_name,
+                model_name,
+                resolved_model_route,
+            }) if provider_name == "openai_compat"
+                && model_name == "gpt-4.1"
+                && resolved_model_route.model_ref.connection_id.as_str() == "secondary"
+        )
+    }));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("continuing current session"))
+    );
+    Ok(())
 }
 
 #[test]
@@ -1997,8 +2106,14 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
     assert_ne!(initial_theme_bg, updated_theme_bg);
     assert_eq!(
         app.session_browser.current_entries.len(),
-        initial_control_entries
+        initial_control_entries + 2
     );
+    assert!(app.session_browser.current_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
+        )
+    }));
     let rendered = std::fs::read_to_string(&config_path)?;
     assert!(rendered.contains("theme = \"solarized_dark\""));
     Ok(())
@@ -3739,6 +3854,59 @@ fn config_save_is_blocked_while_busy() -> Result<()> {
 }
 
 #[test]
+fn config_invalid_save_stays_visible_focuses_the_field_and_clears_after_edit() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should be open");
+        state.draft.model_request_timeout_secs = "not-a-number".to_owned();
+        state.mark_edited();
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(app.config_is_dirty());
+    assert_eq!(app.config_section_title(), Some("Provider"));
+    assert_eq!(
+        app.config_selected_field_label(),
+        Some("Request start timeout")
+    );
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("save failed: "))
+    );
+    assert!(
+        app.config_save_error()
+            .is_some_and(|error| { error.contains("model_request.request_timeout_secs") })
+    );
+    assert!(
+        app.config_footer_hint()
+            .starts_with("status: save failed - ")
+    );
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("[save failed]"));
+    assert!(detail.contains("! model_request.request_timeout_secs"));
+    assert!(detail.contains("Fix the highlighted field, then save again"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should remain open");
+    state.draft.model_request_timeout_secs = "120".to_owned();
+    state.mark_edited();
+    assert_eq!(app.config_save_error(), None);
+    assert_eq!(
+        app.config_footer_hint(),
+        "status: unsaved - save before close"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_clean_save_skips_worker_restart_even_when_busy() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -3847,7 +4015,10 @@ fn config_ctrl_s_saves_and_keeps_config_open() -> Result<()> {
         panic!("expected config save action");
     };
     assert!(app.is_config_mode());
-    assert_eq!(app.last_notice(), Some("saved config"));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("continuing current session"))
+    );
     assert_stored_credential_without_plaintext(&root_config, "saved-from-ctrl-s")?;
 
     let saved = RootConfig::load(&config_path)?;
@@ -3881,7 +4052,10 @@ fn config_footer_enter_saves_without_function_keys() -> Result<()> {
         panic!("expected config save action");
     };
     assert!(app.is_config_mode());
-    assert_eq!(app.last_notice(), Some("saved config"));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("continuing current session"))
+    );
     assert_stored_credential_without_plaintext(&root_config, "saved-from-footer")?;
 
     let saved = RootConfig::load(&config_path)?;

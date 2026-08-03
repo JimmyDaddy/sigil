@@ -3,8 +3,30 @@ use sigil_kernel::{CompactionConfig, JsonlSessionStore, ModelMessage, Session};
 
 use super::{
     ContextWindowSource, compaction_preview_for_strategy, effective_compaction_config,
-    resolve_context_window_tokens,
+    effective_compaction_config_with_override, resolve_context_window_tokens,
+    resolve_context_window_tokens_with_override,
 };
+
+#[test]
+fn exact_connection_model_window_overrides_provider_metadata() {
+    let resolved = resolve_context_window_tokens_with_override(
+        "deepseek",
+        "deepseek-v4-pro",
+        Some(256_000),
+        Some(128_000),
+    );
+
+    assert_eq!(resolved.tokens, Some(256_000));
+    assert_eq!(resolved.source, ContextWindowSource::Connection);
+
+    let effective = effective_compaction_config_with_override(
+        "deepseek",
+        "deepseek-v4-pro",
+        Some(256_000),
+        &CompactionConfig::default(),
+    );
+    assert_eq!(effective.context_window_tokens, Some(256_000));
+}
 
 #[test]
 fn provider_window_overrides_compaction_config_window() {

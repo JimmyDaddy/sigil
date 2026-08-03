@@ -4,6 +4,7 @@ use super::ConfigSection;
 pub(crate) enum ConfigField {
     ProviderName,
     ProviderModel,
+    ProviderContextWindowTokens,
     ProviderApiKey,
     ModelRequestTimeoutSecs,
     ModelRequestStreamIdleTimeoutSecs,
@@ -71,9 +72,10 @@ pub(crate) enum ConfigField {
 }
 
 impl ConfigField {
-    const PROVIDER_FIELDS: [Self; 5] = [
+    const PROVIDER_FIELDS: [Self; 6] = [
         Self::ProviderName,
         Self::ProviderModel,
+        Self::ProviderContextWindowTokens,
         Self::ProviderApiKey,
         Self::ModelRequestTimeoutSecs,
         Self::ModelRequestStreamIdleTimeoutSecs,
@@ -135,6 +137,7 @@ impl ConfigField {
         match self {
             Self::ProviderName => "connection",
             Self::ProviderModel => "model",
+            Self::ProviderContextWindowTokens => "context_window",
             Self::ProviderApiKey => "credential",
             Self::ModelRequestTimeoutSecs => "request_start_timeout",
             Self::ModelRequestStreamIdleTimeoutSecs => "stream_idle_timeout",
@@ -180,6 +183,7 @@ impl ConfigField {
         match self {
             Self::ProviderName => "Connection",
             Self::ProviderModel => "Model",
+            Self::ProviderContextWindowTokens => "Context window",
             Self::ProviderApiKey => "Credential",
             Self::ModelRequestTimeoutSecs => "Request start timeout",
             Self::ModelRequestStreamIdleTimeoutSecs => "Stream idle timeout",
@@ -227,7 +231,10 @@ impl ConfigField {
                 "Connection being edited. Enter opens saved connections and explicit provider templates; A jumps to Add."
             }
             Self::ProviderModel => {
-                "Chat model used for new runs. Switching the saved default does not rewrite the current session."
+                "Chat model used after saving. The current conversation stays open while the worker switches to the selected route."
+            }
+            Self::ProviderContextWindowTokens => {
+                "Optional exact token limit for this connection and model. Leave empty to use provider metadata, then the global fallback."
             }
             Self::ProviderApiKey => {
                 "Credential reference for this connection. New keys are staged in memory and saved only to the configured protected credential store."
@@ -342,6 +349,7 @@ impl ConfigField {
         matches!(
             self,
             Self::ProviderModel
+                | Self::ProviderContextWindowTokens
                 | Self::ModelRequestTimeoutSecs
                 | Self::ModelRequestStreamIdleTimeoutSecs
                 | Self::ProviderBaseUrl
@@ -384,9 +392,9 @@ impl ConfigField {
             | Self::TerminalOsc52Clipboard
             | Self::TerminalNotificationsEnabled
             | Self::AppearanceInfoRail => "Enter toggle",
-            Self::TerminalScrollSensitivity | Self::TerminalNotificationMinimumRunDurationMs => {
-                "Enter input"
-            }
+            Self::ProviderContextWindowTokens
+            | Self::TerminalScrollSensitivity
+            | Self::TerminalNotificationMinimumRunDurationMs => "Enter input",
             Self::AppearanceColorOverride => "Enter input",
             Self::SkillId | Self::PluginId => "",
             _ if self.accepts_text_input() => "Enter input",

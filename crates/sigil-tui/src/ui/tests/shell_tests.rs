@@ -1089,6 +1089,7 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     terminal.draw(|frame| render(frame, &app))?;
     let rows = rendered_rows(&terminal);
     let api_key_action_x = rows
@@ -1292,8 +1293,8 @@ fn render_config_screen_panel_height_tracks_content() -> anyhow::Result<()> {
         .iter()
         .position(|row| row.contains('╰'))
         .expect("config panel should have a bottom border");
-    assert!(panel_bottom < 32);
-    assert!(!rows[31].contains('│'));
+    assert!(panel_bottom < 33);
+    assert!(!rows[panel_bottom + 1].contains('│'));
     Ok(())
 }
 
@@ -1345,6 +1346,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
     open_config_panel_for_test(&mut app)?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -1363,6 +1365,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
 fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     open_config_panel_for_test(&mut app)?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -1493,7 +1496,31 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
     assert!(rendered.contains("Config"));
     assert!(!rendered.contains("Details"));
     assert!(rendered.contains("> Connection"));
-    assert!(rendered.contains("default for new sessions"));
+    assert!(rendered.contains("active after save"));
+    Ok(())
+}
+
+#[test]
+fn render_config_screen_keeps_save_failure_visible() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let blocked_parent = temp.path().join("not-a-directory");
+    std::fs::write(&blocked_parent, "block config persistence")?;
+    let config_path = blocked_parent.join("sigil.toml");
+    let mut app = AppState::from_root_config(&config_path, &test_config());
+    app.composer.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    assert!(action.is_none());
+    let backend = TestBackend::new(160, 36);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("save failed"));
+    assert!(rendered.contains("your draft remains unsaved"));
     Ok(())
 }
 

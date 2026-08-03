@@ -36,10 +36,10 @@ use sigil_runtime::{
     provider_api_key_env_name, provider_capabilities_for_name, provider_capability_view,
     provider_connections::{
         ConfigPublishOutcome, ConnectionSaveDraft, ConnectionSaveOutcome, RootConfigPublisher,
-        connection_semantic_fingerprint, load_provider_connections,
-        save_connection_config_with_base,
+        connection_semantic_fingerprint, load_provider_connections, resolve_default_model_route,
+        resolve_model_route, save_connection_config_with_base, validate_persisted_model_route,
     },
-    resolve_context_window_tokens,
+    resolve_context_window_tokens_with_override,
 };
 
 use super::session_lifecycle_flow::SessionRetentionMaintenancePreview;
@@ -130,7 +130,9 @@ impl AppState {
 
     pub fn config_status_summary(&self) -> String {
         let section = self.config_section_title().unwrap_or("Config");
-        let saved = if self.config_is_dirty() {
+        let saved = if self.config_save_error().is_some() {
+            "save failed"
+        } else if self.config_is_dirty() {
             "unsaved"
         } else {
             "saved"
@@ -171,6 +173,8 @@ impl AppState {
     pub fn config_footer_hint(&self) -> String {
         if self.config_close_guard_armed() {
             "status: confirm close - Esc discards".to_owned()
+        } else if let Some(error) = self.config_save_error() {
+            format!("status: save failed - {error}")
         } else if self.config_is_dirty() {
             "status: unsaved - save before close".to_owned()
         } else {
@@ -210,6 +214,12 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    pub fn config_save_error(&self) -> Option<&str> {
+        self.config_state
+            .as_ref()
+            .and_then(|state| state.save_error.as_deref())
+    }
+
     pub fn config_nav_lines(&self) -> Vec<String> {
         navigation::render_config_nav_lines(self.config_state.as_ref())
     }
@@ -220,6 +230,19 @@ impl AppState {
         };
         let section = config_state.selected_section;
         let mut lines = render_config_detail_header(config_state);
+        if let Some(error) = config_state.save_error.as_deref() {
+            let guidance = if config_save_error_target(error).is_some() {
+                "i Fix the highlighted field, then save again"
+            } else {
+                "i Review the error and retry; your draft remains unsaved"
+            };
+            lines.extend([
+                "[save failed]".to_owned(),
+                format!("! {error}"),
+                guidance.to_owned(),
+                String::new(),
+            ]);
+        }
 
         match section {
             ConfigSection::Provider => {
@@ -416,8 +439,10 @@ impl AppState {
                     match config_state.draft.set_selected_as_default() {
                         Ok(()) => {
                             config_state.mark_dirty();
-                            self.last_notice =
-                                Some("updated saved default; current session unchanged".to_owned());
+                            self.last_notice = Some(
+                                "selected route will apply to the current session on save"
+                                    .to_owned(),
+                            );
                         }
                         Err(error) => self.last_notice = Some(error.to_string()),
                     }
@@ -781,68 +806,68 @@ impl AppState {
                         ConfigField::PermissionMode => {
                             config_state.draft.permission_mode =
                                 cycle_permission_mode(config_state.draft.permission_mode);
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::WebEnabled => {
                             config_state.draft.web_enabled = !config_state.draft.web_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::WebNetworkMode => {
                             config_state.draft.web_network_mode =
                                 cycle_network_policy(config_state.draft.web_network_mode);
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::WebSearchRoute => {
                             config_state.draft.web_search_route =
                                 cycle_web_search_route(config_state.draft.web_search_route);
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::WebBundledSearchEnabled => {
                             config_state.draft.web_bundled_search_enabled =
                                 !config_state.draft.web_bundled_search_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::VerificationAutoRun => {
                             config_state.draft.verification_auto_run =
                                 config_state.draft.verification_auto_run.next();
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::MemoryEnabled => {
                             config_state.draft.memory_enabled = !config_state.draft.memory_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::CompactionEnabled => {
                             config_state.draft.compaction_enabled =
                                 !config_state.draft.compaction_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::CompactionNativeCarrierEnabled => {
                             config_state.draft.compaction_native_carrier_enabled =
                                 !config_state.draft.compaction_native_carrier_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::CodeIntelEnabled => {
                             config_state.draft.code_intelligence_enabled =
                                 !config_state.draft.code_intelligence_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
@@ -851,14 +876,14 @@ impl AppState {
                                 cycle_code_intel_startup(
                                     config_state.draft.code_intelligence_server_startup,
                                 );
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::CodeIntelAutoDiscover => {
                             config_state.draft.code_intelligence_auto_discover =
                                 !config_state.draft.code_intelligence_auto_discover;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
@@ -866,49 +891,49 @@ impl AppState {
                             let report_missing =
                                 &mut config_state.draft.code_intelligence_report_missing;
                             *report_missing = !*report_missing;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::TerminalMouseCapture => {
                             config_state.draft.terminal_mouse_capture =
                                 !config_state.draft.terminal_mouse_capture;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::TerminalOsc52Clipboard => {
                             config_state.draft.terminal_osc52_clipboard =
                                 !config_state.draft.terminal_osc52_clipboard;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::TerminalNotificationsEnabled => {
                             config_state.draft.terminal_notifications_enabled =
                                 !config_state.draft.terminal_notifications_enabled;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::TerminalNotificationMethod => {
                             config_state.draft.terminal_notification_method =
                                 config_state.draft.terminal_notification_method.next();
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::AppearanceInfoRail => {
                             config_state.draft.appearance_info_rail =
                                 !config_state.draft.appearance_info_rail;
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
                         ConfigField::AppearanceTheme => {
                             config_state.draft.appearance_theme =
                                 config_state.draft.appearance_theme.next();
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!(
                                 "theme -> {}",
                                 config_state.draft.appearance_theme.as_str()
@@ -917,7 +942,7 @@ impl AppState {
                         }
                         ConfigField::AppearanceSyntaxTheme => {
                             config_state.draft.cycle_appearance_syntax_theme();
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!(
                                 "syntax theme -> {}",
                                 config_state.draft.appearance_syntax_theme.as_str()
@@ -926,7 +951,7 @@ impl AppState {
                         }
                         ConfigField::AppearanceUsageCostCurrency => {
                             config_state.draft.cycle_appearance_usage_cost_currency();
-                            config_state.dirty = true;
+                            config_state.mark_edited();
                             self.last_notice = Some(format!(
                                 "cost currency -> {}",
                                 config_state.draft.appearance_usage_cost_currency.as_str()
@@ -1064,7 +1089,7 @@ impl AppState {
                     .draft
                     .reset_selected_appearance_color_group_overrides();
                 if removed > 0 {
-                    config_state.dirty = true;
+                    config_state.mark_edited();
                     self.last_notice =
                         Some(format!("reset {removed} color overrides in {}", group.key));
                 } else {
@@ -1077,7 +1102,7 @@ impl AppState {
                     .draft
                     .reset_selected_appearance_color_override()
                 {
-                    config_state.dirty = true;
+                    config_state.mark_edited();
                     self.last_notice = Some(format!("reset color {token}"));
                 } else {
                     self.last_notice = Some(format!("color {token} already inherits"));
@@ -1116,10 +1141,13 @@ impl AppState {
                 self.last_notice = Some("model cannot be empty".to_owned());
                 return;
             }
-            let changed = config_state.draft.provider_model != value;
-            config_state.draft.provider_model = value.clone();
-            if changed {
-                config_state.mark_dirty();
+            match config_state.draft.set_provider_model(value.clone()) {
+                Ok(true) => config_state.mark_dirty(),
+                Ok(false) => {}
+                Err(error) => {
+                    self.last_notice = Some(format!("could not update model: {error:#}"));
+                    return;
+                }
             }
             self.last_notice = Some(format!("updated {}", ConfigField::ProviderModel.label()));
             return;
@@ -1151,7 +1179,7 @@ impl AppState {
             changed
         };
         if changed {
-            config_state.dirty = true;
+            config_state.mark_edited();
         }
         self.last_notice = Some(format!("updated {}", field.label()));
     }
@@ -1302,10 +1330,11 @@ impl AppState {
                 match choice {
                     ConnectionPickerChoiceKind::Existing(connection_id) => {
                         config_state.draft.select_connection(&connection_id)?;
-                        config_state.bump_draft_revision();
+                        config_state.draft.set_selected_as_default()?;
+                        config_state.mark_dirty();
                         config_state.selected_field = Some(ConfigField::ProviderName);
                         self.last_notice = Some(format!(
-                            "editing {}",
+                            "selected {}; save to continue this session with it",
                             config_state.draft.selected_connection_summary()
                         ));
                     }
@@ -1313,6 +1342,7 @@ impl AppState {
                         config_state
                             .draft
                             .add_connection_for_provider(&provider_name)?;
+                        config_state.draft.set_selected_as_default()?;
                         config_state.mark_dirty();
                         config_state.selected_field = Some(ConfigField::ProviderApiKey);
                         self.last_notice = Some(format!(
@@ -1866,16 +1896,24 @@ impl AppState {
         let next_base_root_config = match config_state.draft.to_base_root_config() {
             Ok(root_config) => persisted_root_config(&root_config),
             Err(error) => {
-                self.last_notice = Some(error.to_string());
-                self.push_event("config:error", error.to_string());
+                let message = self
+                    .secret_redactor
+                    .redact_text(&sigil_kernel::safe_persistence_text(&error.to_string()));
+                apply_config_save_error_state(config_state, &message);
+                self.last_notice = Some(format!("save failed: {message}"));
+                self.push_event("config:error", message);
                 return Ok(None);
             }
         };
         let connection_save = match config_state.draft.connection_save_draft() {
             Ok(draft) => draft,
             Err(error) => {
-                self.last_notice = Some(error.to_string());
-                self.push_event("config:error", error.to_string());
+                let message = self
+                    .secret_redactor
+                    .redact_text(&sigil_kernel::safe_persistence_text(&error.to_string()));
+                apply_config_save_error_state(config_state, &message);
+                self.last_notice = Some(format!("save failed: {message}"));
+                self.push_event("config:error", message);
                 return Ok(None);
             }
         };
@@ -1888,8 +1926,11 @@ impl AppState {
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
-                let message = error.to_string();
-                self.last_notice = Some(message.clone());
+                let message = self
+                    .secret_redactor
+                    .redact_text(&sigil_kernel::safe_persistence_text(&error.to_string()));
+                apply_config_save_error_state(config_state, &message);
+                self.last_notice = Some(format!("save failed: {message}"));
                 self.push_event("config:error", message);
                 return Ok(None);
             }
@@ -1901,6 +1942,7 @@ impl AppState {
             ..
         } = save_outcome;
         config_state.dirty = false;
+        config_state.save_error = None;
         config_state.close_guard_armed = false;
         config_state.draft = ConfigDraft::from_root_config(&root_config);
         config_state.draft_revision = config_state.draft_revision.saturating_add(1);
@@ -1916,9 +1958,11 @@ impl AppState {
                         == view.result.connection_fingerprint
                 })
         });
+        let active_route = self
+            .apply_saved_provider_route_to_current_session(&expected_root_config, &root_config)?;
         self.apply_runtime_config_snapshot(&root_config);
         self.runtime.connection_model_catalog_views = compatible_catalog_views;
-        self.last_notice = Some(match publish_outcome {
+        let saved_notice = match publish_outcome {
             ConfigPublishOutcome::Published if old_credential_cleanup_warning => {
                 "saved config; an unreferenced stored credential needs cleanup".to_owned()
             }
@@ -1941,6 +1985,14 @@ impl AppState {
                         )
                     },
                 ),
+        };
+        self.last_notice = Some(if let Some(model_ref) = active_route.as_ref() {
+            format!(
+                "{saved_notice}; route -> {}/{}; continuing current session",
+                model_ref.connection_id, model_ref.model_id
+            )
+        } else {
+            saved_notice
         });
         self.push_event("config", format!("saved {}", self.config_path.display()));
         let loaded = load_provider_connections(&root_config);
@@ -1948,18 +2000,76 @@ impl AppState {
         self.push_event(
             "config:model",
             format!(
-                "default {}/{}; current session unchanged",
+                "default {}/{}; current session {}",
                 default_model
                     .map(|model| model.connection_id.as_str())
                     .unwrap_or("not_configured"),
                 default_model
                     .map(|model| model.model_id.as_str())
-                    .unwrap_or("not_configured")
+                    .unwrap_or("not_configured"),
+                if active_route.is_some() {
+                    "continued on this route"
+                } else {
+                    "retained"
+                }
             ),
         );
         Ok(Some(AppAction::ConfigSaved {
             root_config: Box::new(root_config),
         }))
+    }
+
+    fn apply_saved_provider_route_to_current_session(
+        &mut self,
+        previous_config: &RootConfig,
+        saved_config: &RootConfig,
+    ) -> Result<Option<sigil_kernel::ModelRef>> {
+        let Some(current_route) = self.runtime.model_route.clone() else {
+            return Ok(None);
+        };
+        let previous_default = load_provider_connections(previous_config).default_model;
+        let saved_default = load_provider_connections(saved_config).default_model;
+        let target_model = if previous_default != saved_default {
+            saved_default
+        } else if validate_persisted_model_route(saved_config, &current_route).is_ok() {
+            return Ok(None);
+        } else if resolve_model_route(saved_config, &current_route.model_ref).is_ok() {
+            Some(current_route.model_ref)
+        } else {
+            Some(
+                resolve_default_model_route(saved_config)
+                    .map_err(anyhow::Error::new)?
+                    .1
+                    .model_ref,
+            )
+        };
+        let Some(target_model) = target_model else {
+            return Ok(None);
+        };
+        let (provider_name, route) =
+            resolve_model_route(saved_config, &target_model).map_err(anyhow::Error::new)?;
+        if self.runtime.model_route.as_ref() == Some(&route) {
+            return Ok(None);
+        }
+
+        self.ensure_current_session_identity()?;
+        self.append_control_to_current_session(ControlEntry::SessionModelSelected {
+            provider_name: provider_name.clone(),
+            model_name: target_model.model_id.clone(),
+            resolved_model_route: route.clone(),
+        })?;
+        self.runtime.provider_name = provider_name;
+        self.runtime.model_name = target_model.model_id.clone();
+        self.runtime.model_route = Some(route);
+        if let Some(config_state) = self.config_state.as_mut() {
+            config_state.current_session_route = Some(target_model.clone());
+        }
+        self.push_event(
+            "model",
+            format!("{}/{}", target_model.connection_id, target_model.model_id),
+        );
+        self.schedule_balance_refresh();
+        Ok(Some(target_model))
     }
 
     fn save_config_draft_and_close(&mut self) -> Result<Option<AppAction>> {
@@ -2180,6 +2290,67 @@ impl AppState {
         }
         lines
     }
+}
+
+fn apply_config_save_error_state(config_state: &mut ConfigState, message: &str) {
+    config_state.save_error = Some(message.to_owned());
+    config_state.close_guard_armed = false;
+    let Some((section, field)) = config_save_error_target(message) else {
+        return;
+    };
+    config_state.set_section(section);
+    let _ = config_state.focus_field(field);
+}
+
+fn config_save_error_target(message: &str) -> Option<(ConfigSection, ConfigField)> {
+    let message = message.to_ascii_lowercase();
+    if message.contains("request_timeout_secs") {
+        return Some((
+            ConfigSection::Provider,
+            ConfigField::ModelRequestTimeoutSecs,
+        ));
+    }
+    if message.contains("stream_idle_timeout_secs") {
+        return Some((
+            ConfigSection::Provider,
+            ConfigField::ModelRequestStreamIdleTimeoutSecs,
+        ));
+    }
+    if message.contains("fallback_context_window_tokens") {
+        return Some((
+            ConfigSection::Compaction,
+            ConfigField::CompactionContextWindowTokens,
+        ));
+    }
+    if message.contains("context_window_tokens") || message.contains("context window") {
+        return Some((
+            ConfigSection::Provider,
+            ConfigField::ProviderContextWindowTokens,
+        ));
+    }
+    if message.contains("minimum_run_duration_ms") {
+        return Some((
+            ConfigSection::Terminal,
+            ConfigField::TerminalNotificationMinimumRunDurationMs,
+        ));
+    }
+    if message.contains("credential") || message.contains("api key") {
+        return Some((ConfigSection::Provider, ConfigField::ProviderApiKey));
+    }
+    if message.contains("model") {
+        return Some((ConfigSection::Provider, ConfigField::ProviderModel));
+    }
+    if message.contains("provider")
+        || message.contains("connection")
+        || message.contains("base_url")
+        || message.contains("endpoint")
+    {
+        return Some((ConfigSection::Provider, ConfigField::ProviderName));
+    }
+    if message.contains("mcp") {
+        return Some((ConfigSection::Mcp, ConfigField::McpName));
+    }
+    None
 }
 
 fn persist_connection_config(

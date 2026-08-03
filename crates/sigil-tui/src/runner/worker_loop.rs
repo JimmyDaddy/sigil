@@ -51,7 +51,6 @@ use sigil_runtime::{
     ConversationCoordinator, ConversationSourceTurn, ProviderStatusTaskManager,
     ProviderStatusTaskResult, append_session_control_entries,
     append_session_control_entries_and_track_detached, current_unix_time_ms,
-    effective_compaction_config,
 };
 
 use super::{

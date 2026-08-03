@@ -8,6 +8,18 @@ pub fn build_run_options(
 ) -> AgentRunOptions {
     let workspace_root = canonical_workspace_root(workspace_root);
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    let compaction_config = provider_connections::resolve_default_model_route(root_config)
+        .ok()
+        .map_or_else(
+            || root_config.compaction.clone(),
+            |(provider_name, route)| {
+                effective_compaction_config_for_model_ref(
+                    root_config,
+                    &route.model_ref,
+                    &provider_name,
+                )
+            },
+        );
     AgentRunOptions {
         traffic_partition_key: Some(workspace_partition_key(&workspace_root)),
         workspace_root,
@@ -25,7 +37,7 @@ pub fn build_run_options(
             },
         ),
         memory_config: root_config.memory.clone(),
-        compaction_config: root_config.compaction.clone(),
+        compaction_config,
     }
 }
 
@@ -65,8 +77,16 @@ pub fn build_role_run_options(
     interaction_mode: InteractionMode,
     role: AgentRole,
 ) -> AgentRunOptions {
-    let mut options = build_run_options(root_config, workspace_root, interaction_mode);
-    if let Some(reasoning_effort) = root_config.task.role_config(role).reasoning_effort.clone() {
+    let role_config = root_config.task.role_config(role);
+    let mut resolved = root_config.clone();
+    if let Some(connection) = role_config.connection.as_ref() {
+        resolved.agent.connection = Some(connection.clone());
+    }
+    if let Some(model) = role_config.model.as_ref() {
+        resolved.agent.model.clone_from(model);
+    }
+    let mut options = build_run_options(&resolved, workspace_root, interaction_mode);
+    if let Some(reasoning_effort) = role_config.reasoning_effort.clone() {
         options.reasoning_effort = Some(reasoning_effort);
     }
     options

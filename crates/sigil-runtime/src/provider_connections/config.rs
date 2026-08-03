@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -174,6 +174,8 @@ pub struct ProviderConnectionConfig {
     pub protocol: ProviderProtocol,
     pub base_url: String,
     pub credential: CredentialRefConfig,
+    /// Optional exact context-window limits keyed by provider model id.
+    pub model_context_windows: BTreeMap<String, u32>,
     pub options: Value,
 }
 
@@ -187,6 +189,7 @@ impl fmt::Debug for ProviderConnectionConfig {
             .field("protocol", &self.protocol)
             .field("base_url", &"[redacted endpoint]")
             .field("credential", &credential_debug_label(&self.credential))
+            .field("model_context_windows", &self.model_context_windows)
             .field("options", &"[redacted provider options]")
             .finish()
     }
@@ -200,6 +203,8 @@ struct ProviderConnectionWire {
     protocol: ProviderProtocol,
     base_url: String,
     credential: CredentialRefConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_context_windows: BTreeMap<String, u32>,
     #[serde(default = "empty_options")]
     options: Value,
 }
@@ -219,6 +224,7 @@ impl ProviderConnectionConfig {
             protocol: wire.protocol,
             base_url: wire.base_url,
             credential: wire.credential,
+            model_context_windows: wire.model_context_windows,
             options: wire.options,
         };
         config.validate()?;
@@ -233,6 +239,7 @@ impl ProviderConnectionConfig {
             protocol: self.protocol,
             base_url: self.base_url.clone(),
             credential: self.credential.clone(),
+            model_context_windows: self.model_context_windows.clone(),
             options: self.options.clone(),
         })
         .context("failed to serialize provider connection")
@@ -243,6 +250,13 @@ impl ProviderConnectionConfig {
         validate_family_protocol(self.provider, self.protocol)?;
         validate_credential_ref(self.provider, self.protocol, &self.credential)?;
         validate_endpoint(self.provider, &self.credential, &self.base_url)?;
+        for (model_id, context_window_tokens) in &self.model_context_windows {
+            sigil_kernel::ModelRef::new(self.id.clone(), model_id.clone())?;
+            anyhow::ensure!(
+                *context_window_tokens > 0,
+                "model context window must be greater than zero"
+            );
+        }
         anyhow::ensure!(
             self.options.is_object(),
             "provider connection options must be an object"
@@ -398,6 +412,7 @@ pub fn provider_connection_template(
         credential: CredentialRefConfig::Environment {
             name: environment.to_owned(),
         },
+        model_context_windows: BTreeMap::new(),
         options,
     };
     config.validate()?;

@@ -1548,6 +1548,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
             context_window_tokens: view.context_window_tokens,
             last_prompt_tokens: view.last_prompt_tokens,
             context_window_source: match view.context_window_source {
+                sigil_runtime::ContextWindowSource::Connection => {
+                    HttpContextWindowSource::Connection
+                }
                 sigil_runtime::ContextWindowSource::Provider => HttpContextWindowSource::Provider,
                 sigil_runtime::ContextWindowSource::Config => HttpContextWindowSource::Config,
                 sigil_runtime::ContextWindowSource::None => HttpContextWindowSource::Unavailable,

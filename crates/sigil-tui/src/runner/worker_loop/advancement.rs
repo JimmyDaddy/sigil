@@ -1506,11 +1506,7 @@ where
                             });
                             continue;
                         }
-                        let effective_config = effective_compaction_config(
-                            session.provider_name(),
-                            session.model_name(),
-                            &options.compaction_config,
-                        );
+                        let effective_config = options.compaction_config.clone();
                         let current_preview =
                             sigil_runtime::context_window::compaction_preview_for_strategy(
                                 session,
