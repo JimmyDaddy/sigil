@@ -242,7 +242,7 @@ HTTP registry 已有：
 - `approval_request_id`；
 - `tool_call_hash`；
 - `policy_version`；
-- `expires_at_ms`；
+- `expires_at_ms`（当前交互式工具审批使用 no-expiry sentinel，仅保留 V2 wire 兼容）；
 - command envelope 幂等和 stale protection；
 - pending -> in-flight -> resolved 的 server-side route。
 
@@ -844,6 +844,10 @@ network = "deny"
 
 `Allow session` 保存：
 
+当前 `workspace_validation` 使用 semantic scope version 2：其 durable identity 绑定可执行的
+validation core 与参数，忽略 `tail` / `head` / `grep` 等纯展示管道；version 1 的 exact-AST grant
+不会被静默扩大，升级后最多重新批准一次以生成新 scope。
+
 ```rust
 pub struct ToolApprovalSessionGrantV2 {
     pub grant_id: String,
@@ -867,6 +871,12 @@ pub struct ToolApprovalSessionGrantV2 {
 - `workspace_validation:cargo_clippy`；
 - `workspace_script:scripts/check-touched.sh:tier=standard:digest=...`；
 - `exact_command_ast:<hash>`。
+
+可识别 workspace validation 的 grant identity 绑定 primary validation segments 和真实 validation
+arguments，但不把 `tail`、`head`、`grep` 等只读输出 filter 或安全 fd redirection 计入复用 key；完整
+Shell AST 与原始参数仍进入每次 concrete permission plan hash，并在 forward effect 前重新校验。因此
+`cargo check | tail -60` 与 `cargo check | tail -80` 可在同一 durable session 复用 grant，而
+`cargo check --workspace` 与 `cargo check --all-targets` 不复用。
 
 ### 12.3 Grant availability
 
@@ -1063,7 +1073,9 @@ approval identity：
 ```
 
 `tool_call_hash` 被 `plan_hash` 包含但仍可保留为 wire-level debugging guard。request、command、receipt、
-resolution event 和 durable audit 都携带 `approval_request_id`，不再只凭 call id 关联。
+resolution event 和 durable audit 都携带 `approval_request_id`，不再只凭 call id 关联。当前新建的交互式
+工具审批把 `expires_at_ms` 设为 no-expiry sentinel；TUI channel、HTTP broker 与 subagent aggregation
+均不创建 300 秒 deadline，只由用户决定、显式取消、route/presenter 失败或 run/session shutdown 收口。
 
 ### 15.2 States
 
@@ -1078,11 +1090,13 @@ PolicyEvaluated
   -> Completed | Failed | Cancelled | Interrupted
 ```
 
-拒绝/过期：
+拒绝/取消：
 
 ```text
-ApprovalPending -> Denied | Expired | Stale
+ApprovalPending -> Denied | Cancelled | Stale
 ```
+
+`Expired` 只保留用于读取旧日志或外部 adapter 明确提供的有界请求，不是当前交互式工具审批的自动终态。
 
 `DecisionAccepted` 是 control route 已接收并绑定 exact request，不等于工具已经开始。它允许 UI 立即关闭
 审批操作区并显示“已批准，正在恢复执行”。只有 `ToolExecutionStarted` 才显示“正在执行”。
@@ -1106,7 +1120,7 @@ pub struct ApprovalCommandReceiptV2 {
 
 route transaction：
 
-1. 校验 envelope、session/run、expected stream sequence、expiry、plan/policy hash；
+1. 校验 envelope、session/run、expected stream sequence、no-expiry sentinel、plan/policy hash；
 2. pending -> in-flight reservation；
 3. deliver driver；
 4. driver 拒绝则原子恢复 pending；
@@ -1125,7 +1139,8 @@ route transaction：
 6. command response 丢失时，客户端以同一 command id 重试，server 返回 replayed receipt；
 7. delivery uncertain 时显示“批准状态待确认”，提供重新连接/取消，不显示虚假的 waiting approval；
 8. run terminal 时强制关闭所有该 run 的 pending/in-flight presentation，并保存 resolved/closed tombstone；
-9. approval expiry 必须产生 live state change；不能只靠前端 `Date.now()` 禁用按钮；
+9. 当前 interactive approval 没有 wall-clock expiry；前端不得仅凭 `Date.now()` 禁用按钮，取消或
+   route/run/session 终态必须产生 live state change；
 10. approval accepted 后若 execution 迟迟未开始，server 状态必须能区分 resolving、execution uncertain 和
     terminal failure。
 

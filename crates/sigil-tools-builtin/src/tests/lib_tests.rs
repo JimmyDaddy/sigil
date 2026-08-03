@@ -2451,6 +2451,7 @@ fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()>
         .semantic_scope
         .expect("complete plan has semantic scope");
     assert_eq!(scope.family, "workspace_validation");
+    assert_eq!(scope.version, 2);
     assert_eq!(
         scope.qualifiers.get("commands").map(String::as_str),
         Some("cargo_fmt_check,cargo_check,cargo_test,cargo_clippy")
@@ -3227,7 +3228,7 @@ fn bash_permission_plan_classifies_program_specific_escape_effects() -> Result<(
 }
 
 #[test]
-fn bash_session_scope_and_environment_binding_are_exact() -> Result<()> {
+fn bash_session_scope_ignores_output_filters_but_binds_validation_arguments() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let first_tool = posix_bash_tool(workspace.path())?;
     let mut second_tool = posix_bash_tool(workspace.path())?;
@@ -3238,7 +3239,7 @@ fn bash_session_scope_and_environment_binding_are_exact() -> Result<()> {
         first_tool.permission_plan(&context, &json!({ "command": "cargo check --workspace" }))?;
     let repeated = first_tool.permission_plan(
         &context,
-        &json!({ "command": "  cargo   check   --workspace  " }),
+        &json!({ "command": "cargo check --workspace 2>&1 | tail -80" }),
     )?;
     let changed =
         first_tool.permission_plan(&context, &json!({ "command": "cargo check --all-targets" }))?;
@@ -3253,7 +3254,7 @@ fn bash_session_scope_and_environment_binding_are_exact() -> Result<()> {
         first_scope.qualifiers.get("arguments_sha256"),
         changed_scope.qualifiers.get("arguments_sha256")
     );
-    assert!(first_scope.qualifiers.contains_key("ast_sha256"));
+    assert!(!first_scope.qualifiers.contains_key("ast_sha256"));
 
     let first_binding = first
         .analysis_bindings
@@ -5589,6 +5590,8 @@ async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Res
         &json!({ "command": "cd . && cargo check 2>&1 | tail -20" }),
     )?;
     let tail = tool.permission_plan(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?;
+    let other_tail =
+        tool.permission_plan(&ctx, &json!({ "command": "cargo check 2>&1 | tail -80" }))?;
 
     assert_eq!(first.subjects.len(), 1);
     assert_eq!(piped.subjects.len(), 1);
@@ -5601,6 +5604,9 @@ async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Res
     assert_eq!(piped.subjects[0].normalized, "family:cargo_check");
     assert_eq!(tail.access, ToolAccess::Execute);
     assert_eq!(tail.operation, ToolOperation::ExecuteWorkspaceCheckCommand);
+    assert_eq!(first.semantic_scope, piped.semantic_scope);
+    assert_eq!(first.semantic_scope, tail.semantic_scope);
+    assert_eq!(tail.semantic_scope, other_tail.semantic_scope);
     assert!(
         sigil_kernel::tool_approval_session_grant_available_for_parts(
             ToolAccess::Execute,

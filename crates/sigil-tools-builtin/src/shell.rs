@@ -1961,7 +1961,7 @@ fn shell_semantic_scope(
         return None;
     }
     let mut scope = if family.is_workspace_check() {
-        ToolSemanticScope::new("workspace_validation", 1)
+        ToolSemanticScope::new("workspace_validation", 2)
     } else if family.is_workspace_read_only() {
         ToolSemanticScope::new("workspace_read_only_shell", 1)
     } else if family.is_workspace_mutating() {
@@ -1999,15 +1999,58 @@ fn shell_semantic_scope(
                 .insert("command".to_owned(), family.as_str().to_owned());
         }
     }
-    scope
-        .qualifiers
-        .insert("ast_sha256".to_owned(), ast_binding.to_owned());
-    let normalized_arguments = serde_json::to_vec(&tokenize_shell_subject_words(command)).ok()?;
+    let normalized_arguments = if family.is_workspace_check() {
+        // Session grants for a known validation command bind the executable validation core, not
+        // presentation-only pipes such as `tail`, `head`, or `grep`. The full AST remains bound by
+        // the per-execution permission plan hash, so this only widens durable grant reuse.
+        workspace_validation_semantic_tokens(command)
+    } else {
+        scope
+            .qualifiers
+            .insert("ast_sha256".to_owned(), ast_binding.to_owned());
+        tokenize_shell_subject_words(command)
+    };
+    let normalized_arguments = serde_json::to_vec(&normalized_arguments).ok()?;
     scope.qualifiers.insert(
         "arguments_sha256".to_owned(),
         sha256_hex(&normalized_arguments),
     );
     Some(scope)
+}
+
+fn workspace_validation_semantic_tokens(command: &str) -> Vec<String> {
+    let tokens = tokenize_shell_subject_words(command);
+    let tokens = tokens
+        .iter()
+        .position(|token| matches!(token.as_str(), "&&" | ";"))
+        .filter(|separator| tokens.first().is_some_and(|token| token == "cd") && *separator >= 2)
+        .map_or(tokens.as_slice(), |separator| &tokens[separator + 1..]);
+    let mut normalized = Vec::new();
+    for segment in split_shell_command_segments(tokens) {
+        let Some(primary) = split_shell_pipeline(segment).first().copied() else {
+            continue;
+        };
+        let mut skip_redirection_target = false;
+        for token in primary {
+            if skip_redirection_target {
+                skip_redirection_target = false;
+                continue;
+            }
+            if is_fd_duplication_token(token) || redirection_target(token).is_some() {
+                continue;
+            }
+            if is_redirection_operator(token) {
+                skip_redirection_target = true;
+                continue;
+            }
+            normalized.push(token.clone());
+        }
+        normalized.push(";".to_owned());
+    }
+    if normalized.last().is_some_and(|token| token == ";") {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn shell_permission_summary(
