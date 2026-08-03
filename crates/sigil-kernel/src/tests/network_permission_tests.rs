@@ -82,17 +82,23 @@ fn read_only_denies_mutating_or_unknown_network_effects() -> Result<()> {
 }
 
 #[test]
-fn non_read_only_modes_meet_network_ask_or_deny_including_danger() -> Result<()> {
+fn danger_full_access_suppresses_network_ask_but_preserves_deny() -> Result<()> {
     for permission_mode in [
         PermissionMode::Manual,
         PermissionMode::AutoEdit,
         PermissionMode::DangerFullAccess,
     ] {
-        for (network_policy, expected) in [
-            (NetworkPolicy::Allow, ApprovalMode::Allow),
-            (NetworkPolicy::Ask, ApprovalMode::Ask),
-            (NetworkPolicy::Deny, ApprovalMode::Deny),
+        for network_policy in [
+            NetworkPolicy::Allow,
+            NetworkPolicy::Ask,
+            NetworkPolicy::Deny,
         ] {
+            let expected = match (permission_mode, network_policy) {
+                (PermissionMode::DangerFullAccess, NetworkPolicy::Ask) => ApprovalMode::Allow,
+                (_, NetworkPolicy::Allow) => ApprovalMode::Allow,
+                (_, NetworkPolicy::Ask) => ApprovalMode::Ask,
+                (_, NetworkPolicy::Deny) => ApprovalMode::Deny,
+            };
             let decision = network_decision(
                 permission_mode,
                 network_policy,

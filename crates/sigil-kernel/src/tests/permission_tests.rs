@@ -97,6 +97,75 @@ fn permission_policy_chain_combines_parent_role_and_profile_monotonically() -> R
     Ok(())
 }
 
+#[test]
+fn danger_full_access_suppresses_delegated_ask_but_preserves_delegated_deny() -> Result<()> {
+    let primary = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..PermissionConfig::default()
+    };
+    let delegated = PermissionConfig {
+        tools: BTreeMap::from([
+            ("delegated_ask".to_owned(), ApprovalMode::Ask),
+            ("delegated_deny".to_owned(), ApprovalMode::Deny),
+        ]),
+        ..PermissionConfig::default()
+    };
+    let context = PermissionEvaluationContext {
+        delegated_policy_constraints: vec![delegated],
+        ..PermissionEvaluationContext::default()
+    };
+    let chain = PermissionPolicyChain::new_with_context(&primary, &context);
+    let tool_spec = spec(ToolAccess::Read);
+
+    for (tool_name, expected) in [
+        ("delegated_ask", ApprovalMode::Allow),
+        ("delegated_deny", ApprovalMode::Deny),
+    ] {
+        let decision = chain.decide_with_operation_network_effect_and_default(
+            &tool_spec,
+            tool_name,
+            ToolAccess::Read,
+            ToolOperation::Read,
+            None,
+            Vec::new(),
+            None,
+        )?;
+        assert_eq!(decision.mode, expected, "tool={tool_name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn danger_full_access_preserves_mandatory_durable_memory_approval() -> Result<()> {
+    let config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..PermissionConfig::default()
+    };
+    let context = PermissionEvaluationContext::default();
+    let policy = PermissionPolicyChain::new_with_context(&config, &context);
+    let tool_spec = spec(ToolAccess::Write);
+
+    for operation in [ToolOperation::RememberMemory, ToolOperation::ForgetMemory] {
+        let decision = policy.decide_with_operation_network_effect_and_default(
+            &tool_spec,
+            "durable_memory_tool",
+            ToolAccess::Write,
+            operation,
+            None,
+            Vec::new(),
+            Some(ApprovalMode::Ask),
+        )?;
+        assert_eq!(decision.mode, ApprovalMode::Ask, "operation={operation:?}");
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "durable_memory_approval_required")
+        );
+    }
+    Ok(())
+}
+
 fn path_subject(path: &str) -> ToolSubject {
     ToolSubject::path(path.to_owned(), path.to_owned())
 }
@@ -1279,6 +1348,27 @@ fn permission_external_directory_disabled_denies_external_subjects() -> Result<(
 
     assert_eq!(decision.mode, ApprovalMode::Deny);
     assert!(decision.external_directory_required);
+    Ok(())
+}
+
+#[test]
+fn danger_full_access_does_not_turn_disabled_external_directory_deny_into_ask() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("note.txt");
+    let config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..PermissionConfig::default()
+    };
+    let mut decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Read),
+        "read_file",
+        vec![external_path_subject(external_path)],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert!(decision.external_directory_required);
+    decision.request_external_directory_interactive_approval();
+    assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
 }
 

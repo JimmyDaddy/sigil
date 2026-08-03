@@ -194,7 +194,7 @@ fn prepared_policy_fingerprint_binds_network_facets() -> Result<()> {
         subjects,
     )?;
     assert_eq!(local_ask.mode, ApprovalMode::Ask);
-    assert_eq!(network_ask.mode, ApprovalMode::Ask);
+    assert_eq!(network_ask.mode, ApprovalMode::Allow);
     assert_eq!(local_ask.risk, network_ask.risk);
     assert_ne!(
         preparation_policy_fingerprint(&local_ask)?,
@@ -519,7 +519,7 @@ where
     let mut session = Session::new("network-non-explicit-test", "test-model");
     let mut event_handler = crate::NoopEventHandler;
     let mut options = interactive_options(NetworkPolicy::Ask);
-    options.permission_config.mode = crate::PermissionMode::DangerFullAccess;
+    options.permission_config.mode = crate::PermissionMode::Manual;
     agent
         .run_with_approval(
             &mut session,
@@ -550,7 +550,7 @@ fn session_has_non_explicit_network_denial(session: &Session) -> bool {
 }
 
 #[tokio::test]
-async fn agent_marks_network_ask_context_only_for_explicit_user_approval() -> Result<()> {
+async fn danger_full_access_authorizes_network_ask_without_approval() -> Result<()> {
     assert!(!crate::AutoApproveHandler.approval_is_explicit_user_action());
 
     let observed = Arc::new(Mutex::new(None));
@@ -581,6 +581,12 @@ async fn agent_marks_network_ask_context_only_for_explicit_user_approval() -> Re
             .map_err(|_| anyhow!("network context assertion lock poisoned"))?,
         Some((NetworkPolicy::Ask, true))
     );
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            crate::SessionLogEntry::Control(crate::ControlEntry::ToolApproval(_))
+        )
+    }));
     Ok(())
 }
 
@@ -606,7 +612,7 @@ async fn agent_reuses_exact_network_session_grant_without_second_prompt() -> Res
     };
     let run_options = || {
         let mut options = interactive_options(NetworkPolicy::Ask);
-        options.permission_config.mode = crate::PermissionMode::DangerFullAccess;
+        options.permission_config.mode = crate::PermissionMode::Manual;
         options
     };
 
@@ -705,7 +711,7 @@ async fn approval_time_args_cannot_change_read_network_effect_to_mutate_or_unkno
             args_json: json!({"effect": effect}).to_string(),
         };
         let mut options = interactive_options(NetworkPolicy::Ask);
-        options.permission_config.mode = crate::PermissionMode::DangerFullAccess;
+        options.permission_config.mode = crate::PermissionMode::Manual;
 
         agent
             .run_with_approval(

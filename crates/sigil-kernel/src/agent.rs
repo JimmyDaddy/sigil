@@ -2688,7 +2688,7 @@ where
             grant
                 .facets
                 .contains(&ToolApprovalSessionGrantFacet::Network)
-        });
+        }) || decision.danger_full_access_network_authorized();
         let approval_identity = if decision.mode == ApprovalMode::Ask
             && options.interaction_mode == InteractionMode::Interactive
         {

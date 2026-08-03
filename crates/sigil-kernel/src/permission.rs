@@ -465,6 +465,8 @@ pub enum ToolOperation {
     MessageAgent,
     CloseAgent,
     LoadSkill,
+    RememberMemory,
+    ForgetMemory,
     InvokePlugin,
 }
 
@@ -497,6 +499,8 @@ impl ToolOperation {
             Self::MessageAgent => "message_agent",
             Self::CloseAgent => "close_agent",
             Self::LoadSkill => "load_skill",
+            Self::RememberMemory => "remember_memory",
+            Self::ForgetMemory => "forget_memory",
             Self::InvokePlugin => "invoke_plugin",
         }
     }
@@ -630,6 +634,7 @@ pub struct PermissionDecision {
     pub reasons: Vec<PermissionDecisionReason>,
     base_local_policy_decision: ApprovalMode,
     external_directory_policy_decision: ApprovalMode,
+    danger_full_access: bool,
 }
 
 impl PermissionDecision {
@@ -825,8 +830,10 @@ impl PermissionDecision {
             reasons,
             base_local_policy_decision,
             external_directory_policy_decision,
+            danger_full_access: policy_mode == PermissionMode::DangerFullAccess,
         };
         decision.enforce_critical_path_hard_safety();
+        decision.suppress_danger_full_access_asks();
         decision
     }
 
@@ -876,8 +883,76 @@ impl PermissionDecision {
         self.recompute_mode();
     }
 
-    fn restrict_for_incomplete_analysis(&mut self, analysis: &ToolAnalysisStatus) {
+    fn suppress_danger_full_access_asks(&mut self) {
+        if !self.danger_full_access {
+            return;
+        }
+        if matches!(
+            self.operation,
+            ToolOperation::RememberMemory | ToolOperation::ForgetMemory
+        ) {
+            self.source_policy_decision =
+                combine_modes(vec![self.source_policy_decision, ApprovalMode::Ask]);
+            self.recompute_mode();
+            if !self
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "durable_memory_approval_required")
+            {
+                self.reasons.push(PermissionDecisionReason {
+                    source: PermissionDecisionSource::HardSafety,
+                    code: "durable_memory_approval_required".to_owned(),
+                    detail: "durable memory mutation requires an interactive approval even in danger-full-access mode".to_owned(),
+                });
+            }
+            return;
+        }
+        let mut suppressed = false;
+        for decision in [
+            &mut self.base_local_policy_decision,
+            &mut self.external_directory_policy_decision,
+            &mut self.network_policy_decision,
+            &mut self.source_policy_decision,
+        ] {
+            if *decision == ApprovalMode::Ask {
+                *decision = ApprovalMode::Allow;
+                suppressed = true;
+            }
+        }
+        self.local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            self.external_directory_policy_decision,
+        ]);
+        self.recompute_mode();
+        if suppressed {
+            self.reasons.push(PermissionDecisionReason {
+                source: PermissionDecisionSource::PermissionModeDefault,
+                code: "danger_full_access_ask_suppressed".to_owned(),
+                detail: "danger-full-access converted interactive ask facets to allow; deny facets and hard safety remain authoritative".to_owned(),
+            });
+        }
+    }
+
+    pub(crate) fn danger_full_access_network_authorized(&self) -> bool {
+        self.danger_full_access
+            && self.network_effect.is_some()
+            && self.network_policy_decision == ApprovalMode::Allow
+    }
+
+    fn restrict_for_incomplete_analysis(
+        &mut self,
+        policy_mode: PermissionMode,
+        analysis: &ToolAnalysisStatus,
+    ) {
         if analysis.is_complete() {
+            return;
+        }
+        if policy_mode == PermissionMode::DangerFullAccess {
+            self.reasons.push(PermissionDecisionReason {
+                source: PermissionDecisionSource::PermissionModeDefault,
+                code: "danger_full_access_incomplete_analysis_allowed".to_owned(),
+                detail: "danger-full-access keeps incomplete local analysis non-interactive; independent hard safety and policy facets still apply".to_owned(),
+            });
             return;
         }
         self.base_local_policy_decision =
@@ -900,13 +975,21 @@ impl PermissionDecision {
     /// facts. A producer that under-declares either label must therefore not be able to lower the
     /// risk or approval action implied by effects such as deletion, dynamic execution, remote
     /// mutation, or credential access.
-    fn restrict_for_permission_effects(&mut self, effects: &BTreeSet<ToolPermissionEffect>) {
+    fn restrict_for_permission_effects(
+        &mut self,
+        policy_mode: PermissionMode,
+        effects: &BTreeSet<ToolPermissionEffect>,
+    ) {
         let floor = permission_effect_policy_floor(effects, self.access, self.operation);
         self.risk = self.risk.max(floor.risk);
-        self.base_local_policy_decision = combine_modes(vec![
-            self.base_local_policy_decision,
-            floor.local_policy_decision,
-        ]);
+        if policy_mode != PermissionMode::DangerFullAccess
+            || floor.local_policy_decision == ApprovalMode::Deny
+        {
+            self.base_local_policy_decision = combine_modes(vec![
+                self.base_local_policy_decision,
+                floor.local_policy_decision,
+            ]);
+        }
         self.local_policy_decision = combine_modes(vec![
             self.base_local_policy_decision,
             self.external_directory_policy_decision,
@@ -918,13 +1001,19 @@ impl PermissionDecision {
         } else if self.confirmation.is_none() {
             self.confirmation = confirmation_for_risk(self.risk, &self.subject_zones);
         }
+        let local_policy_detail = if policy_mode == PermissionMode::DangerFullAccess
+            && floor.local_policy_decision == ApprovalMode::Ask
+        {
+            "danger-full-access preserves the explicit local policy result".to_owned()
+        } else {
+            format!("{} local policy", floor.local_policy_decision.as_str())
+        };
         self.reasons.push(PermissionDecisionReason {
             source: PermissionDecisionSource::HardSafety,
             code: "permission_effect_floor".to_owned(),
             detail: format!(
-                "declared effects require at least {} risk and {} local policy",
+                "declared effects require at least {} risk; {local_policy_detail}",
                 permission_risk_label(floor.risk),
-                floor.local_policy_decision.as_str()
             ),
         });
         self.recompute_mode();
@@ -946,7 +1035,8 @@ impl PermissionDecision {
     }
 
     pub(crate) fn request_external_directory_interactive_approval(&mut self) {
-        if !self.external_directory_required
+        if self.danger_full_access
+            || !self.external_directory_required
             || self.external_directory_policy_decision != ApprovalMode::Deny
         {
             return;
@@ -1006,10 +1096,12 @@ pub struct PermissionPolicy<'a> {
 /// Permission evaluator for a primary run policy plus delegated narrowing constraints.
 ///
 /// Each policy is evaluated independently for the concrete tool spec, operation, and subjects.
-/// The resulting decisions are then combined monotonically, so a child role or profile cannot
-/// relax a parent `Ask` or `Deny` decision.
+/// The resulting decisions are first combined monotonically. When the primary mode is
+/// [`PermissionMode::DangerFullAccess`], the final decision then converts any remaining `Ask`
+/// facet to `Allow`; `Deny` facets remain authoritative.
 pub struct PermissionPolicyChain<'a> {
     policies: Vec<PermissionPolicy<'a>>,
+    primary_mode: PermissionMode,
 }
 
 impl<'a> PermissionPolicyChain<'a> {
@@ -1027,7 +1119,10 @@ impl<'a> PermissionPolicyChain<'a> {
                 .iter()
                 .map(|constraint| PermissionPolicy::new_with_context(constraint, context)),
         );
-        Self { policies }
+        Self {
+            policies,
+            primary_mode: config.mode,
+        }
     }
 
     /// Resolves one tool call across every permission layer and returns the strictest decision.
@@ -1071,6 +1166,10 @@ impl<'a> PermissionPolicyChain<'a> {
             )?;
             decision.restrict_with(constraint);
         }
+        if self.primary_mode == PermissionMode::DangerFullAccess {
+            decision.danger_full_access = true;
+            decision.suppress_danger_full_access_asks();
+        }
         Ok(decision)
     }
 
@@ -1087,6 +1186,10 @@ impl<'a> PermissionPolicyChain<'a> {
         let mut decision = primary.decide_plan(spec, plan)?;
         for policy in policies {
             decision.restrict_with(policy.decide_plan(spec, plan)?);
+        }
+        if self.primary_mode == PermissionMode::DangerFullAccess {
+            decision.danger_full_access = true;
+            decision.suppress_danger_full_access_asks();
         }
         Ok(decision)
     }
@@ -1329,6 +1432,7 @@ impl<'a> PermissionPolicy<'a> {
             external_directory_required,
         );
         decision.command_permission_matches = command_decision.matches;
+        decision.suppress_danger_full_access_asks();
         Ok(decision)
     }
 
@@ -1346,9 +1450,9 @@ impl<'a> PermissionPolicy<'a> {
             plan.subjects.clone(),
             plan.tool_default_mode,
         )?;
-        decision.restrict_for_permission_effects(&plan.effects);
+        decision.restrict_for_permission_effects(self.config.mode, &plan.effects);
         if !plan.analysis.is_complete() {
-            decision.restrict_for_incomplete_analysis(&plan.analysis);
+            decision.restrict_for_incomplete_analysis(self.config.mode, &plan.analysis);
             return Ok(decision);
         }
         if spec.category != ToolCategory::Shell {
@@ -1377,7 +1481,7 @@ impl<'a> PermissionPolicy<'a> {
         {
             decision.allow_contained_workspace_validation_default();
         } else {
-            decision.restrict_for_incomplete_analysis(&plan.analysis);
+            decision.restrict_for_incomplete_analysis(self.config.mode, &plan.analysis);
         }
         Ok(decision)
     }
@@ -2490,11 +2594,18 @@ fn apply_operation_risk_overlay(
 }
 
 fn apply_policy_risk_overlay(
-    _policy_mode: PermissionMode,
+    policy_mode: PermissionMode,
     mode: ApprovalMode,
     operation: ToolOperation,
     risk: PermissionRisk,
 ) -> ApprovalMode {
+    if policy_mode == PermissionMode::DangerFullAccess {
+        return if risk == PermissionRisk::Protected {
+            ApprovalMode::Deny
+        } else {
+            mode
+        };
+    }
     apply_operation_risk_overlay(mode, operation, risk)
 }
 

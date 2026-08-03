@@ -100,9 +100,12 @@ Tool call
   V2 phase matrix，以及 terminal metadata 原子替换、generation CAS 和 durable-before-live lifecycle 发布；
 - 产品复核后补齐了 Desktop typed terminal lifecycle/card/cancel/follower、Tauri allowlist、HTTP durable terminal
   cancel 去重、foreground-final 后的 SSE continuation，以及 provider-neutral output hash 规范化；
-- 最终独立复核确认 `ToolPermissionPlanV2.effects` 是不可降级的安全下限：删除副作用至少为 destructive/ask，
-  动态执行、网络、进程、权限与远程副作用至少为 high/ask，凭据访问始终 protected/deny；工具声明的弱标签、
-  Manual/AutoEdit/DangerFullAccess 模式和 MCP hint 都不能降低该下限；
+- 最终独立复核确认 `ToolPermissionPlanV2.effects` 是不可降级的风险与硬安全下限：删除副作用至少标记为
+  destructive，动态执行、网络、进程、权限与远程副作用至少标记为 high，凭据访问始终 protected/deny；
+  工具声明的弱标签和 MCP hint 不能降低 risk、snapshot 或 hard deny。2026-08-04 的产品语义收口明确：
+  Manual/AutoEdit 继续把相应 effect floor 提升为 Ask，DangerFullAccess 将最终 local/network/source/external
+  Ask facet 归一化为 Allow，但不能覆盖 managed/explicit Deny、disabled external-directory Deny、protected target
+  或 circuit breaker；
 - exact network session grant 已贯通到真实 tool execution context：首次审批可授权同一会话内的同一规范化网络
   subject，后续匹配调用不会再次弹窗，同时 executor 仍收到显式网络授权；不同 subject、scope 或 generation
   不复用授权；

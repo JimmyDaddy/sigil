@@ -124,7 +124,7 @@ fn network_effect_uses_the_strictest_declared_network_fact() -> Result<()> {
 }
 
 #[test]
-fn destructive_mcp_effects_remain_ask_across_interactive_permission_modes() -> Result<()> {
+fn destructive_mcp_effects_remain_ask_except_in_danger_full_access() -> Result<()> {
     let root = tempfile::tempdir()?;
     let plan = ToolPermissionPlanV2::bind(
         "mcp__records__delete",
@@ -150,7 +150,12 @@ fn destructive_mcp_effects_remain_ask_across_interactive_permission_modes() -> R
         let policy = crate::PermissionPolicyChain::new_with_context(&config, &context);
         let decision = policy.decide_plan(&mcp_spec(ToolAccess::Write), &plan)?;
 
-        assert_eq!(decision.mode, crate::ApprovalMode::Ask, "mode={mode:?}");
+        let expected_mode = if mode == crate::PermissionMode::DangerFullAccess {
+            crate::ApprovalMode::Allow
+        } else {
+            crate::ApprovalMode::Ask
+        };
+        assert_eq!(decision.mode, expected_mode, "mode={mode:?}");
         assert_eq!(decision.risk, crate::PermissionRisk::Destructive);
         assert!(decision.snapshot_required);
         assert!(decision.reasons.iter().any(|reason| {
@@ -190,7 +195,7 @@ fn danger_full_access_cannot_use_weak_labels_to_bypass_effect_floor() -> Result<
 
     let decision = policy.decide_plan(&mcp_spec(ToolAccess::Read), &plan)?;
 
-    assert_eq!(decision.mode, crate::ApprovalMode::Ask);
+    assert_eq!(decision.mode, crate::ApprovalMode::Allow);
     assert_eq!(decision.risk, crate::PermissionRisk::Destructive);
     assert!(decision.snapshot_required);
     Ok(())
@@ -222,7 +227,7 @@ fn credential_effect_is_protected_and_denied_even_with_allow_labels() -> Result<
 }
 
 #[test]
-fn high_risk_effect_preserves_headless_approval_barrier() -> Result<()> {
+fn danger_full_access_skips_the_ordinary_high_risk_approval_barrier() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut weak = destructive_mcp_draft();
     weak.access = ToolAccess::Read;
@@ -241,9 +246,7 @@ fn high_risk_effect_preserves_headless_approval_barrier() -> Result<()> {
 
     let decision = policy.decide_plan(&mcp_spec(ToolAccess::Read), &plan)?;
 
-    // The headless executor maps Ask to a structured approval-required error; an effect floor
-    // must therefore preserve Ask instead of silently authorizing execution.
-    assert_eq!(decision.mode, crate::ApprovalMode::Ask);
+    assert_eq!(decision.mode, crate::ApprovalMode::Allow);
     assert_eq!(decision.risk, crate::PermissionRisk::High);
     Ok(())
 }
@@ -286,7 +289,7 @@ fn agent_lifecycle_is_distinct_from_operating_system_process_control() -> Result
     let process_plan =
         ToolPermissionPlanV2::bind("list_agents", &json!({}), root.path(), lifecycle)?;
     let process_decision = policy.decide_plan(&spec, &process_plan)?;
-    assert_eq!(process_decision.mode, crate::ApprovalMode::Ask);
+    assert_eq!(process_decision.mode, crate::ApprovalMode::Allow);
     assert_eq!(process_decision.risk, crate::PermissionRisk::High);
     Ok(())
 }
@@ -380,7 +383,7 @@ fn trusted_binary_read_exception_requires_a_structured_shell_operation() -> Resu
         candidate.clone(),
     )?;
     let weak_decision = policy.decide_plan(&spec, &weak)?;
-    assert_eq!(weak_decision.mode, crate::ApprovalMode::Ask);
+    assert_eq!(weak_decision.mode, crate::ApprovalMode::Allow);
 
     candidate.operation = ToolOperation::ExecuteReadOnlyCommand;
     let analyzed = ToolPermissionPlanV2::bind(
@@ -449,7 +452,77 @@ fn incomplete_shell_analysis_cannot_be_widened_by_raw_allow_pattern() -> Result<
 }
 
 #[test]
-fn incomplete_non_shell_analysis_also_fails_closed() -> Result<()> {
+fn danger_full_access_keeps_incomplete_local_shell_non_interactive_and_suppresses_explicit_ask()
+-> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut draft = draft();
+    draft.access = ToolAccess::Execute;
+    draft.operation = ToolOperation::ExecuteUnknownCommand;
+    draft.effects = BTreeSet::from([ToolPermissionEffect::ExecuteDynamicCode]);
+    draft.analysis = super::ToolAnalysisStatus::Conservative {
+        reasons: vec![super::ToolAnalysisReason::new(
+            super::ToolAnalysisReasonCode::DynamicCommand,
+            Some("command substitution".to_owned()),
+        )],
+    };
+    draft.semantic_scope = None;
+    let plan = ToolPermissionPlanV2::bind(
+        "bash",
+        &json!({"command":"echo $(git status --short)"}),
+        root.path(),
+        draft,
+    )?;
+    let spec = crate::ToolSpec {
+        name: "bash".to_owned(),
+        description: "shell".to_owned(),
+        input_schema: json!({"type":"object"}),
+        category: crate::ToolCategory::Shell,
+        access: ToolAccess::Execute,
+        network_effect: None,
+        preview: crate::ToolPreviewCapability::Optional,
+    };
+    let context = crate::PermissionEvaluationContext {
+        workspace_root: root.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    let config = crate::PermissionConfig {
+        mode: crate::PermissionMode::DangerFullAccess,
+        ..Default::default()
+    };
+    let decision = crate::PermissionPolicyChain::new_with_context(&config, &context)
+        .decide_plan(&spec, &plan)?;
+    assert_eq!(decision.mode, crate::ApprovalMode::Allow);
+    assert_eq!(decision.risk, crate::PermissionRisk::High);
+    assert!(
+        decision
+            .reasons
+            .iter()
+            .any(|reason| { reason.code == "danger_full_access_incomplete_analysis_allowed" })
+    );
+
+    let explicit_ask = crate::PermissionConfig {
+        mode: crate::PermissionMode::DangerFullAccess,
+        commands: crate::CommandPermissionConfig {
+            ask: vec!["*".to_owned()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let decision = crate::PermissionPolicyChain::new_with_context(&explicit_ask, &context)
+        .decide_plan(&spec, &plan)?;
+    assert_eq!(decision.mode, crate::ApprovalMode::Allow);
+    assert!(
+        decision
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "danger_full_access_ask_suppressed")
+    );
+    Ok(())
+}
+
+#[test]
+fn danger_full_access_suppresses_network_ask_for_incomplete_non_shell_analysis() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut draft = draft();
     draft.access = ToolAccess::Read;
@@ -469,6 +542,7 @@ fn incomplete_non_shell_analysis_also_fails_closed() -> Result<()> {
     };
     let context = crate::PermissionEvaluationContext {
         workspace_root: root.path().to_path_buf(),
+        network_policy: crate::NetworkPolicy::Ask,
         ..Default::default()
     };
     let policy = crate::PermissionPolicyChain::new_with_context(&config, &context);
@@ -483,12 +557,13 @@ fn incomplete_non_shell_analysis_also_fails_closed() -> Result<()> {
     };
 
     let decision = policy.decide_plan(&spec, &plan)?;
-    assert_eq!(decision.mode, crate::ApprovalMode::Ask);
+    assert_eq!(decision.mode, crate::ApprovalMode::Allow);
+    assert_eq!(decision.network_policy_decision, crate::ApprovalMode::Allow);
     assert!(
         decision
             .reasons
             .iter()
-            .any(|reason| reason.code == "deterministic_analysis_incomplete")
+            .any(|reason| { reason.code == "danger_full_access_incomplete_analysis_allowed" })
     );
     Ok(())
 }
