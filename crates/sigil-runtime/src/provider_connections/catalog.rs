@@ -138,18 +138,6 @@ impl ModelCatalogState {
             Self::CredentialUnavailable => "credential_unavailable",
         }
     }
-
-    /// Whether this catalog outcome permits an explicit model ID acknowledgement.
-    ///
-    /// Authentication, transport, protocol and stale-cache failures must be repaired or retried
-    /// before a manual ID can become an admitted route.
-    #[must_use]
-    pub const fn manual_entry_allowed(self) -> bool {
-        matches!(
-            self,
-            Self::Remote | Self::CacheFresh | Self::Empty | Self::Unsupported
-        )
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -382,9 +370,10 @@ impl ProviderModelCatalogService {
                     result_with(
                         request,
                         state,
-                        configured_warning(
+                        configured_reference(
                             stale_reference_entries(cache_entries(cache.entries)),
                             configured_model.as_ref(),
+                            ModelAvailability::Unverified,
                         ),
                         retry_after,
                     )
@@ -784,7 +773,11 @@ fn configured_plus_bundled(
     connection: &ProviderConnectionConfig,
     configured: Option<&ModelRef>,
 ) -> Vec<ModelCatalogEntry> {
-    configured_warning(bundled_model_entries(connection), configured)
+    configured_reference(
+        bundled_model_entries(connection),
+        configured,
+        ModelAvailability::Unverified,
+    )
 }
 
 #[must_use]
@@ -879,8 +872,20 @@ fn enrich_remote_entries(connection: &ProviderConnectionConfig, entries: &mut [M
 }
 
 fn configured_warning(
+    entries: Vec<ModelCatalogEntry>,
+    configured: Option<&ModelRef>,
+) -> Vec<ModelCatalogEntry> {
+    configured_reference(
+        entries,
+        configured,
+        ModelAvailability::ConfiguredUnavailable,
+    )
+}
+
+fn configured_reference(
     mut entries: Vec<ModelCatalogEntry>,
     configured: Option<&ModelRef>,
+    availability: ModelAvailability,
 ) -> Vec<ModelCatalogEntry> {
     if let Some(configured) = configured
         && !entries.iter().any(|entry| entry.model_ref == *configured)
@@ -888,7 +893,7 @@ fn configured_warning(
         entries.push(ModelCatalogEntry {
             model_ref: configured.clone(),
             display_name: configured.model_id.clone(),
-            availability: ModelAvailability::ConfiguredUnavailable,
+            availability,
             recommendation: ModelRecommendation::Standard,
             provenance: ModelCatalogProvenance::Configured,
         });
@@ -924,7 +929,6 @@ fn result_with(
     entries: Vec<ModelCatalogEntry>,
     retry_after_secs: Option<u64>,
 ) -> ModelCatalogResult {
-    let manual_entry_allowed = state.manual_entry_allowed();
     ModelCatalogResult {
         request_id: request.request_id,
         connection_id: request.connection_id,
@@ -933,7 +937,9 @@ fn result_with(
         state,
         entries,
         retry_after_secs,
-        manual_entry_allowed,
+        // Catalog discovery is optional. Every provider can still accept an explicit model ID;
+        // the actual request remains fail-closed when the provider rejects that route.
+        manual_entry_allowed: true,
     }
 }
 

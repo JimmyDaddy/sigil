@@ -73,6 +73,7 @@ mod plugin_manifest_io; // bounded regular-file reads shared by discovery and ac
 mod provider_factory; // provider construction, capabilities, and secrets.
 mod provider_pressure; // task-role provider route cooldown and shared backpressure.
 mod reasoning_effort; // exact provider+model effort admission and stale bindings.
+pub use reasoning_effort::admitted_reasoning_effort;
 mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
 mod run_options; // shared run options and scoped tool registry views.
 mod task_completion_progress; // process-local task completion arrival diagnostics.

@@ -4,6 +4,19 @@
 
 创建日期：2026-07-24
 
+### 2026-08-03 optional catalog amendment
+
+模型目录从配置 admission gate 降级为可选的选择器增强。每条合法 connection 始终允许输入非空的
+精确 model ID；bundled、fresh、stale、unsupported、offline、auth rejected、TLS、protocol、
+malformed 和 rate-limited 状态都不得阻止本地保存。远端目录仍用于推荐、展示和诊断；只有权威的
+remote/fresh result 明确证明既有 configured model 不在返回集合时，才显示
+`ConfiguredUnavailable` 并禁用该候选。失败 fallback 中的 configured/bundled 候选均为
+`Unverified`，不是“不可用”。第一次真实生成请求继续 fail closed，并给出 provider 的结构化错误。
+
+因此，下文 6.1、6.3、9.3 中关于“auth/transport/protocol failure 禁用 manual entry”与“保存前
+catalog admission”的旧规则均由本修订替代。Desktop、TUI 和 HTTP setup save 必须遵循同一语义：
+配置只验证本地结构、credential source 与安全发布，不依赖站点实现模型列表接口。
+
 ### 2026-08-02 same-session model-switch amendment
 
 模型不再是 durable session 的不可变容器边界。idle 模型切换改为在同一个 session 中追加完整
@@ -305,14 +318,13 @@ flowchart TD
     E --> V["Probe exact connection"]
     K --> V
     N --> V
-    V --> M["Load exact connection model catalog"]
+    V --> M["Optionally refresh exact connection model catalog"]
     M --> C{"Model available?"}
     C -- "yes" --> X["Choose recommended or exact model"]
     C -- "unsupported/empty" --> Y["Explain and allow acknowledged manual entry"]
-    C -- "auth/transport/protocol/error" --> Z["Repair or retry; manual entry disabled"]
+    C -- "auth/transport/protocol/error" --> Y
     X --> R["Review connection + model + trust"]
     Y --> X
-    Z --> V
     R --> W["Atomic save"]
     W --> S
 ```
@@ -394,8 +406,7 @@ model picker 只显示当前 connection。布局按以下顺序：
 2. `Recent on this connection`；
 3. `Available from <connection label>`；
 4. `Configured but not returned`：只在 legacy/current value 存在时显示，带 warning；
-5. `Enter model ID manually`，仅在 authoritative remote/fresh cache、confirmed empty 或
-   catalog unsupported 状态出现。
+5. `Enter model ID manually`，始终出现；目录状态只改变提示，不改变保存资格。
 
 示例：
 
@@ -428,10 +439,9 @@ Choose a model · Local gateway
 No models from another provider will be shown here.
 ```
 
-manual entry 生成当前 connection 的 `ModelRef`，不是全局裸 ID。保存前执行格式与长度校验；
-它只在 catalog 已成功建立可信边界、明确为空或明确不支持 discovery 时开放。auth、transport、
-TLS、protocol、malformed 和 stale-cache failure 均 fail closed，不允许用 manual ID 绕过。
-该 row 标记为 `manual · unverified`。
+manual entry 生成当前 connection 的 `ModelRef`，不是全局裸 ID。保存前只执行本地格式与长度
+校验；catalog failure 不关闭该入口。该 row 标记为 `manual · unverified`，第一次真实生成请求仍
+按 credential、transport、protocol 和 provider response fail closed。
 
 ### 6.4 Recommended is not Auto
 
@@ -985,8 +995,7 @@ remote response 中的 context window、price、feature、owner、display name �
    - catalog unsupported：读取 provider-owned bundled + manual；
    - malformed/oversized：视为 provider failure，不接受部分 unbounded 数据；
 4. cache 不存在或太旧时，使用 provider-owned bundled；
-5. manual entry 只在 remote/cache-fresh、confirmed empty 或 catalog unsupported 时保留；
-   auth/transport/TLS/protocol/malformed/stale-cache failure 禁止 manual 绕过；
+5. manual entry 在所有 catalog state 保留；失败只影响诊断与推荐，不影响本地配置保存；
 6. 永远不查询或合并其他 connection。
 
 ### 9.4 Cache

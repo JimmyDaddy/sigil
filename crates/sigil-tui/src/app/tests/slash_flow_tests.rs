@@ -1490,7 +1490,7 @@ fn slash_selector_executes_selected_effort_candidate() -> Result<()> {
 }
 
 #[test]
-fn slash_selector_and_execution_reject_unadmitted_custom_model_ids() -> Result<()> {
+fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -1499,14 +1499,16 @@ fn slash_selector_and_execution_reject_unadmitted_custom_model_ids() -> Result<(
 
     let rows = app.slash_selector_rows();
     assert!(rows.is_empty());
-    assert!(app.submit_input()?.is_none());
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::RuntimeConfigUpdated { .. })
+    ));
     assert_eq!(app.session_id, previous_session_id);
-    assert_eq!(
-        app.last_notice(),
-        Some(
-            "model deepseek-default/ds-custom is not admitted; open /config, refresh this connection, and use M only when offered"
-        )
-    );
+    assert_eq!(app.runtime.model_name, "ds-custom");
+    assert!(app.last_notice().is_some_and(|notice| {
+        notice.contains("route -> deepseek-default/ds-custom")
+            && notice.contains("saved default unchanged")
+    }));
     Ok(())
 }
 

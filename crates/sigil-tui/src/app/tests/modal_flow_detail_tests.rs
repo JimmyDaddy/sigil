@@ -17,7 +17,6 @@ fn disconnected_setup_catalog_worker_leaves_loading_with_a_repairable_error() {
         catalog_entries: Vec::new(),
         options: Vec::new(),
         selected: 0,
-        manual_entry_allowed: false,
     }));
     app.runtime.active_model_picker_refresh = Some(PendingModelPickerRefresh {
         request_id: 1,
@@ -42,7 +41,6 @@ fn disconnected_setup_catalog_worker_leaves_loading_with_a_repairable_error() {
         app.modal_state,
         Some(ModalState::ModelPicker(ModelPickerState {
             catalog_state: ModelCatalogState::Error(_),
-            manual_entry_allowed: false,
             ..
         }))
     ));
@@ -172,16 +170,6 @@ fn modal_outcomes_update_setup_and_config_state() {
     setup_app.apply_modal_outcome(ModalOutcome::SecretSubmitted {
         target: SecretInputTarget::SetupApiKey,
         value: SecretString::new("setup-secret"),
-    });
-    let setup_state = setup_app
-        .setup_state
-        .as_mut()
-        .expect("setup state should exist");
-    setup_state.catalog_admission = Some(crate::setup::SetupCatalogAdmission {
-        draft_revision: setup_state.draft_revision,
-        available_models: Default::default(),
-        manual_entry_allowed: true,
-        manual_model: None,
     });
     setup_app.apply_modal_outcome(ModalOutcome::TextSubmitted {
         target: TextInputTarget::SetupModel,
@@ -351,12 +339,11 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
         catalog_entries: Vec::new(),
         options: Vec::new(),
         selected: 0,
-        manual_entry_allowed: false,
     }));
     assert!(matches!(app.submit_modal(), ModalOutcome::None));
     assert_eq!(
         app.last_notice.as_deref(),
-        Some("no verified model is selectable; repair connection or retry")
+        Some("no listed model; press M to enter a model id")
     );
 }
 
@@ -512,7 +499,6 @@ fn model_picker_and_input_key_events_cover_wrap_dismiss_and_submission() {
         catalog_entries: Vec::new(),
         options: Vec::new(),
         selected: 0,
-        manual_entry_allowed: false,
     }));
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -520,7 +506,7 @@ fn model_picker_and_input_key_events_cover_wrap_dismiss_and_submission() {
     ));
     assert_eq!(
         app.last_notice.as_deref(),
-        Some("no verified model is selectable; repair connection or retry")
+        Some("no listed model; press M to enter a model id")
     );
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),

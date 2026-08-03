@@ -80,26 +80,17 @@ impl AppState {
                     .entries
                     .iter()
                     .find(|entry| entry.id == model_ref.connection_id)
-                    .is_some_and(|entry| entry.readiness == ConnectionReadiness::Ready)
+                    .is_some_and(|entry| {
+                        matches!(
+                            entry.readiness,
+                            ConnectionReadiness::Ready | ConnectionReadiness::Unverified
+                        )
+                    })
             });
         if !ready {
             let notice = format!(
                 "connection {} is not ready; open /config to repair authentication",
                 model_ref.connection_id
-            );
-            self.last_notice = Some(notice.clone());
-            self.push_timeline(TimelineRole::Notice, notice);
-            return Ok(None);
-        }
-
-        let compound = format!("{}/{}", model_ref.connection_id, model_ref.model_id);
-        let admitted = self
-            .model_selector_entries(&compound)
-            .iter()
-            .any(|entry| entry.resolved.arg == compound);
-        if !admitted {
-            let notice = format!(
-                "model {compound} is not admitted; open /config, refresh this connection, and use M only when offered"
             );
             self.last_notice = Some(notice.clone());
             self.push_timeline(TimelineRole::Notice, notice);

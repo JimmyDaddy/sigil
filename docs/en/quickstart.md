@@ -33,6 +33,8 @@ The launch directory becomes the normal active workspace when Quick Setup saves 
 When configuration is missing, make at most three main choices: provider, credential source, and
 model. `Review, trust folder, save and start` confirms the route and allows the launch directory to
 be used as the workspace. Quick Setup writes a named V2 connection and the compound saved default.
+Remote model discovery is optional. If an endpoint has no model list or refresh fails, enter the
+exact model ID and continue saving the setup.
 
 In Sigil Desktop, open a project first. A new computer or missing config opens the same three-step
 provider wizard before **New conversation** becomes available. The Settings page later shows every

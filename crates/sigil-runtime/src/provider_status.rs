@@ -153,7 +153,7 @@ impl ProviderStatusTaskManager {
                     state: ModelCatalogState::Malformed,
                     entries: Vec::new(),
                     retry_after_secs: None,
-                    manual_entry_allowed: false,
+                    manual_entry_allowed: true,
                 },
             };
             let _ =

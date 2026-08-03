@@ -160,7 +160,7 @@ impl HttpSupportContext {
     ///
     /// # Errors
     ///
-    /// Returns an error when catalog admission, credential storage, or config publish fails.
+    /// Returns an error when local validation, credential storage, or config publish fails.
     pub(crate) fn save_provider_setup(
         &self,
         request: HttpProviderSetupSaveRequest,
@@ -177,20 +177,6 @@ impl HttpSupportContext {
                 request.replace_invalid_config,
             )
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        let catalog = self
-            .load_setup_catalog(&draft)
-            .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        if !catalog.state.manual_entry_allowed() {
-            return Err(HttpProviderSetupFailure::Invalid);
-        }
-        let catalog_admits = catalog.entries.iter().any(|entry| {
-            entry.model_ref == draft.default_model
-                && entry.availability != ModelAvailability::ConfiguredUnavailable
-        });
-        if !catalog_admits && !catalog.manual_entry_allowed {
-            return Err(HttpProviderSetupFailure::Invalid);
-        }
-
         let save_current = if self.config_path.exists() && !draft.replace_invalid_config {
             draft.current.clone()
         } else {

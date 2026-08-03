@@ -561,7 +561,7 @@ fn setup_field_paste_updates_selected_text_without_saving() {
 }
 
 #[test]
-fn config_model_paste_requires_catalog_admission() {
+fn config_model_paste_updates_the_explicit_model_id() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     app.config_state
@@ -571,18 +571,13 @@ fn config_model_paste_requires_catalog_admission() {
 
     app.handle_paste_text("custom\nmodel");
 
-    assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
     let state = app
         .config_state
         .as_ref()
         .expect("config state remains open");
-    assert_eq!(state.draft.provider_model, "deepseek-v4-flash");
-    assert!(!state.dirty);
-    assert_eq!(
-        app.last_notice(),
-        Some("pasted model ids require catalog admission; choose a model or press M")
-    );
-    app.modal_state = None;
+    assert_eq!(state.draft.provider_model, "custommodel");
+    assert!(state.dirty);
+    assert_eq!(app.last_notice(), Some("updated model"));
 
     app.config_state
         .as_mut()

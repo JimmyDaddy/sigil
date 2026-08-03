@@ -59,13 +59,17 @@ export function ProviderSetup({
 
   const isCustom = template === "open_ai_compatible";
   const effectiveModelId = modelId === "__manual__" ? manualModelId.trim() : modelId;
+  const selectedModelUnavailable = modelId !== "__manual__"
+    && catalog?.models.some((model) => (
+      model.modelId === modelId && model.availability === "configured_unavailable"
+    )) === true;
   const canLoadModels = template !== undefined
     && (credentialSource !== "secure_store" || apiKey.trim().length > 0)
     && (!isCustom || endpoint.trim().length > 0);
   const canSave = effectiveModelId.length > 0
-    && state === "idle"
+    && state !== "saving"
     && catalog !== undefined
-    && providerCatalogAllowsSave(catalog);
+    && !selectedModelUnavailable;
   const progress = step === "provider" ? 1 : step === "authentication" ? 2 : 3;
 
   const catalogInput = useMemo<ProviderSetupCatalogInput | undefined>(() => {
@@ -98,24 +102,19 @@ export function ProviderSetup({
       if (requestRevision !== catalogRequestRevision.current) return;
       if (cached !== undefined) {
         const view = cached.stale ? staleCatalogView(cached.catalog) : cached.catalog;
-        if (!applyCatalog(view)) return;
+        applyCatalog(view);
         if (cached.stale) {
           setState("refreshing");
           void loadAndCacheProviderCatalog(bridge, workspaceId, catalogInput)
             .then((next) => {
               if (requestRevision !== catalogRequestRevision.current) return;
-              if (providerCatalogAllowsSave(next)) {
-                applyCatalog(next);
-                setError(undefined);
-                setState("idle");
-              } else {
-                setState("error");
-                setError(providerCatalogFailureMessage(next.state, t));
-              }
+              applyCatalog(next);
+              setError(catalogWarning(next.state, t));
+              setState("idle");
             })
             .catch(() => {
               if (requestRevision !== catalogRequestRevision.current) return;
-              setState("error");
+              setState("idle");
               setError(t("providerCatalogRefreshFailed"));
             });
         } else {
@@ -129,7 +128,8 @@ export function ProviderSetup({
         catalogInput,
       );
       if (requestRevision !== catalogRequestRevision.current) return;
-      if (!applyCatalog(next)) return;
+      applyCatalog(next);
+      setError(catalogWarning(next.state, t));
       setState("idle");
     } catch {
       if (requestRevision !== catalogRequestRevision.current) return;
@@ -147,30 +147,25 @@ export function ProviderSetup({
     setState("idle");
   }
 
-  const applyCatalog = (next: ProviderSetupCatalog): boolean => {
-    if (!providerCatalogAllowsDisplay(next)) {
-      setCatalog(undefined);
-      setModelId("");
-      setState("error");
-      setError(providerCatalogFailureMessage(next.state, t));
-      setStep("authentication");
-      return false;
-    }
+  const applyCatalog = (next: ProviderSetupCatalog) => {
     setCatalog(next);
     setModelId((current) => {
-      if (current !== "" && next.models.some((model) => model.modelId === current)) {
+      if (current === "__manual__") return current;
+      if (current !== "" && next.models.some((model) => (
+        model.modelId === current && model.availability !== "configured_unavailable"
+      ))) {
         return current;
       }
       return next.suggestedModel
         ?? next.models.find((model) => model.availability !== "configured_unavailable")?.modelId
-        ?? (next.manualEntryAllowed ? "__manual__" : "");
+        ?? "__manual__";
     });
     setStep("model");
-    return true;
   };
 
   const save = async () => {
     if (!canSave || catalogInput === undefined) return;
+    catalogRequestRevision.current += 1;
     setState("saving");
     setError(undefined);
     try {
@@ -354,16 +349,14 @@ export function ProviderSetup({
                 onChange={() => setModelId(model.modelId)}
               />
             ))}
-            {catalog.manualEntryAllowed ? (
-              <Radio
-                name="provider-model"
-                label={t("enterModelManually")}
-                description={t("enterModelManuallyDetail")}
-                value="__manual__"
-                checked={modelId === "__manual__"}
-                onChange={() => setModelId("__manual__")}
-              />
-            ) : null}
+            <Radio
+              name="provider-model"
+              label={t("enterModelManually")}
+              description={t("enterModelManuallyDetail")}
+              value="__manual__"
+              checked={modelId === "__manual__"}
+              onChange={() => setModelId("__manual__")}
+            />
           </fieldset>
           {modelId === "__manual__" ? (
             <TextField
@@ -460,28 +453,15 @@ function providerEnvironment(
   }
 }
 
-function providerCatalogAllowsSave(catalog: ProviderSetupCatalog): boolean {
-  return catalog.state === "remote"
-    || catalog.state === "cache_fresh"
-    || catalog.state === "remote_empty"
-    || catalog.state === "catalog_unsupported";
-}
-
-function providerCatalogAllowsDisplay(catalog: ProviderSetupCatalog): boolean {
-  return providerCatalogAllowsSave(catalog) || catalog.state === "cache_stale";
-}
-
 function staleCatalogView(catalog: ProviderSetupCatalog): ProviderSetupCatalog {
   return {
     ...catalog,
     state: "cache_stale",
     models: catalog.models.map((model) => ({
       ...model,
-      availability: model.availability === "configured_unavailable"
-        ? "configured_unavailable"
-        : "unverified",
+      availability: "unverified",
     })),
-    manualEntryAllowed: false,
+    manualEntryAllowed: true,
   };
 }
 
@@ -499,10 +479,10 @@ function providerCatalogStateLabel(
   }
 }
 
-function providerCatalogFailureMessage(
+function catalogWarning(
   state: string,
   t: ReturnType<typeof useLocale>["t"],
-): string {
+): string | undefined {
   switch (state) {
     case "auth_rejected": return t("providerCatalogAuthRejected");
     case "credential_unavailable": return t("providerCatalogCredentialUnavailable");
@@ -511,6 +491,6 @@ function providerCatalogFailureMessage(
     case "protocol_mismatch": return t("providerCatalogProtocolMismatch");
     case "catalog_malformed": return t("providerCatalogMalformed");
     case "rate_limited": return t("providerCatalogRateLimited");
-    default: return t("providerCatalogLoadFailed");
+    default: return undefined;
   }
 }

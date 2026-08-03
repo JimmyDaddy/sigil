@@ -531,10 +531,8 @@ fn queued_chat_candidate_freezes_exact_request_without_mutating_durable_state() 
             .any(|message| message.content.as_deref() == Some(RAW_PROMPT))
     );
     assert_eq!(candidate.frozen_request.request().max_tokens, None);
-    assert_eq!(
-        candidate.frozen_request.request().reasoning_effort,
-        Some(ReasoningEffort::High)
-    );
+    assert_eq!(candidate.frozen_request.request().reasoning_effort, None);
+    assert_eq!(candidate.reasoning_effort, None);
     assert!(!candidate.capability_registrations.is_empty());
     assert_eq!(std::fs::read(store.path())?, before_stream);
     assert!(exact_prompts.contains_key(&candidate.promotion.queue_id));

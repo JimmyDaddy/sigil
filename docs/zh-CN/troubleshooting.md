@@ -36,14 +36,17 @@ sigil doctor
 
 `sigil doctor` 会独立报告每条 connection，且不会打印 secret 值或 credential ID。按 UI 状态处理：
 
+模型目录不是保存配置的前置条件；站点没有列表接口或暂时无法刷新时，可直接输入精确模型 ID
+继续。只有实际模型请求成功，才能证明凭据、端点和该模型组合可用。
+
 | 状态 | 含义 | 处理方式 |
 |---|---|---|
 | `needs_credential` / `credential_unavailable` | 当前凭据来源缺失，或 configured store 无法读取 | 修复该 connection 的环境变量绑定或 stored record，并检查 `[storage].credential_store` |
-| `auth_rejected` | 端点拒绝了当前 connection 的凭据 | 替换该凭据；Sigil 不会尝试其他 connection |
-| `offline`、`tls_rejected`、`protocol_mismatch` | 当前协议无法安全访问已配置端点 | 检查网络、TLS、端点和协议 |
+| `auth_rejected` | 模型目录请求被当前凭据拒绝 | 仍可保存明确模型 ID；首次请求若也失败，再替换凭据 |
+| `offline`、`tls_rejected`、`protocol_mismatch` | 模型目录暂时无法按当前协议访问 | 可先保存明确模型 ID；同时检查网络、TLS、端点和协议 |
 | `remote_empty` | Discovery 成功，但没有返回模型 | 手动输入精确模型 ID |
 | `catalog_unsupported` | 当前 provider/端点不提供 discovery | 使用 provider 自带列表或手动输入 |
-| `catalog_malformed` | 返回值不是合法模型目录 | 修复端点或网关；远端元数据不会扩展本地能力 |
+| `catalog_malformed` | 返回值不是合法模型目录 | 手动输入模型 ID；远端元数据不会扩展本地能力 |
 
 Provider 生成请求与远程模型目录均遵循标准 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`
 环境变量。`[web].proxy_mode` 只控制 Web 工具，不用于配置 Provider 流量。

@@ -1571,13 +1571,16 @@ async fn catalog_distinguishes_empty_auth_unsupported_and_malformed() {
         )
         .await;
         assert_eq!(result.state, expected);
-        assert_eq!(
+        assert!(
             result.manual_entry_allowed,
-            matches!(
-                expected,
-                ModelCatalogState::Empty | ModelCatalogState::Unsupported
-            )
+            "catalog discovery must never disable explicit model IDs for {expected:?}"
         );
+        if expected != ModelCatalogState::Empty {
+            assert!(result.entries.iter().any(|entry| {
+                entry.model_ref.model_id == "configured-only"
+                    && entry.availability == ModelAvailability::Unverified
+            }));
+        }
         server.abort();
     }
 }

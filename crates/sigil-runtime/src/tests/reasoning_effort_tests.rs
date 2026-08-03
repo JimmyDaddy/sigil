@@ -1,6 +1,8 @@
 use sigil_kernel::ReasoningEffort;
 
-use crate::reasoning_effort::{reasoning_effort_binding, supported_reasoning_efforts};
+use crate::reasoning_effort::{
+    admitted_reasoning_effort, reasoning_effort_binding, supported_reasoning_efforts,
+};
 
 #[test]
 fn exact_provider_model_support_is_projected_without_guessing() {
@@ -15,6 +17,22 @@ fn exact_provider_model_support_is_projected_without_guessing() {
     );
     assert!(supported_reasoning_efforts("openai_responses", "gpt-4.1").is_empty());
     assert!(supported_reasoning_efforts("openai_compat", "gpt-5").is_empty());
+}
+
+#[test]
+fn request_effort_is_omitted_for_unknown_or_unsupported_models() {
+    assert_eq!(
+        admitted_reasoning_effort("deepseek", "deepseek-v4-flash", Some(ReasoningEffort::Max)),
+        Some(ReasoningEffort::Max)
+    );
+    assert_eq!(
+        admitted_reasoning_effort("openai_responses", "gpt-4.1", Some(ReasoningEffort::High)),
+        None
+    );
+    assert_eq!(
+        admitted_reasoning_effort("openai_compat", "private", Some(ReasoningEffort::Max)),
+        None
+    );
 }
 
 #[test]

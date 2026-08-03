@@ -1118,7 +1118,6 @@ fn config_enter_starts_and_commits_text_edit() -> Result<()> {
     assert_eq!(app.modal_title(), Some("Model"));
     if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_mut() {
         state.catalog_state = crate::app::modal_flow::ModelCatalogState::Unsupported;
-        state.manual_entry_allowed = true;
     } else {
         panic!("model picker should remain open");
     }
@@ -1143,7 +1142,7 @@ fn config_enter_starts_and_commits_text_edit() -> Result<()> {
 }
 
 #[test]
-fn config_direct_model_typing_opens_the_admission_picker() -> Result<()> {
+fn config_direct_model_typing_opens_the_picker_with_manual_entry() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
 
@@ -1159,7 +1158,7 @@ fn config_direct_model_typing_opens_the_admission_picker() -> Result<()> {
     assert!(!state.dirty);
     assert_eq!(
         app.last_notice(),
-        Some("choose a catalog model or use M when manual entry is admitted")
+        Some("choose a listed model or press M to enter an exact model id")
     );
     Ok(())
 }
@@ -3986,10 +3985,6 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    app.setup_state
-        .as_mut()
-        .expect("setup state should exist in setup mode")
-        .admit_current_model_for_test();
     app.setup_state
         .as_mut()
         .expect("setup state should exist in setup mode")

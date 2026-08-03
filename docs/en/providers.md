@@ -33,13 +33,13 @@ In `/config` → **Provider**, Enter on **Connection** opens an explicit chooser
 connections and provider templates; `A` opens the add-provider group directly. Up/Down works on
 standard macOS keyboards, and adding never guesses the next provider.
 The model chooser is scoped to the selected connection: it starts with that provider's bundled
-default and refreshes a remote list only when discovery is supported. `M` is offered only after
-an authoritative remote/fresh-cache response, a confirmed empty catalog, or an explicit
-unsupported-discovery result; transport, authentication, TLS, protocol, malformed-response, and
-stale-cache failures must be repaired or retried first. Loading, authenticated remote results, confirmed empty results, authentication
-rejection, offline/TLS failure, unsupported discovery, and malformed responses are distinct
-states; Sigil does not fill another provider's models into the list. A confirmed empty remote
-catalog clears the candidates and permits acknowledged manual entry.
+default and refreshes a remote list only when discovery is supported. Model discovery is optional:
+`M` always accepts an exact model ID for the current connection, even when the endpoint has no
+`/models` route or discovery fails because of network, authentication, TLS, protocol, or response
+format. Those states remain distinct for troubleshooting, but they do not block saving the local
+configuration; the first generation request validates the route. Sigil never fills the chooser
+with models from another provider, and only disables a saved model after an authoritative remote
+catalog confirms that it is absent.
 After a successful catalog load, leaving and reopening the picker reuses the exact
 connection/fingerprint view for ten minutes. An older in-process view remains visible as
 unverified while Sigil refreshes it in the background, so menu navigation does not repeatedly

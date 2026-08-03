@@ -1007,7 +1007,7 @@ impl AppState {
                             .unwrap_or_default();
                         self.open_model_picker(ModelPickerTarget::Provider, &current);
                         self.last_notice = Some(
-                            "choose a catalog model or use M when manual entry is admitted"
+                            "choose a listed model or press M to enter an exact model id"
                                 .to_owned(),
                         );
                         return Ok(None);
@@ -1088,19 +1088,6 @@ impl AppState {
     }
 
     pub(super) fn handle_config_paste_text(&mut self, text: &str) {
-        let provider_model = self.config_state.as_ref().and_then(|config_state| {
-            (!config_state.footer_selected
-                && config_state.selected_field == Some(ConfigField::ProviderModel))
-            .then(|| config_state.draft.provider_model.clone())
-        });
-        if let Some(current) = provider_model {
-            self.open_model_picker(ModelPickerTarget::Provider, &current);
-            self.last_notice = Some(
-                "pasted model ids require catalog admission; choose a model or press M".to_owned(),
-            );
-            return;
-        }
-
         let Some(config_state) = self.config_state.as_mut() else {
             return;
         };
@@ -1124,6 +1111,19 @@ impl AppState {
         } else {
             return;
         };
+        if field == ConfigField::ProviderModel {
+            if value.is_empty() {
+                self.last_notice = Some("model cannot be empty".to_owned());
+                return;
+            }
+            let changed = config_state.draft.provider_model != value;
+            config_state.draft.provider_model = value.clone();
+            if changed {
+                config_state.mark_dirty();
+            }
+            self.last_notice = Some(format!("updated {}", ConfigField::ProviderModel.label()));
+            return;
+        }
         if value.is_empty() {
             return;
         }

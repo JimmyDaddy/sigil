@@ -177,10 +177,6 @@ impl AppState {
         {
             picker.catalog_state =
                 super::super::modal_flow::ModelCatalogState::Error(message.clone());
-            picker.manual_entry_allowed = false;
-        }
-        if let Some(setup) = self.setup_state.as_mut() {
-            setup.catalog_admission = None;
         }
         self.last_notice = Some(message.clone());
         self.push_event("model_list:error", message);

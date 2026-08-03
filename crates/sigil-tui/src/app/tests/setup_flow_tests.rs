@@ -49,7 +49,11 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.selected_field = SetupField::Model;
     let lines = app.setup_lines().join("\n");
-    assert!(lines.contains("> model                 : deepseek-v4-flash  [Enter choose]"));
+    assert!(
+        lines.contains(
+            "> model                 : deepseek-v4-flash  [Enter choose · type model ID]"
+        )
+    );
 
     app.setup_state
         .as_mut()
@@ -80,11 +84,6 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
         .as_mut()
         .expect("setup state should exist")
         .credential_source = SetupCredentialSource::Environment;
-    app.setup_state
-        .as_mut()
-        .expect("setup state should exist")
-        .admit_current_model_for_test();
-
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     let Some(AppAction::SetupCompleted {
@@ -123,7 +122,6 @@ fn setup_explicitly_replaces_an_existing_malformed_config() -> Result<()> {
     );
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.api_key = SecretString::new("staged-only");
-    state.admit_current_model_for_test();
     state.selected_field = SetupField::Save;
     assert!(
         app.setup_lines()
@@ -154,8 +152,6 @@ fn setup_startup_recovery_error_blocks_publish_when_config_is_missing() -> Resul
     );
     let state = app.setup_state.as_mut().expect("setup state should exist");
     state.api_key = SecretString::new("staged-only");
-    state.admit_current_model_for_test();
-
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     assert!(action.is_none());
@@ -321,10 +317,6 @@ fn typing_in_setup_model_field_opens_text_modal() -> Result<()> {
     app.setup_state
         .as_mut()
         .expect("setup state should exist")
-        .allow_manual_model_for_test();
-    app.setup_state
-        .as_mut()
-        .expect("setup state should exist")
         .selected_field = SetupField::Model;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))?;
@@ -352,10 +344,6 @@ fn setup_paste_updates_model_and_api_key_fields() {
     app.handle_setup_paste_text("\n\u{0007}");
     assert!(app.last_notice().is_none());
 
-    app.setup_state
-        .as_mut()
-        .expect("setup state should exist")
-        .allow_manual_model_for_test();
     app.setup_state
         .as_mut()
         .expect("setup state should exist")
@@ -444,36 +432,18 @@ fn setup_validation_and_builder_reject_empty_model_and_auth() {
 }
 
 #[test]
-fn setup_manual_model_admission_is_state_scoped_and_exact() {
+fn setup_manual_model_is_validated_locally_without_catalog_admission() {
     let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
     state.credential_source = SetupCredentialSource::SecureStore;
     state.api_key = SecretString::new("test-key");
-    state.catalog_admission = Some(crate::setup::SetupCatalogAdmission {
-        draft_revision: state.draft_revision,
-        available_models: std::collections::BTreeSet::new(),
-        manual_entry_allowed: true,
-        manual_model: None,
-    });
-
-    assert!(state.admit_manual_model("remote-manual-model"));
     state.model = "remote-manual-model".to_owned();
     assert_eq!(validate_setup_state(&state), None);
 
     state.model = "different-unverified-model".to_owned();
-    assert!(validate_setup_state(&state).is_some());
+    assert_eq!(validate_setup_state(&state), None);
 
-    state.catalog_admission = Some(crate::setup::SetupCatalogAdmission {
-        draft_revision: state.draft_revision,
-        available_models: std::collections::BTreeSet::new(),
-        manual_entry_allowed: false,
-        manual_model: None,
-    });
-    assert!(
-        !state.admit_manual_model("auth-rejected-model"),
-        "an auth-rejected catalog must not admit manual model ids"
-    );
     state.model = "auth-rejected-model".to_owned();
-    assert!(validate_setup_state(&state).is_some());
+    assert_eq!(validate_setup_state(&state), None);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use super::super::modal_flow::{ModalOutcome, ModelCatalogState, ModelPickerState};
+use super::super::modal_flow::ModalOutcome;
 use super::*;
 use anyhow::{Context, bail};
 
@@ -129,7 +129,7 @@ fn ctrl_c_quits_while_keyboard_help_modal_is_open() -> Result<()> {
 }
 
 #[test]
-fn model_picker_waits_for_exact_connection_catalog_before_selection() -> Result<()> {
+fn model_picker_keeps_bundled_models_while_refreshing_exact_connection_catalog() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
@@ -145,9 +145,9 @@ fn model_picker_waits_for_exact_connection_catalog_before_selection() -> Result<
         Some("loading models for the exact connection")
     );
     let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("catalog: loading remote provider models"));
+    assert!(lines.contains("catalog: bundled models; refreshing optional remote list"));
     assert!(lines.contains("configured: custom-model"));
-    assert!(!lines.contains("> deepseek-v4-flash"));
+    assert!(lines.contains("> deepseek-v4-flash"));
     Ok(())
 }
 
@@ -201,7 +201,7 @@ fn connection_model_picker_refreshes_a_stale_view_without_blocking_its_display()
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("catalog: exact connection cache · stale reference"));
     assert!(lines.contains("deepseek-v4-flash"));
-    assert!(!lines.contains("M manual model id"));
+    assert!(lines.contains("M manual model id"));
     Ok(())
 }
 
@@ -324,29 +324,27 @@ fn invalid_connection_picker_does_not_guess_a_provider() -> Result<()> {
     assert!(app.runtime.active_model_picker_refresh.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("model list unavailable: repair the exact connection settings")
+        Some("remote model list skipped; choose a bundled model or enter a model id")
     );
     let lines = app.modal_lines().join("\n");
-    assert!(lines.contains("exact connection draft is unavailable"));
+    assert!(lines.contains("finish the connection fields to refresh the optional remote list"));
     assert!(lines.contains("claude-sonnet-4-5"));
-    assert!(!lines.contains("M manual model id"));
+    assert!(lines.contains("M manual model id"));
     assert!(!lines.contains("deepseek-v4-"));
 
     let outcome = app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert!(matches!(outcome, ModalOutcome::None));
     assert!(matches!(
-        app.modal_state,
-        Some(ModalState::ModelPicker(ModelPickerState {
-            catalog_state: ModelCatalogState::Error(_),
-            manual_entry_allowed: false,
-            ..
-        }))
+        outcome,
+        ModalOutcome::ManualModelRequested {
+            target: ModelPickerTarget::Provider,
+            current
+        } if current == "claude-sonnet-4-5"
     ));
     Ok(())
 }
 
 #[test]
-fn setup_picker_with_invalid_exact_draft_stays_repairable_and_blocks_manual_entry() -> Result<()> {
+fn setup_picker_with_invalid_exact_draft_keeps_bundled_and_manual_entry() -> Result<()> {
     let temp = tempdir()?;
     let mut app = AppState::from_setup(
         temp.path().join("sigil.toml"),
@@ -363,12 +361,17 @@ fn setup_picker_with_invalid_exact_draft_stays_repairable_and_blocks_manual_entr
     assert!(app.runtime.active_model_picker_refresh.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("model list unavailable: repair the exact connection settings")
+        Some("remote model list skipped; choose a bundled model or enter a model id")
     );
-    assert!(!app.modal_lines().join("\n").contains("M manual model id"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("deepseek-v4-flash"));
+    assert!(lines.contains("M manual model id"));
     assert!(matches!(
         app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)),
-        ModalOutcome::None
+        ModalOutcome::ManualModelRequested {
+            target: ModelPickerTarget::Setup,
+            ..
+        }
     ));
     Ok(())
 }
@@ -722,7 +725,7 @@ fn model_picker_key_edges_cover_up_decrement_and_empty_selection() {
     ));
     assert_eq!(
         app.last_notice(),
-        Some("no verified model is selectable; repair connection or retry")
+        Some("no listed model; press M to enter a model id")
     );
     assert!(app.has_modal());
     assert!(matches!(
@@ -1208,11 +1211,6 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    app.setup_state
-        .as_mut()
-        .expect("setup state should exist")
-        .admit_current_model_for_test();
-
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
     let Some(AppAction::SetupCompleted {

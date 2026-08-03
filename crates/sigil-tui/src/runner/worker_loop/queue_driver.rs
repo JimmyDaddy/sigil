@@ -531,13 +531,18 @@ where
     let mut transient_messages = vec![exact_user_message];
     transient_messages.extend(background_ready_context.clone());
     let runtime_context = resolve_runtime_context(&exact_prompt);
+    let reasoning_effort = sigil_runtime::admitted_reasoning_effort(
+        session.provider_name(),
+        session.model_name(),
+        queued.reasoning_effort.clone().or(default_reasoning_effort),
+    );
     let request = session
         .build_pre_turn_candidate_request(
             workspace_root,
             memory_config,
             tools,
             target_max_tokens,
-            queued.reasoning_effort.clone().or(default_reasoning_effort),
+            reasoning_effort.clone(),
             session.latest_response_handle(session.provider_name()),
             traffic_partition_key,
             &transient_messages,
@@ -554,7 +559,7 @@ where
             promotion,
             source_frontier: snapshot.frontier().clone(),
             frozen_request,
-            reasoning_effort: queued.reasoning_effort,
+            reasoning_effort,
             background_ready_context,
             runtime_context,
             capability_registrations,

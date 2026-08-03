@@ -1468,7 +1468,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText(/SIGIL_OPENAI_RESPONSES_API_KEY/)).toBeTruthy();
   });
 
-  it("explains a rejected credential without collapsing provider failures together", async () => {
+  it("explains rejected catalog credentials while keeping explicit model setup available", async () => {
     const user = userEvent.setup();
     render(<App bridge={bridgeWith({
       bootstrap: async () => ({
@@ -1495,13 +1495,15 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Continue to models" }));
 
     expect((await screen.findByRole("alert")).textContent).toContain(
-      "The API key was rejected. Update the selected credential and try again.",
+      "The model list rejected this API key. You can still enter an exact model ID and continue.",
     );
-    expect(screen.getByLabelText("API key")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Save and continue" })).toBeNull();
+    expect(screen.getByRole("radio", { name: /Enter a model ID/ })).toBeTruthy();
+    await user.type(screen.getByLabelText("Model ID"), "explicit-model");
+    expect((screen.getByRole("button", { name: "Save and continue" }) as HTMLButtonElement).disabled)
+      .toBe(false);
   });
 
-  it("keeps a stale catalog visible but disables save until refresh succeeds", async () => {
+  it("keeps a stale catalog visible and allows save during optional refresh", async () => {
     const user = userEvent.setup();
     let now = 1_784_505_600_000;
     vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -1552,7 +1554,7 @@ describe("desktop workspace and history shell", () => {
     expect(await screen.findByText(/Stale cached catalog/)).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Local Stale Coder/ })).toBeTruthy();
     expect((screen.getByRole("button", { name: "Save and continue" }) as HTMLButtonElement).disabled)
-      .toBe(true);
+      .toBe(false);
     expect(await screen.findByRole("button", { name: "Refreshing models…" })).toBeTruthy();
     expect(providerSetupCatalog).toHaveBeenCalledTimes(2);
 

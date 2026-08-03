@@ -174,10 +174,15 @@ impl AppState {
         let Some(inventory) = self.runtime.connection_inventory.as_ref() else {
             return Vec::new();
         };
-        let ready_connections = inventory
+        let usable_connections = inventory
             .entries
             .iter()
-            .filter(|entry| entry.readiness == ConnectionReadiness::Ready)
+            .filter(|entry| {
+                matches!(
+                    entry.readiness,
+                    ConnectionReadiness::Ready | ConnectionReadiness::Unverified
+                )
+            })
             .map(|entry| entry.id.clone())
             .collect::<HashSet<_>>();
         let current = self
@@ -189,7 +194,7 @@ impl AppState {
         let mut candidates = Vec::<(ModelRef, String, &'static str)>::new();
         if let Some(current) = current
             .as_ref()
-            .filter(|current| ready_connections.contains(&current.connection_id))
+            .filter(|current| usable_connections.contains(&current.connection_id))
         {
             candidates.push((
                 current.clone(),
@@ -198,12 +203,12 @@ impl AppState {
             ));
         }
         for recent in &self.recent_model_refs {
-            if ready_connections.contains(&recent.connection_id) {
+            if usable_connections.contains(&recent.connection_id) {
                 candidates.push((recent.clone(), connection_label(&loaded, recent), "recent"));
             }
         }
         for connection in loaded.connections.values() {
-            if !ready_connections.contains(&connection.config.id) {
+            if !usable_connections.contains(&connection.config.id) {
                 continue;
             }
             for entry in bundled_model_entries(&connection.config) {

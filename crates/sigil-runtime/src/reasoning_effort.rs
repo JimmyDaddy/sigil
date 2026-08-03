@@ -24,6 +24,18 @@ pub(crate) fn supported_reasoning_efforts(
     }
 }
 
+/// Keeps a requested effort only when the exact provider/model pair has a local capability
+/// mapping for it. Unknown models and providers omit the field instead of guessing support.
+#[must_use]
+pub fn admitted_reasoning_effort(
+    provider_name: &str,
+    model_name: &str,
+    requested: Option<ReasoningEffort>,
+) -> Option<ReasoningEffort> {
+    let supported = supported_reasoning_efforts(provider_name, model_name);
+    requested.filter(|effort| supported.contains(effort))
+}
+
 #[must_use]
 pub(crate) fn configured_default_reasoning_effort(
     root_config: &RootConfig,

@@ -134,7 +134,11 @@ where
                 let run_message_tx = message_tx.clone();
                 let agent = Arc::clone(agent);
                 let mut options = options.clone();
-                options.reasoning_effort = Some(reasoning_effort);
+                options.reasoning_effort = sigil_runtime::admitted_reasoning_effort(
+                    run_session.provider_name(),
+                    run_session.model_name(),
+                    Some(reasoning_effort),
+                );
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(

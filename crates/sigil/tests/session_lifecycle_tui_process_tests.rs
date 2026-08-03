@@ -294,48 +294,109 @@ fn write_input(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn spawn_openai_responses_catalog_fixture()
--> Result<(String, Arc<AtomicBool>, thread::JoinHandle<Result<()>>)> {
+fn read_http_request(stream: &mut impl Read) -> Result<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let body_start = header_end + 4;
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if request.len() >= body_start.saturating_add(content_length) {
+            break;
+        }
+    }
+    Ok(request)
+}
+
+struct NoCatalogProviderFixture {
+    base_url: String,
+    catalog_responded: Arc<AtomicBool>,
+    generation_responded: Arc<AtomicBool>,
+    server: thread::JoinHandle<Result<()>>,
+}
+
+fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProviderFixture> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let responded = Arc::new(AtomicBool::new(false));
     let server_responded = Arc::clone(&responded);
+    let generated = Arc::new(AtomicBool::new(false));
+    let server_generated = Arc::clone(&generated);
     let server = thread::spawn(move || -> Result<()> {
         let deadline = Instant::now() + PROCESS_TIMEOUT;
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        bail!("catalog fixture did not receive a request");
+        let mut generation_requests = 0_u8;
+        loop {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            bail!("catalog fixture did not receive a request");
+                        }
+                        thread::sleep(Duration::from_millis(10));
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
+            };
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(PROCESS_TIMEOUT))?;
+            let request = read_http_request(&mut stream)?;
+            let request = String::from_utf8_lossy(&request);
+            if request.starts_with("GET /v1/models ") {
+                let body = r#"{"error":"model discovery is not implemented"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+                stream.flush()?;
+                server_responded.store(true, Ordering::Release);
+                continue;
             }
-        };
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(PROCESS_TIMEOUT))?;
-        let mut request = [0_u8; 8 * 1024];
-        let read = stream.read(&mut request)?;
-        let request = String::from_utf8_lossy(&request[..read]);
-        assert!(
-            request.starts_with("GET /v1/models "),
-            "unexpected catalog request: {request}"
-        );
-        let body =
-            r#"{"object":"list","data":[{"id":"gpt-4.1","object":"model","owned_by":"openai"}]}"#;
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )?;
-        stream.flush()?;
-        server_responded.store(true, Ordering::Release);
-        Ok(())
+            assert!(
+                request.starts_with("POST /v1/chat/completions "),
+                "unexpected provider request: {request}"
+            );
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"FIRST-RUN-CANARY\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            stream.flush()?;
+            server_generated.store(true, Ordering::Release);
+            generation_requests = generation_requests.saturating_add(1);
+            if generation_requests >= 2 {
+                return Ok(());
+            }
+        }
     });
-    Ok((format!("http://{address}/v1"), responded, server))
+    Ok(NoCatalogProviderFixture {
+        base_url: format!("http://{address}/v1"),
+        catalog_responded: responded,
+        generation_responded: generated,
+        server,
+    })
 }
 
 fn configure_isolated_process_home(command: &mut CommandBuilder, workspace: &Path) -> Result<()> {
@@ -361,6 +422,24 @@ fn run_tui_process(
     ready_text: &str,
     interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
 ) -> Result<()> {
+    run_tui_process_with_optional_config(Some(config_path), workspace, ready_text, true, interact)
+}
+
+fn run_tui_process_with_default_config(
+    workspace: &Path,
+    ready_text: &str,
+    interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
+) -> Result<()> {
+    run_tui_process_with_optional_config(None, workspace, ready_text, false, interact)
+}
+
+fn run_tui_process_with_optional_config(
+    config_path: Option<&Path>,
+    workspace: &Path,
+    ready_text: &str,
+    inject_deepseek_test_env: bool,
+    interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
+) -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 40,
@@ -371,20 +450,30 @@ fn run_tui_process(
     let master = pair.master;
     let slave = pair.slave;
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_sigil"));
-    command.args([
-        "--config",
-        config_path.to_str().context("UTF-8 config path")?,
-    ]);
+    if let Some(config_path) = config_path {
+        command.args([
+            "--config",
+            config_path.to_str().context("UTF-8 config path")?,
+        ]);
+    }
     command.cwd(workspace);
     configure_isolated_process_home(&mut command, workspace)?;
     command.env("TERM", "xterm-256color");
-    command.env("SIGIL_API_KEY", "test-key");
-    command.env("SIGIL_BASE_URL", "https://api.deepseek.com");
-    command.env("SIGIL_BETA_BASE_URL", "https://api.deepseek.com/beta");
-    command.env(
-        "SIGIL_ANTHROPIC_BASE_URL",
-        "https://api.deepseek.com/anthropic",
-    );
+    if inject_deepseek_test_env {
+        command.env("SIGIL_API_KEY", "test-key");
+        command.env("SIGIL_BASE_URL", "https://api.deepseek.com");
+        command.env("SIGIL_BETA_BASE_URL", "https://api.deepseek.com/beta");
+        command.env(
+            "SIGIL_ANTHROPIC_BASE_URL",
+            "https://api.deepseek.com/anthropic",
+        );
+    } else {
+        command.env_remove("SIGIL_API_KEY");
+        command.env_remove("SIGIL_OPENAI_COMPATIBLE_API_KEY");
+        command.env_remove("SIGIL_OPENAI_RESPONSES_API_KEY");
+        command.env_remove("SIGIL_ANTHROPIC_API_KEY");
+        command.env_remove("SIGIL_GEMINI_API_KEY");
+    }
     let mut child = slave.spawn_command(command)?;
     drop(slave);
 
@@ -445,25 +534,26 @@ fn run_tui_process(
 }
 
 #[test]
-fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> Result<()> {
+fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let workspace = test_workspace()?;
-    let config_path = workspace.join("config").join("sigil.toml");
-    let (catalog_base_url, catalog_responded, catalog_server) =
-        spawn_openai_responses_catalog_fixture()?;
+    let config_path = workspace
+        .join(".process-home")
+        .join(".sigil")
+        .join("sigil.toml");
+    let fixture = spawn_openai_compatible_without_catalog_fixture()?;
 
     let result = (|| -> Result<()> {
-        run_tui_process(
-            &config_path,
+        run_tui_process_with_default_config(
             &workspace,
             "Set up a model connection",
             |output, writer| {
                 wait_for_text(output, "Set up a model connection")?;
-                wait_for_text(output, "SIGIL_API_KEY detected")?;
 
                 // Use an explicit custom connection so this real-process fixture can exercise a
-                // loopback Responses endpoint without weakening hosted-provider HTTPS policy.
+                // loopback Chat Completions endpoint without weakening hosted-provider HTTPS
+                // policy or requiring a credential.
                 for _ in 0..4 {
                     write_input(writer, b"\x1b[B")?;
                     thread::sleep(Duration::from_millis(50));
@@ -471,15 +561,11 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                 write_input(writer, b"\r")?;
                 thread::sleep(Duration::from_millis(150));
 
-                // Custom starts on Chat Completions; choose Responses before editing the endpoint.
-                write_input(writer, b"\r")?;
-                thread::sleep(Duration::from_millis(150));
-
                 let setup_complete_offset = captured_len(output);
                 write_input(writer, b"\x1b[B\r")?;
                 thread::sleep(Duration::from_millis(100));
                 write_input(writer, &[0x7f; 64])?;
-                write_input(writer, catalog_base_url.as_bytes())?;
+                write_input(writer, fixture.base_url.as_bytes())?;
                 let endpoint_apply_offset = captured_len(output);
                 write_input(writer, b"\r")?;
                 wait_for_text_after(output, endpoint_apply_offset, "credential: <not staged>")?;
@@ -493,10 +579,10 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                 wait_for_text_after(
                     output,
                     catalog_loading_offset,
-                    "loading remote provider models",
+                    "refreshing optional remote list",
                 )?;
                 let deadline = Instant::now() + PROCESS_TIMEOUT;
-                while !catalog_responded.load(Ordering::Acquire) {
+                while !fixture.catalog_responded.load(Ordering::Acquire) {
                     if Instant::now() >= deadline {
                         return Err(anyhow!(
                             "model picker did not query the loopback catalog; captured={}",
@@ -505,10 +591,14 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                     }
                     thread::sleep(Duration::from_millis(25));
                 }
-                wait_for_text_after(output, catalog_loading_offset, "gpt-4.1  [current]")?;
+                wait_for_text_after(output, catalog_loading_offset, " · unverified]")?;
                 let model_apply_offset = captured_len(output);
                 write_input(writer, b"\r")?;
-                wait_for_text_after(output, model_apply_offset, "Custom endpoint · Responses")?;
+                wait_for_text_after(
+                    output,
+                    model_apply_offset,
+                    "Custom endpoint · Chat Completions",
+                )?;
 
                 write_input(writer, b"\x1b[B\r")?;
 
@@ -524,6 +614,11 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                     thread::sleep(Duration::from_millis(25));
                 }
                 wait_for_text_after(output, setup_complete_offset, "sigil ready.")?;
+
+                let first_request_offset = captured_len(output);
+                write_input(writer, b"reply with the first-run canary\r")?;
+                wait_for_text_after(output, first_request_offset, "FIRST-RUN-CANARY")?;
+                assert!(fixture.generation_responded.load(Ordering::Acquire));
 
                 let root = RootConfig::load(&config_path)?;
                 assert_eq!(root.config_version, sigil_kernel::CONFIG_VERSION_V2);
@@ -545,28 +640,14 @@ fn real_tui_first_run_saves_loopback_openai_route_without_plaintext_secret() -> 
                         & 0o777,
                     0o700
                 );
-                assert!(!fs::read_to_string(&config_path)?.contains("test-key"));
-                assert!(!captured_text(output).contains("test-key"));
                 Ok(())
             },
         )?;
-
-        for entry in walkdir::WalkDir::new(&workspace) {
-            let entry = entry?;
-            if entry.file_type().is_file() {
-                assert!(
-                    !fs::read(entry.path())?
-                        .windows(b"test-key".len())
-                        .any(|window| window == b"test-key"),
-                    "environment secret leaked to {}",
-                    entry.path().display()
-                );
-            }
-        }
         Ok(())
     })();
 
-    let catalog_result = catalog_server
+    let catalog_result = fixture
+        .server
         .join()
         .map_err(|_| anyhow!("catalog fixture thread panicked"))?;
     let cleanup = fs::remove_dir_all(&workspace);

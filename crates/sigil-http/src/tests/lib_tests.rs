@@ -510,7 +510,7 @@ async fn provider_setup_requires_explicit_intent_to_replace_an_invalid_config() 
 }
 
 #[tokio::test]
-async fn provider_setup_rejects_save_when_the_catalog_is_not_admitted() {
+async fn provider_setup_saves_an_explicit_model_when_catalog_auth_is_rejected() {
     let secret_canary = "provider-upstream-secret-canary";
     let (provider_base_url, _, provider_server) = spawn_provider_catalog_server(
         401,
@@ -564,7 +564,7 @@ async fn provider_setup_rejects_save_when_the_catalog_is_not_admitted() {
 
     let mut save_request = catalog_request;
     save_request["model_id"] = json!("local-coder");
-    let (status, rejected) = http_raw_request(
+    let (status, saved) = http_raw_request(
         address,
         http_post(
             "/settings/provider-connections",
@@ -573,10 +573,12 @@ async fn provider_setup_rejects_save_when_the_catalog_is_not_admitted() {
         ),
     )
     .await;
-    assert_eq!(status, 422);
-    assert_eq!(rejected["error"]["code"], "provider_setup_invalid");
-    assert!(!rejected.to_string().contains(secret_canary));
-    assert!(!config_path.exists());
+    assert_eq!(status, 201);
+    assert_eq!(saved["default_model"]["model_id"], "local-coder");
+    assert!(!saved.to_string().contains(secret_canary));
+    let persisted = std::fs::read_to_string(&config_path).expect("config should be saved");
+    assert!(persisted.contains("local-coder"));
+    assert!(!persisted.contains(secret_canary));
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving

@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    env, fmt,
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, env, fmt, path::PathBuf};
 
 use sigil_kernel::SecretString;
 use sigil_runtime::{
@@ -124,17 +120,8 @@ pub(crate) struct SetupState {
     pub(crate) api_key: SecretString,
     pub(crate) draft_revision: u64,
     pub(crate) startup_error: Option<String>,
-    pub(crate) catalog_admission: Option<SetupCatalogAdmission>,
     pub(crate) orchestration_rollout: NewInstallOrchestrationRolloutDecision,
     provider_drafts: BTreeMap<String, SetupProviderDraft>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SetupCatalogAdmission {
-    pub(crate) draft_revision: u64,
-    pub(crate) available_models: BTreeSet<String>,
-    pub(crate) manual_entry_allowed: bool,
-    pub(crate) manual_model: Option<String>,
 }
 
 impl fmt::Debug for SetupState {
@@ -151,7 +138,6 @@ impl fmt::Debug for SetupState {
             .field("api_key", &"[redacted]")
             .field("draft_revision", &self.draft_revision)
             .field("startup_error", &self.startup_error)
-            .field("catalog_admission", &self.catalog_admission)
             .field("orchestration_rollout", &self.orchestration_rollout)
             .field("provider_draft_count", &self.provider_drafts.len())
             .finish()
@@ -179,7 +165,6 @@ impl SetupState {
             base_url,
             credential_source,
             startup_error,
-            catalog_admission: None,
             orchestration_rollout,
             provider_drafts: BTreeMap::new(),
         }
@@ -390,7 +375,6 @@ impl SetupState {
 
     pub(crate) fn bump_revision(&mut self) {
         self.draft_revision = self.draft_revision.saturating_add(1);
-        self.catalog_admission = None;
     }
 
     pub(crate) fn refresh_orchestration_rollout(&mut self) {
@@ -405,42 +389,8 @@ impl SetupState {
         }
     }
 
-    pub(crate) fn admit_manual_model(&mut self, model: &str) -> bool {
-        let model = model.trim();
-        if model.is_empty() {
-            return false;
-        }
-        let Some(admission) = self.catalog_admission.as_mut().filter(|admission| {
-            admission.draft_revision == self.draft_revision && admission.manual_entry_allowed
-        }) else {
-            return false;
-        };
-        admission.manual_model = Some(model.to_owned());
-        true
-    }
-
     pub(crate) fn existing_config_repair_required(&self) -> bool {
         self.startup_error.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn admit_current_model_for_test(&mut self) {
-        self.catalog_admission = Some(SetupCatalogAdmission {
-            draft_revision: self.draft_revision,
-            available_models: BTreeSet::from([self.model.clone()]),
-            manual_entry_allowed: false,
-            manual_model: None,
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn allow_manual_model_for_test(&mut self) {
-        self.catalog_admission = Some(SetupCatalogAdmission {
-            draft_revision: self.draft_revision,
-            available_models: BTreeSet::new(),
-            manual_entry_allowed: true,
-            manual_model: None,
-        });
     }
 }
 

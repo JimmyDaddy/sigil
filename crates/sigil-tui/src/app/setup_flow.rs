@@ -112,7 +112,7 @@ impl AppState {
                 state.selected_field,
                 "model",
                 &state.model,
-                Some("Enter choose"),
+                Some("Enter choose · type model ID"),
             ),
             render_setup_action_row(
                 SetupField::Save,
@@ -360,16 +360,9 @@ impl AppState {
         }
         match state.selected_field {
             SetupField::Model => {
-                if state.admit_manual_model(&value) {
-                    state.model = value.clone();
-                    state.refresh_orchestration_rollout();
-                    self.last_notice = Some(format!("updated model {value}"));
-                } else {
-                    self.last_notice = Some(
-                        "manual model entry is unavailable for the current catalog state"
-                            .to_owned(),
-                    );
-                }
+                state.model = value.clone();
+                state.refresh_orchestration_rollout();
+                self.last_notice = Some(format!("updated model {value}"));
             }
             SetupField::Endpoint if state.is_custom() => {
                 state.base_url = value;
@@ -509,22 +502,9 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
         SetupCredentialSource::NoAuthentication if !state.no_authentication_allowed() => Some(
             "no authentication is only allowed for an explicit loopback custom endpoint".to_owned(),
         ),
-        _ => {
-            let admission = state.catalog_admission.as_ref().filter(|admission| {
-                admission.draft_revision == state.draft_revision
-                    && (admission.available_models.contains(state.model.trim())
-                        || admission.manual_model.as_deref() == Some(state.model.trim()))
-            });
-            if admission.is_none() {
-                return Some(
-                    "verify this connection in the model picker before saving; rejected, missing, or offline credentials cannot start a session"
-                        .to_owned(),
-                );
-            }
-            build_setup_root_config(state)
-                .err()
-                .map(|error| format!("{error:#}"))
-        }
+        _ => build_setup_root_config(state)
+            .err()
+            .map(|error| format!("{error:#}")),
     }
 }
 
@@ -591,7 +571,7 @@ fn build_setup_draft(
     ))
 }
 
-fn setup_connection_identity(
+pub(super) fn setup_connection_identity(
     state: &SetupState,
 ) -> Result<(ProviderFamily, ProviderProtocol, ConnectionId, &'static str)> {
     let (family, protocol, id, label) = match state.provider_name.as_str() {

@@ -36,14 +36,18 @@ Check that the environment-variable name belongs to the selected connection and 
 
 `sigil doctor` reports each connection independently and never prints secret values or credential IDs. Match the result to the UI state:
 
+The model catalog is not a prerequisite for saving configuration. If an endpoint has no discovery
+API or refresh is temporarily unavailable, enter an exact model ID and continue. Only a successful
+generation request proves that the credential, endpoint, and model route work together.
+
 | State | Meaning | Action |
 |---|---|---|
 | `needs_credential` / `credential_unavailable` | The selected source is missing or the configured store cannot read it | Repair that connection's environment binding or stored record; verify `[storage].credential_store` |
-| `auth_rejected` | The endpoint rejected this connection's credential | Replace that credential; Sigil will not try another connection |
-| `offline`, `tls_rejected`, `protocol_mismatch` | The configured endpoint cannot be safely reached with the selected protocol | Check network, TLS, endpoint, and protocol |
+| `auth_rejected` | The catalog request rejected this connection's credential | You may still save an exact model ID; replace the credential if the first generation request also fails |
+| `offline`, `tls_rejected`, `protocol_mismatch` | Catalog discovery cannot currently use the configured route | Save an exact model ID if known, and check network, TLS, endpoint, and protocol |
 | `remote_empty` | Discovery succeeded but returned no models | Enter an exact model ID manually |
 | `catalog_unsupported` | This provider/endpoint does not expose discovery | Use the provider-owned bundled list or manual entry |
-| `catalog_malformed` | The response was not a valid catalog | Fix the endpoint or gateway; remote metadata is not trusted to add capabilities |
+| `catalog_malformed` | The response was not a valid catalog | Enter the model ID manually; remote metadata is not trusted to add capabilities |
 
 Provider generation and remote model discovery both honor the standard
 `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables. The
