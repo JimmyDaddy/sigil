@@ -5307,7 +5307,12 @@ fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Resu
         .final_answer_context(&session, &options, &outcome)?
         .expect("background agent should be included in final-answer facts");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
-    assert_eq!(payload["type"], "run_facts_summary");
+    assert_eq!(payload["type"], "active_run_facts");
+    assert!(
+        payload["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not a finalization request"))
+    );
     assert_eq!(payload["session_facts"]["subagents"]["running"], 1);
     Ok(())
 }
@@ -5500,7 +5505,7 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         .final_answer_context(&session, &options, &outcome)?
         .expect("recorded facts should produce final-answer context");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
-    assert_eq!(payload["type"], "run_facts_summary");
+    assert_eq!(payload["type"], "active_run_facts");
     assert_eq!(payload["session_facts"]["commands"], json!([]));
     assert_eq!(payload["session_facts"]["gates"], json!([]));
     assert_eq!(
@@ -5513,8 +5518,9 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
             .prompt
             .contains("./scripts/check-touched.sh --tier quick")
     );
-    assert!(!payload["session_facts"]["readiness"].is_null());
-    assert!(!payload["session_facts"]["readiness"]["visible_state"].is_null());
+    assert!(payload["session_facts"].get("readiness").is_none());
+    assert!(!context.prompt.contains("pending_final_answer"));
+    assert!(!context.prompt.contains("\"run_status\":\"completed\""));
     assert!(!context.key.is_empty());
     Ok(())
 }

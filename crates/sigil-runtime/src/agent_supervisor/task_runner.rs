@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Condvar, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -3145,7 +3145,6 @@ impl TaskApprovalDecisionBroker {
         &self,
         group_id: &str,
         call_id: &str,
-        expires_at_ms: u64,
         resolver: impl FnOnce() -> Result<ToolApproval>,
     ) -> Result<ToolApproval> {
         let (state, changed) = self.state.as_ref();
@@ -3161,17 +3160,9 @@ impl TaskApprovalDecisionBroker {
                 Some(TaskApprovalGroupState::Pending { leader_call_id })
                     if leader_call_id != call_id =>
                 {
-                    let remaining = approval_time_remaining(expires_at_ms);
-                    if remaining.is_zero() {
-                        anyhow::bail!("aggregated task approval expired before resolution");
-                    }
-                    let (next_state, wait) = changed
-                        .wait_timeout(state, remaining)
+                    state = changed
+                        .wait(state)
                         .map_err(|_| anyhow::anyhow!("task approval aggregation lock poisoned"))?;
-                    state = next_state;
-                    if wait.timed_out() {
-                        anyhow::bail!("aggregated task approval expired before resolution");
-                    }
                 }
                 Some(TaskApprovalGroupState::Pending { .. }) => break,
                 None => {
@@ -3224,14 +3215,6 @@ impl TaskApprovalDecisionBroker {
         }
         Ok(())
     }
-}
-
-fn approval_time_remaining(expires_at_ms: u64) -> Duration {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    Duration::from_millis(expires_at_ms.saturating_sub(now_ms))
 }
 
 fn state_lock(
@@ -3339,12 +3322,10 @@ where
             &self.approval_batch_id,
             context,
         )?;
-        let approval =
-            self.approval_broker
-                .resolve(&group_id, &call.id, context.expires_at_ms, || {
-                    self.inner
-                        .approve_tool_call_with_context(call, spec, context)
-                })?;
+        let approval = self.approval_broker.resolve(&group_id, &call.id, || {
+            self.inner
+                .approve_tool_call_with_context(call, spec, context)
+        })?;
         let (task_status, agent_status) = match approval {
             ToolApproval::Approve
             | ToolApproval::ApproveForSession

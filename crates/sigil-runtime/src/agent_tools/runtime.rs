@@ -644,17 +644,17 @@ impl AgentToolDelegate for AgentToolRuntime {
     fn final_answer_context(
         &mut self,
         session: &Session,
-        options: &AgentRunOptions,
+        _options: &AgentRunOptions,
         outcome: &AgentRunOutcome,
     ) -> Result<Option<FinalAnswerContext>> {
-        let facts = collect_session_facts(session, Some((options, outcome)))?;
+        let facts = collect_session_facts(session, Some(outcome))?;
         if !facts.has_recorded_facts {
             return Ok(None);
         }
         let key = hash_text(&serde_json::to_string(&facts.value)?);
         let prompt = json!({
-            "type": "run_facts_summary",
-            "message": "Use these recorded run facts when composing the final answer. Do not claim checks, commands, approvals, subagent results, or file changes that are not listed here. If background agents are still running, say that they are still running rather than implying their work is complete. If a command has exit_code or verdict, do not rerun it only to recover truncated output.",
+            "type": "active_run_facts",
+            "message": "These are host-recorded facts for the active run. Continue the task from the current state; this context is not a finalization request and does not mean the run is complete. Use the facts when deciding next actions and, eventually, when composing the final answer. Do not claim checks, commands, approvals, subagent results, or file changes that are not listed here. If background agents are still running, say that they are still running rather than implying their work is complete. If a command has exit_code or verdict, do not rerun it only to recover truncated output.",
             "session_facts": facts.value
         })
         .to_string();
@@ -686,10 +686,10 @@ fn session_facts_summary(session: &Session) -> Value {
 
 fn collect_session_facts(
     session: &Session,
-    run_context: Option<(&AgentRunOptions, &AgentRunOutcome)>,
+    run_outcome: Option<&AgentRunOutcome>,
 ) -> Result<SessionFactsSummary> {
-    let call_belongs_to_current_run = |call_id: &str| match run_context {
-        Some((_, outcome)) => outcome
+    let call_belongs_to_current_run = |call_id: &str| match run_outcome {
+        Some(outcome) => outcome
             .tool_call_ids
             .iter()
             .any(|current_call_id| current_call_id == call_id),
@@ -867,7 +867,7 @@ fn collect_session_facts(
             _ => {}
         }
     }
-    if let Some((_, outcome)) = run_context {
+    if let Some(outcome) = run_outcome {
         for file in &outcome.changed_files {
             changed_files.insert(file.clone());
         }
@@ -914,26 +914,6 @@ fn collect_session_facts(
         || !commands.is_empty()
         || subagents_total > 0
         || !changed_files.is_empty();
-    let readiness = if has_recorded_facts && let Some((options, outcome)) = run_context {
-        let entry = sigil_kernel::projected_agent_run_readiness(
-            session,
-            options,
-            "pending_final_answer",
-            outcome,
-        )?;
-        Some(json!({
-            "scope": &entry.scope,
-            "run_status": entry.evaluation.run_status,
-            "verification_verdict": entry.evaluation.verification_verdict,
-            "visible_state": entry.evaluation.visible_state,
-            "required_actions": &entry.evaluation.required_actions,
-            "reasons": &entry.evaluation.reasons,
-            "policy_hash": entry.policy_hash,
-            "workspace_snapshot_id": entry.workspace_snapshot_id,
-        }))
-    } else {
-        None
-    };
     Ok(SessionFactsSummary {
         has_recorded_facts,
         value: json!({
@@ -958,7 +938,6 @@ fn collect_session_facts(
             },
             "commands": commands,
             "gates": gates,
-            "readiness": readiness,
             "subagents": {
                 "total": subagents_total,
                 "running": subagents_running,
