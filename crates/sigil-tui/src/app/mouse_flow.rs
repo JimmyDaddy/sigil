@@ -114,7 +114,12 @@ impl AppState {
                     }
                 } else if self.finish_timeline_text_selection() {
                     self.cancel_tool_card_body_click();
-                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    Ok(self
+                        .selected_timeline_text()
+                        .map(|text| {
+                            crate::mouse::AppMouseOutcome::Action(self.request_clipboard_copy(text))
+                        })
+                        .unwrap_or(crate::mouse::AppMouseOutcome::Redraw))
                 } else if !had_left_down {
                     self.handle_mouse_left_up_click_fallback(target, input, layout)
                 } else {
@@ -328,6 +333,26 @@ impl AppState {
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
+            }
+            crate::mouse::HitTarget::ComposerQueueItem { index }
+                if !self.approval.has_actionable_pending() =>
+            {
+                self.cancel_tool_card_body_click();
+                self.clear_timeline_text_selection();
+                if self.select_composer_queue_item(index) {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
+            crate::mouse::HitTarget::ComposerQueueAction { action }
+                if !self.approval.has_actionable_pending() =>
+            {
+                self.cancel_tool_card_body_click();
+                self.clear_timeline_text_selection();
+                Ok(mouse_action_outcome(
+                    self.execute_composer_queue_action(action),
+                ))
             }
             crate::mouse::HitTarget::Composer if !self.approval.has_actionable_pending() => {
                 Ok(self.click_composer(input, layout))
@@ -584,7 +609,11 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ApprovalModal => Ok(crate::mouse::AppMouseOutcome::Noop),
-            crate::mouse::HitTarget::Composer => Ok(crate::mouse::AppMouseOutcome::Noop),
+            crate::mouse::HitTarget::Composer
+            | crate::mouse::HitTarget::ComposerQueueItem { .. }
+            | crate::mouse::HitTarget::ComposerQueueAction { .. } => {
+                Ok(crate::mouse::AppMouseOutcome::Noop)
+            }
         }
     }
 

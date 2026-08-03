@@ -49,10 +49,13 @@ use sigil_runtime::support::SupportBuildInfo;
 use sigil_updater::BuildMetadata;
 
 #[cfg(not(test))]
+use crate::terminal_backend::CachedCursorBackend;
+#[cfg(not(test))]
 use crate::ui;
 use crate::{
     app::{AppAction, AppState},
     attention::AttentionController,
+    clipboard::{self, ClipboardCopyOutcome},
     mouse::AppMouseOutcome,
     runner::{self, WorkerCommand, WorkerMessage},
     ui::{LayoutSnapshot, theme},
@@ -70,6 +73,9 @@ const SCROLLBACK_SEED_CHUNK_LINES: usize = 256;
 #[cfg(not(test))]
 const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
 const SPINNER_FRAME_MILLIS: u128 = 120;
+
+#[cfg(not(test))]
+type TuiTerminal = Terminal<CachedCursorBackend<CrosstermBackend<io::Stdout>>>;
 
 #[cfg(not(test))]
 pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
@@ -402,34 +408,40 @@ fn current_inline_viewport_height() -> Result<u16> {
 fn terminal_with_inline_fallback(
     stdout: io::Stdout,
     inline_viewport_height: u16,
-) -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+) -> Result<TuiTerminal> {
     let backend = CrosstermBackend::new(stdout);
-    match Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(inline_viewport_height),
-        },
-    ) {
-        Ok(terminal) => Ok(terminal),
-        Err(inline_error) => {
-            let backend = CrosstermBackend::new(io::stdout());
-            Terminal::new(backend).with_context(|| {
-                format!(
-                    "inline viewport unavailable ({inline_error}); failed to initialize fallback terminal"
-                )
-            })
-        }
-    }
+    let inline_result = CachedCursorBackend::capture(backend).and_then(|backend| {
+        Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(inline_viewport_height),
+            },
+        )
+    });
+    inline_result.or_else(|inline_error| {
+        let backend = CachedCursorBackend::with_position(
+            CrosstermBackend::new(io::stdout()),
+            ratatui::layout::Position::ORIGIN,
+        );
+        Terminal::new(backend).with_context(|| {
+            format!(
+                "inline viewport unavailable ({inline_error}); failed to initialize fallback terminal"
+            )
+        })
+    })
 }
 
 #[cfg(not(test))]
 async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut TuiTerminal,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     mouse_capture_active: &mut bool,
     focus_change_active: &mut bool,
 ) -> Result<()> {
+    // From this point onward the event stream is the sole reader of terminal input. Capability
+    // probes and the real cursor capture have already completed; ratatui resize reads are served
+    // by the cached backend and transcript insertion uses scrolling regions.
     let mut terminal_events = EventStream::new();
     let mut scrollback = ScrollbackSyncState::default();
     let mut needs_render = true;
@@ -588,7 +600,7 @@ async fn run_app(
 
 #[cfg(not(test))]
 fn process_terminal_event<F>(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut TuiTerminal,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     needs_render: &mut bool,
@@ -797,19 +809,22 @@ where
             app.apply_saved_default_model(*root_config);
         }
         AppAction::CopyToClipboard { text } => {
-            if app.terminal_osc52_clipboard_enabled() {
-                copy_text_to_terminal_clipboard(&text)?;
-                app.record_clipboard_copy_success(&text);
-            } else {
-                app.record_clipboard_copy_unavailable("OSC52 disabled");
+            match clipboard::copy_text(&text, app.terminal_osc52_clipboard_enabled()) {
+                ClipboardCopyOutcome::Copied => app.record_clipboard_copy_success(&text),
+                ClipboardCopyOutcome::Unavailable(reason) => {
+                    app.record_clipboard_copy_unavailable(&reason);
+                }
             }
         }
         AppAction::CopySecretToClipboard { text } => {
-            if app.terminal_osc52_clipboard_enabled() {
-                copy_text_to_terminal_clipboard(text.expose_secret())?;
-                app.record_clipboard_copy_success(text.expose_secret());
-            } else {
-                app.record_clipboard_copy_unavailable("OSC52 disabled");
+            match clipboard::copy_text(text.expose_secret(), app.terminal_osc52_clipboard_enabled())
+            {
+                ClipboardCopyOutcome::Copied => {
+                    app.record_clipboard_copy_success(text.expose_secret());
+                }
+                ClipboardCopyOutcome::Unavailable(reason) => {
+                    app.record_clipboard_copy_unavailable(&reason);
+                }
             }
         }
         AppAction::OpenExternalUrl { url } => {
@@ -851,22 +866,6 @@ where
         }
     }
     flush_pending_worker_commands(app, worker)?;
-    Ok(())
-}
-
-#[cfg(not(test))]
-fn copy_text_to_terminal_clipboard(text: &str) -> Result<()> {
-    use std::io::Write as _;
-
-    let sequence = osc52_clipboard_sequence(text);
-    let mut stdout = io::stdout();
-    stdout.write_all(sequence.as_bytes())?;
-    stdout.flush()?;
-    Ok(())
-}
-
-#[cfg(test)]
-fn copy_text_to_terminal_clipboard(_text: &str) -> Result<()> {
     Ok(())
 }
 
@@ -976,33 +975,6 @@ fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
 #[cfg(test)]
 fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
     external_launch_plan(target, current_external_launch_platform()).map(|_| ())
-}
-
-fn osc52_clipboard_sequence(text: &str) -> String {
-    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
-}
-
-fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let first = chunk[0];
-        let second = *chunk.get(1).unwrap_or(&0);
-        let third = *chunk.get(2).unwrap_or(&0);
-        output.push(TABLE[(first >> 2) as usize] as char);
-        output.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            output.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
-        } else {
-            output.push('=');
-        }
-        if chunk.len() > 2 {
-            output.push(TABLE[(third & 0b0011_1111) as usize] as char);
-        } else {
-            output.push('=');
-        }
-    }
-    output
 }
 
 #[cfg(test)]
@@ -1326,7 +1298,7 @@ enum ScrollbackSyncPlan {
 
 #[cfg(not(test))]
 fn sync_terminal_scrollback(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut TuiTerminal,
     app: &AppState,
     sync_state: &mut ScrollbackSyncState,
 ) -> Result<()> {
@@ -1495,10 +1467,7 @@ fn plan_scrollback_sync_with_chunk_size(
 }
 
 #[cfg(not(test))]
-fn insert_scrollback_lines(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    lines: Vec<Line<'static>>,
-) -> Result<()> {
+fn insert_scrollback_lines(terminal: &mut TuiTerminal, lines: Vec<Line<'static>>) -> Result<()> {
     if lines.is_empty() {
         return Ok(());
     }

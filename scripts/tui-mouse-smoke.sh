@@ -155,7 +155,7 @@ Real TUI mouse smoke steps:
 9. Click tool activity body to focus it, then click its header to expand/collapse.
 10. Move across clickable surfaces and check hover visual state.
 11. Drag transcript text by displayed columns, including wide text when available.
-12. Press Ctrl-C and paste elsewhere to verify OSC52 copy status.
+12. Release and paste immediately to verify automatic copy; if it fails, press Ctrl-C to retry the retained selection.
 13. Adjust Terminal scroll sensitivity if the wheel feels too fast or too slow.
 
 Exit the TUI when finished; the script will ask for results.
@@ -186,7 +186,7 @@ check_labels=(
   "Tool card header expand/collapse"
   "Hover visual state"
   "Column text selection"
-  "OSC52 Ctrl-C copy"
+  "Automatic system/OSC52 selection copy"
   "Scroll sensitivity feels correct"
 )
 

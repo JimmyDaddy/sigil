@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    app::ComposerQueueAction,
     mouse::{AppMouseOutcome, HitTarget, MouseInput, MouseInputKind},
     ui::{LayoutMode, LayoutSnapshot},
 };
@@ -704,7 +705,7 @@ fn layout_snapshot_hits_visible_thinking_block_over_live_panel() -> Result<()> {
 }
 
 #[test]
-fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
+fn mouse_drag_copies_live_text_on_release() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.push_timeline(TimelineRole::User, "first selectable line");
@@ -728,22 +729,37 @@ fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
     let drag = app.handle_mouse_event(mouse(MouseInputKind::Drag, end_column, end_row), &layout)?;
     assert!(matches!(drag, AppMouseOutcome::Redraw));
 
-    let up = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, end_column, end_row), &layout)?;
-    assert!(matches!(up, AppMouseOutcome::Redraw));
     let selected_text = app
         .selected_timeline_text()
         .expect("expected selected timeline text");
+    let up = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, end_column, end_row), &layout)?;
+    assert!(matches!(
+        up,
+        AppMouseOutcome::Action(AppAction::CopyToClipboard { text }) if text == selected_text
+    ));
     assert!(selected_text.contains("first selectable line"));
     assert!(!app.transcript_lines(usize::MAX).is_empty());
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
-    assert!(matches!(
-        action,
-        Some(AppAction::CopyToClipboard { text }) if text == selected_text
-    ));
     assert!(
         app.last_notice()
             .is_some_and(|notice| notice.starts_with("copy pending "))
+    );
+
+    app.record_clipboard_copy_unavailable("test clipboard unavailable");
+    assert_eq!(
+        app.selected_timeline_text().as_deref(),
+        Some(selected_text.as_str())
+    );
+    let retry = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+    assert!(matches!(
+        retry,
+        Some(AppAction::CopyToClipboard { text }) if text == selected_text
+    ));
+
+    app.record_clipboard_copy_success(&selected_text);
+    assert!(app.selected_timeline_text().is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("copied "))
     );
     Ok(())
 }
@@ -773,19 +789,14 @@ fn mouse_drag_into_info_rail_keeps_copy_scoped_to_transcript() -> Result<()> {
 
     let (info_column, info_row) = point_in(layout.info_rail);
     let _ = app.handle_mouse_event(mouse(MouseInputKind::Drag, info_column, info_row), &layout)?;
-    let _ = app.handle_mouse_event(
+    let up = app.handle_mouse_event(
         mouse(MouseInputKind::LeftUp, info_column, info_row),
         &layout,
     )?;
 
-    assert_eq!(
-        app.selected_timeline_text().as_deref(),
-        Some(transcript_only.as_str())
-    );
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
     assert!(matches!(
-        action,
-        Some(AppAction::CopyToClipboard { text }) if text == transcript_only
+        up,
+        AppMouseOutcome::Action(AppAction::CopyToClipboard { text }) if text == transcript_only
     ));
     Ok(())
 }
@@ -1032,7 +1043,9 @@ fn mouse_drag_tool_card_body_does_not_toggle_card() -> Result<()> {
     ));
     assert!(matches!(
         up,
-        AppMouseOutcome::Noop | AppMouseOutcome::Redraw
+        AppMouseOutcome::Noop
+            | AppMouseOutcome::Redraw
+            | AppMouseOutcome::Action(AppAction::CopyToClipboard { .. })
     ));
     assert!(app.timeline_state.expanded_tool_activity_keys.is_empty());
     Ok(())
@@ -1790,6 +1803,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
     app.set_terminal_size(80, 20);
     let layout = LayoutSnapshot {
         verification_card: None,
+        composer_queue_hit_areas: None,
         screen: Rect::new(0, 0, 80, 20),
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
@@ -1826,6 +1840,7 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
     app.set_terminal_size(80, 20);
     let layout = LayoutSnapshot {
         verification_card: None,
+        composer_queue_hit_areas: None,
         screen: Rect::new(0, 0, 80, 20),
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
@@ -2035,7 +2050,7 @@ fn mouse_click_approval_diff_controls_update_modal_state() -> Result<()> {
     let metadata_toggle =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
     assert!(matches!(metadata_toggle, AppMouseOutcome::Redraw));
-    assert!(app.approval.metadata_collapsed);
+    assert!(!app.approval.metadata_collapsed);
     Ok(())
 }
 
@@ -2118,5 +2133,60 @@ fn mouse_click_approval_action_returns_decision() -> Result<()> {
             ..
         }) if call_id == "call-1"
     ));
+    Ok(())
+}
+
+#[test]
+fn mouse_click_run_next_targets_the_selected_follow_up() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(100, 30);
+    let queue_entry = |id: &str, prompt: &str| -> Result<SessionLogEntry> {
+        Ok(SessionLogEntry::Control(
+            ControlEntry::ConversationInputQueued(sigil_kernel::ConversationInputQueuedEntry {
+                queue_id: sigil_kernel::ConversationInputQueueId::new(id)?,
+                target: sigil_kernel::ConversationInputTarget::MainThread,
+                kind: sigil_kernel::ConversationInputKind::Chat,
+                prompt_hash: format!("sha256:{id}"),
+                prompt: prompt.to_owned(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                created_at_ms: Some(1),
+            }),
+        ))
+    };
+    app.sync_current_session_state(vec![
+        queue_entry("queue_1", "first")?,
+        queue_entry("queue_2", "second")?,
+    ]);
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 30), &app);
+    let areas = layout
+        .composer_queue_hit_areas
+        .as_ref()
+        .expect("queue controls should be clickable");
+    let (column, row) = point_in(areas.item_rows[1].area);
+    let selected = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(selected, AppMouseOutcome::Redraw));
+    assert!(app.composer_queue_rows()[1].selected);
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 30), &app);
+    let run_next = layout
+        .composer_queue_hit_areas
+        .as_ref()
+        .and_then(|areas| {
+            areas
+                .actions
+                .iter()
+                .find(|hit| hit.action == ComposerQueueAction::KeepNext)
+        })
+        .expect("Run next should have a hit target");
+    let (column, row) = point_in(run_next.area);
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(
+        outcome,
+        AppMouseOutcome::Action(AppAction::PromoteQueuedConversationInput { queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+    assert_eq!(app.last_notice(), Some("follow-up will run next"));
     Ok(())
 }

@@ -1,19 +1,19 @@
 # Sigil TUI 鼠标交互功能设计
 
-状态：Implementation Snapshot（2026-06-13）
+状态：Implementation Snapshot（2026-08-03）
 
 本文定义 `sigil-tui` 支持鼠标交互时的产品边界、功能范围、事件模型、状态模型、实现分层、测试策略和分阶段交付计划。
 
 ## 当前状态
 
-截至 2026-06-13，本设计状态如下：
+截至 2026-08-03，本设计状态如下：
 
 | 范围 | 状态 | 说明 |
 | --- | --- | --- |
-| Phase 1 基础点击、滚轮、拖选复制 | 已落地 | live panel、slash、tool card、info rail、composer focus、transcript 文本选择和 OSC52 copy 均复用现有状态路径 |
+| Phase 1 基础点击、滚轮、拖选复制 | 已落地 | live panel、slash、tool card、info rail、composer focus、transcript 文本选择和自动 copy 均复用现有状态路径 |
 | Phase 2 approval modal 鼠标交互 | 已落地 | file row、hunk navigation、diff view、metadata、allow/deny action 均有明确 hit area |
 | Phase 3 setup/config/session selector | 已落地 | setup/config 字段与 footer action、session row 与确认 action 均支持鼠标选择和确认 |
-| 文本选择增强 | 已落地 | 支持按列选择、`Ctrl-C` 复制状态提示、OSC52 兼容开关 |
+| 文本选择增强 | 已落地 | 支持按列选择、松开自动复制、`Ctrl-C` 失败重试、系统剪贴板与 OSC52 双适配器 |
 | Terminal capability / mouse capture 开关 | 已落地 | `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity` 进入配置、`/config` 和 `/doctor` |
 | Phase 4 小交互 | 已落地 | composer 点击定位光标、tool card header / hidden-preview 行展开/折叠、tool card hover visual state、可配置滚轮灵敏度 |
 | 推迟项 | 明确推迟 | hover tooltip/preview、双击手势、拖拽 resize、右键菜单、直接操作 terminal 原生 scrollback |
@@ -85,7 +85,7 @@
 | 点击 approval 文件 | `,` / `.` |
 | 点击 approval diff view | `V` |
 | 点击 metadata toggle | `M` |
-| 复制 live panel 选区 | `Ctrl-C` |
+| 拖选并自动复制 live panel 选区 | `Ctrl-C` 重试失败后保留的选区 |
 
 如果某个鼠标动作没有合理键盘等价路径，应先补键盘路径或放弃该鼠标动作。
 
@@ -154,8 +154,11 @@ Phase 1 目标是让鼠标在主要 TUI 表面可用，但不碰审批安全动�
 6. live panel 文本拖选与复制：
    - 左键按下记录可见 timeline 行锚点
    - 拖动更新选区范围
-   - `Ctrl-C` 在存在选区时复制选中文本；没有选区时保留取消/退出语义
-   - 复制动作返回 app-local `AppAction`，由主循环负责终端剪贴板输出
+   - 松开左键后立即复制选中文本，不要求第二次按键
+   - 主循环同时尝试系统剪贴板与启用时的 OSC52；OSC52 复用 tmux/screen passthrough，任一适配器成功即完成复制
+   - 成功后清除选区；两个适配器都失败时保留选区，`Ctrl-C` 可重试
+   - 没有选区时，`Ctrl-C` 保留取消/退出语义
+   - 复制动作返回 app-local `AppAction`，由主循环负责剪贴板副作用与结果反馈
 
 不支持：
 
@@ -756,6 +759,9 @@ cargo check -p sigil-tui
 4. tool card click select
 5. info rail card / agent row click
 6. live panel 文本行选区与复制
+   - `LeftUp` 自动产生 `AppAction::CopyToClipboard`
+   - 成功清除选区，失败保留选区供键盘重试
+   - 系统剪贴板与 OSC52 适配器任一路径成功即可
 
 验证：
 
@@ -833,7 +839,7 @@ cargo check -p sigil-tui
    - 当前推迟；后续若做必须有明确按钮与确认语义
 5. 是否需要配置开关禁用 mouse capture？
    - 已补 `[terminal].mouse_capture`
-   - 不支持 OSC52 的终端可关闭 `[terminal].osc52_clipboard`
+   - 不支持 OSC52 的终端可关闭 `[terminal].osc52_clipboard`；系统剪贴板仍会独立尝试
    - 滚轮步长通过 `[terminal].scroll_sensitivity` 调整
 6. 仍推迟哪些鼠标能力？
    - hover tooltip/preview、双击手势、拖拽 resize、右键菜单、直接操作 terminal 原生 scrollback

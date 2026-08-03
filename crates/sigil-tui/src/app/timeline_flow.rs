@@ -1007,6 +1007,7 @@ impl AppState {
     }
 
     pub fn record_clipboard_copy_success(&mut self, text: &str) {
+        self.clear_timeline_text_selection_state();
         self.last_notice = Some(format!("copied {}", clipboard_copy_status(text)));
         self.push_event("selection:copy", clipboard_copy_status(text));
     }

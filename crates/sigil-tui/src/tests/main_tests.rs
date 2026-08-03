@@ -25,9 +25,9 @@ use super::{
     AppMouseOutcome, BACKGROUND_TASK_WAKE_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
     InitialSessionTarget, SCROLLBACK_SEED_POLL_INTERVAL, SPINNER_FRAME_MILLIS,
     ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
-    apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app, drain_worker_messages,
+    apply_key_action, apply_mouse_outcome, build_initial_app, drain_worker_messages,
     external_launch_plan, flush_pending_worker_commands, mouse_layout_snapshot,
-    next_mouse_capture_action, next_wake_deadline, osc52_clipboard_sequence, plan_scrollback_sync,
+    next_mouse_capture_action, next_wake_deadline, plan_scrollback_sync,
     plan_scrollback_sync_with_chunk_size, prepare_scrollback_sync,
     prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
     render_scrollback_rows, render_tui_exit_resume_hint, restart_worker_after_session_transition,
@@ -116,13 +116,6 @@ fn v2_test_config(default_connection: &str) -> RootConfig {
         );
     }
     config
-}
-
-#[test]
-fn osc52_clipboard_sequence_encodes_text() {
-    assert_eq!(base64_encode(b"h"), "aA==");
-    assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
-    assert_eq!(osc52_clipboard_sequence("hi"), "\x1b]52;c;aGk=\x07");
 }
 
 #[test]
@@ -793,7 +786,7 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
 }
 
 #[test]
-fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
+fn process_app_action_uses_system_clipboard_when_osc52_is_disabled() -> anyhow::Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut root_config = test_config();
@@ -816,10 +809,7 @@ fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
     )?;
 
     assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
-    assert_eq!(
-        app.last_notice(),
-        Some("clipboard unavailable: OSC52 disabled")
-    );
+    assert_eq!(app.last_notice(), Some("copied 1 line(s), 8 char(s)"));
     Ok(())
 }
 
@@ -1314,7 +1304,7 @@ fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
 }
 
 #[test]
-fn config_save_restarts_worker_on_current_session_route_not_new_default() -> Result<()> {
+fn config_save_restarts_worker_on_active_session_route() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let current_config = v2_test_config("primary");
@@ -1629,5 +1619,56 @@ fn apply_key_action_always_requests_render_and_forwards_actions() -> Result<()> 
 
     let command = commands.recv()?;
     assert!(matches!(command, WorkerCommand::CancelRun));
+    Ok(())
+}
+
+#[test]
+fn tab_enter_run_next_reaches_the_worker_command_channel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let entries = vec![SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(sigil_kernel::ConversationInputQueuedEntry {
+            queue_id: sigil_kernel::ConversationInputQueueId::new("queue_keyboard_next")?,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            prompt_hash: "sha256:keyboard-next".to_owned(),
+            prompt: "run this follow-up next".to_owned(),
+            reasoning_effort: Some(sigil_kernel::ReasoningEffort::High),
+            created_at_ms: Some(1),
+        }),
+    )];
+    let items = sigil_kernel::ConversationQueueProjection::from_entries(&entries).items;
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items,
+        paused: false,
+        entries,
+    })?;
+    let (runtime, commands) = fake_worker_runtime();
+    let mut worker = Some(runtime);
+
+    assert!(
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ))?
+        .is_none()
+    );
+    assert!(app.is_composer_queue_panel_focused());
+    let action = app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ))?;
+    assert!(apply_key_action(
+        &mut app,
+        &mut worker,
+        action,
+        |_root_config, _app| Err(anyhow!("spawner should not run"))
+    )?);
+
+    let command = commands.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        command,
+        WorkerCommand::PromoteQueuedConversationInput { queue_id }
+            if queue_id.as_str() == "queue_keyboard_next"
+    ));
     Ok(())
 }

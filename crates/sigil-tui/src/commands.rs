@@ -424,7 +424,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         UiCommand::SubmitPrompt,
     ]));
     lines.push(
-        "Ctrl-C: Copy selection; otherwise cancel/quit. Alt-P: Pause task. Ctrl-L: Copy latest reply."
+        "Drag: Auto-copy. Ctrl-C: Retry/cancel/quit. Alt-P: Pause. Ctrl-L: Latest reply."
             .to_owned(),
     );
     lines.extend(command_help_lines([
