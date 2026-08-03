@@ -10,8 +10,9 @@ provider 协议、端点、凭据来源和模型目录。保存默认值与运�
 
 Desktop 输入区会按 connection 分组展示所有已配置且可用连接中的已知模型。选择另一个 Provider
 或模型时，Sigil 会为该精确 route 创建新会话，不会原地改写正在查看的会话。在**设置**中选择默认
-Provider/模型，会发布与 TUI 共用的 `connection-id/model-id` 默认值。TUI 的 `/model` 同样创建
-新会话；在精确模型候选上按 `D` 只修改未来会话的默认 route。
+Provider/模型，会发布与 TUI 共用的 `connection-id/model-id` 默认值。TUI 的 `/model` 会追加可审计
+route 边界并在当前会话继续；在精确模型候选上按 `D` 只修改未来会话的默认 route。TUI `/config`
+中选择 connection 或模型并保存时，会同时更新保存默认值和当前会话 route。
 
 ## 选择模型服务
 
@@ -27,7 +28,8 @@ Provider/模型，会发布与 TUI 共用的 `connection-id/model-id` 默认值�
 需要在本机或 CI 中重复使用相同设置时，再改用手写的当前 schema 配置。
 在 `/config` → **Provider** 中，对 **Connection** 按 Enter 会打开明确的已保存连接和 Provider
 模板选择器；`A` 会直接定位到新增 Provider。普通 macOS 键盘使用 Up/Down 即可，新增操作不会
-再猜测“下一家” Provider。
+再猜测“下一家” Provider。选中的 connection 就是保存时应用的 route，不需要再做一次“设为默认”；
+保存会保留当前 session ID 和对话历史，从下一轮开始使用新 route。
 模型选择器只属于当前选中的 connection：它先显示该 provider 自带的默认模型，仅在支持
 discovery 时刷新远端列表。模型目录是可选增强：无论站点是否提供 `/models`，`M` 都可以手动输入
 当前 connection 的精确模型 ID；网络、认证、TLS、协议或目录格式错误也不会阻止保存本地配置。
@@ -63,7 +65,8 @@ secret 写入 `sigil.toml`、workspace、session、模型缓存、日志、快�
 ## 排障路径
 
 依次检查 `[agent].connection`、`[agent].model`、对应的 `[connections.<id>]` 区块、端点、
-凭据来源就绪状态，以及 provider 专项限制。`/config` 会分别显示当前会话 route 与保存默认值。
+凭据来源就绪状态，以及 provider 专项限制。`/config` 会显示待保存 route 与当前会话 route；保存后
+两者一致。
 不兼容的配置会被拒绝，不会迁移；请直接替换为当前模板，也不要手工编辑 credential ID。
 排障期间保持 `permission.mode = "manual"`；如果问题并非某个模型
 服务特有，再进入

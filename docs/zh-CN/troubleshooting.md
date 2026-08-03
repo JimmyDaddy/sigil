@@ -84,7 +84,7 @@ TUI 会进入快速设置，并把最后一步明确标成**检查、替换无�
 
 ## 鼠标或剪贴板不可用
 
-在当前 `sigil.toml` 中检查 `[terminal].mouse_capture` 与 `osc52_clipboard`，修改后重启，再测试普通文本选择。`Ctrl-C` 复制选区；存在选区时，`Ctrl-L` 也复制该选区，没有选区时才复制最近一条助手回复。图片粘贴还依赖受支持的系统剪贴板。见[终端兼容性](terminal-compatibility.md)。
+在当前 `sigil.toml` 中检查 `[terminal].mouse_capture` 与 `osc52_clipboard`，修改后重启，再拖选普通会话文本。松开鼠标后会通过系统剪贴板以及启用时的 OSC52 自动复制；失败时选区会保留，可按 `Ctrl-C` 重试。`Ctrl-L` 复制现有选区，没有选区时复制最近一条助手回复。远程 Shell 或容器可能同时无法访问这两种适配器；图片粘贴另行依赖受支持的系统剪贴板。见[终端兼容性](terminal-compatibility.md)。
 
 ## 失焦通知没有出现
 

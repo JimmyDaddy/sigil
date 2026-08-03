@@ -15,6 +15,8 @@ Terminal, multiplexer, remote-shell, and desktop settings can block keys, mouse 
 
 On Windows, run a harmless `Write-Output 'hello'` and `exit 7`; the activity should show the actual shell, UTF-8 output, and exit code. Local execution is not an OS sandbox.
 
+Sigil captures the real cursor once before starting the asynchronous terminal input reader. Later inline-viewport resize reads use the backend's cursor cache, and restored or newly completed transcript lines move into native scrollback through terminal scrolling regions. Leaving the TUI idle during a long run must not exit with `The cursor position could not be read within a normal duration`.
+
 ## Attention Notification Smoke
 
 Temporarily enable notifications and set the long-run threshold to `1000` ms. Start a run longer than one second, move focus away, and expect one fixed completion signal. Approval and MCP input requests can notify without the long-run threshold. If tmux or screen exposes control text or ignores the signal, try `bell` or disable notifications.
@@ -36,7 +38,7 @@ Clicks and wheel input should affect only the focused surface; keyboard controls
 
 ## Text Selection And Copy
 
-Drag-select single-line, multiline, and wide-character transcript text, press `Ctrl-C`, and paste elsewhere. Confirm `Ctrl-L` copies an active selection too. Then click outside the transcript selection and press `Ctrl-L` again; it should copy the latest assistant reply. Every copy should exclude the right info rail. If OSC52 is disabled or blocked, Sigil reports that the clipboard is unavailable.
+Drag-select single-line, multiline, and wide-character transcript text, release the mouse, and paste elsewhere; release should copy without another keypress. If Sigil reports that copying failed, confirm the selection stays highlighted and `Ctrl-C` retries it. Press `Ctrl-L` with no selection to copy the latest assistant reply. Every copy should exclude the right info rail. Sigil attempts the local system clipboard and, when enabled, OSC52 with tmux/screen passthrough; it reports the clipboard as unavailable only when neither adapter can be written.
 
 ## Image Paste Smoke
 
@@ -52,7 +54,7 @@ An unsupported model must keep the draft and reject the image before sending. Re
 
 ## tmux, screen, SSH, And WSL
 
-Repeat `/doctor`, mouse, and copy checks inside each layer. If keys break, set `keyboard_enhancement = "off"` and restart. If mouse input breaks, set `mouse_capture = false` and restart. If copy is blocked or visible control text appears, set `osc52_clipboard = false`.
+Repeat `/doctor`, mouse, and copy checks inside each layer. If keys break, set `keyboard_enhancement = "off"` and restart. If mouse input breaks, set `mouse_capture = false` and restart. If OSC52 produces visible control text, set `osc52_clipboard = false`; Sigil will still attempt the system clipboard, which may not reach the host clipboard across SSH or container boundaries.
 
 ## Result Template
 

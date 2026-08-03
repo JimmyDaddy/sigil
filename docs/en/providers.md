@@ -13,9 +13,10 @@ fallback.
 Desktop groups the known models from every configured, usable connection in the composer. Picking
 a different Provider or model creates a fresh conversation on that exact route; the conversation
 you are viewing is never rewritten in place. In **Settings**, choosing a default publishes the
-same shared `connection-id/model-id` used by the TUI. In the TUI, `/model` performs the same
-fresh-session switch, and `D` on an exact model candidate changes only the default for future
-sessions.
+same shared `connection-id/model-id` used by the TUI. In the TUI, `/model` appends an audited route
+boundary and continues the current conversation; `D` on an exact model candidate changes only the
+default for future sessions. In `/config`, selecting a connection or model and saving intentionally
+updates both the saved default and the current conversation route.
 
 ## Choose A Provider
 
@@ -31,7 +32,9 @@ Quick Setup is the shortest first-use path: choose provider, credential source, 
 review and save. Use a manual current-schema config for repeatable local or CI defaults.
 In `/config` → **Provider**, Enter on **Connection** opens an explicit chooser for saved
 connections and provider templates; `A` opens the add-provider group directly. Up/Down works on
-standard macOS keyboards, and adding never guesses the next provider.
+standard macOS keyboards, and adding never guesses the next provider. The selected connection
+becomes the route applied by Save; there is no second set-default step. Saving keeps the current
+session ID and history, then uses that route on the next turn.
 The model chooser is scoped to the selected connection: it starts with that provider's bundled
 default and refreshes a remote list only when discovery is supported. Model discovery is optional:
 `M` always accepts an exact model ID for the current connection, even when the endpoint has no
@@ -75,7 +78,7 @@ Templates are available under [`docs/examples/config`](../examples/config). Revi
 
 Check, in order: `[agent].connection`, `[agent].model`, the matching
 `[connections.<id>]` block, endpoint, credential-source readiness, and provider-specific limits.
-`/config` shows the current session route separately from the saved default. Incompatible
+`/config` shows the selected route and current session route. After Save they match; incompatible
 configuration is rejected rather than migrated; replace it with a current template. Keep
 `permission.mode = "manual"` while diagnosing, then use
 [Troubleshooting](troubleshooting.md) for shared symptoms.

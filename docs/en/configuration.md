@@ -48,7 +48,12 @@ theme = "sigil_dark"
 
 Add the matching `[connections.my-connection]` block from the chosen provider page. Copyable
 starting points are under [`docs/examples/config`](../examples/config). Sigil accepts only the
-current schema; an older config must be replaced with a current template.
+current schema; an older config must be replaced with a current template. In the TUI, selecting a
+connection or model in `/config` and saving keeps the current conversation open, switches its next
+turn to that route, and records the same route as the default for future sessions. If validation or
+publishing fails, the panel stays open with the draft intact, shows a persistent **save failed**
+status, and focuses the related field when Sigil can identify one. Editing again clears the stale
+error so the next save attempt is unambiguous.
 
 ## Workspace
 

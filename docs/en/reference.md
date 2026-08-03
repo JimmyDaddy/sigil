@@ -21,7 +21,8 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | Delete composer text | `Backspace/Delete`, `Ctrl-H/W`, modified Backspace/Delete |
 | Kill/yank line tail | `Ctrl-K/Y` |
 | Restore the last draft cleared with `Esc` | `Ctrl-Z` |
-| Copy selected transcript text | `Ctrl-C` when a selection is active |
+| Select and copy transcript text | Drag and release; copies automatically and excludes the info rail |
+| Retry selected transcript copy | `Ctrl-C` when a failed selection remains active |
 | Copy selection, or latest assistant reply when no selection is active | `Ctrl-L`; info rail is excluded |
 | Cancel current run / close overlay | `Ctrl-C` with no selection / `Esc` |
 | Focus and move through activity | `Ctrl-G`, `Alt-J` / `Alt-K` |
@@ -57,7 +58,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | `/plan [prompt]` | Run a read-only plan; accept its card to start a task |
 | `/task <task>` | Start multi-step execution |
 | `/task continue` | Continue the latest unfinished task |
-| `/model <model-id|connection-id/model-id>` | Switch to an exact ready route and start a fresh session; in the selector, `D` changes only the saved default |
+| `/model <model-id|connection-id/model-id>` | Continue the current idle session on an exact ready route; in the selector, `D` changes only the saved default |
 | `/effort <low|medium|high|max>` | Change reasoning effort for the next run |
 | `/compact` | Generate, validate, and activate one recoverable context checkpoint |
 | `/update [check|refresh|apply]` | Check the current channel, bypass the cached check, or explicitly apply an admitted update |

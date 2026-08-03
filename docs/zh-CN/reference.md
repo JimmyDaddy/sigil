@@ -21,7 +21,8 @@
 | 删除输入内容 | `Backspace/Delete`、`Ctrl-H/W`、终端支持的修饰键加 Backspace/Delete |
 | 删除/粘贴行尾 | `Ctrl-K/Y` |
 | 恢复最近一次由 `Esc` 清空的草稿 | `Ctrl-Z` |
-| 复制选中的会话文本 | 有选区时按 `Ctrl-C` |
+| 选择并复制会话文本 | 拖选后松开鼠标；自动复制且不包含信息栏 |
+| 重试复制选中的会话文本 | 复制失败且选区仍存在时按 `Ctrl-C` |
 | 复制选区；没有选区时复制最新助手回复 | `Ctrl-L`；不包含信息栏 |
 | 取消当前运行 / 关闭浮层 | 无选区时按 `Ctrl-C` / `Esc` |
 | 聚焦并切换活动 | `Ctrl-G`、`Alt-J` / `Alt-K` |
@@ -57,7 +58,7 @@
 | `/plan [prompt]` | 运行只读计划；接受计划后开始任务 |
 | `/task <任务>` | 开始多步骤执行 |
 | `/task continue` | 继续最近的未完成任务 |
-| `/model <model-id|connection-id/model-id>` | 切换到准确的 ready route 并新建会话；在选择器中按 `D` 只修改保存默认值 |
+| `/model <model-id|connection-id/model-id>` | 让空闲的当前会话在准确 ready route 上继续；在选择器中按 `D` 只修改保存默认值 |
 | `/effort <low|medium|high|max>` | 修改下一轮的推理强度 |
 | `/compact` | 生成、校验并激活一个可恢复的上下文 checkpoint |
 | `/update [check|refresh|apply]` | 检查当前渠道、跳过检查缓存，或明确应用已准入的更新 |

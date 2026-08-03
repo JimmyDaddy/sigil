@@ -9,6 +9,15 @@ This page lists user-facing release notes. For support boundaries and early-prev
 ## Unreleased - main
 
 - TUI and Desktop now configure an optional context-window size independently for each connection/model pair, including first-run setup. Empty values keep automatic provider metadata and global fallback behavior, so providers without a model catalog are not blocked.
+- TUI transcript selections now copy automatically when the mouse is released. Copy attempts both
+  OSC52 and the system clipboard, preserves a failed selection for `Ctrl-C` retry, and still
+  excludes the info rail.
+- Long TUI runs no longer stop when native scrollback and asynchronous input compete for a cursor
+  query. Active-run facts no longer look like a host finalization instruction, and typed artifact
+  retrieval remains visible after the initial tool-preview budget is exhausted.
+- Interactive tool approvals no longer expire automatically after 300 seconds. `Allow for
+  session` persists across reopening the same session and reuses recognized validation grants
+  across presentation-only `tail`, `head`, or `grep` changes while retaining exact execution checks.
 
 ## v0.0.1-beta.2 - 2026-08-03
 

@@ -48,7 +48,10 @@ theme = "sigil_dark"
 
 然后从所选模型服务的页面加入匹配的 `[connections.my-connection]` 区块。可以直接复制的起点
 位于 [`docs/examples/config`](../examples/config)。Sigil 只接受当前 schema；旧配置需要直接
-替换为当前模板。
+替换为当前模板。在 TUI 中，通过 `/config` 选择 connection 或模型并保存时，当前对话会保持打开，
+下一轮切换到该 route，同时把同一 route 保存为未来会话的默认值。如果字段校验或文件发布失败，
+配置面板会保留未保存草稿并持续显示 **保存失败**；能够识别具体字段时还会自动聚焦该字段。再次编辑
+会清除已经过期的错误状态，让下一次保存结果保持明确。
 
 ## 工作区
 

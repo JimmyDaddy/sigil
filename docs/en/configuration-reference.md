@@ -179,7 +179,7 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[[code_intelligence.servers]].startup_timeout_ms` | `10000` | Startup timeout. |
 | `[[code_intelligence.servers]].trust_required` | `true` | Requires a matching workspace-trust decision. |
 | `[terminal].keyboard_enhancement` | `"auto"` | `auto`, `on`, or `off`. |
-| `[terminal].mouse_capture` / `.osc52_clipboard` | `true` | Mouse and OSC52 clipboard behavior. |
+| `[terminal].mouse_capture` / `.osc52_clipboard` | `true` | Mouse behavior and the optional OSC52 copy bridge; system-clipboard copy is attempted independently. |
 | `[terminal].scroll_sensitivity` | `3` | Rows per mouse-wheel tick. |
 | `[terminal.notifications].enabled` | `false` | Enables privacy-bounded attention signals in the interactive TUI. |
 | `[terminal.notifications].method` | `"auto"` | `auto`, `osc9`, `osc777`, or `bell`. |

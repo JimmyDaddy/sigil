@@ -116,7 +116,7 @@
 - Sigil 自身和模型可见 shell 工具需要临时 scratch 文件时，优先使用运行时注入的 `$SIGIL_SCRATCH_DIR`；它位于用户态 cache root，对模型显示为 `cache/tmp`。不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
 - 工具失败必须结构化返回，不能 panic
 - provider-visible tool result 必须使用 V2 bounded model view；durable history 写 descriptor、facts 和 initial model view，不写裸文本或完整工具正文
-- initial model view 必须同时受 tool-specific per-result cap 与 root-run aggregate cap；预算耗尽后保留 facts、opaque artifact ref 和 typed retrieval hint，不得回退为扩大 inline preview
+- initial model view 必须同时受 tool-specific per-result cap 与 root-run aggregate cap；aggregate cap 只按实际写入 `initial_model_view.preview` 的 UTF-8 bytes 扣减，不得按工具最大额度预扣；预算耗尽后保留 facts、opaque artifact ref 和 typed retrieval hint，不得回退为扩大 inline preview
 
 ### 3.4 `sigil-mcp`
 

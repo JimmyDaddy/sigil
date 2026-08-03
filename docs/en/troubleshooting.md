@@ -89,7 +89,7 @@ expired or cancelled operation silently.
 
 ## Mouse Or Clipboard Does Not Work
 
-Check `[terminal].mouse_capture` and `osc52_clipboard` in the active `sigil.toml`, restart after changes, then test plain text selection. `Ctrl-C` copies a selection. `Ctrl-L` copies that selection when one is active, or the latest assistant reply when none is active. Image paste requires a supported system clipboard. See [Terminal Compatibility](terminal-compatibility.md).
+Check `[terminal].mouse_capture` and `osc52_clipboard` in the active `sigil.toml`, restart after changes, then drag-select plain transcript text. Releasing the mouse copies automatically through the system clipboard and, when enabled, OSC52. A failed copy keeps the selection for `Ctrl-C` retry. `Ctrl-L` copies an active selection or the latest assistant reply when none is active. Remote shells and containers may expose neither usable adapter; image paste separately requires a supported system clipboard. See [Terminal Compatibility](terminal-compatibility.md).
 
 ## Attention Notification Does Not Appear
 

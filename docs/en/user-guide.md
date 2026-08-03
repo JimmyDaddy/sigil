@@ -28,9 +28,9 @@ Type ordinary tasks in the composer. Use slash commands for a small set of contr
 
 Press `F1` or `/` for help and commands. `F2` shows or hides the info rail, while `Shift-F2` changes its detail. Use `Ctrl-G` for activity, `Alt-V` for task verification, `Ctrl-R` for the latest controlled restore, `Alt-S` for the current Intent Stack, and `Ctrl-T` to expand or collapse thinking and activity. `Ctrl-C` cancels a run when no text is selected; `Esc` closes the current overlay. The complete key matrix lives in [Reference](reference.md#tui-keys).
 
-The info rail is enabled by default when the terminal is wide enough. `F2` changes only the current run. To change the startup default, open `/config`, choose **Appearance**, toggle **Info rail**, and save with `Ctrl-S`; narrow terminals still collapse it automatically.
+The info rail is enabled by default when the terminal is wide enough. Its Git summary keeps the branch and total on the first row, then places staged, modified, untracked, conflict, and ahead/behind counts on a compact second row instead of truncating one long sentence. `F2` changes only the current run. To change the startup default, open `/config`, choose **Appearance**, toggle **Info rail**, and save with `Ctrl-S`; narrow terminals still collapse it automatically.
 
-Drag across transcript text and press `Ctrl-C` to copy the selection when clipboard integration is available. `Ctrl-L` copies an active selection first; with no selection, it copies the latest assistant reply. Both use transcript content, so the info rail is excluded. With no selection, `Ctrl-C` keeps its normal cancel or exit behavior.
+Drag across transcript text and release the mouse to copy immediately. Sigil attempts both the system clipboard and, when enabled, the OSC52 terminal bridge; either path can complete the copy. A successful copy clears the highlight, while a failed copy keeps it available for `Ctrl-C` retry. `Ctrl-L` copies an active selection first; with no selection, it copies the latest assistant reply. All of these paths use transcript content, so the info rail is excluded. With no selection, `Ctrl-C` keeps its normal cancel or exit behavior.
 
 Mouse mode also supports scrolling, composer placement, approval controls, menus, session rows, activities, and tool-card expansion. Terminal-specific copy, keyboard, mouse, tmux, and SSH checks are in [Terminal compatibility](terminal-compatibility.md).
 
@@ -64,11 +64,11 @@ The most common control commands are:
 
 Model, agent, follow-up, and every other command form are listed in [Reference](reference.md#slash-commands).
 
-When a run is active, ordinary input becomes a visible follow-up and normally runs after the current turn. Focus the follow-up panel with `Tab`; use its action selector only when you intentionally want to interrupt. Sigil does not resend a follow-up automatically when delivery is uncertain.
+When a run is active, ordinary input becomes a visible follow-up and the first pending item is already scheduled to run after the current turn. Focus the follow-up panel with `Tab`, or click an item and its `Run next`, `Interrupt`, `Edit`, or `Delete` action directly. Pressing `Run next` while a new item is still being saved is acknowledged immediately; when a later or paused item needs reordering, the action is forwarded as soon as its durable queue id is confirmed. `Run next` also resumes a paused queue; use `Interrupt` only when you intentionally want to stop the current turn. Sigil does not resend a follow-up automatically when delivery is uncertain. On short terminals the composer collapses to three rows so a disappearing follow-up strip returns space to the transcript instead of leaving an oversized input panel.
 
 ## Config Panel
 
-`/config` groups common provider, permission, Web, memory, context, code-intelligence, terminal, appearance, agent, skill, plugin, and MCP settings. Theme changes preview immediately; save changes with `Ctrl-S`. Exact fields and defaults belong in [Configuration Reference](configuration-reference.md).
+`/config` groups common provider, permission, Web, memory, context, code-intelligence, terminal, appearance, agent, skill, plugin, and MCP settings. The per-model context-window field cycles through Automatic, 64K, 128K, 256K, and 1M instead of requiring a raw number; an existing custom value remains intact until you cycle the field. Theme changes preview immediately; save changes with `Ctrl-S`. Exact fields and defaults belong in [Configuration Reference](configuration-reference.md).
 
 For a Streamable HTTP MCP server configured with OAuth, open its detail view and choose **Authentication**. The modal can show status, start sign-in, open or copy the authorization URL, accept a transient callback URL, refresh, sign out, or clear a retained local credential. See [MCP](mcp.md) before connecting a server.
 
@@ -92,6 +92,8 @@ automatic handoff and proactive spawning without deleting Task history, set
 ## Approvals and File Changes
 
 Read-only file and search tools usually run directly. Writes, deletes, commands, network access, and external tools follow the configured permission policy.
+
+The approval modal centers the content that needs review: commands and tool requests use a dedicated high-contrast area, while file writes use the exact diff. Tool type and risk stay in a compact header; press `M` for policy, effect, and containment details. Requests without a file diff do not show empty panels.
 
 Before allowing a risky action, check:
 

@@ -46,9 +46,10 @@ enough to create a credential record, and `sigil.toml` stores a random reference
 Choose an allowlisted environment variable for CI or an already managed shell secret. See the
 [provider guide](providers.md#authentication-priority).
 
-Later, `/model connection-id/model-id` starts a fresh session on a ready route. In its selector,
-Enter starts the session and `D` changes only the saved default; the current and saved routes are
-shown separately.
+Later, `/model connection-id/model-id` switches an idle current session to an exact ready route
+without losing its conversation history. In its selector, Enter switches the current session and
+`D` changes only the saved default. In `/config`, choosing a connection or model and saving applies
+it to both the current conversation and future sessions.
 
 ## 4. Run The First Checks
 

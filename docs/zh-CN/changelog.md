@@ -9,6 +9,12 @@
 ## 尚未发布 - main
 
 - TUI 与 Desktop 现在都能按 connection/model 单独配置可选的上下文大小，首次设置也有入口。留空会继续使用 Provider 元数据和全局 fallback，因此没有模型目录的站点不会被阻塞。
+- TUI 会话文本现在会在松开鼠标时自动复制。复制会同时尝试 OSC52 与系统剪贴板；失败时保留
+  选区供 `Ctrl-C` 重试，并继续排除右侧信息栏。
+- 长任务不再因终端原生 scrollback 与异步输入争抢 cursor query 而直接退出。运行中 facts 不再
+  被表达成 host 终结指令；初始工具 preview 预算耗尽后，typed artifact retrieval 仍然可见。
+- 交互式工具审批不再于 300 秒后自动过期。**本次会话允许** 会在重新打开同一 session 后继续
+  生效，并允许可识别验证命令跨 `tail`、`head`、`grep` 等纯展示变化复用，同时保留逐次精确执行校验。
 
 ## v0.0.1-beta.2 - 2026-08-03
 

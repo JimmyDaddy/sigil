@@ -175,7 +175,7 @@ task-config digest 与 binary build 全部精确匹配 qualified release manifes
 | `[[code_intelligence.servers]].startup_timeout_ms` | `10000` | 启动超时。 |
 | `[[code_intelligence.servers]].trust_required` | `true` | 启动前需要工作区信任决定与配置相符。 |
 | `[terminal].keyboard_enhancement` | `"auto"` | `auto`、`on` 或 `off`。 |
-| `[terminal].mouse_capture` / `.osc52_clipboard` | `true` | 鼠标与 OSC52 剪贴板行为。 |
+| `[terminal].mouse_capture` / `.osc52_clipboard` | `true` | 鼠标行为与可选的 OSC52 复制桥接；系统剪贴板会独立尝试。 |
 | `[terminal].scroll_sensitivity` | `3` | 每次滚轮滚动的行数。 |
 | `[terminal.notifications].enabled` | `false` | 在交互式 TUI 中启用通知；通知内容受明确的隐私边界限制。 |
 | `[terminal.notifications].method` | `"auto"` | `auto`、`osc9`、`osc777` 或 `bell`。 |
