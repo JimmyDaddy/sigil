@@ -71,13 +71,13 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 
 | Command | Use |
 | --- | --- |
-| `sigil` | Open the TUI in the current workspace |
+| `sigil` | Open the TUI with a fresh session in the current workspace |
 | `sigil doctor [--output text|json]` | Run local diagnostics |
 | `sigil mcp add <name> -- <command> [args...]` | Add a local stdio MCP server |
 | `sigil mcp add <name> --url <https-url>` | Add a remote Streamable HTTP MCP server |
 | `sigil mcp list` / `get <name>` / `remove <name>` | Inspect or remove configured MCP servers |
 | `sigil run "<task>" [--connection <id> --model <id>] [--output text|json|jsonl]` | Run a non-interactive task; connection and model must appear together |
-| `sigil resume [session-id]` | Open the TUI and restore a session |
+| `sigil resume [session-id]` | Restore the exact session, or the latest session when omitted |
 | `sigil intent --session <session-id> inspect` | Emit the bounded durable Intent Stack for one exact session |
 | `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | Build an exact read-only Drop preview |
 | `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | Confirm and execute the exact preview |

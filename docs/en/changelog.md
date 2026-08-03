@@ -8,6 +8,10 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- Plain `sigil` launches now start a fresh session instead of reopening the most recent conversation.
+  Explicit resume keeps the portable transcript across safe endpoint corrections, asks before using
+  a changed or unproven destination, and prevents the same session from being opened for writing in
+  two TUI/Desktop/headless owners at once.
 - TUI and Desktop now configure an optional context-window size independently for each connection/model pair, including first-run setup. Empty values keep automatic provider metadata and global fallback behavior, so providers without a model catalog are not blocked.
 - TUI transcript selections now copy automatically when the mouse is released. Copy attempts both
   OSC52 and the system clipboard, preserves a failed selection for `Ctrl-C` retry, and still

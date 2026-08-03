@@ -57,7 +57,17 @@ Add only checks you understand. Repository hints can be suggested but do not run
 
 <!-- public-doc-topic: memory -->
 
-`[memory].enabled = true` lets Sigil load workspace instruction files such as `SIGIL.md`, `AGENTS.md`, and `SIGIL.local.md`. Keep them short, current, and suitable for every session in the repository.
+```toml
+[memory]
+enabled = true
+writable = false
+```
+
+`enabled` lets Sigil load workspace instruction files such as `SIGIL.md`, `AGENTS.md`, and `SIGIL.local.md`. Keep them short, current, and suitable for every session in the repository.
+
+`writable` is a separate, default-off capability. When enabled, Sigil exposes approval-gated `remember_user_preference` and `remember_project_fact` tools, plus `inspect_memory` and `forget_memory`. The model decides from the user's meaning whether durable memory is intended; Sigil does not classify prompts by matching phrases. A successful write returns a durable receipt with `scope`, `memory_id`, and `version`. Until that receipt exists, Sigil must not claim the information was remembered beyond the current session. User preferences are shared across local workspaces; project facts are isolated to the canonical current workspace. Secret-like content is rejected.
+
+Forgetting stops future retrieval and physically deletes the Sigil-controlled memory sidecar. It cannot retract context already sent to a provider or erase independent session and audit evidence.
 
 <!-- public-doc-topic: skills-agents -->
 

@@ -55,6 +55,11 @@ publishing fails, the panel stays open with the draft intact, shows a persistent
 status, and focuses the related field when Sigil can identify one. Editing again clears the stale
 error so the next save attempt is unambiguous.
 
+A connection ID identifies the saved route but is not itself a trust grant. Correcting only the
+path on the same endpoint origin can rebind a resumed session automatically. Changing origin,
+provider protocol, or an account/tenant boundary requires an exact user confirmation or route
+replacement before any history is sent.
+
 ## Workspace
 
 `workspace.root = "."` follows the directory where `sigil` starts. File tools stay within that workspace unless you deliberately enable a narrow external-directory rule. Review [Permissions and sandbox](permissions-and-sandbox.md) before doing so.

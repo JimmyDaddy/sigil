@@ -8,6 +8,9 @@
 
 ## 尚未发布 - main
 
+- 直接运行 `sigil` 现在会创建 fresh session，不再自动打开最近会话。显式恢复会在安全 endpoint
+  修正后保留可移植对话；目的地变化或无法证明时先要求确认，并阻止同一 session 被两个
+  TUI/Desktop/headless owner 同时以可写方式打开。
 - TUI 与 Desktop 现在都能按 connection/model 单独配置可选的上下文大小，首次设置也有入口。留空会继续使用 Provider 元数据和全局 fallback，因此没有模型目录的站点不会被阻塞。
 - TUI 会话文本现在会在松开鼠标时自动复制。复制会同时尝试 OSC52 与系统剪贴板；失败时保留
   选区供 `Ctrl-C` 重试，并继续排除右侧信息栏。

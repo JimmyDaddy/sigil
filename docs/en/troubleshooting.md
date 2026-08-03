@@ -1,4 +1,4 @@
-<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
+<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,a-session-needs-route-recovery,a-session-is-already-active,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
 
 # Troubleshooting
 
@@ -22,6 +22,8 @@ Use `sigil doctor --output json` when you need a redacted diagnostic file for a 
 | A tool is blocked | Approval or sandbox message | Review the reason; change policy only if intended |
 | MCP is unavailable | `/config` → MCP Servers | Fix auth, config, or start mode |
 | Terminal input behaves oddly | Terminal support | Try a supported terminal and run Doctor |
+| A session asks for route recovery | `session:route_resume` in Doctor | Confirm the intended connection or select a replacement |
+| A session is already active | Other TUI/Desktop owner | Exit that owner, retry, or start a new session |
 | Context is nearly full | Info rail | Finish the current step or use `/compact` when available |
 
 ## Quick Setup Opens Every Time
@@ -89,11 +91,19 @@ expired or cancelled operation silently.
 
 ## Mouse Or Clipboard Does Not Work
 
-Check `[terminal].mouse_capture` and `osc52_clipboard` in the active `sigil.toml`, restart after changes, then drag-select plain transcript text. Releasing the mouse copies automatically through the system clipboard and, when enabled, OSC52. A failed copy keeps the selection for `Ctrl-C` retry. `Ctrl-L` copies an active selection or the latest assistant reply when none is active. Remote shells and containers may expose neither usable adapter; image paste separately requires a supported system clipboard. See [Terminal Compatibility](terminal-compatibility.md).
+Check `[terminal].mouse_capture` and `osc52_clipboard` in the active `sigil.toml`, restart after changes, then drag-select plain transcript text. Releasing the mouse copies automatically through the system clipboard and, when enabled, OSC52. A failed copy keeps the selection for `Ctrl-C` retry. `Ctrl-L` copies an active selection or the latest assistant reply when none is active. Remote shells and containers may expose neither copy method; image paste separately requires a supported system clipboard. See [Terminal Compatibility](terminal-compatibility.md).
 
 ## Attention Notification Does Not Appear
 
 Notifications are off by default and depend on terminal support. Enable them under `/config` → **Terminal**, run Doctor, and ensure the terminal has not disabled OSC or bell notifications.
+
+## A Session Needs Route Recovery
+
+Run `sigil doctor` and inspect `session:route_resume`. Endpoint path corrections on the same trusted origin are rebound automatically and do not contact the provider during startup. A changed origin or account/tenant boundary, a missing connection, or an older session without a proven trust binding requires an explicit decision. Review and save the intended connection in `/config` or Desktop Settings, select a replacement route, or start a new session. Sigil keeps the shell and portable transcript available and does not silently send history to an unconfirmed destination.
+
+## A Session Is Already Active
+
+The session has a write-capable owner in another TUI, Desktop run, or headless run. Return to that owner or exit it, then retry the explicit resume. You can also start a new session or return to the session library. The operating system releases the attachment after a normal exit or crash; do not delete the sidecar lock file or force a takeover.
 
 ## Session Restore Shows Interrupted Tools
 

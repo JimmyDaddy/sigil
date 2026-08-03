@@ -1088,6 +1088,13 @@ provider options；不包含 secret、credential ID、label 或 rotation generat
 
 ### 10.3 Restore and drift
 
+> Superseded for session-open behavior by
+> [RFC-0061](0061-portable-session-route-rebinding-and-recovery-control-plane-v1.md). The strict
+> semantic fingerprint remains authoritative for provider-private continuation/cache reuse, but
+> route drift no longer makes portable session truth unreadable. Trust-equal drift may append an
+> automatic rebind boundary; changed or unproven trust requires explicit confirmation or
+> replacement.
+
 restore 时：
 
 - exact connection 存在且 semantic fingerprint 匹配：可使用当前 credential 继续；

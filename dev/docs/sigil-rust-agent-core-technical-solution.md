@@ -476,6 +476,16 @@ candidate。session JSONL、writer lease、lifecycle journal 及其 lease 创建
 owner-only；Doctor 对最近 session/lease 与 lifecycle journal 做同一不变量检查，custom
 `session.log_dir` 不依赖父目录权限间接保密。
 
+Session continuity 与 provider-private acceleration compatibility 分开处理。Portable transcript、任务、
+usage、标题和可恢复 control state 始终可读；semantic route fingerprint只决定旧 response handle、native
+carrier、cache proof 等私有状态能否复用。同一 durable egress trust binding 内的配置修正由 runtime 在
+持有 writer authority、quiescence permit 和 immutable config snapshot 时追加
+`SessionRouteRebound + SessionRouteTrustBound` 原子边界；origin/tenant变化、connection缺失或 legacy
+trust无法证明时，Desktop/TUI/HTTP都投影 bounded typed recovery，未经 exact-bound确认不得发送历史。
+直接运行 TUI 默认创建 fresh session，历史只通过显式 `sigil resume [selector]` 或 `/resume` attach；
+每个 session 另有 OS-backed、crash-released的跨进程 write-capable attachment lease，目标 busy 时不释放
+source、不启动第二个 worker。该 attachment lease 与 durable writer/lifecycle lease职责独立。
+
 V2 tool result 的 policy-safe bytes 写入 session JSONL sibling resource tree：
 `<session-stem>/artifacts/{staging,refs,blobs,trash}`。对外 ref 是随机、session-scoped
 `ta1_*` capability，不可反推物理路径；descriptor 记录 observed/policy-projected/persisted bytes、
@@ -1110,7 +1120,7 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 - O8c 的 production-path harness 已接入 `ApplicationRunServices`：committed generated corpus 固定为 20 negative / 10 positive，route contract 与 runtime-derived provider/model/config/corpus facts 共同形成 exact route identity，V1 report 独立计算 false-positive、positive miss、majority misroute 与 zero-tolerance invariants。`scripts/run-evals.sh` 会传递 bounded route contract、验证两层 report artifact，并在 deterministic mode 检查 corpus drift 和关键 orchestration gates；CI 另跑真实 TUI PTY fixture campaign。2026-07-25 对 `6432fc5728a6` 的 DeepSeek V4 Flash campaign 完成 90 次 provider admission，但只有 55 次完成；exact route positive miss 为 `77.8%`，并有 33 次 TLS handshake EOF。该证据不合格且已驱动 routing-only typed microturn 修复，修复后的 prompt/tool digest 与旧报告不同。2026-07-26 已补齐 confirmed-pre-dispatch connect retry：DeepSeek 只把 typed reqwest connect-phase error 映射为 provider-neutral rejection，kernel 在前一 physical attempt 已同步确认 zero-generation/zero-output/zero-effect 后，最多用同一冻结 request 新建两个独立 attempt；HTTP status、timeout、stream error 和 transport uncertain 均不重试。queue/task recovery 只接受同 provider/model/purpose/request fingerprint 的有序安全 predecessor chain。该历史失败只保留为诊断证据；每个 release route 仍必须由最终 exact-build 的 `auto + proactive` 30×3 report 独立 qualification。
 - O8d 使用 release-owned sidecar 激活新安装默认，而不是修改 Rust schema 默认：exact candidate binary 从完整 qualified report 生成 path-free `sigil-orchestration-rollout-v1.json`，并重新验证 commit/build、route identity、task-config digest、30×3 repetition、阈值与零容忍不变量。Quick Setup 只对缺少配置且 exact provider/model/官方 endpoint/build/digest 匹配的 route 写入 `auto + proactive`；其他 route、custom endpoint、sidecar 缺失/损坏/过期以及所有已有配置保持 `manual + explicit_request_only`。route-local kill switch 在 typed handoff 与 exact spawn admission 前从 durable facts 触发，并同时降级 routing 与 proactive spawn；accepted TaskPlan recovery 和 Task history 保留。Doctor 投影 release qualification 与 session report handle；archive/npm/Homebrew 只把由同一 binary 验证生成的 sidecar 安装在 binary 旁。
 - 主会话 running-input queue 是内部 durable control plane，使用 `ConversationInputQueued`、`ConversationInputEdited`、`ConversationInputReordered`、`ConversationInputStatusChanged`、`ConversationInputQueueControl` 和 recovery-critical `ConversationInputPromoted` append-only entry 持久化；TUI 产品层把它呈现为 visible follow-up，而不是暴露为隐藏队列。普通 chat 在 active run busy 时会显示为 follow-up，不提前写入 provider-visible user history；busy 状态下的 agent mention 不会静默降级成 main-thread chat，而是保留输入并提示用户等待或使用专门的 agent message 入口。worker 在当前 turn 结束后先冻结 exact request；可证明压力时先应用 portable compaction，再以 queue-revision CAS promotion、safe user/capability commit 和 provider physical-attempt Started 为唯一 send barrier，并把 promotion 的 `dispatch_run_id` 原样作为该首次 physical attempt 的 logical run id。没有本地 admission 时仍可发送同一冻结请求，但不猜测 provider token limit 或启用未证明 compaction。恢复或 run error 只根据同一 logical run 的 durable physical-attempt evidence 分类：已完成、已有输出或副作用后的终态写 `Delivered`；已确认未消费写 `Rejected` 并 pause queue；缺 terminal、传输结果不确定、interrupted、缺失或多个匹配 attempt 一律写 `Stale`，不自动重放远端请求。`/queue next` 只调整顺序等待下一 turn；`/queue interrupt` 先走 cancel/interrupted audit，再 dispatch 选中 item；`now` 与 `send-now` 不再解析。
-- TUI follow-up 行与四个 action 都有真实鼠标命中区；键盘 `Tab -> Enter` 必须经 launcher 到达 worker command channel。queue 首项默认就是 next dispatchable；optimistic 首项上的 `Run next` 明确反馈已排在下一位，后续项的 promote intent 等 durable queue id 返回后补发。`Run next` 在重排并恢复 paused queue 后必须同时重新唤醒 conversation queue 与 TaskGuidance advancement。queue item 离开 `Queued` 后清理对应 edit buffer；高度不超过 14 行的终端使用三行 composer，使 live strip 收缩时立即把空间归还 transcript。普通配置面板的单模型上下文窗口使用 `automatic / 64K / 128K / 256K / 1M` 预设循环；已有 custom value 在用户主动切换前保持原值，精确自定义继续由配置文件承载。
+- TUI follow-up 行与四个 action 都有真实鼠标命中区；键盘 `Tab -> Enter` 必须经 launcher 到达 worker command channel。queue 首项默认就是 next dispatchable，并在 optimistic entry 创建时记录 deferred promote intent；用户在 durable id 返回前再次选择 `Run next` 也保留同一 intent 和明确反馈，而不是以“已经排在第一位”为由吞掉 action。durable id 返回后补发 promote，重排或恢复 paused queue 后同时重新唤醒 conversation queue 与 TaskGuidance advancement；recovery task handoff 不得抢在已经 next-dispatchable 的 main follow-up 前启动。queue item 离开 `Queued` 后清理对应 edit buffer；active target 变化导致当前 queue strip 不再可见时同步清除 queue focus/selection，让键盘立即回到 composer。高度不超过 14 行的终端使用三行 composer，使 live strip 收缩时立即把空间归还 transcript。普通配置面板的单模型上下文窗口使用 `automatic / 64K / 128K / 256K / 1M` 预设循环；已有 custom value 在用户主动切换前保持原值，精确自定义继续由配置文件承载。
 - Background child result completion 与 follow-up / internal queue 有明确优先级：`join_before_final` / blocking child 完成后优先触发 parent continuation；普通 non-blocking background child 完成只写 `AgentResultContinuation(Pending)` ready 状态。当主会话已经有 pending follow-up 时，non-blocking result 不抢占 queued input，只以 bounded transient system notice 提醒模型可按需 `wait_agent` / `read_agent_result`。
 - `/agent close <child-id|current>` 不再由 TUI 直接追加 `AgentThreadClosed`；TUI 只解析目标并发送 worker `CloseAgent`，worker 通过 runtime `close_agent_thread` 复用 model-visible `close_agent` 的 terminal 校验和 control entry 生成，再把同步后的 session entries 返回给 TUI。`/agent cancel <child-id|current>` 解析 running target 后发送 worker `CancelAgent`，background child 的独立 cancellation owner 会先 durable 记录 request，再 cancel+join；quiescence 成功写 `AgentThreadStatusChanged(Cancelled)`，超时写 `Interrupted`/cleanup-incomplete，并统一追加 `AgentRunInterrupted`。
 - `list_agents`、`message_agent`、`cancel_agent` 和 `close_agent` 已作为 agent coordination tools 注册。`list_agents` 返回所有 agent thread 的 status、objective、result ref、messageable/closable/cancelable 与 approval_pending；`message_agent` 用于给 active background child mailbox 投递 follow-up，记录 `AgentThreadMessageRouted` requested -> resolved/rejected 审计，tool result 明确返回 `delivered_to_mailbox`、`will_apply_after_current_turn`、`interrupt_requested=false` 和 `interrupts_in_flight_provider_stream=false`，语义是 next safe point steering，不承诺 mid-token 或正在执行 tool 时实时中断；`cancel_agent` 只取消仍有 live handle 的 running background child；terminal child、无 mailbox 或无效目标会返回 rejected/unsupported，且不改变 child lifecycle terminal status。
@@ -1240,7 +1250,23 @@ route 同时用作 saved default 与当前 session 的后续 route，减少设�
 
 ### 10.4 Auto Memory
 
-Auto memory 不必阻塞 MVP。第一版只支持文档型 memory 是可以接受的，indexed fact store 后续再补。
+文档型 memory 仍由 `[memory].enabled` 控制并进入稳定 prefix。另有一条显式、默认关闭的可写
+memory vertical slice，由 `[memory].writable` 控制：
+
+- `remember_user_preference` 保存跨 workspace 的稳定交互或工作流偏好；
+- `remember_project_fact` 保存 canonical current workspace 范围内的 user-asserted 项目事实或约定；
+- 模型根据用户语义和工具描述自行判断是否需要写入，kernel/runtime 不以关键词匹配 prompt；
+- 两类写入都需要 preview/approval，只有 sidecar 原子发布且 ref-only journal durable sync 完成后才返回
+  包含 scope、memory id 和 version 的 durable receipt；没有成功回执就不能声称已经长期记住；
+- `[memory].writable = false` 时 system contract 明确要求模型只能承诺当前会话保留；
+- active memory 通过 Context V1 dynamic suffix 召回，不进入稳定 prefix；user preference 为
+  user-private、project fact 为 repository sensitivity，疑似 secret/credential 在落盘前拒绝；
+- `inspect_memory` 提供 active entry 与 admission provenance，`forget_memory` 先 tombstone，再物理删除
+  Sigil-controlled sidecar；V1 不把 pre-pack retrieval candidate 误记成 provider injection，也不声称能够
+  撤回历史 provider egress 或独立审计证据。
+
+该 vertical slice 只覆盖显式 `user_asserted` V1，不等同于 RFC-0010 P10 的自动候选提炼、
+evidence-backed promotion、supersede/invalidate、branch/snapshot validity 和完整 TUI lineage 管理。
 
 ## 11. MCP 插件模型
 
@@ -1415,8 +1441,8 @@ Permission policy 负责决定一次工具调用是：
 
 - `ToolAccess::Read` 默认 allow
 - `ToolAccess` 只表达本地 `Read / Write / Execute`；网络单独使用 `NetworkEffect::Read / Mutate / Unknown` 与 `NetworkPolicy::Allow / Ask / Deny`
-- 本地 `Write / Execute` 由 `permission.mode` 决定：`manual` 默认 ask，`auto-edit` 只自动允许 workspace 文件编辑，`read-only` 拒绝本地写入/执行，`danger-full-access` 只放宽本地轴
-- `NetworkEffect::Read` 始终服从独立 NetworkPolicy；`read-only` 下的 `Mutate / Unknown` 直接拒绝，其他 mode 与 network/source policy 按 `Deny > Ask > Allow` 求交。`NetworkEndpoint` 不得因 `ToolSubjectScope::External` 被误送入只属于 `Path` 的 external-directory gate。plan approval、external-directory override 和 `danger-full-access` 不能覆盖 network/source ask 或 deny；交互用户显式创建的 durable session grant 只可把同一 tool 的只读 `NetworkRequest` Ask facet 降为 Allow，不能覆盖 source Ask、任何 Deny、`Mutate / Unknown` 或不同 tool
+- 本地 `Write / Execute` 由 `permission.mode` 决定：`manual` 默认 ask，`auto-edit` 只自动允许 workspace 文件编辑，`read-only` 拒绝本地写入/执行。`danger-full-access` 是明确的非交互模式：动态执行、高风险/破坏性 effect floor 与 deterministic analysis incomplete 仍提高 risk、保留 snapshot/confirmation metadata 和审计 reason，但最终所有 local/network/source/external-directory `Ask` facet 都归一化为 `Allow`，不会再产生 approval 请求；credential/protected target hard deny、managed/explicit Deny、disabled external-directory Deny 与 circuit breaker 仍然生效
+- `NetworkEffect::Read` 始终服从独立 NetworkPolicy；`read-only` 下的 `Mutate / Unknown` 直接拒绝，Manual/AutoEdit 与 network/source policy 按 `Deny > Ask > Allow` 求交。`NetworkEndpoint` 不得因 `ToolSubjectScope::External` 被误送入只属于 `Path` 的 external-directory gate。`danger-full-access` 将 network/source Ask 视为用户已在运行模式层明确授权，但不能覆盖任何 Deny；交互用户显式创建的 durable session grant 只可把同一 tool 的只读 `NetworkRequest` Ask facet 降为 Allow，不能覆盖 source Ask、任何 Deny、`Mutate / Unknown` 或不同 tool
 - `ToolApprovalSessionGrant` 以 append-only control entry 持久化获批 facet（local/network）与匹配 scope，reload 同一 session 后继续参与决策；缺少任一当前字段的日志直接拒绝。可识别的 workspace validation grant 使用规范化策略 scope 和 executable-core argument binding，忽略 `tail/head/grep` 等纯输出管道，但每次执行仍以完整 AST/参数生成 exact permission plan hash 并在 effect 前重验；不同 validation 参数、family、effect、risk、workspace 或 containment 不复用。只读 network endpoint 使用 `network_read_tool` scope，允许同一 tool 在 session 内跨 URL 复用，但每个 URL 仍必须重新通过 capability binding、destination guard、durable egress barrier、逐消息 disclosure 与 budget；exact-subject grant 不得在策略 facet 或 scope 漂移后扩大权限。命中 exact network facet 的 grant 必须作为当前执行的 network authorization 传播到 tool context，不能只把 policy decision 改为 `Allow` 后丢失执行授权
 - `ToolSpec` 只保存静态声明；每个动态 adapter 通过单一 `permission_plan` 为最终参数生成完整 `ToolPermissionPlanV2` draft，一次性绑定 access、operation、effects、subjects、containment、semantic scope、默认策略和安全摘要；registry 与 scoped registry 只消费并透传这一个 immutable plan contract。通用 MCP tool 投影为本地 `Read + NetworkEffect::Unknown`，本地 stdio/plugin extension process 启动投影为本地 `Execute + NetworkEffect::Unknown`
 - extension process 的网络启动授权使用不可序列化的 run-scoped admission：`Ask` 只有在真实交互审批证据存在时才可越过 spawn boundary；`Deny` 只有 exact backend plan 同时证明 network isolation、process-tree isolation 和 denied network receipt 时才可启动，并在执行后复核 receipt。model-triggered activation 作为本地 `Execute + NetworkEffect::Unknown` 工具走完整 local/network/source permission；配置声明的 eager、direct activation 与 refresh 属于既有 lifecycle management path，不把 `approval_default` 重新解释为启动审批，但仍必须显式携带当前 NetworkPolicy，不能退回隐式 default Allow

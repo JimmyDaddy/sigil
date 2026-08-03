@@ -54,7 +54,17 @@ effect = "read_only"
 
 <!-- public-doc-topic: memory -->
 
-`[memory].enabled = true` 允许 Sigil 加载 `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` 等工作区指令文件。请保持内容简短、及时更新，并确保这些说明适用于仓库中的每个会话。
+```toml
+[memory]
+enabled = true
+writable = false
+```
+
+`enabled` 允许 Sigil 加载 `SIGIL.md`、`AGENTS.md`、`SIGIL.local.md` 等工作区指令文件。请保持内容简短、及时更新，并确保这些说明适用于仓库中的每个会话。
+
+`writable` 是独立且默认关闭的能力。启用后，Sigil 会提供需要审批的 `remember_user_preference`、`remember_project_fact`，以及 `inspect_memory`、`forget_memory` 工具。是否需要长期记忆由模型根据用户语义自行判断，不通过关键词机械匹配 prompt。写入成功会返回包含 `scope`、`memory_id` 和 `version` 的 durable receipt；拿到该回执前，Sigil 不得声称信息已跨会话记住。用户偏好在本机工作区之间共享，项目事实按当前 canonical workspace 隔离；疑似凭据或 secret 的内容会被拒绝。
+
+Forget 会停止后续召回，并物理删除 Sigil 控制的记忆 sidecar；它不能撤回已经发送给 provider 的上下文，也不会删除独立的 session 和审计证据。
 
 <!-- public-doc-topic: skills-agents -->
 

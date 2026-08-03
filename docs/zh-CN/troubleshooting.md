@@ -1,4 +1,4 @@
-<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
+<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,a-session-needs-route-recovery,a-session-is-already-active,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
 
 # 排障
 
@@ -22,6 +22,8 @@ sigil doctor
 | 工具被阻止 | 审批或沙箱提示 | 阅读原因；仅在确有需要时调整策略 |
 | MCP 不可用 | `/config` → MCP Servers | 修正认证、配置或启动模式 |
 | 终端输入异常 | 终端支持情况 | 换用受支持的终端并运行 Doctor |
+| 会话要求恢复 route | Doctor 中的 `session:route_resume` | 确认目标 connection 或选择替代 route |
+| 会话已在使用 | 另一个 TUI/Desktop owner | 退出原 owner 后重试，或新建会话 |
 | 上下文接近上限 | 信息栏 | 完成当前步骤，或在可用时使用 `/compact` |
 
 ## 每次都会进入快速设置
@@ -89,6 +91,14 @@ TUI 会进入快速设置，并把最后一步明确标成**检查、替换无�
 ## 失焦通知没有出现
 
 通知默认关闭，而且依赖终端支持。在 `/config` → **Terminal** 中启用后运行 Doctor，并确认终端没有禁用 OSC 或响铃通知。
+
+## 会话需要恢复 route
+
+运行 `sigil doctor` 并检查 `session:route_resume`。同一可信 origin 内的 endpoint 路径修正会自动 rebind，启动时不会联系 Provider。origin 或账户/tenant 边界变化、connection 缺失，或旧 session 无法证明 trust binding 时，需要用户作出明确决定：在 `/config` 或 Desktop 设置中检查并保存目标 connection、选择 replacement route，或新建 session。Sigil 会保持 shell 与可移植对话记录可用，不会把历史静默发送到未经确认的目的地。
+
+## 会话已在使用
+
+该 session 已由另一个 TUI、Desktop run 或 headless run 持有可写 attachment。返回或退出原 owner 后再显式恢复，也可以新建 session 或回到会话库。正常退出或进程崩溃后，操作系统会释放 attachment；不要删除 sidecar lock file，也不要强制接管。
 
 ## 恢复会话后显示工具已中断
 

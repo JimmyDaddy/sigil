@@ -71,13 +71,13 @@
 
 | 命令 | 用途 |
 | --- | --- |
-| `sigil` | 在当前工作区打开 TUI |
+| `sigil` | 在当前工作区打开 TUI 并创建 fresh session |
 | `sigil doctor [--output text|json]` | 运行本机诊断 |
 | `sigil mcp add <名称> -- <命令> [参数...]` | 添加本机 stdio MCP 服务 |
 | `sigil mcp add <名称> --url <https-url>` | 添加远端 Streamable HTTP MCP 服务 |
 | `sigil mcp list` / `get <名称>` / `remove <名称>` | 检查或移除已配置的 MCP 服务 |
 | `sigil run "<task>" [--connection <id> --model <id>] [--output text|json|jsonl]` | 运行非交互任务；connection 与 model 必须同时提供 |
-| `sigil resume [session-id]` | 打开 TUI 并恢复会话 |
+| `sigil resume [session-id]` | 恢复精确会话；省略 ID 时恢复最近会话 |
 | `sigil intent --session <session-id> inspect` | 输出某个精确会话的 bounded durable Intent Stack |
 | `sigil intent --session <session-id> drop-preview --intent-id <id> --intent-version <n>` | 生成精确、只读的 Drop preview |
 | `sigil intent --session <session-id> drop --operation-id <id> --stack-version <n> --preview-digest <digest>` | 确认并执行该精确 preview |

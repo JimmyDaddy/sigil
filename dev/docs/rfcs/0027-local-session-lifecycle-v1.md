@@ -10,6 +10,15 @@ Session lifecycle 当前只读取当前 session/export/journal schema。本文�
 session 兼容规则仅保留为历史设计记录；非当前记录不恢复、不导出、不迁移，但仍可通过 invalid-source
 删除流程清理。
 
+### 2026-08-03 session attachment and startup supersession
+
+RFC-0061 replaces the implicit latest-session startup assumption with default-fresh TUI launch.
+Explicit resume remains available through `sigil resume [session-id]` and `/resume`, and is guarded
+by a separate cross-process write-capable attachment lease. Lifecycle preview/apply leases continue
+to protect fork/export/delete/retention; they do not replace the interactive attachment lease.
+Legal new/select/fork control-plane actions remain available when the prior agent worker cannot
+reach ready state. See [RFC-0061](0061-portable-session-route-rebinding-and-recovery-control-plane-v1.md).
+
 基线：
 
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)

@@ -38,7 +38,7 @@ Clicks and wheel input should affect only the focused surface; keyboard controls
 
 ## Text Selection And Copy
 
-Drag-select single-line, multiline, and wide-character transcript text, release the mouse, and paste elsewhere; release should copy without another keypress. If Sigil reports that copying failed, confirm the selection stays highlighted and `Ctrl-C` retries it. Press `Ctrl-L` with no selection to copy the latest assistant reply. Every copy should exclude the right info rail. Sigil attempts the local system clipboard and, when enabled, OSC52 with tmux/screen passthrough; it reports the clipboard as unavailable only when neither adapter can be written.
+Drag-select single-line, multiline, and wide-character transcript text, release the mouse, and paste elsewhere; release should copy without another keypress. If Sigil reports that copying failed, confirm the selection stays highlighted and `Ctrl-C` retries it. Press `Ctrl-L` with no selection to copy the latest assistant reply. Every copy should exclude the right info rail. Sigil attempts the local system clipboard and, when enabled, OSC52 with tmux/screen passthrough; it reports the clipboard as unavailable only when neither copy method can be used.
 
 ## Image Paste Smoke
 

@@ -106,7 +106,11 @@ Large diffs may be shortened in the activity view; inspect the final repository 
 
 ## Sessions and Recovery
 
-Session logs stay under the per-user Sigil state directory. On restart, Sigil can restore the latest supported session, including visible messages, task state, completed activity summaries, and interrupted tool results. It does not silently rerun an interrupted tool. Exiting prints the session id and a `sigil resume <session-id>` command.
+Session logs stay under the per-user Sigil state directory. A plain `sigil` launch always starts a fresh session, even when another Sigil window is already open in the same workspace. Resume is explicit: use `sigil resume` for the latest supported session, `sigil resume <session-id>` for an exact session, or `/resume` to choose one. Resume restores visible messages, task state, completed activity summaries, and interrupted tool results; it does not silently rerun an interrupted tool. Exiting prints the session id and the exact resume command.
+
+Only one write-capable interactive surface may attach to a session at a time. If that session is already active in another TUI or Desktop run, Sigil keeps the current shell available and offers retry, a new session, or the session library. Close or leave the original owner before retrying; never delete an attachment sidecar or force a takeover.
+
+Provider endpoint path corrections on the same trusted origin are rebound automatically when a session resumes. A changed origin, account/tenant boundary, missing connection, or older session without a proven trust binding requires one explicit route confirmation or replacement. Review and save the intended connection in `/config` (or Settings), or choose a replacement route; the same session id and portable transcript remain available while provider-private continuation state is discarded.
 
 Cancellation stops new work and waits briefly for active work to finish. **Cancelled** means cleanup completed; **Interrupted** means it could not be confirmed within the limit. Messages and results already saved remain available.
 

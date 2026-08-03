@@ -1,6 +1,6 @@
 # RFC-0061 Portable Session Route Rebinding and Recovery Control Plane V1
 
-状态：proposed / base design audit complete / startup ownership addendum re-audit pending / implementation deferred
+状态：implemented and accepted / R61.0-R61.6 complete / all acceptance gates closed
 
 创建日期：2026-08-03
 
@@ -1205,13 +1205,15 @@ mtime、最近活动时间或 best-effort worker探测决定是否双开。
   interactive attachment lease与 lifecycle/append writer lease职责分离；
 - RFC-0052 Desktop continuity补充 typed route transition/recovery view。
 
-在 RFC-0061 accepted 前不修改上述历史 RFC 的 normative text；避免 proposed 设计被误写成已实现事实。
+RFC-0061 进入实现后，RFC-0027 和 RFC-0056 已加入明确 supersession pointer；历史段落保留为当时设计记录，
+不再被解释为 current restore contract。RFC-0057、RFC-0058 与 RFC-0052 的完整正文继续在各自后续修订中
+同步，当前实现事实以本 RFC、核心技术方案和公共 EN/ZH 文档为准。
 
 ## 23. Implementation boundary
 
-本 RFC 创建与设计审计阶段只提交文档，不修改 Rust、TypeScript、OpenAPI、session schema 或产品行为。
-实现必须按 R61.0-R61.6 切片推进，每个切片带对应测试和状态同步；不得以“先把 validator 改成永远成功”
-替代完整的 route epoch、worker recovery 和跨表面 contract。
+实现按 R61.0-R61.6 切片推进，每个切片带对应测试和状态同步；不得以“把 validator 改成永远成功”替代
+完整的 route epoch、worker recovery 和跨表面 contract。最终状态只有在第 18 节 gate 与独立审计全部
+关闭后才能从 `implementation in progress` 改为 `implemented`。
 
 ## 24. Independent design audit
 
@@ -1221,5 +1223,61 @@ quiescence authority、幂等提交顺序、config snapshot TOCTOU 语义，以�
 也已关闭：`provider_unavailable` 和 `session_route_trust_bound` 已进入 normative 清单。
 
 同日新增 default-fresh TUI launch 与 single write-capable attachment addendum。该 addendum 已完成仓库实现对照和
-文档自检，但属于首轮独立审计之后新增的 normative scope；在再次独立复核前，RFC 状态保持
-`startup ownership addendum re-audit pending`。
+文档自检，但属于首轮独立审计之后新增的 normative scope；其实现复核已并入本轮最终独立审计 gate。
+
+2026-08-03 最终独立实现审计基于最新 live tree 重新复核 18 项 acceptance criteria，未发现剩余 P0/P1/P2，
+未发现阻塞问题。审计确认实施期识别的 5 个 P1 与 1 个 P2 均已关闭且没有回归：shared route authority、
+HTTP attachment/delete/bind、TUI exact retry 与 source retention、SSE terminal/foreground 原子性，以及
+Desktop/OpenAPI privacy 与 recovery-state authority。独立定向复验覆盖真实 serve终态后立即重连、真实 TUI
+PTY、canonical path/stale generation/cross-session retry、busy read-only HTTP reopen、machine protocol、
+Desktop recovery action、generated contract drift、format 与 diff gate，结果全部通过。
+
+## 25. Implementation record
+
+2026-08-03 完成 R61.0-R61.6 实现、最终 gate 与独立实现审计：
+
+- R61.0：先补 route planner、trust binding、append-only event/projection 与 default-fresh/attachment
+  regression tests；
+- R61.1：runtime 使用 immutable resolved-config snapshot 生成五态 resume plan，并以 authority、
+  quiescence 与 stale binding 校验执行 automatic rebind 或 exact-bound confirmation；
+- R61.2：session route/trust boundary 以 ordered batch durable append，重复 apply 返回 idempotent receipt；
+- R61.3：TUI launcher 将 fresh/latest/selector 分离，pre-ready failure保持 shell，`/new`/switch先取得
+  target attachment再转换 source；
+- R61.4：OS-backed session attachment覆盖 TUI、application/HTTP run owner，busy投影稳定
+  `session_already_active` recovery；
+- R61.5：HTTP/OpenAPI/Desktop/Tauri/renderer 使用同一 bounded recovery code/action/binding，内部 endpoint、
+  credential与fingerprint不进入公共 DTO；
+- R61.6：Doctor新增 `session:route_resume` 聚合检查，中英文 user guide/configuration/providers/
+  troubleshooting/changelog及 supersession/core architecture同步。
+
+实施期审查和全量测试额外关闭了以下竞态与状态泄漏：
+
+- interactive attachment 使用 canonical durable session path 和 session/generation exact-bound retry；busy ->
+  stale binding -> refreshed binding不会误作用到 renderer 已切换的 target；
+- TUI route-confirmation binding 与 attachment-retry binding分离，旧 generation或错误 target不能进入 route
+  loader；plain TUI 真实 PTY证明同一 workspace 默认创建 fresh session；
+- Desktop以最新 `runContext` 为 route recovery authority，成功 exact/provider/route retry会清除 stale panel state；
+- HTTP open在 busy attachment 下保持 transcript/library只读可用，automatic same-trust rebind只记录一个 durable
+  receipt；
+- application terminal SSE先发布终态并保留流，再在 registry 持锁期间关闭 stream并提交 terminal/
+  foreground-owner transition；真实 serve 客户端收到终态后立即重连稳定返回
+  `409 run_no_longer_foreground`，不存在可观察的 200 窗口；
+- 首次配置真实 PTY fixture只把真正的 user generation作为必需请求，不再错误依赖并发 background title
+  generation；标题生成保持在主 run 后串行执行。
+
+最终 gate记录：
+
+- `cargo fmt --all --check`：通过；
+- `cargo clippy --all-targets -- -D warnings`：通过；
+- `cargo test --quiet`：通过；其中 `sigil-http` 202/202、`sigil-runtime` 977 passed + 3 ignored、
+  `sigil-tui` 1589 passed + 3 ignored，真实 TUI PTY 与真实 `sigil serve` process tests均通过；
+- `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`：通过；
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`：77/77 通过；
+- `pnpm --dir apps/desktop check`：OpenAPI/generated contract drift、UI system、TypeScript、274/274 renderer
+  tests和 production build全部通过；
+- `./scripts/check-docs.sh`：链接、mirror、command metadata、public-content policy、negative tests和双语 parity
+  全部通过；
+- `git diff --check`：通过。
+
+上述 gate关闭第 18 节第 1-17 项验收；基于最新 live tree 的独立 findings-first 实现审计未发现剩余
+P0/P1/P2，关闭第 18 项。RFC-0061 的 18 项验收现已全部完成，状态更新为 `implemented and accepted`。

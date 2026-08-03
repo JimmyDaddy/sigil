@@ -83,5 +83,10 @@ configuration is rejected rather than migrated; replace it with a current templa
 `permission.mode = "manual"` while diagnosing, then use
 [Troubleshooting](troubleshooting.md) for shared symptoms.
 
+Credential rotation on the same route does not invalidate a session. Endpoint path corrections on
+the same trusted origin can rebind automatically; origin, account/tenant, protocol, or missing-
+connection changes require confirmation or a replacement route. `sigil doctor` reports the bounded
+route-recovery state without printing the endpoint or credential identity.
+
 <!-- public-doc-cta: open-provider-guide -->
 Next: [Set up DeepSeek or choose another provider](provider-deepseek.md).

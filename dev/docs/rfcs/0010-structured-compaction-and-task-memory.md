@@ -1,6 +1,6 @@
 # RFC-0010 Structured Compaction and Task Memory
 
-状态：accepted / RFC-0025 K25.1-K25.18F implemented / current roadmap core complete / P10.1-P10.6 project memory productization deferred
+状态：accepted / RFC-0025 K25.1-K25.18F implemented / explicit user-asserted writable-memory V1 implemented / P10.1-P10.6 full project memory productization deferred
 
 创建日期：2026-06-28
 
@@ -166,6 +166,16 @@ RFC-0051/0053 即使全部完成，也只会让单个 Intent/Task 的计划、�
 多次任务中沉淀的项目约束、架构决策和失败经验自动变成可检查、可失效、可删除的长期项目记忆。
 本节把原“cross-session retention / memory editing”开放项收敛为直接可实施的 Project Memory
 计划。
+
+当前已经落地一条不依赖自动提炼的显式 `user_asserted` V1：模型根据用户语义自主选择
+`remember_user_preference` 或 `remember_project_fact`，写操作经过 preview/approval，成功后返回
+durable receipt；ref-only journal 不保存 statement/content digest，正文位于可物理删除 sidecar；
+project fact 按 canonical workspace 隔离，active entry 通过 Context V1 dynamic suffix 召回，并提供
+`inspect_memory` / whole-entry `forget_memory`。该切片默认由 `[memory].writable = false` 关闭；未启用、
+审批拒绝或写入失败时，模型必须说明只能在当前会话保留。它不通过 prompt 关键词匹配建立 hard
+gate，也不声称已完成下面仍然 deferred 的 evidence extraction、supersede/invalidate、branch/snapshot
+validity、automatic promotion、post-pack injection audit 或完整 TUI lineage productization。当前 Context
+V1 candidate 只引用 admission event，不把可能被最终 token pack 淘汰的候选记录成“已经使用”。
 
 ### 8.2.1 Scope and truth model
 

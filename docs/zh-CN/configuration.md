@@ -53,6 +53,10 @@ theme = "sigil_dark"
 配置面板会保留未保存草稿并持续显示 **保存失败**；能够识别具体字段时还会自动聚焦该字段。再次编辑
 会清除已经过期的错误状态，让下一次保存结果保持明确。
 
+Connection ID 用于标识保存的 route，但本身不等于 trust 授权。只修正同一 endpoint origin 内的路径时，
+恢复的 session 可以自动 rebind；origin、Provider 协议或账户/tenant 边界变化时，发送任何历史前都必须
+经过精确的用户确认或选择 replacement route。
+
 ## 工作区
 
 `workspace.root = "."` 表示使用 `sigil` 的启动目录。文件工具会留在这个工作区内；只有明确配置了范围足够小的外部目录规则时才例外。修改前请阅读[权限与沙箱](permissions-and-sandbox.md)。

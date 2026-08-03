@@ -72,5 +72,9 @@ secret 写入 `sigil.toml`、workspace、session、模型缓存、日志、快�
 服务特有，再进入
 [故障排查](troubleshooting.md)。
 
+同一 route 上轮换凭据不会使 session 失效。同一可信 origin 内修正 endpoint 路径可以自动 rebind；
+origin、账户/tenant、协议变化或 connection 缺失时，需要确认或选择 replacement route。
+`sigil doctor` 只报告有界 route 恢复状态，不会打印 endpoint 或 credential identity。
+
 <!-- public-doc-cta: open-provider-guide -->
 下一步：[设置 DeepSeek，或选择其他模型服务](provider-deepseek.md)。
