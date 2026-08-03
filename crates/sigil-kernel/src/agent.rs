@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use crate::{
     FrozenProviderRequestMaterial, RuntimeContextCandidates,
     approval::{
-        ApprovalHandler, ApprovalRequestIdentityV2, AutoApproveHandler, ToolApproval,
-        ToolApprovalContext,
+        APPROVAL_REQUEST_NO_EXPIRY_MS, ApprovalHandler, ApprovalRequestIdentityV2,
+        AutoApproveHandler, ToolApproval, ToolApprovalContext,
     },
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig, TaskRoutingPolicy},
@@ -2695,7 +2695,6 @@ where
             let session_id = tool_ctx
                 .session_scope_id()
                 .ok_or_else(|| anyhow!("interactive approval requires a bound session scope"))?;
-            let requested_at_ms = unix_time_ms();
             Some(ApprovalRequestIdentityV2 {
                 session_id: session_id.to_owned(),
                 run_id: root_logical_run_id.to_owned(),
@@ -2704,7 +2703,7 @@ where
                 plan_hash: permission_plan.plan_hash.clone(),
                 policy_version: policy_fingerprint.clone(),
                 execution_binding_hash: permission_plan.plan_hash.clone(),
-                expires_at_ms: requested_at_ms.saturating_add(5 * 60 * 1_000),
+                expires_at_ms: APPROVAL_REQUEST_NO_EXPIRY_MS,
             })
         } else {
             None
@@ -2793,9 +2792,7 @@ where
                     .expect("interactive Ask decisions must bind an approval identity");
                 let preview = preview_capture.preview.clone();
                 let preview_hash = preview_capture.preview_hash.clone();
-                let requested_at_ms = approval_identity
-                    .expires_at_ms
-                    .saturating_sub(5 * 60 * 1_000);
+                let requested_at_ms = unix_time_ms();
                 let approval_context = ToolApprovalContext {
                     identity: approval_identity.clone(),
                     permission_signature: approval_permission_signature(

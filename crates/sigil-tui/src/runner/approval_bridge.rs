@@ -1,14 +1,7 @@
-use std::{
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::sync::mpsc;
 
 use anyhow::{Result, anyhow};
-use sigil_kernel::{
-    ApprovalHandler, ToolApproval, ToolApprovalContext, ToolCall, ToolSpec, saturating_elapsed,
-};
-
-const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+use sigil_kernel::{ApprovalHandler, ToolApproval, ToolApprovalContext, ToolCall, ToolSpec};
 
 #[derive(Debug, Clone)]
 pub(super) enum ApprovalSignal {
@@ -30,22 +23,11 @@ pub(super) struct ApprovalDeliveryAcknowledgement {
 
 pub(super) struct ChannelApprovalHandler {
     decision_rx: mpsc::Receiver<ApprovalSignal>,
-    timeout: Duration,
 }
 
 impl ChannelApprovalHandler {
     pub(super) fn new(decision_rx: mpsc::Receiver<ApprovalSignal>) -> Self {
-        Self::with_timeout(decision_rx, DEFAULT_APPROVAL_TIMEOUT)
-    }
-
-    pub(super) fn with_timeout(
-        decision_rx: mpsc::Receiver<ApprovalSignal>,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            decision_rx,
-            timeout,
-        }
+        Self { decision_rx }
     }
 }
 
@@ -74,12 +56,8 @@ impl ChannelApprovalHandler {
         call: &ToolCall,
         expected_approval_request_id: Option<&str>,
     ) -> Result<ToolApproval> {
-        let started = Instant::now();
         loop {
-            let Some(remaining) = self.timeout.checked_sub(saturating_elapsed(started)) else {
-                return Ok(timeout_denial(self.timeout));
-            };
-            match self.decision_rx.recv_timeout(remaining) {
+            match self.decision_rx.recv() {
                 Ok(ApprovalSignal::Decision {
                     call_id,
                     approval_request_id,
@@ -113,19 +91,8 @@ impl ChannelApprovalHandler {
                         reason: "run cancelled from TUI".to_owned(),
                     });
                 }
-                Err(error) => {
-                    if matches!(error, mpsc::RecvTimeoutError::Timeout) {
-                        return Ok(timeout_denial(self.timeout));
-                    }
-                    return Err(anyhow!("approval channel closed: {error}"));
-                }
+                Err(error) => return Err(anyhow!("approval channel closed: {error}")),
             }
         }
-    }
-}
-
-fn timeout_denial(timeout: Duration) -> ToolApproval {
-    ToolApproval::Expired {
-        reason: format!("approval timed out after {} seconds", timeout.as_secs()),
     }
 }

@@ -1,5 +1,8 @@
 use std::path::Path;
 
+use anyhow::Result;
+use serde_json::json;
+
 use crate::{
     ControlEntry, PlanApprovalExpiry, PlanPermissionGrantedEntry, Session, SessionLogEntry,
     TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, ToolApprovalSessionGrantEntry,
@@ -14,6 +17,7 @@ use crate::{
 };
 
 use super::AgentRunOptions;
+use super::tool_audit::stable_json_hash;
 
 pub(super) type PlanApprovalAuthority = PlanPermissionGrantedEntry;
 
@@ -135,7 +139,9 @@ pub(super) fn session_grant_covers_decision(
         && grant.facets == shape.facets
         && grant.scope == shape.scope
         && grant.containment_binding == containment_binding
-        && grant.policy_version == policy_version
+        && (grant.policy_version == policy_version
+            || session_grant_policy_fingerprint(decision)
+                .is_ok_and(|fingerprint| fingerprint == grant.policy_version))
         && match grant.scope {
             ToolApprovalSessionGrantScope::ExactSubjects => {
                 grant_subjects_match_decision(&grant.subjects, &decision.subjects)
@@ -152,6 +158,30 @@ pub(super) fn session_grant_covers_decision(
                     })
             }
         }
+}
+
+pub(super) fn session_grant_policy_fingerprint(decision: &PermissionDecision) -> Result<String> {
+    let subjects = decision
+        .subjects
+        .iter()
+        .map(ToolSubjectAudit::from)
+        .collect::<Vec<_>>();
+    stable_json_hash(&json!({
+        "schema_version": 1,
+        "access": decision.access,
+        "network_effect": decision.network_effect,
+        "local_policy_decision": decision.local_policy_decision,
+        "network_policy_decision": decision.network_policy_decision,
+        "source_policy_decision": decision.source_policy_decision,
+        "operation": decision.operation,
+        "risk": decision.risk,
+        "subjects": subjects,
+        "subject_zones": decision.subject_zones,
+        "external_directory_required": decision.external_directory_required,
+        "confirmation": decision.confirmation,
+        "snapshot_required": decision.snapshot_required,
+    }))
+    .map(|digest| format!("session-scope-sha256:{digest}"))
 }
 
 fn grant_subjects_match_decision(

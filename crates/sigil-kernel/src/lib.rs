@@ -91,8 +91,8 @@ pub use agent_thread::{
     stale_expired_agent_approval_routes,
 };
 pub use approval::{
-    ApprovalHandler, ApprovalRequestIdentityV2, AutoApproveHandler, ToolApproval,
-    ToolApprovalContext,
+    APPROVAL_REQUEST_NO_EXPIRY_MS, ApprovalHandler, ApprovalRequestIdentityV2, AutoApproveHandler,
+    ToolApproval, ToolApprovalContext,
 };
 pub use cache_layout::{
     CACHE_LAYOUT_PROOF_SCHEMA_VERSION, CacheLayoutMutationKind, CacheLayoutMutationProofV1,

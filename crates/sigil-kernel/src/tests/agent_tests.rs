@@ -60,6 +60,35 @@ use super::{
     TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, emit_tool_result,
 };
 
+#[test]
+fn emitting_small_tool_results_keeps_later_model_previews_visible() -> Result<()> {
+    let mut session = Session::new("test", "model");
+    session.begin_tool_model_view_run();
+    let mut handler = RecordingEventHandler::default();
+
+    for index in 0..12 {
+        let tool_name = if index % 2 == 0 { "read_file" } else { "shell" };
+        let body = format!("small result {index}");
+        emit_tool_result(
+            &mut session,
+            &mut handler,
+            ToolResult::ok(
+                format!("call-small-{index}"),
+                tool_name,
+                body.clone(),
+                ToolResultMeta::default(),
+            ),
+        )?;
+        assert!(matches!(
+            session.entries().last(),
+            Some(SessionLogEntry::ToolResultV2(result))
+                if result.initial_model_view.preview == body
+        ));
+    }
+
+    Ok(())
+}
+
 fn declared_test_permission_plan<T: Tool + ?Sized>(
     tool: &T,
     args: &Value,
@@ -1164,8 +1193,12 @@ impl Tool for BashCargoCheckFamilyTool {
     fn permission_plan(
         &self,
         _ctx: &crate::ToolContext,
-        _args: &serde_json::Value,
+        args: &serde_json::Value,
     ) -> Result<crate::ToolPermissionPlanDraft> {
+        let command = args
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing command"))?;
         Ok(crate::ToolPermissionPlanDraft {
             access: ToolAccess::Execute,
             operation: crate::ToolOperation::ExecuteWorkspaceCheckCommand,
@@ -1173,10 +1206,7 @@ impl Tool for BashCargoCheckFamilyTool {
                 crate::ToolPermissionEffect::FileRead,
                 crate::ToolPermissionEffect::ExecuteWorkspaceCode,
             ]),
-            subjects: vec![ToolSubject::command(
-                "family:cargo_check",
-                "family:cargo_check",
-            )],
+            subjects: vec![ToolSubject::command(command, "family:cargo_check")],
             analysis: crate::ToolAnalysisStatus::Complete,
             containment: crate::ExecutionContainmentRequest {
                 filesystem: crate::FilesystemContainment::WorkspaceAndScratch,
@@ -1916,6 +1946,20 @@ impl ApprovalHandler for ApproveForSessionHandler {
     ) -> Result<ToolApproval> {
         self.approvals.fetch_add(1, Ordering::SeqCst);
         Ok(ToolApproval::ApproveForSession)
+    }
+
+    fn approve_tool_call_with_context(
+        &mut self,
+        call: &ToolCall,
+        spec: &crate::ToolSpec,
+        context: &crate::ToolApprovalContext,
+    ) -> Result<ToolApproval> {
+        assert_eq!(context.expires_at_ms, crate::APPROVAL_REQUEST_NO_EXPIRY_MS);
+        assert_eq!(
+            context.identity.expires_at_ms,
+            crate::APPROVAL_REQUEST_NO_EXPIRY_MS
+        );
+        self.approve_tool_call(call, spec)
     }
 }
 
@@ -7196,6 +7240,7 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
         registry,
     );
     let workspace = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
     let run_options = || AgentRunOptions {
         workspace_root: workspace.path().to_path_buf(),
         max_turns: Some(4),
@@ -7211,7 +7256,11 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
         memory_config: MemoryConfig { enabled: false },
         compaction_config: CompactionConfig::default(),
     };
-    let mut session = Session::new("mock-session-grant-cargo-check", "mock-model");
+    let mut session = Session::load_from_store(
+        "mock-session-grant-cargo-check",
+        "mock-model",
+        store.clone(),
+    )?;
     let mut handler = RecordingEventHandler::default();
     let mut approval_handler = ApproveForSessionHandler {
         approvals: Arc::clone(&approvals),
@@ -7226,6 +7275,9 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
             &mut approval_handler,
         )
         .await?;
+    drop(session);
+    let mut session =
+        Session::load_from_store("mock-session-grant-cargo-check", "mock-model", store)?;
     let second = agent
         .run_with_approval(
             &mut session,
@@ -7255,6 +7307,7 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
             SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
                 if grant.source_call_id == "call-cargo-1"
                     && grant.tool_name == "bash"
+                    && grant.policy_version.starts_with("session-scope-sha256:")
                     && grant.subjects.len() == 1
                     && grant.subjects[0].identity_sha256
                         == crate::stable_event_hash(b"family:cargo_check")

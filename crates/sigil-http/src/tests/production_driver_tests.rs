@@ -2143,7 +2143,6 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
             &call(),
             &spec(ToolAccess::Read, None),
             &approval_identity(),
-            Duration::from_secs(1),
             false,
             unavailable_session_grant_reason(),
             crate::HttpPendingApprovalDisplay::default(),
@@ -2169,7 +2168,6 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
         .wait_for_decision("call-1", &pending.approval_request_id)
         .expect("resolved wait should finish");
 
-    assert!(!outcome.expired);
     assert!(matches!(
         outcome.decision,
         Some(HttpApprovalDecisionRecord {
@@ -2180,7 +2178,7 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
 }
 
 #[test]
-fn approval_broker_expires_and_cleans_up_without_fabricating_a_decision() {
+fn approval_broker_keeps_an_idle_request_pending_until_an_explicit_decision() {
     let broker = HttpApprovalBroker::default();
     let pending = broker
         .register(
@@ -2188,26 +2186,42 @@ fn approval_broker_expires_and_cleans_up_without_fabricating_a_decision() {
             &call(),
             &spec(ToolAccess::Read, None),
             &approval_identity(),
-            Duration::ZERO,
             false,
             unavailable_session_grant_reason(),
             crate::HttpPendingApprovalDisplay::default(),
         )
         .expect("approval should register");
 
-    let outcome = broker
-        .wait_for_decision("call-1", &pending.approval_request_id)
-        .expect("expiry should be a typed denial path");
-
-    assert!(outcome.expired);
-    assert!(outcome.decision.is_none());
+    std::thread::sleep(Duration::from_millis(20));
     assert!(
         broker
             .pending
             .lock()
             .expect("broker should lock")
-            .is_empty()
+            .contains_key(&pending.approval_request_id)
     );
+    broker
+        .resolve(
+            "call-1",
+            &pending.approval_request_id,
+            HttpApprovalDecisionRecord {
+                run_id: "run-1".to_owned(),
+                call_id: "call-1".to_owned(),
+                decision: ToolApprovalUserDecision::Denied,
+                reason: Some("explicit denial".to_owned()),
+            },
+        )
+        .expect("explicit decision should resolve");
+    let outcome = broker
+        .wait_for_decision("call-1", &pending.approval_request_id)
+        .expect("explicit decision should end the wait");
+    assert!(matches!(
+        outcome.decision,
+        Some(HttpApprovalDecisionRecord {
+            decision: ToolApprovalUserDecision::Denied,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -2219,7 +2233,6 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
             &call(),
             &spec(ToolAccess::Write, None),
             &approval_identity(),
-            Duration::from_secs(1),
             false,
             unavailable_session_grant_reason(),
             crate::HttpPendingApprovalDisplay::default(),
@@ -2239,7 +2252,6 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
         .expect("decision should resolve");
     let mut handler = HttpProductionApprovalHandler {
         run_id: "run-1".to_owned(),
-        registry: Weak::new(),
         broker,
     };
 
@@ -2265,7 +2277,6 @@ fn approval_handler_preserves_bounded_session_decisions() {
             &call(),
             &spec(ToolAccess::Read, None),
             &approval_identity(),
-            Duration::from_secs(1),
             true,
             None,
             crate::HttpPendingApprovalDisplay::default(),
@@ -2286,7 +2297,6 @@ fn approval_handler_preserves_bounded_session_decisions() {
         .expect("session decision should resolve");
     let mut handler = HttpProductionApprovalHandler {
         run_id: "run-1".to_owned(),
-        registry: Weak::new(),
         broker,
     };
 

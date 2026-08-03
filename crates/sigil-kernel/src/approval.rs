@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ToolCall, ToolSpec};
 
+/// Sentinel carried by the V2 wire shape for approvals that remain pending until an explicit
+/// decision, cancellation, route failure, or run/session shutdown. This is JavaScript's maximum
+/// safe integer so Desktop can round-trip the exact request identity without precision loss.
+pub const APPROVAL_REQUEST_NO_EXPIRY_MS: u64 = 9_007_199_254_740_991;
+
 /// Exact V2 identity shared by kernel, route adapters, durable audit and clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -45,7 +50,7 @@ pub enum ToolApproval {
     ApproveWithArgs { args_json: String },
     /// Deny the tool call and persist a user-facing reason.
     Deny { reason: String },
-    /// The exact approval request expired before a user decision was accepted.
+    /// A legacy or externally bounded approval request expired before a user decision was accepted.
     Expired { reason: String },
     /// The approval route was cancelled before a user decision was accepted.
     Cancelled { reason: String },

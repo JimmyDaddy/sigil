@@ -306,9 +306,19 @@ fn approval_request_id(message: &WorkerMessage) -> &str {
 }
 
 #[test]
-fn approval_handler_denies_when_decision_channel_stays_idle() -> Result<()> {
-    let (_tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_millis(1));
+fn approval_handler_waits_for_an_explicit_decision_without_an_idle_timeout() -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
+    let mut handler = ChannelApprovalHandler::new(rx);
+    let sender = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        let (acknowledgement_tx, _acknowledgement_rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(ApprovalSignal::Decision {
+            call_id: "call-1".to_owned(),
+            approval_request_id: "approval-1".to_owned(),
+            approval: ToolApproval::Approve,
+            acknowledgement_tx,
+        })
+    });
     let approval = handler.approve_tool_call(
         &ToolCall {
             id: "call-1".to_owned(),
@@ -326,45 +336,17 @@ fn approval_handler_denies_when_decision_channel_stays_idle() -> Result<()> {
         },
     )?;
 
-    assert!(matches!(
-        approval,
-        ToolApproval::Expired { reason } if reason.contains("approval timed out")
-    ));
-    Ok(())
-}
-
-#[test]
-fn approval_handler_with_zero_timeout_denies_immediately() -> Result<()> {
-    let (_tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::ZERO);
-    let approval = handler.approve_tool_call(
-        &ToolCall {
-            id: "call-1".to_owned(),
-            name: "write_file".to_owned(),
-            args_json: "{}".to_owned(),
-        },
-        &ToolSpec {
-            name: "write_file".to_owned(),
-            description: "write".to_owned(),
-            input_schema: serde_json::json!({"type":"object"}),
-            category: ToolCategory::File,
-            access: sigil_kernel::ToolAccess::Write,
-            network_effect: None,
-            preview: ToolPreviewCapability::Required,
-        },
-    )?;
-
-    assert!(matches!(
-        approval,
-        ToolApproval::Expired { reason } if reason == "approval timed out after 0 seconds"
-    ));
+    sender
+        .join()
+        .expect("approval sender thread should not panic")?;
+    assert!(matches!(approval, ToolApproval::Approve));
     Ok(())
 }
 
 #[test]
 fn approval_handler_ignores_other_call_ids_until_matching_decision_arrives() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let mut handler = ChannelApprovalHandler::new(rx);
     let (wrong_ack_tx, _wrong_ack_rx) = std::sync::mpsc::sync_channel(1);
     tx.send(ApprovalSignal::Decision {
         call_id: "other-call".to_owned(),
@@ -406,7 +388,7 @@ fn approval_handler_ignores_other_call_ids_until_matching_decision_arrives() -> 
 #[test]
 fn approval_handler_forwards_approved_argument_overrides() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let mut handler = ChannelApprovalHandler::new(rx);
     let (acknowledgement_tx, _acknowledgement_rx) = std::sync::mpsc::sync_channel(1);
     tx.send(ApprovalSignal::Decision {
         call_id: "call-spawn".to_owned(),
@@ -444,7 +426,7 @@ fn approval_handler_forwards_approved_argument_overrides() -> Result<()> {
 #[test]
 fn approval_handler_rejects_stale_request_id_before_accepting_exact_decision() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let mut handler = ChannelApprovalHandler::new(rx);
     let (stale_ack_tx, stale_ack_rx) = std::sync::mpsc::sync_channel(1);
     tx.send(ApprovalSignal::Decision {
         call_id: "call-1".to_owned(),
@@ -566,7 +548,7 @@ fn approval_denial_is_forwarded_to_active_run() -> Result<()> {
 #[test]
 fn approval_handler_returns_cancel_denial() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let mut handler = ChannelApprovalHandler::new(rx);
     tx.send(ApprovalSignal::Cancel)?;
 
     let approval = handler.approve_tool_call(
@@ -597,7 +579,7 @@ fn approval_handler_returns_cancel_denial() -> Result<()> {
 fn approval_handler_errors_when_channel_closes() {
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
     drop(tx);
-    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    let mut handler = ChannelApprovalHandler::new(rx);
 
     let error = handler
         .approve_tool_call(

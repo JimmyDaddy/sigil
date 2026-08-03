@@ -96,7 +96,6 @@ use crate::{
     HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
 };
 
-const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_HTTP_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTTP_EXACT_QUEUE_PROMPTS: usize = 128;
 const MAX_HTTP_QUEUE_PREVIEW_CHARS: usize = 240;
@@ -110,8 +109,6 @@ pub struct HttpProductionRunDriverOptions {
     pub config_path: PathBuf,
     /// Process launch working directory used for workspace resolution.
     pub launch_cwd: PathBuf,
-    /// Maximum time an externally interactive approval may remain pending.
-    pub approval_timeout: Duration,
     /// Maximum time allowed for cooperative cancellation quiescence.
     pub cancellation_timeout: Duration,
     /// Workspace-bound lifecycle truth used to authorize historical session reopen.
@@ -125,7 +122,6 @@ impl HttpProductionRunDriverOptions {
         Self {
             config_path: config_path.into(),
             launch_cwd: launch_cwd.into(),
-            approval_timeout: DEFAULT_HTTP_APPROVAL_TIMEOUT,
             cancellation_timeout: DEFAULT_HTTP_CANCELLATION_TIMEOUT,
             session_lifecycle: None,
         }
@@ -3231,14 +3227,12 @@ impl HttpRunSupervisor {
         let event_handler = HttpProductionEventHandler {
             durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
             run_id: self.start.run.id.clone(),
-            approval_timeout: self.options.approval_timeout,
             registry: Arc::downgrade(&registry),
             broker: Arc::clone(&self.broker),
             event_bus: Arc::clone(&self.event_bus),
         };
         let approval_handler = HttpProductionApprovalHandler {
             run_id: self.start.run.id.clone(),
-            registry: Arc::downgrade(&registry),
             broker: Arc::clone(&self.broker),
         };
         let mut execution =
@@ -3913,7 +3907,6 @@ impl HttpRunSupervisor {
         let mut event_handler = HttpProductionEventHandler {
             durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
             run_id: self.start.run.id.clone(),
-            approval_timeout: self.options.approval_timeout,
             registry: Arc::downgrade(registry),
             broker: Arc::clone(&self.broker),
             event_bus: Arc::clone(&self.event_bus),
@@ -4143,7 +4136,6 @@ impl HttpRunSupervisor {
 struct HttpProductionEventHandler {
     durable_session_scope_id: String,
     run_id: String,
-    approval_timeout: Duration,
     registry: Weak<HttpSessionRunRegistry>,
     broker: Arc<HttpApprovalBroker>,
     event_bus: Arc<HttpLiveEventBus>,
@@ -4330,7 +4322,6 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                         call,
                         spec,
                         approval_identity,
-                        self.approval_timeout,
                         *session_grant_available,
                         *session_grant_unavailable_reason,
                         display,
@@ -4390,7 +4381,6 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
 
 struct HttpProductionApprovalHandler {
     run_id: String,
-    registry: Weak<HttpSessionRunRegistry>,
     broker: Arc<HttpApprovalBroker>,
 }
 
@@ -4413,17 +4403,6 @@ impl ApprovalHandler for HttpProductionApprovalHandler {
         let outcome = self
             .broker
             .wait_for_decision(&call.id, &context.identity.approval_request_id)?;
-        if outcome.expired
-            && let Some(registry) = self.registry.upgrade()
-        {
-            registry
-                .expire_approval_request_exact(
-                    &self.run_id,
-                    &call.id,
-                    &context.identity.approval_request_id,
-                )
-                .map_err(|error| anyhow!(error))?;
-        }
         match outcome.decision {
             Some(HttpApprovalDecisionRecord {
                 decision: ToolApprovalUserDecision::Approved,
@@ -4440,8 +4419,8 @@ impl ApprovalHandler for HttpProductionApprovalHandler {
                 decision: ToolApprovalUserDecision::ApprovedForSession,
                 ..
             }) => Ok(ToolApproval::ApproveForSession),
-            None => Ok(ToolApproval::Expired {
-                reason: "HTTP approval request expired before a decision arrived".to_owned(),
+            None => Ok(ToolApproval::Cancelled {
+                reason: "HTTP approval route ended without a decision".to_owned(),
             }),
         }
     }
@@ -4463,7 +4442,6 @@ impl HttpApprovalBroker {
         call: &ToolCall,
         spec: &ToolSpec,
         identity: &ApprovalRequestIdentityV2,
-        timeout: Duration,
         session_grant_available: bool,
         session_grant_unavailable_reason: Option<
             sigil_kernel::ToolApprovalSessionGrantUnavailableReason,
@@ -4478,15 +4456,9 @@ impl HttpApprovalBroker {
                 "production approval session-grant availability invariant changed"
             ));
         }
-        let now_ms = current_unix_time_ms();
-        let identity_timeout = Duration::from_millis(identity.expires_at_ms.saturating_sub(now_ms));
-        let timeout = timeout.min(identity_timeout);
         let tool_call_hash = tool_call_hash(call)?;
         let slot = Arc::new(HttpApprovalSlot {
             call_id: call.id.clone(),
-            deadline: Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
             state: Mutex::new(HttpApprovalSlotState::Waiting),
             changed: Condvar::new(),
         });
@@ -4577,7 +4549,6 @@ impl HttpApprovalBroker {
                     self.remove(approval_request_id, &slot);
                     return Ok(HttpApprovalWaitOutcome {
                         decision: Some(decision),
-                        expired: false,
                     });
                 }
                 HttpApprovalSlotState::Cancelled => {
@@ -4587,21 +4558,10 @@ impl HttpApprovalBroker {
                 }
                 HttpApprovalSlotState::Waiting => {}
             }
-            let remaining = slot.deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                *state = HttpApprovalSlotState::Cancelled;
-                drop(state);
-                self.remove(approval_request_id, &slot);
-                return Ok(HttpApprovalWaitOutcome {
-                    decision: None,
-                    expired: true,
-                });
-            }
-            let waited = slot
+            state = slot
                 .changed
-                .wait_timeout(state, remaining)
+                .wait(state)
                 .map_err(|_| anyhow!("production approval slot is unavailable"))?;
-            state = waited.0;
         }
     }
 
@@ -4647,7 +4607,6 @@ impl HttpApprovalBroker {
 
 struct HttpApprovalSlot {
     call_id: String,
-    deadline: Instant,
     state: Mutex<HttpApprovalSlotState>,
     changed: Condvar,
 }
@@ -4660,7 +4619,6 @@ enum HttpApprovalSlotState {
 
 struct HttpApprovalWaitOutcome {
     decision: Option<HttpApprovalDecisionRecord>,
-    expired: bool,
 }
 
 #[allow(clippy::too_many_arguments)]

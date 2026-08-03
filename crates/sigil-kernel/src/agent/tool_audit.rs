@@ -27,6 +27,8 @@ use crate::{
     tool::{ToolSubject, ToolSubjectKind, ToolSubjectScope},
 };
 
+use super::approval_policy::session_grant_policy_fingerprint;
+
 pub(super) fn has_external_subject(subjects: &[ToolSubject]) -> bool {
     subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path && subject.scope == ToolSubjectScope::External
@@ -401,7 +403,7 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
         facets: shape.facets,
         scope: shape.scope,
         containment_binding,
-        policy_version: identity.policy_version.clone(),
+        policy_version: session_grant_policy_fingerprint(decision)?,
         expires: ToolApprovalSessionGrantExpiry::Session,
         granted_at_ms: super::unix_time_ms(),
     });
