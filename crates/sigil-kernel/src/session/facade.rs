@@ -482,18 +482,35 @@ impl Session {
             .tool_model_view_run_budget_remaining = Some(TOOL_MODEL_VIEW_RUN_BUDGET_BYTES);
     }
 
-    pub(crate) fn reserve_tool_model_view_bytes(&mut self, tool_name: &str) -> usize {
+    pub(crate) fn tool_model_view_available_bytes(&self, tool_name: &str) -> usize {
         let per_result_limit = tool_model_view_initial_limit(tool_name);
+        // Typed artifact reads already have their own per-call and per-turn byte budgets. They
+        // must not consume, or be hidden by, the aggregate budget for initial tool previews;
+        // otherwise exhausting that preview budget also disables the documented recovery path.
+        if tool_name.rsplit("__").next() == Some("read_tool_artifact") {
+            return per_result_limit;
+        }
         let Some(remaining) = self
             .runtime_attachments
             .tool_model_view_run_budget_remaining
-            .as_mut()
+            .as_ref()
         else {
             return per_result_limit;
         };
-        let reserved = per_result_limit.min(*remaining);
-        *remaining = remaining.saturating_sub(reserved);
-        reserved
+        per_result_limit.min(*remaining)
+    }
+
+    pub(crate) fn consume_tool_model_view_bytes(&mut self, tool_name: &str, bytes: usize) {
+        if tool_name.rsplit("__").next() == Some("read_tool_artifact") {
+            return;
+        }
+        if let Some(remaining) = self
+            .runtime_attachments
+            .tool_model_view_run_budget_remaining
+            .as_mut()
+        {
+            *remaining = remaining.saturating_sub(bytes);
+        }
     }
 
     /// Persists one tool result and its body-free receipts/provenance as one crash-safe bundle.

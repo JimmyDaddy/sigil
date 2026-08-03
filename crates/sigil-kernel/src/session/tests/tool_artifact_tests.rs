@@ -91,7 +91,7 @@ fn root_run_budget_bounds_many_initial_tool_previews() -> Result<()> {
 
     for index in 0..20 {
         let tool_name = if index % 2 == 0 { "read_file" } else { "shell" };
-        let limit = session.reserve_tool_model_view_bytes(tool_name);
+        let limit = session.tool_model_view_available_bytes(tool_name);
         let (recorded, _) = ToolResultRecordedV2::capture_with_model_preview_limit(
             &ToolResult::ok(
                 format!("call-{index}"),
@@ -103,10 +103,64 @@ fn root_run_budget_bounds_many_initial_tool_previews() -> Result<()> {
             ToolArtifactSensitivity::Ordinary,
             limit,
         )?;
-        preview_bytes += recorded.initial_model_view.preview.len();
+        let actual_preview_bytes = recorded.initial_model_view.preview.len();
+        session.consume_tool_model_view_bytes(tool_name, actual_preview_bytes);
+        preview_bytes += actual_preview_bytes;
     }
 
     assert_eq!(preview_bytes, TOOL_MODEL_VIEW_RUN_BUDGET_BYTES);
+    Ok(())
+}
+
+#[test]
+fn typed_artifact_retrieval_remains_visible_after_initial_preview_budget_is_exhausted() {
+    let mut session = Session::new("test", "model");
+    session.begin_tool_model_view_run();
+
+    while session.tool_model_view_available_bytes("shell") > 0 {
+        let available = session.tool_model_view_available_bytes("shell");
+        session.consume_tool_model_view_bytes("shell", available);
+    }
+
+    assert_eq!(session.tool_model_view_available_bytes("shell"), 0);
+    assert_eq!(
+        session.tool_model_view_available_bytes("read_tool_artifact"),
+        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES
+    );
+}
+
+#[test]
+fn root_run_budget_charges_actual_preview_bytes_instead_of_tool_maxima() -> Result<()> {
+    let mut session = Session::new("test", "model");
+    session.begin_tool_model_view_run();
+
+    for index in 0..20 {
+        let tool_name = if index % 2 == 0 { "read_file" } else { "shell" };
+        let body = format!("small result {index}");
+        let limit = session.tool_model_view_available_bytes(tool_name);
+        let (recorded, _) = ToolResultRecordedV2::capture_with_model_preview_limit(
+            &ToolResult::ok(
+                format!("call-small-{index}"),
+                tool_name,
+                body.clone(),
+                crate::ToolResultMeta::default(),
+            ),
+            None,
+            ToolArtifactSensitivity::Ordinary,
+            limit,
+        )?;
+        assert_eq!(recorded.initial_model_view.preview, body);
+        session.consume_tool_model_view_bytes(tool_name, recorded.initial_model_view.preview.len());
+    }
+
+    assert_eq!(
+        session.tool_model_view_available_bytes("shell"),
+        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES
+    );
+    assert_eq!(
+        session.tool_model_view_available_bytes("read_file"),
+        TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES
+    );
     Ok(())
 }
 

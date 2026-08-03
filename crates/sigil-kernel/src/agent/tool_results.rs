@@ -53,7 +53,7 @@ where
     } else {
         ToolArtifactSensitivity::ExternalUntrusted
     };
-    let model_preview_limit = session.reserve_tool_model_view_bytes(&result.tool_name);
+    let model_preview_limit = session.tool_model_view_available_bytes(&result.tool_name);
     let artifact_store = session.tool_artifact_store();
     let (recorded, display) = ToolResultRecordedV2::capture_with_model_preview_limit(
         &result,
@@ -95,6 +95,7 @@ where
         };
         controls.push(ControlEntry::ExternalProvenance(provenance));
     }
+    let model_preview_bytes = recorded.initial_model_view.preview.len();
     if let Err(error) = session.append_tool_result_bundle(recorded, controls.clone()) {
         if !registrations.is_empty()
             && let Some(registrar) = registrar.as_ref()
@@ -103,6 +104,7 @@ where
         }
         return Err(error);
     }
+    session.consume_tool_model_view_bytes(&result.tool_name, model_preview_bytes);
     if !registrations.is_empty()
         && let Some(registrar) = registrar.as_ref()
         && let Err(error) = registrar.commit_message(&message.id)

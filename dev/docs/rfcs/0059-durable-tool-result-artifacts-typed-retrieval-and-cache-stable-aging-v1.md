@@ -6,6 +6,11 @@
 
 实现完成日期：2026-07-29
 
+后续修订：RFC-0062 在 `ToolResultRecordedV3` clean cutover 中保留本 RFC 的 artifact、typed retrieval、
+retention、pressure projection 与 cache-stable aging，同时把 V2 的 root-run cumulative initial-preview cap
+替换为 per-assistant-tool-batch byte cap。RFC-0059 的 `accepted / implemented` 状态描述 V2 基线；V3 修订在
+RFC-0062 标记 implemented 前不得写成现状。
+
 依赖：
 
 - [Rust agent core technical solution](../sigil-rust-agent-core-technical-solution.md)
@@ -355,12 +360,20 @@ pub struct ToolResultRecordedV2 {
 - hard fail 仍使用全局 `MAX_EVENT_BYTES`，但普通 tool result 不应接近 1 MiB；
 - `initial_model_view.preview` 普通工具默认不超过 16 KiB；read/list/glob/grep/search 类高流量工具
   默认不超过 8 KiB；
-- 一个 root agent run 的所有 initial preview 正文共享 64 KiB aggregate cap；耗尽后继续记录
-  facts、opaque artifact ref 与 typed retrieval hint，不回退为 inline body；
+- 一个 root agent run 的所有普通 initial preview 正文共享 64 KiB aggregate cap；预算只按实际进入
+  `initial_model_view.preview` 的 UTF-8 bytes 扣减，不按 tool-specific 最大额度预扣；耗尽后继续记录
+  facts、opaque artifact ref 与 typed retrieval hint，不回退为 inline body；`read_tool_artifact` 的
+  provider-visible page 不消费也不受该 initial-preview cap 阻断，而由独立的 per-call/per-turn
+  retrieval budget 约束，避免恢复通道被自身预算锁死；
 - 截断 preview 在 byte cap 内使用 UTF-8-safe head/tail；tool-specific projector 可以在同一总预算内
   使用更高信息密度的结构化结果；
 - event 超过 64 KiB target 时再次 deterministic shrink；仍超过 hard limit 才返回
   `tool_result_descriptor_too_large`，不能回退为 inline raw body。
+
+上述 root-run aggregate cap 是当前 V2 implemented baseline。RFC-0062 V3 cutover 将预算面拆开：每个
+assistant tool-call batch 独立使用 64 KiB actual-byte preview cap，并先保护每个 safe non-empty current
+result 的 minimum preview；跨 batch 的历史总量只由 §11-14 的 token pressure、protected classes 和
+next-epoch aging 管理。历史输出不得把新的 current batch initial preview 预算降为零。
 
 ### 7.5 Token and storage accounting
 
@@ -715,6 +728,11 @@ selection 顺序：
 4. 单个 aged result 目标不超过 1K token；
 5. 同一完整历史 turn 的 aged tool facts 聚合目标不超过 2K token；
 6. fit-required 可以绕过 16K economics threshold，但不能绕过 safety/protection rules。
+
+RFC-0062 V3 materialization 进一步冻结：current assistant tool batch 的 initial projection 在进入本节的
+历史 selection 前已经完成并受到保护；selector 只能从 oldest eligible historical result 回收 token，不能用
+历史压力修改或删除当前 batch。若没有安全候选，则进入 semantic compaction 或明确 context-pressure 分支，
+不能清空最新 tool result 后继续发送。
 
 32K/16K/1K 是首版 telemetry defaults，不是 provider-specific 永久常量。exact tokenizer 可用时使用
 exact token；否则使用 calibrated upper bound。
@@ -1384,9 +1402,14 @@ truth。SQLite 不进入 live writer authority。
   cost-only aging 在有 cache hit 时只保留 candidate、不主动 reset epoch。
 - descriptor projection、artifact GC 和 worker scheduler 使用 changed-family wake、coalescing slot 和
   blocking receive；不存在固定 50 ms scan。
-- latest-session 审计后的 hardening 已补齐：high-volume initial preview 为 8 KiB、普通 preview 为
+- V2 latest-session 审计后的 hardening 已补齐：high-volume initial preview 为 8 KiB、普通 preview 为
   16 KiB、root run aggregate preview 为 64 KiB；`read_tool_artifact` hint 明确使用
-  `line_page/search_literal`。这把单次 run 的初始 tool 正文从“结果数 × 单条 cap”收敛为固定上界。
+  `line_page/search_literal`，其返回 page 只计入独立的 16 KiB per-call、8 次/64 KiB per-turn
+  retrieval budget，不计入 initial-preview aggregate cap。这把单次 run 的初始 tool 正文从
+  “结果数 × 单条 cap”收敛为固定上界，同时保证预算耗尽后的 typed recovery 仍然可见。
+- RFC-0062 V3 将删除 root-run cumulative counter：64 KiB 改为 current assistant batch cap，长 run 的历史
+  tool token 使用本 RFC 已实现的 current/recent/high-signal protection、oldest-eligible batch aging 与
+  next-epoch activation；此条在 RFC-0062 implemented 前仍是 target contract，不冒充 V2 现状。
 - session JSONL、writer lease、lifecycle journal/lease 在创建与 writer-open 时统一收紧到 owner-only；
   Doctor 对最近 stream/lease 和 lifecycle journal 报告权限漂移。
 
