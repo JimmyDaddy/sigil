@@ -3,6 +3,7 @@ use std::{
     path::Path,
 };
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
 use serde_json::json;
 use sigil_kernel::{
@@ -979,6 +980,13 @@ fn render_shell_approval_prioritizes_command_without_internal_identity_or_empty_
             theme::default_palette().surface_code
         )
     );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    terminal.draw(|frame| render_approval_modal(frame, &app))?;
+    let expanded = rendered_content(&terminal);
+    assert!(expanded.contains("local:ask network:allow"));
+    assert!(expanded.contains("Command to run"));
+    assert!(expanded.contains("cargo clippy --workspace --all-targets"));
     Ok(())
 }
 
