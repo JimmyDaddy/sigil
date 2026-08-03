@@ -2993,9 +2993,7 @@ pub struct MemoryConfig {
     #[serde(default = "default_memory_enabled")]
     pub enabled: bool,
     /// Enables model-visible durable memory writes and cross-session retrieval.
-    ///
-    /// This is intentionally independent from workspace instruction loading and defaults off.
-    #[serde(default)]
+    #[serde(default = "default_memory_writable")]
     pub writable: bool,
 }
 
@@ -3003,7 +3001,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             enabled: default_memory_enabled(),
-            writable: false,
+            writable: default_memory_writable(),
         }
     }
 }
@@ -3897,6 +3895,10 @@ fn default_lsp_startup_timeout_ms() -> u64 {
 }
 
 fn default_memory_enabled() -> bool {
+    true
+}
+
+fn default_memory_writable() -> bool {
     true
 }
 

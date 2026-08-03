@@ -155,7 +155,7 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[web].allowed_ports` | `[80, 443]` | Permitted destination ports. |
 | `[web].allowed_domains` / `.blocked_domains` / `.allowed_private_hosts` / `.allowed_private_cidrs` | `[]` | Optional destination lists; private destinations require an explicit match. |
 | `[memory].enabled` | `true` | Loads workspace instruction files. |
-| `[memory].writable` | `false` | Enables approval-gated durable user-preference and current-project-fact tools, local cross-session retrieval, inspect, and physical forget. |
+| `[memory].writable` | `true` | Enables approval-gated durable user-preference and current-project-fact tools, local cross-session retrieval, inspect, and physical forget. Set `false` to opt out. |
 | `[skills].enabled` / `.user_skills` / `.user_agents` | `true` | Enables discovered reusable resources. |
 | `[skills].compatibility_auto_discover` | `true` | Imports standard `.agents/skills`, Codex `.codex/agents`, OpenCode `.opencode/{skills,commands,agents}`, and Claude Code `.claude/{skills,commands,agents}` workspace resources. Set `false` to disable the default compatibility set. |
 | `[skills].compatibility_sources` | `[]` | Adds compatibility sources beyond the default set, such as `"reasonix"` for `.reasonix/agents`; it can also select exact sources while `compatibility_auto_discover = false`. |

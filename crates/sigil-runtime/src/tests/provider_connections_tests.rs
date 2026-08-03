@@ -16,6 +16,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
+#[test]
+fn default_setup_root_config_enables_readable_and_writable_memory() {
+    let config = default_setup_root_config();
+
+    assert!(config.memory.enabled);
+    assert!(config.memory.writable);
+}
+
 #[derive(Clone, Default)]
 struct FakeCredentialStore {
     records: Arc<Mutex<BTreeMap<CredentialId, ProviderCredentialRecord>>>,

@@ -1719,7 +1719,7 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
 }
 
 #[test]
-fn writable_memory_tools_follow_the_independent_default_off_capability() -> Result<()> {
+fn writable_memory_tools_follow_the_independent_writable_capability() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let provider_capabilities =
         provider_capabilities_for_name("deepseek").expect("DeepSeek capabilities");

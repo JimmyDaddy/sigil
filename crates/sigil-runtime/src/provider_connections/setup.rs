@@ -28,7 +28,7 @@ pub fn default_setup_root_config() -> RootConfig {
         },
         model_request: Default::default(),
         permission: PermissionConfig::default(),
-        memory: MemoryConfig::with_enabled(true),
+        memory: MemoryConfig::default(),
         skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),

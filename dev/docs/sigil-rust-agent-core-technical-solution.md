@@ -1250,7 +1250,7 @@ route 同时用作 saved default 与当前 session 的后续 route，减少设�
 
 ### 10.4 Auto Memory
 
-文档型 memory 仍由 `[memory].enabled` 控制并进入稳定 prefix。另有一条显式、默认关闭的可写
+文档型 memory 仍由 `[memory].enabled` 控制并进入稳定 prefix。另有一条显式、默认启用且可退出的可写
 memory vertical slice，由 `[memory].writable` 控制：
 
 - `remember_user_preference` 保存跨 workspace 的稳定交互或工作流偏好；

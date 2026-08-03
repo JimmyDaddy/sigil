@@ -8,6 +8,8 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- Workspace instruction memory and approval-gated durable memory are now enabled by default. Set
+  `[memory].enabled = false` or `[memory].writable = false` to opt out of either capability.
 - Plain `sigil` launches now start a fresh session instead of reopening the most recent conversation.
   Explicit resume keeps the portable transcript across safe endpoint corrections, asks before using
   a changed or unproven destination, and prevents the same session from being opened for writing in

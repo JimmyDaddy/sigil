@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionStrategy, CompactionThresholdStatus,
     ConfigPlatform, ConfigPublishError, DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS,
-    McpServerConfig, McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
+    McpServerConfig, McpServerStartup, McpTrustClass, MemoryConfig, ModelRequestConfig, RootConfig,
     SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement,
     TerminalNotificationMethod, ThemeId, UsageCostCurrency, WebPolicyCap, WebProxyMode,
@@ -2288,7 +2288,7 @@ model = "deepseek-v4-flash"
     .expect("minimal config should parse");
 
     assert!(config.memory.enabled);
-    assert!(!config.memory.writable);
+    assert!(config.memory.writable);
     assert!(!config.code_intelligence.enabled);
     assert_eq!(
         config.code_intelligence.server_startup,
@@ -2310,6 +2310,18 @@ model = "deepseek-v4-flash"
     );
     assert_eq!(config.execution.fallback(), ExecutionSandboxFallback::Deny);
     assert_eq!(config.execution.container_image(), None);
+}
+
+#[test]
+fn memory_config_defaults_writable_on_and_preserves_explicit_opt_out() {
+    let defaults: MemoryConfig = toml::from_str("").expect("empty memory config should parse");
+    assert!(defaults.enabled);
+    assert!(defaults.writable);
+
+    let disabled: MemoryConfig =
+        toml::from_str("writable = false").expect("memory opt-out should parse");
+    assert!(disabled.enabled);
+    assert!(!disabled.writable);
 }
 
 #[test]

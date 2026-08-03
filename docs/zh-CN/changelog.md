@@ -8,6 +8,8 @@
 
 ## 尚未发布 - main
 
+- 工作区指令记忆与需审批的持久记忆现在默认启用；可分别设置 `[memory].enabled = false` 或
+  `[memory].writable = false` 退出对应能力。
 - 直接运行 `sigil` 现在会创建 fresh session，不再自动打开最近会话。显式恢复会在安全 endpoint
   修正后保留可移植对话；目的地变化或无法证明时先要求确认，并阻止同一 session 被两个
   TUI/Desktop/headless owner 同时以可写方式打开。
