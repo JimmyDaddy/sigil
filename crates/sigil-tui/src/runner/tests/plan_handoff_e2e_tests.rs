@@ -516,6 +516,92 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
 }
 
 #[test]
+fn run_next_resumes_paused_task_guidance_after_its_initial_wake_was_consumed() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-paused-task-guidance-run-next.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    let task_id = TaskId::new("paused_task_guidance_run_next")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative(
+            session_log_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("session.jsonl"),
+        )?,
+        objective: "resume task guidance only after Run next".to_owned(),
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for user guidance".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("finish")?,
+            title: "Finish the pending work".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: Some(TaskStepMode::Read),
+            isolation: Some(TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: None,
+    }))?;
+    let queue_id = ConversationInputQueueId::new("queue_paused_task_guidance_run_next")?;
+    let guidance = project_conversation_prompt_for_persistence("apply this guidance next");
+    session.append_control(ControlEntry::ConversationInputQueued(
+        ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::Task {
+                task_id: task_id.clone(),
+            },
+            kind: ConversationInputKind::TaskGuidance,
+            prompt_hash: guidance.prompt_hash,
+            prompt: guidance.safe_prompt,
+            reasoning_effort: Some(ReasoningEffort::High),
+            created_at_ms: Some(1),
+        },
+    ))?;
+    session.append_control(ControlEntry::ConversationInputQueueControl(
+        sigil_kernel::ConversationInputQueueControlEntry {
+            action: sigil_kernel::ConversationInputQueueControlAction::Pause,
+            reason: Some("exercise Run next wake".to_owned()),
+            updated_at_ms: Some(2),
+        },
+    ))?;
+    drop(session);
+
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path,
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace_root,
+        planned_role_provider_builder(vec![StreamPlan::Pending]),
+    )?;
+
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(3), |message| {
+        matches!(message, WorkerMessage::Notice(notice) if notice.contains("task guidance is waiting"))
+    })?;
+    worker.send(WorkerCommand::PromoteQueuedConversationInput { queue_id })?;
+    let started = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::TaskRunStarted { task_id: started, .. }
+            if started == task_id.as_str())
+    })?;
+    assert!(matches!(started, WorkerMessage::TaskRunStarted { .. }));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn auto_handoff_preflight_failure_persists_and_projects_failed_task_state() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();

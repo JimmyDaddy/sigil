@@ -84,6 +84,7 @@ pub(crate) use crate::timeline::{
     LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarCard, ThinkingBlockMode,
     ToolActivityCacheEntry,
 };
+use crate::workspace_git::{WorkspaceGitStatus, inspect_workspace_git_status};
 pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
 pub(crate) use self::checkpoint_flow::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
@@ -305,6 +306,7 @@ pub(crate) enum MutationArtifactRetentionPreview {
 pub struct AppState {
     pub config_path: PathBuf,
     pub workspace_root: PathBuf,
+    workspace_git_status: Option<WorkspaceGitStatus>,
     pub sigil_paths: SigilPaths,
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
@@ -643,10 +645,12 @@ impl AppState {
         )
         .reasoning_effort
         .unwrap_or(ReasoningEffort::Max);
+        let workspace_git_status = inspect_workspace_git_status(&workspace_root);
 
         let mut app = Self {
             config_path: config_path.to_path_buf(),
             workspace_root,
+            workspace_git_status,
             sigil_paths,
             session_log_dir,
             session_log_path: PathBuf::new(),
@@ -765,9 +769,11 @@ impl AppState {
         );
         let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
+        let workspace_git_status = inspect_workspace_git_status(&workspace_root);
         let mut app = Self {
             config_path: config_path.clone(),
             workspace_root: workspace_root.clone(),
+            workspace_git_status,
             sigil_paths,
             session_log_dir,
             session_log_path: PathBuf::new(),
@@ -867,6 +873,14 @@ impl AppState {
         app.bootstrap_setup();
         app.refresh_usage_sidebar_cache();
         app
+    }
+
+    pub(crate) fn workspace_git_status(&self) -> Option<&WorkspaceGitStatus> {
+        self.workspace_git_status.as_ref()
+    }
+
+    pub(crate) fn refresh_workspace_git_status(&mut self) {
+        self.workspace_git_status = inspect_workspace_git_status(&self.workspace_root);
     }
 
     pub(crate) fn code_intelligence_sidebar_lines(&self) -> Vec<String> {

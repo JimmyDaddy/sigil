@@ -26,10 +26,13 @@ impl AppState {
     }
 
     pub fn composer_height(&self) -> u16 {
+        let compact = self.terminal_height <= 14;
+        let chrome_rows = if compact { 2 } else { 4 };
+        let minimum_rows = if compact { 3 } else { 5 };
         self.composer_input_rows()
-            .saturating_add(4)
+            .saturating_add(chrome_rows)
             .saturating_add(self.composer.image_attachments.len() as u16)
-            .max(5)
+            .max(minimum_rows)
     }
 
     pub(super) fn input_char_len(&self) -> usize {

@@ -1490,18 +1490,28 @@ fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()
         prompt: "second".to_owned(),
         reasoning_effort: ReasoningEffort::High,
     })?;
-    let _ = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. }
-            if items.len() == 1 && items[0].queued.prompt == "second")
-    })?;
-
     gate.notify_one();
-    let first_finished = worker
-        .recv_until_with_timeout(Duration::from_secs(10), |message| {
-            matches!(message, WorkerMessage::RunFinished { result, .. }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut queue_confirmed = false;
+    let mut first_finished = None;
+    while !queue_confirmed || first_finished.is_none() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("queued follow-up was not confirmed before the current run settled");
+        }
+        let message = worker.recv_with_timeout(remaining)?;
+        if matches!(&message, WorkerMessage::ConversationQueueUpdated { items, .. }
+            if items.len() == 1 && items[0].queued.prompt == "second")
+        {
+            queue_confirmed = true;
+        }
+        if matches!(&message, WorkerMessage::RunFinished { result, .. }
             if result.final_text == "first done")
-        })
-        .context("first queued-follow-up run did not finish")?;
+        {
+            first_finished = Some(message);
+        }
+    }
+    let first_finished = first_finished.context("first queued-follow-up run did not finish")?;
     assert!(matches!(
         first_finished,
         WorkerMessage::RunFinished { ref entries, .. }
@@ -1679,6 +1689,71 @@ fn queue_control_commands_persist_and_update_projection() -> Result<()> {
             if status.queue_id.as_str() == "queue_2"
                 && status.status == sigil_kernel::ConversationInputStatus::Cancelled
     )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn promote_resumes_a_paused_idle_queue_and_dispatches_run_next() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-queue-promote-resume.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("follow-up done".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SetConversationQueuePaused { paused: true })?;
+    let _ = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { paused: true, .. }
+        )
+    })?;
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "run me next".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let queued = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated {
+                items,
+                paused: true,
+                ..
+            } if items.len() == 1 && items[0].queued.prompt == "run me next"
+        )
+    })?;
+    let queue_id = match queued {
+        WorkerMessage::ConversationQueueUpdated { items, .. } => items[0].queued.queue_id.clone(),
+        _ => unreachable!("queue predicate guarantees an update"),
+    };
+
+    worker.send(WorkerCommand::PromoteQueuedConversationInput { queue_id })?;
+    let _ = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                    if prompt == "run me next"
+            )
+        })
+        .context("Run next did not wake the resumed idle queue")?;
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(
+            message,
+            WorkerMessage::RunFinished { result, .. }
+                if result.final_text == "follow-up done"
+        )
+    })?;
 
     worker.shutdown()?;
     Ok(())

@@ -959,6 +959,12 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
         action,
         Some(AppAction::SwitchSession { session_log_path }) if session_log_path == restored_path
     ));
+    app.push_optimistic_conversation_queue_item(
+        "old-session follow-up".to_owned(),
+        sigil_kernel::ConversationInputKind::Chat,
+        sigil_kernel::ConversationInputTarget::MainThread,
+    );
+    app.composer.deferred_queue_promotions = app.composer.optimistic_queue_items.clone();
 
     let entries = JsonlSessionStore::read_entries(&restored_path)?;
     app.handle_worker_message(WorkerMessage::SessionSwitched {
@@ -972,6 +978,8 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
     assert_eq!(app.runtime.model_name, "restored-model");
     assert_eq!(app.session_id, "restored");
     assert_eq!(app.session_log_path, restored_path);
+    assert!(app.composer.optimistic_queue_items.is_empty());
+    assert!(app.composer.deferred_queue_promotions.is_empty());
     assert!(
         app.timeline
             .iter()

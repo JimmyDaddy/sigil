@@ -150,7 +150,7 @@ pub(super) fn render_appearance_preview_lines(config_state: &ConfigState) -> Vec
         "preview shell: rail live composer footer".to_owned(),
         "preview composer: Build · agent: main · deepseek-v4-flash".to_owned(),
         "preview tool: read_file ✓ ok · doc excerpt · 2 hidden".to_owned(),
-        "preview modal: Review Tool Call allow deny selected".to_owned(),
+        "preview modal: Approve action allow deny selected".to_owned(),
         format!(
             "preview token: {} {}",
             config_state.draft.selected_appearance_color_token(),

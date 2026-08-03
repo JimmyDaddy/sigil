@@ -233,10 +233,90 @@ impl AppState {
         }
     }
 
+    pub(super) fn select_composer_queue_item(&mut self, index: usize) -> bool {
+        let visible_count = self
+            .conversation_queue_projection()
+            .items
+            .len()
+            .min(COMPOSER_QUEUE_VISIBLE_ROWS);
+        if index >= visible_count || !self.focus_composer_queue_panel() {
+            return false;
+        }
+        self.composer.queue_selected = index;
+        self.reset_composer_queue_action();
+        true
+    }
+
+    pub(super) fn execute_composer_queue_action(
+        &mut self,
+        action: ComposerQueueAction,
+    ) -> Option<AppAction> {
+        if !self.focus_composer_queue_panel() {
+            return None;
+        }
+        self.composer.queue_action_selected = action;
+        self.execute_selected_queue_action()
+    }
+
     pub(super) fn promote_selected_queue_item(&mut self) -> Option<AppAction> {
-        let queue_id = self.selected_confirmed_queue_id()?;
+        let projection = self.conversation_queue_projection();
+        let item = projection
+            .items
+            .into_iter()
+            .take(COMPOSER_QUEUE_VISIBLE_ROWS)
+            .nth(self.composer.queue_selected)?;
+        if is_optimistic_queue_id(&item.queued.queue_id) {
+            if !projection.paused && self.composer.queue_selected == 0 {
+                self.last_notice = Some("follow-up is already scheduled to run next".to_owned());
+                self.push_event("follow-up:next", "saving; already first in queue");
+                return None;
+            }
+            if !self
+                .composer
+                .deferred_queue_promotions
+                .iter()
+                .any(|queued| queued.queue_id == item.queued.queue_id)
+            {
+                self.composer
+                    .deferred_queue_promotions
+                    .push(item.queued.clone());
+            }
+            self.last_notice = Some("follow-up will run next after saving".to_owned());
+            self.push_event("follow-up:next", "waiting for durable queue id");
+            return None;
+        }
+        let queue_id = item.queued.queue_id;
         self.last_notice = Some("follow-up will run next".to_owned());
         Some(AppAction::PromoteQueuedConversationInput { queue_id })
+    }
+
+    pub(super) fn resolve_deferred_queue_promotions(
+        &mut self,
+        items: &[ConversationQueueItemProjection],
+    ) {
+        if self.composer.deferred_queue_promotions.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.composer.deferred_queue_promotions);
+        let mut resolved_queue_ids = Vec::new();
+        for optimistic in pending {
+            let durable = items.iter().find(|item| {
+                item.status == ConversationInputStatus::Queued
+                    && !resolved_queue_ids.contains(&item.queued.queue_id)
+                    && queued_inputs_match(&item.queued, &optimistic)
+            });
+            let Some(durable) = durable else {
+                self.composer.deferred_queue_promotions.push(optimistic);
+                continue;
+            };
+            resolved_queue_ids.push(durable.queued.queue_id.clone());
+            self.enqueue_worker_command(
+                crate::runner::WorkerCommand::PromoteQueuedConversationInput {
+                    queue_id: durable.queued.queue_id.clone(),
+                },
+            );
+            self.push_event("follow-up:next", durable.queued.queue_id.as_str());
+        }
     }
 
     pub(super) fn send_selected_queue_item_now(&mut self) -> Option<AppAction> {
@@ -283,24 +363,31 @@ impl AppState {
     }
 
     pub(super) fn refresh_conversation_queue_selection(&mut self) {
+        if let Some(target) = self.composer.queue_edit_target.clone() {
+            let target_is_still_queued =
+                ConversationQueueProjection::from_entries(&self.session_browser.current_entries)
+                    .items
+                    .iter()
+                    .any(|item| {
+                        item.queued.queue_id == target
+                            && item.status == ConversationInputStatus::Queued
+                    });
+            if !target_is_still_queued {
+                self.composer.queue_edit_target = None;
+                self.composer.input.clear();
+                self.composer.input_cursor = 0;
+                self.composer.input_paste_spans.clear();
+            }
+        }
         let projection = self.conversation_queue_projection();
         let visible_count = projection.items.len().min(COMPOSER_QUEUE_VISIBLE_ROWS);
         if visible_count == 0 {
             self.composer.queue_selected = 0;
             self.composer.queue_panel_focused = false;
             self.reset_composer_queue_action();
-            self.composer.queue_edit_target = None;
             return;
         }
         self.composer.queue_selected = self.composer.queue_selected.min(visible_count - 1);
-        if let Some(target) = &self.composer.queue_edit_target
-            && !projection
-                .items
-                .iter()
-                .any(|item| item.queued.queue_id == *target)
-        {
-            self.composer.queue_edit_target = None;
-        }
     }
 
     pub(super) fn finish_queue_edit_submission(&mut self, prompt: String) -> Option<AppAction> {

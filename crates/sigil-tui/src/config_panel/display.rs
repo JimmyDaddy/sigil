@@ -277,10 +277,22 @@ impl ConfigState {
             ConfigField::ProviderContextWindowTokens if text_value.trim().is_empty() => {
                 "automatic".to_owned()
             }
-            ConfigField::ProviderContextWindowTokens => format!("{text_value} tokens"),
+            ConfigField::ProviderContextWindowTokens => {
+                provider_context_window_display_value(text_value)
+            }
             ConfigField::CompactionContextWindowTokens => format!("{text_value} tokens"),
             _ => text_value.to_owned(),
         }
+    }
+}
+
+fn provider_context_window_display_value(value: &str) -> String {
+    match value.trim() {
+        "64000" => "64K".to_owned(),
+        "128000" => "128K".to_owned(),
+        "256000" => "256K".to_owned(),
+        "1000000" => "1M".to_owned(),
+        custom => format!("custom · {custom} tokens"),
     }
 }
 

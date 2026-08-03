@@ -539,7 +539,7 @@ fn render_config_line_styles_theme_preview_with_current_palette() {
     );
     let modal = render_config_line_with_palette(
         2,
-        "preview modal: Review Tool Call allow deny selected",
+        "preview modal: Approve action allow deny selected",
         80,
         &palette,
     );
@@ -605,7 +605,7 @@ fn render_config_line_styles_theme_preview_with_current_palette() {
         Some(palette.markdown_code_bg)
     );
     assert_eq!(
-        span_style(&modal, "Review Tool Call").bg,
+        span_style(&modal, "Approve action").bg,
         Some(palette.approval_selected_bg)
     );
     assert_eq!(

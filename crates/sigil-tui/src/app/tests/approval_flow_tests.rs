@@ -150,6 +150,10 @@ fn approval_request_projects_source_agent_route() -> Result<()> {
     ]);
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
+    let collapsed = app.approval_preview_lines().join("\n");
+    assert!(collapsed.contains("meta hidden"));
+    assert!(!collapsed.contains("source_agent="));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
     let lines = app.approval_preview_lines().join("\n");
     assert!(lines.contains("source_agent=Kernel Mapper · thread_1"));
     let view = app
@@ -922,33 +926,34 @@ fn approval_metadata_toggle_collapses_and_expands_preview_header() -> Result<()>
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
-    let expanded = app.approval_preview_lines().join("\n");
-    assert!(expanded.contains("tool=write_file"));
-    assert!(expanded.contains("preview=Update note.txt"));
-
-    assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?
-            .is_none()
-    );
     let collapsed = app.approval_preview_lines().join("\n");
     assert!(collapsed.contains("meta hidden"));
     assert!(!collapsed.contains("tool=write_file"));
-    assert!(
-        app.events.iter().any(|event| {
-            event.label == "approval:view" && event.detail == "metadata collapsed"
-        })
-    );
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?
             .is_none()
     );
-    let reexpanded = app.approval_preview_lines().join("\n");
-    assert!(reexpanded.contains("tool=write_file"));
+    let expanded = app.approval_preview_lines().join("\n");
+    assert!(expanded.contains("tool=write_file"));
+    assert!(expanded.contains("preview=Update note.txt"));
     assert!(
         app.events
             .iter()
             .any(|event| { event.label == "approval:view" && event.detail == "metadata expanded" })
+    );
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?
+            .is_none()
+    );
+    let recollapsed = app.approval_preview_lines().join("\n");
+    assert!(recollapsed.contains("meta hidden"));
+    assert!(!recollapsed.contains("tool=write_file"));
+    assert!(
+        app.events.iter().any(|event| {
+            event.label == "approval:view" && event.detail == "metadata collapsed"
+        })
     );
     Ok(())
 }
@@ -1034,11 +1039,11 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
     })?;
     assert!(app.approval.pending.is_none());
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert!(
-        app.timeline
-            .iter()
-            .any(|entry| entry.text.contains("Denied call-1: policy denied"))
-    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry
+            .text
+            .contains("Denied · Update note.txt · policy denied")
+    }));
 
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
@@ -1050,7 +1055,12 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.text.contains("Approved call-1."))
+            .any(|entry| entry.text.contains("Allowed once · Update note.txt"))
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("call-1"))
     );
     Ok(())
 }

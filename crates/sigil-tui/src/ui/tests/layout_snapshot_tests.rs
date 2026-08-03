@@ -467,7 +467,6 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
 fn approval_modal_area_uses_widest_content_with_screen_cap() {
     let view = ApprovalModalView {
         tool_name: "write_file".to_owned(),
-        call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "write".to_owned(),
         risk: sigil_kernel::PermissionRisk::Medium,
@@ -476,6 +475,7 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: false,
+        has_diff_preview: true,
         file_rows: Vec::new(),
         changed_files: Vec::new(),
         diff_mode_label: "full",
@@ -717,7 +717,6 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
 fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     let mut view = ApprovalModalView {
         tool_name: "write_file".to_owned(),
-        call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "write".to_owned(),
         risk: sigil_kernel::PermissionRisk::Medium,
@@ -726,6 +725,7 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: true,
+        has_diff_preview: true,
         file_rows: vec![ApprovalFileRow {
             path: "note.txt".to_owned(),
             selected: true,
@@ -751,13 +751,13 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         ..ApprovalModalView::default()
     };
 
-    assert_eq!(approval_header_line_count(&view), 5);
+    assert_eq!(approval_header_line_count(&view), 1);
     assert_eq!(
         approval_header_line_count(&ApprovalModalView {
             source_agent: Some("Kernel Mapper · thread_1".to_owned()),
             ..view.clone()
         }),
-        6
+        1
     );
     assert_eq!(
         approval_header_line_count(&ApprovalModalView {
@@ -768,7 +768,7 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
             }),
             ..view.clone()
         }),
-        7
+        1
     );
     assert!(approval_file_row_hit_areas(Rect::new(0, 0, 20, 1), &view).is_empty());
     assert_eq!(
@@ -790,8 +790,27 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     assert!(controls.diff_view_toggle.x > controls.hunk_next.x);
     assert!(controls.metadata_toggle.x > controls.diff_view_toggle.x);
 
+    let command_view = ApprovalModalView {
+        tool_name: "bash".to_owned(),
+        access_label: "shell execute".to_owned(),
+        risk: sigil_kernel::PermissionRisk::Medium,
+        preview_title: "Run shell command".to_owned(),
+        preview_summary: "cargo test -p sigil-tui".to_owned(),
+        metadata_collapsed: true,
+        has_diff_preview: false,
+        ..ApprovalModalView::default()
+    };
+    let command_hits = approval_modal_hit_areas(Rect::new(0, 0, 100, 24), &command_view)
+        .expect("command approval should expose compact hit areas");
+    assert_ne!(command_hits.metadata_toggle, Rect::default());
+    assert_eq!(command_hits.metadata_toggle.height, 1);
+
     view.metadata_collapsed = false;
     view.preview_summary = "line one\nline two\nline three".to_owned();
-    assert_eq!(approval_header_line_count(&view), 11);
+    assert_eq!(approval_header_line_count(&view), 1);
+    let sections = approval_modal_sections(Rect::new(1, 1, 80, 22), &view);
+    assert!(sections.metadata.is_some());
+    assert_eq!(sections.header.height, 3);
+    assert_eq!(sections.footer.height, 4);
     assert!(approval_modal_hit_areas(Rect::new(0, 0, 4, 4), &view).is_some());
 }

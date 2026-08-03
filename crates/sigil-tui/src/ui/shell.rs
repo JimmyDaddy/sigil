@@ -128,6 +128,30 @@ fn render_footer_status(
         return;
     }
     let context_width = footer_context_width(footer, inner.width);
+    let workspace_width = inner
+        .width
+        .saturating_sub(context_width)
+        .saturating_sub(u16::from(context_width > 0));
+    if !footer.workspace_git_label.is_empty() && workspace_width >= 12 {
+        let git_label = truncate_display_width(
+            &footer.workspace_git_label,
+            workspace_width.saturating_sub(4) as usize,
+        );
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![Line::from(vec![
+                Span::styled(
+                    "git ",
+                    Style::default()
+                        .fg(theme.palette.accent_info)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(git_label, styles::muted(&theme.palette)),
+            ])]))
+            .style(Style::default().bg(theme.palette.surface_base))
+            .wrap(Wrap { trim: false }),
+            Rect::new(inner.x, inner.y, workspace_width, inner.height),
+        );
+    }
     if context_width > 0 {
         let context_area = Rect::new(
             inner.x + inner.width.saturating_sub(context_width),

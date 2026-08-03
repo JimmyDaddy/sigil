@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use sigil_kernel::{
     EnvironmentContainment, ExecutionContainmentRequest, FilesystemContainment, NetworkContainment,
@@ -25,6 +25,7 @@ use super::{
     geometry::{halo_rect, shadow_rect},
     layout_snapshot::{
         approval_diff_view_control_label, approval_metadata_control_label, approval_modal_area,
+        approval_modal_sections,
     },
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_palette},
     theme::{self, ThemePalette},
@@ -58,7 +59,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     }
     frame.render_widget(Clear, area);
     let block = Block::default()
-        .title(approval_block_title(app))
+        .title(approval_block_title(&view))
         .title_style(
             Style::default()
                 .fg(palette.text_inverse)
@@ -82,41 +83,50 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         palette,
     );
     let footer_lines = approval_footer_lines_with_palette(&view, palette);
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length((header_lines.len() as u16).saturating_add(2)),
-            Constraint::Min(8),
-            Constraint::Length((footer_lines.len() as u16).saturating_add(2)),
-        ])
-        .split(inner);
+    let sections = approval_modal_sections(inner, &view);
 
     frame.render_widget(
         Paragraph::new(Text::from(header_lines))
             .block(
                 Block::default()
-                    .title("Summary")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.accent_info)),
+                    .border_style(Style::default().fg(palette.border_subtle)),
             )
             .wrap(Wrap { trim: false }),
-        layout[0],
+        sections.header,
     );
 
+    if !view.has_diff_preview {
+        render_approval_review_content(
+            frame,
+            &view,
+            sections.body,
+            app.approval.scroll_back as u16,
+            area.width.saturating_sub(6) as usize,
+            current_theme.syntax_theme,
+            palette,
+        );
+        if let Some(metadata_area) = sections.metadata {
+            render_approval_metadata(frame, &view, metadata_area, palette);
+        }
+        render_approval_footer(frame, sections.footer, footer_lines, palette);
+        return;
+    }
+
     let body_chunks = if !view.file_rows.is_empty() {
-        let file_width = if layout[1].width >= 92 { 28 } else { 22 }
-            .min(layout[1].width.saturating_sub(18))
+        let file_width = if sections.body.width >= 92 { 28 } else { 22 }
+            .min(sections.body.width.saturating_sub(18))
             .max(16)
-            .min(layout[1].width);
+            .min(sections.body.width);
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(file_width), Constraint::Min(12)])
-            .split(layout[1])
+            .split(sections.body)
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1)])
-            .split(layout[1])
+            .split(sections.body)
     };
 
     if !view.file_rows.is_empty() {
@@ -148,22 +158,44 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         );
     }
 
-    let diff_area = *body_chunks.last().unwrap_or(&layout[1]);
+    let diff_area = *body_chunks.last().unwrap_or(&sections.body);
+    let diff_title = if view.preview_title.trim().is_empty() {
+        " Diff to apply ".to_owned()
+    } else {
+        format!(" {} ", view.preview_title.trim())
+    };
     let diff_block = Block::default()
-        .title("Diff")
+        .title(diff_title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.border_subtle));
     let diff_inner = diff_block.inner(diff_area);
     frame.render_widget(diff_block, diff_area);
     if diff_inner.width > 0 && diff_inner.height > 0 {
+        let summary_lines = approval_preview_summary_lines_with_palette(
+            &view,
+            diff_inner.width as usize,
+            current_theme.syntax_theme,
+            palette,
+        );
+        let mut constraints = vec![Constraint::Length(1)];
+        if !summary_lines.is_empty() {
+            constraints.push(Constraint::Length(summary_lines.len() as u16));
+        }
+        constraints.push(Constraint::Min(1));
         let diff_sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .constraints(constraints)
             .split(diff_inner);
         frame.render_widget(
             Paragraph::new(approval_diff_status_line_with_palette(&view, palette)),
             diff_sections[0],
         );
+        if !summary_lines.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Text::from(summary_lines)).wrap(Wrap { trim: false }),
+                diff_sections[1],
+            );
+        }
         let numbered =
             number_unified_diff_lines(view.diff_lines.iter().map(|line| line.text.as_str()));
         let line_number_width = diff_line_number_width(&numbered);
@@ -186,25 +218,102 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
             Paragraph::new(Text::from(diff_lines))
                 .scroll((app.approval.scroll_back as u16, 0))
                 .wrap(Wrap { trim: false }),
-            diff_sections[1],
+            *diff_sections.last().unwrap_or(&diff_inner),
         );
     }
 
+    if let Some(metadata_area) = sections.metadata {
+        render_approval_metadata(frame, &view, metadata_area, palette);
+    }
+    render_approval_footer(frame, sections.footer, footer_lines, palette);
+}
+
+fn render_approval_review_content(
+    frame: &mut Frame,
+    view: &ApprovalModalView,
+    area: ratatui::layout::Rect,
+    scroll: u16,
+    max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
+    palette: &ThemePalette,
+) {
+    let content_lines =
+        approval_review_lines_with_palette(view, max_content_width, syntax_theme, palette);
+    let risk_color = permission_risk_color(view.risk, palette);
+    let title = if view.tool_name == "bash" {
+        " Command to run "
+    } else {
+        " Content to approve "
+    };
     frame.render_widget(
-        Paragraph::new(Text::from(footer_lines))
+        Paragraph::new(Text::from(content_lines))
             .block(
                 Block::default()
-                    .title("Actions")
+                    .title(title)
+                    .title_style(Style::default().fg(risk_color).add_modifier(Modifier::BOLD))
+                    .padding(Padding::horizontal(1))
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(risk_color))
+                    .style(Style::default().bg(palette.surface_code)),
+            )
+            .style(Style::default().bg(palette.surface_code))
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_approval_metadata(
+    frame: &mut Frame,
+    view: &ApprovalModalView,
+    area: ratatui::layout::Rect,
+    palette: &ThemePalette,
+) {
+    frame.render_widget(
+        Paragraph::new(Text::from(approval_permission_metadata_lines(
+            view,
+            area.width.saturating_sub(2) as usize,
+            palette,
+        )))
+        .block(
+            Block::default()
+                .title("Details")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border_subtle)),
+        )
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_approval_footer(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    lines: Vec<Line<'static>>,
+    palette: &ThemePalette,
+) {
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .title("Decision")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(palette.border_subtle)),
             )
             .wrap(Wrap { trim: false }),
-        layout[2],
+        area,
     );
 }
 
-fn approval_block_title(_app: &AppState) -> &'static str {
-    " Review Tool Call "
+fn approval_block_title(view: &ApprovalModalView) -> &'static str {
+    if view.has_diff_preview {
+        " Review file changes "
+    } else if view.tool_name == "bash" {
+        " Approve command? "
+    } else {
+        " Approve action? "
+    }
 }
 
 #[cfg(test)]
@@ -215,126 +324,112 @@ fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> 
 
 fn approval_header_lines_with_palette(
     view: &ApprovalModalView,
+    _max_content_width: usize,
+    _syntax_theme: SyntaxThemeId,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let mut spans = vec![
+        approval_badge_with_palette(
+            &view.access_label,
+            permission_risk_color(view.risk, palette),
+            palette,
+        ),
+        Span::raw(" "),
+        Span::styled(
+            view.tool_name.clone(),
+            Style::default()
+                .fg(palette.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        approval_badge_with_palette(
+            &format!("risk {}", approval_risk_label(view.risk)),
+            permission_risk_color(view.risk, palette),
+            palette,
+        ),
+    ];
+    if !view.has_diff_preview {
+        spans.extend([
+            Span::raw("  "),
+            approval_badge_with_palette(
+                approval_metadata_control_label(view.metadata_collapsed),
+                palette.text_muted,
+                palette,
+            ),
+        ]);
+    }
+    vec![Line::from(spans)]
+}
+
+#[cfg(test)]
+fn approval_review_lines(view: &ApprovalModalView, max_content_width: usize) -> Vec<Line<'static>> {
+    let palette = theme::default_palette();
+    approval_review_lines_with_palette(view, max_content_width, SyntaxThemeId::default(), &palette)
+}
+
+fn approval_review_lines_with_palette(
+    view: &ApprovalModalView,
     max_content_width: usize,
     syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(vec![
-            approval_badge_with_palette(
-                &view.access_label,
-                permission_risk_color(view.risk, palette),
-                palette,
-            ),
-            Span::raw(" "),
-            Span::styled(
-                view.tool_name.clone(),
-                Style::default()
-                    .fg(palette.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("call", Style::default().fg(palette.text_muted)),
-            Span::raw(" "),
-            Span::styled(
-                view.call_id.clone(),
-                Style::default().fg(palette.accent_info),
-            ),
-        ]),
-        Line::from(vec![Span::styled(
-            view.preview_title.clone(),
-            Style::default()
-                .fg(palette.text_primary)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            approval_badge_with_palette(
-                &format!("risk {}", approval_risk_label(view.risk)),
-                permission_risk_color(view.risk, palette),
-                palette,
-            ),
-            Span::raw(" "),
-            Span::styled("policy", Style::default().fg(palette.text_muted)),
-            Span::raw(" "),
-            Span::styled(
-                view.policy_label.clone(),
-                Style::default().fg(palette.text_secondary),
-            ),
-        ]),
-    ];
-
-    if let Some(source_agent) = &view.source_agent {
-        lines.push(Line::from(vec![
-            approval_badge_with_palette("agent", palette.accent_info, palette),
-            Span::raw(" "),
-            Span::styled(
-                source_agent.clone(),
-                Style::default().fg(palette.text_primary),
-            ),
-        ]));
-    }
-
-    if let Some(change_set) = &view.change_set {
-        lines.push(approval_change_set_line_with_palette(change_set, palette));
-        lines.push(approval_format_hint_line_with_palette(change_set, palette));
-    }
-
-    if view.metadata_collapsed {
-        lines.push(Line::from(vec![
-            approval_badge_with_palette("meta hidden", palette.text_muted, palette),
-            Span::raw(" "),
-            Span::styled("press M to expand", Style::default().fg(palette.text_muted)),
-        ]));
-    } else if view.preview_summary.trim().is_empty() {
+    let mut lines = Vec::new();
+    let preview_title = view.preview_title.trim();
+    let hide_generic_shell_title = view.tool_name == "bash"
+        && !view.preview_summary.trim().is_empty()
+        && preview_title == "Run shell command";
+    if !preview_title.is_empty() && !hide_generic_shell_title {
         lines.push(Line::styled(
-            "No preview summary provided.",
-            Style::default().fg(palette.text_muted),
+            preview_title.to_owned(),
+            Style::default()
+                .fg(palette.text_secondary)
+                .add_modifier(Modifier::BOLD),
         ));
-    } else {
+    }
+    if !view.preview_summary.trim().is_empty() {
         let markdown_options =
             MarkdownRenderOptions::modal(max_content_width).with_syntax_theme(syntax_theme);
-        lines.extend(view.preview_summary.lines().take(4).map(|line| {
+        lines.extend(view.preview_summary.lines().map(|line| {
+            Line::from(render_inline_markdown_spans_with_palette(
+                line,
+                Style::default().fg(palette.text_primary),
+                markdown_options,
+                palette,
+            ))
+        }));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "No review content was provided.",
+            Style::default().fg(palette.text_muted),
+        ));
+    }
+    lines
+}
+
+fn approval_preview_summary_lines_with_palette(
+    view: &ApprovalModalView,
+    max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    if view.preview_summary.trim().is_empty() {
+        return Vec::new();
+    }
+    let markdown_options =
+        MarkdownRenderOptions::modal(max_content_width).with_syntax_theme(syntax_theme);
+    view.preview_summary
+        .lines()
+        .take(2)
+        .map(|line| {
             Line::from(render_inline_markdown_spans_with_palette(
                 line,
                 Style::default().fg(palette.text_secondary),
                 markdown_options,
                 palette,
             ))
-        }));
-    }
-
-    if !view.metadata_collapsed {
-        lines.extend(approval_permission_metadata_lines(
-            view,
-            max_content_width,
-            palette,
-        ));
-    }
-
-    let change_count = view.changed_files.len().max(view.file_rows.len());
-    lines.push(Line::from(vec![
-        Span::styled("files", Style::default().fg(palette.text_muted)),
-        Span::raw(" "),
-        Span::styled(
-            change_count.to_string(),
-            Style::default().fg(palette.text_primary),
-        ),
-        Span::raw("  "),
-        Span::styled("hunks", Style::default().fg(palette.text_muted)),
-        Span::raw(" "),
-        Span::styled(
-            view.hunk_total.to_string(),
-            Style::default().fg(palette.text_primary),
-        ),
-        Span::raw("  "),
-        Span::styled("mode", Style::default().fg(palette.text_muted)),
-        Span::raw(" "),
-        Span::styled(
-            view.diff_mode_label,
-            Style::default().fg(palette.accent_info),
-        ),
-    ]));
-    lines
+        })
+        .collect()
 }
 
 fn approval_permission_metadata_lines(
@@ -376,6 +471,7 @@ fn approval_permission_metadata_lines(
     };
 
     let mut lines = [
+        ("policy", view.policy_label.clone()),
         ("summary", summary),
         ("effects", format!("{effects}  subjects {subjects}")),
         ("analysis", format!("{analysis}  containment {containment}")),
@@ -393,6 +489,19 @@ fn approval_permission_metadata_lines(
         ])
     })
     .collect::<Vec<_>>();
+    if let Some(source_agent) = &view.source_agent {
+        lines.push(Line::from(vec![
+            Span::styled("agent ", Style::default().fg(palette.text_muted)),
+            Span::styled(
+                source_agent.clone(),
+                Style::default().fg(palette.text_secondary),
+            ),
+        ]));
+    }
+    if let Some(change_set) = &view.change_set {
+        lines.push(approval_change_set_line_with_palette(change_set, palette));
+        lines.push(approval_format_hint_line_with_palette(change_set, palette));
+    }
     if let Some(hint) = analysis_recovery_hint(&view.analysis) {
         lines.push(Line::from(vec![
             Span::styled("recovery ", Style::default().fg(palette.text_muted)),
@@ -681,7 +790,7 @@ fn approval_footer_lines_with_palette(
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let file_hint = if view.file_rows.len() > 1 {
-        "  ,/. file"
+        " · ,/. file"
     } else {
         ""
     };
@@ -692,12 +801,25 @@ fn approval_footer_lines_with_palette(
             Style::default().fg(palette.text_muted),
         ));
     }
-    let action_hint =
-        "Tab/Left/Right switch  Enter select  Y allow once  N deny  M details  V view";
+    let details_hint = if view.metadata_collapsed {
+        "M details"
+    } else {
+        "M hide details"
+    };
+    let action_hint = if view.has_diff_preview {
+        format!("Tab switch · Enter select · Y allow · N deny · {details_hint} · V view")
+    } else {
+        format!("Tab switch · Enter select · Y allow · N deny · {details_hint} · ↑/↓ scroll")
+    };
+    let navigation_hint = if view.has_diff_preview {
+        format!(" · [/] hunk{file_hint} · ↑/↓ scroll")
+    } else {
+        String::new()
+    };
     vec![
         Line::from(action_line),
         Line::styled(
-            format!("{action_hint}  [,] hunk{file_hint}  Up/Down scroll"),
+            format!("{action_hint}{navigation_hint}"),
             Style::default().fg(palette.text_muted),
         ),
     ]

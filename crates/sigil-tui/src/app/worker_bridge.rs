@@ -252,6 +252,7 @@ impl AppState {
                 paused,
                 entries,
             } => {
+                self.resolve_deferred_queue_promotions(&items);
                 self.sync_current_session_state(entries);
                 let visible_target = self.active_conversation_queue_target();
                 let visible_items = items

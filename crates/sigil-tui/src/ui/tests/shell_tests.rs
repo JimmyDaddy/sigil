@@ -388,12 +388,14 @@ fn render_main_screen_places_cursor_on_new_composer_line() -> anyhow::Result<()>
     app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))?;
+    assert_eq!(app.input_cursor_visual_position(), (0, 1));
+    assert_eq!(app.composer_height(), 4);
     let backend = TestBackend::new(80, 12);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;
 
-    terminal.backend_mut().assert_cursor_position((3, 9));
+    terminal.backend_mut().assert_cursor_position((3, 10));
     Ok(())
 }
 
@@ -427,6 +429,7 @@ fn footer_context_width_uses_half_width_cap_and_hides_small_areas() {
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: String::new(),
+        workspace_git_label: String::new(),
         context_label: "ctx 18% · 1200/8000".to_owned(),
     };
 
@@ -1160,6 +1163,7 @@ fn shell_footer_helpers_cover_context_thresholds() {
         hints: "hint".to_owned(),
         is_busy: false,
         phase: RunPhase::Idle,
+        workspace_git_label: String::new(),
         context_label: "ctx 42%".to_owned(),
     };
 
@@ -1216,6 +1220,71 @@ fn render_status_workspace_trust_mode_uses_trust_copy() -> anyhow::Result<()> {
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Workspace trust"));
     assert!(rendered.contains("review workspace"));
+    Ok(())
+}
+
+#[test]
+fn queue_disappearance_reclaims_short_terminal_space_without_stale_composer_rows()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(79, 11);
+    let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1")?;
+    let queued = sigil_kernel::ConversationInputQueuedEntry {
+        queue_id: queue_id.clone(),
+        target: sigil_kernel::ConversationInputTarget::MainThread,
+        kind: sigil_kernel::ConversationInputKind::Chat,
+        prompt_hash: "sha256:queue_1".to_owned(),
+        prompt: "follow up".to_owned(),
+        reasoning_effort: Some(sigil_kernel::ReasoningEffort::High),
+        created_at_ms: Some(1),
+    };
+    let queued_item = sigil_kernel::ConversationQueueItemProjection {
+        queued: queued.clone(),
+        status: sigil_kernel::ConversationInputStatus::Queued,
+        reason: None,
+    };
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: vec![queued_item],
+        paused: false,
+        entries: vec![SessionLogEntry::Control(
+            ControlEntry::ConversationInputQueued(queued.clone()),
+        )],
+    })?;
+    let backend = TestBackend::new(79, 11);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+    assert!(rendered_content(&terminal).contains("Follow-ups"));
+
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: vec![sigil_kernel::ConversationQueueItemProjection {
+            queued: queued.clone(),
+            status: sigil_kernel::ConversationInputStatus::Dispatching,
+            reason: Some("promotion_bound".to_owned()),
+        }],
+        paused: false,
+        entries: vec![
+            SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued)),
+            SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(
+                sigil_kernel::ConversationInputStatusEntry {
+                    queue_id,
+                    status: sigil_kernel::ConversationInputStatus::Dispatching,
+                    reason: Some("promotion_bound".to_owned()),
+                    updated_at_ms: Some(2),
+                },
+            )),
+        ],
+    })?;
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    let layout =
+        crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 79, 11), &app);
+    assert!(!rendered.contains("Follow-ups"));
+    assert!(rendered.contains("Build · agent: main"));
+    assert!(rendered.contains("deepseek-v4-flash"));
+    assert_eq!(layout.composer.height, 3);
+    assert_eq!(layout.composer_input.height, 1);
     Ok(())
 }
 
@@ -1800,7 +1869,7 @@ fn render_main_screen_shows_pending_approval_overlay() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Review Tool Call"));
+    assert!(rendered.contains("Review file changes"));
     assert!(rendered.contains("Update note.txt"));
     assert!(rendered.contains("Allow"));
     assert!(rendered.contains("Deny"));
@@ -1835,6 +1904,7 @@ fn footer_context_width_covers_empty_and_bounded_states() {
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: "Enter send".to_owned(),
+        workspace_git_label: String::new(),
         context_label: "ctx 12%".to_owned(),
     };
 
@@ -1905,6 +1975,7 @@ fn render_footer_status_returns_early_for_zero_and_tiny_areas() -> anyhow::Resul
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: String::new(),
+        workspace_git_label: String::new(),
         context_label: "ctx 12%".to_owned(),
     };
     let backend = TestBackend::new(8, 2);
@@ -1927,6 +1998,7 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
         is_busy: false,
         run_label: "ready".to_owned(),
         hints: "Enter send".to_owned(),
+        workspace_git_label: "feature/tui-status · 3 changes".to_owned(),
         context_label: String::new(),
     };
     let backend = TestBackend::new(24, 2);
@@ -1936,6 +2008,8 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
     terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 24, 1), &footer, &theme))?;
 
     let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("git"));
+    assert!(rendered.contains("feature"));
     assert!(!rendered.contains("ready"));
     assert!(!rendered.contains("Enter send"));
     assert!(!rendered.contains("ctx"));

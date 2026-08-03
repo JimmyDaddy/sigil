@@ -5,6 +5,7 @@ use sigil_kernel::{
 
 use super::super::{
     AppState, ApprovalAction, PaneFocus, PendingApproval, RunPhase, TimelineRole,
+    approval_flow::approval_activity_label,
     formatting::{
         format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_result_block_redacted,
@@ -105,7 +106,7 @@ impl EventHandler for AppState {
                             )
                         });
                 }
-                self.approval.pending = Some(PendingApproval {
+                let pending = PendingApproval {
                     approval_request_id: approval_identity.approval_request_id,
                     call: call.clone(),
                     session_grant_available,
@@ -129,10 +130,12 @@ impl EventHandler for AppState {
                     command_permission_matches,
                     preview,
                     presentation_state: super::super::ApprovalPresentationState::Pending,
-                });
+                };
+                let activity_label = approval_activity_label(&pending);
+                self.approval.pending = Some(pending);
                 self.active_pane = PaneFocus::Activity;
                 self.approval.scroll_back = 0;
-                self.approval.metadata_collapsed = false;
+                self.approval.metadata_collapsed = true;
                 self.approval.selected_file_index = 0;
                 self.approval.selected_hunk_index = 0;
                 self.approval.selected_action =
@@ -141,7 +144,10 @@ impl EventHandler for AppState {
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(
                     TimelineRole::Notice,
-                    format!("Approve {}? Y allow once, N deny.", call.name),
+                    format!(
+                        "Approval needed · {} · Y allow once, N deny.",
+                        activity_label
+                    ),
                 );
             }
             RunEvent::ToolApprovalResolved {
@@ -159,6 +165,14 @@ impl EventHandler for AppState {
                     );
                     return Ok(());
                 }
+                let resolved_presentation = self.approval.pending.as_ref().map(|pending| {
+                    (
+                        approval_activity_label(pending),
+                        self.approval
+                            .selected_action
+                            .normalized(pending.session_grant_available),
+                    )
+                });
                 let approved_agent_profile = approved.then(|| {
                     self.approval
                         .pending
@@ -182,12 +196,22 @@ impl EventHandler for AppState {
                     ),
                 );
                 if approved {
-                    self.push_timeline(TimelineRole::Notice, format!("Approved {call_id}."));
+                    let (activity, action) = resolved_presentation
+                        .unwrap_or_else(|| ("tool action".to_owned(), ApprovalAction::AllowOnce));
+                    let outcome = if action == ApprovalAction::AllowSession {
+                        "Allowed for session"
+                    } else {
+                        "Allowed once"
+                    };
+                    self.push_timeline(TimelineRole::Notice, format!("{outcome} · {activity}"));
                 } else {
+                    let activity = resolved_presentation
+                        .map(|(activity, _)| activity)
+                        .unwrap_or_else(|| "tool action".to_owned());
                     self.push_timeline(
                         TimelineRole::Notice,
                         format!(
-                            "Denied {call_id}: {}",
+                            "Denied · {activity} · {}",
                             reason.unwrap_or_else(|| "denied".to_owned())
                         ),
                     );
@@ -212,6 +236,9 @@ impl EventHandler for AppState {
                 );
             }
             RunEvent::ToolResult(result) => {
+                let refresh_workspace_git = result.tool_name == "bash"
+                    || result.tool_name.starts_with("terminal_")
+                    || !result.metadata.changed_files.is_empty();
                 self.clear_recent_egress_disclosure();
                 let is_agent_tool = agent_tool_name(&result.tool_name);
                 if !is_agent_tool {
@@ -242,6 +269,9 @@ impl EventHandler for AppState {
                     self.push_timeline(TimelineRole::Tool, rendered);
                 }
                 self.push_event("tool:result", format!("{} {}", result.tool_name, status));
+                if refresh_workspace_git {
+                    self.refresh_workspace_git_status();
+                }
             }
             RunEvent::Usage(usage) => {
                 self.runtime.stats.apply_usage(&usage);
@@ -305,6 +335,7 @@ impl EventHandler for AppState {
                         &self.secret_redactor,
                     ));
                     self.append_current_session_control(ControlEntry::TerminalTask(task));
+                    self.refresh_workspace_git_status();
                 }
                 ControlEntry::ToolExecution(execution) => {
                     if matches!(execution.status, ToolExecutionStatus::Started) {

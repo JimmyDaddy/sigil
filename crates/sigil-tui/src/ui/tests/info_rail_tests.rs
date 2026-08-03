@@ -13,6 +13,12 @@ fn sample_view_model() -> InfoRailViewModel {
     InfoRailViewModel {
         session_title: "Session title that is deliberately longer than the rail".to_owned(),
         workspace_label: "/tmp/project/with/a/very/long/path".to_owned(),
+        workspace_git_status: crate::workspace_git::parse_workspace_git_status(concat!(
+            "## feature/tui-status...origin/feature/tui-status [ahead 2]\n",
+            "M  staged.rs\n",
+            " M modified.rs\n",
+            "?? new.rs\n",
+        )),
         session_lines: vec!["mode: ready".to_owned()],
         permission_lines: vec!["approval: ask".to_owned()],
         agent_lines: vec![
@@ -48,6 +54,12 @@ fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
 
     let rendered = rendered_text(&terminal);
     assert!(rendered.contains("info"));
+    assert!(rendered.contains("git:"));
+    assert!(rendered.contains("feature/tui-status"));
+    assert!(rendered.contains("stg 1"));
+    assert!(rendered.contains("mod 1"));
+    assert!(rendered.contains("new 1"));
+    assert!(rendered.contains("↑2"));
     assert!(rendered.contains("session"));
     assert!(rendered.contains("permissions"));
     assert!(rendered.contains("agents"));
@@ -59,6 +71,71 @@ fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
     assert!(rendered.contains("controls"));
     assert!(rendered.contains("mode"));
     assert!(rendered.contains("approval"));
+    Ok(())
+}
+
+#[test]
+fn render_info_rail_splits_busy_git_status_into_readable_narrow_rows() -> anyhow::Result<()> {
+    let mut view_model = sample_view_model();
+    view_model.workspace_git_status = crate::workspace_git::parse_workspace_git_status(&format!(
+        "## main\n{}{}{}",
+        "M  staged.rs\n".repeat(12),
+        " M modified.rs\n".repeat(73),
+        "?? new.rs\n".repeat(16),
+    ));
+    let backend = TestBackend::new(38, 18);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| {
+        render_info_rail(frame, Rect::new(0, 0, 38, 18), &view_model);
+    })?;
+
+    let row = |y: u16| {
+        (0..38)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect::<String>()
+    };
+    assert!(
+        row(3).contains("git: main · 101 changes"),
+        "summary row: {:?}",
+        row(3)
+    );
+    assert!(
+        row(4).contains("stg 12 · mod 73 · new 16"),
+        "detail row: {:?}",
+        row(4)
+    );
+    assert!(!row(3).contains("..."));
+    assert!(!row(4).contains("..."));
+    Ok(())
+}
+
+#[test]
+fn render_info_rail_preserves_branch_and_total_at_minimum_rail_width() -> anyhow::Result<()> {
+    let mut view_model = sample_view_model();
+    view_model.session_title = "short".to_owned();
+    view_model.workspace_label = "/repo".to_owned();
+    view_model.workspace_git_status = crate::workspace_git::parse_workspace_git_status(&format!(
+        "## main\n{}{}{}",
+        "M  staged.rs\n".repeat(12),
+        " M modified.rs\n".repeat(73),
+        "?? new.rs\n".repeat(16),
+    ));
+    let backend = TestBackend::new(24, 18);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| {
+        render_info_rail(frame, Rect::new(0, 0, 24, 18), &view_model);
+    })?;
+
+    let row = |y: u16| {
+        (0..24)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect::<String>()
+    };
+    assert!(row(3).contains("git: main"));
+    assert!(row(4).contains("101 changes"));
+    assert!(format!("{} {}", row(5), row(6)).contains("S12 M73 ?16"));
     Ok(())
 }
 

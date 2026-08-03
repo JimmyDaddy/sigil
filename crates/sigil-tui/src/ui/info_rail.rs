@@ -5,8 +5,9 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
-use crate::view_model::InfoRailViewModel;
+use crate::{view_model::InfoRailViewModel, workspace_git::WorkspaceGitStatus};
 
 use super::{
     geometry::inset_rect,
@@ -49,7 +50,10 @@ pub(crate) fn render_info_rail_with_theme(
         ),
         Span::raw("  "),
         Span::styled(
-            truncate_display_width(&view_model.session_title, inner.width as usize),
+            truncate_display_width(
+                &view_model.session_title,
+                inner.width.saturating_sub(6).max(1) as usize,
+            ),
             Style::default()
                 .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
@@ -59,6 +63,13 @@ pub(crate) fn render_info_rail_with_theme(
         truncate_display_width(&view_model.workspace_label, inner.width as usize),
         Style::default().fg(palette.text_muted),
     )]));
+    if let Some(status) = &view_model.workspace_git_status {
+        lines.extend(render_workspace_git_status(
+            status,
+            inner.width as usize,
+            theme,
+        ));
+    }
     lines.push(Line::raw(String::new()));
 
     push_info_section(
@@ -136,6 +147,99 @@ pub(crate) fn render_info_rail_with_theme(
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn render_workspace_git_status(
+    status: &WorkspaceGitStatus,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let content_width = width.saturating_sub(2).max(1);
+    let suffix = format!(" · {}", status.change_label());
+    let fixed_width = UnicodeWidthStr::width("git: ") + UnicodeWidthStr::width(suffix.as_str());
+    let branch_budget = content_width.saturating_sub(fixed_width);
+    let mut lines = if branch_budget >= 4 {
+        let branch = truncate_display_width(&status.branch, branch_budget);
+        vec![render_info_line_with_theme(
+            &format!("git: {branch}{suffix}"),
+            width,
+            theme,
+        )]
+    } else {
+        let branch = truncate_display_width(
+            &status.branch,
+            content_width.saturating_sub(UnicodeWidthStr::width("git: ")),
+        );
+        vec![
+            render_info_line_with_theme(&format!("git: {branch}"), width, theme),
+            render_workspace_git_detail(&status.change_label(), width, theme),
+        ]
+    };
+
+    let detail_width = width.saturating_sub(7);
+    let compact = detail_width < 18;
+    let mut details = Vec::new();
+    for (count, label, compact_label) in [
+        (status.conflicted_entries, "conf", "!"),
+        (status.staged_entries, "stg", "S"),
+        (status.unstaged_entries, "mod", "M"),
+        (status.untracked_entries, "new", "?"),
+    ] {
+        if count > 0 {
+            details.push(if compact {
+                format!("{compact_label}{count}")
+            } else {
+                format!("{label} {count}")
+            });
+        }
+    }
+    if status.ahead > 0 {
+        details.push(format!("↑{}", status.ahead));
+    }
+    if status.behind > 0 {
+        details.push(format!("↓{}", status.behind));
+    }
+    let separator = if compact { " " } else { " · " };
+    for detail in pack_workspace_git_details(&details, detail_width, separator) {
+        lines.push(render_workspace_git_detail(&detail, width, theme));
+    }
+    lines
+}
+
+fn pack_workspace_git_details(details: &[String], width: usize, separator: &str) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    for detail in details {
+        let candidate = if current.is_empty() {
+            detail.clone()
+        } else {
+            format!("{current}{separator}{detail}")
+        };
+        if UnicodeWidthStr::width(candidate.as_str()) <= width {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+        }
+        current = truncate_display_width(detail, width);
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+fn render_workspace_git_detail(value: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let indent = 7.min(width.saturating_sub(1));
+    let value = truncate_display_width(value, width.saturating_sub(indent));
+    Line::from(vec![
+        Span::raw(" ".repeat(indent)),
+        Span::styled(value, Style::default().fg(theme.palette.text_secondary)),
+    ])
 }
 
 fn push_info_section<I>(

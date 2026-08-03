@@ -63,12 +63,24 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
         .approval_modal_view()
         .expect("workspace check approval should be visible");
     assert_eq!(view.preview_title, "Run workspace check");
-    assert!(view.preview_summary.contains("cargo check 2>&1"));
-    assert!(view.preview_summary.contains("Reason:"));
-    assert!(view.preview_summary.contains("Access:"));
-    assert!(view.preview_summary.contains("Session grant:"));
+    assert_eq!(view.preview_summary, "cargo check 2>&1");
+    assert!(!view.preview_summary.contains("Reason:"));
+    assert!(!view.preview_summary.contains("Access:"));
+    assert!(!view.preview_summary.contains("Session grant:"));
+    assert!(view.metadata_collapsed);
+    assert!(!view.has_diff_preview);
     assert_eq!(view.selected_action, ApprovalAction::AllowOnce);
     assert!(view.session_grant_available);
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| { entry.text.contains("Approval needed · cargo check 2>&1") })
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("call-cargo-check"))
+    );
 
     app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert_eq!(app.approval.selected_action, ApprovalAction::AllowSession);
@@ -77,6 +89,22 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
         action,
         Some(AppAction::ApprovalSessionDecision { call_id, .. }) if call_id == "call-cargo-check"
     ));
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-cargo-check".to_owned(),
+        approval_request_id: "approval-call-cargo-check".to_owned(),
+        approved: true,
+        reason: None,
+    })?;
+    assert!(app.timeline.iter().any(|entry| {
+        entry
+            .text
+            .contains("Allowed for session · cargo check 2>&1")
+    }));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("call-cargo-check"))
+    );
     Ok(())
 }
 

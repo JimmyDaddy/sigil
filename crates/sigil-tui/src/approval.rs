@@ -125,7 +125,6 @@ pub(crate) struct ApprovalChangeSetSummary {
 #[derive(Debug, Clone)]
 pub(crate) struct ApprovalModalView {
     pub tool_name: String,
-    pub call_id: String,
     pub source_agent: Option<String>,
     pub access_label: String,
     pub risk: PermissionRisk,
@@ -140,6 +139,7 @@ pub(crate) struct ApprovalModalView {
     pub preview_summary: String,
     pub change_set: Option<ApprovalChangeSetSummary>,
     pub metadata_collapsed: bool,
+    pub has_diff_preview: bool,
     pub file_rows: Vec<ApprovalFileRow>,
     pub changed_files: Vec<String>,
     pub diff_mode_label: &'static str,
@@ -157,7 +157,6 @@ impl Default for ApprovalModalView {
     fn default() -> Self {
         Self {
             tool_name: String::new(),
-            call_id: String::new(),
             source_agent: None,
             access_label: String::new(),
             risk: PermissionRisk::Low,
@@ -172,6 +171,7 @@ impl Default for ApprovalModalView {
             preview_summary: String::new(),
             change_set: None,
             metadata_collapsed: false,
+            has_diff_preview: false,
             file_rows: Vec::new(),
             changed_files: Vec::new(),
             diff_mode_label: "full",

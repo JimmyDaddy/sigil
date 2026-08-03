@@ -1,5 +1,18 @@
 use super::*;
 
+const PROVIDER_CONTEXT_WINDOW_PRESETS: [&str; 5] = ["", "64000", "128000", "256000", "1000000"];
+
+pub(super) fn cycle_provider_context_window(value: &str) -> &'static str {
+    let current = value.trim();
+    let Some(index) = PROVIDER_CONTEXT_WINDOW_PRESETS
+        .iter()
+        .position(|preset| *preset == current)
+    else {
+        return PROVIDER_CONTEXT_WINDOW_PRESETS[0];
+    };
+    PROVIDER_CONTEXT_WINDOW_PRESETS[(index + 1) % PROVIDER_CONTEXT_WINDOW_PRESETS.len()]
+}
+
 #[cfg(test)]
 pub(crate) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
     match mode {

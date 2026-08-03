@@ -793,7 +793,13 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let pending_action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(pending_action.is_none());
-    assert_eq!(app.last_notice(), Some("follow-up is being saved"));
+    assert_eq!(
+        app.last_notice(),
+        Some("follow-up is already scheduled to run next")
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "follow-up:next" && event.detail == "saving; already first in queue"
+    }));
 
     app.sync_current_session_state(vec![queued_conversation_input_entry(
         "queue_1",
@@ -815,6 +821,45 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
             .all(|entry| !(entry.role == TimelineRole::User
                 && entry.text == "follow up after this finishes"))
     );
+    Ok(())
+}
+
+#[test]
+fn run_next_pressed_on_an_optimistic_later_item_is_sent_after_durable_confirmation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let _ = app.drain_pending_worker_commands();
+    let durable = queued_conversation_input_entry("queue_1", "first queued prompt")?;
+    app.sync_current_session_state(vec![durable.clone()]);
+    app.push_optimistic_conversation_queue_item(
+        "second queued prompt".to_owned(),
+        sigil_kernel::ConversationInputKind::Chat,
+        sigil_kernel::ConversationInputTarget::MainThread,
+    );
+    assert!(app.focus_composer_queue_panel());
+    assert!(app.move_composer_queue_selection(true));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("follow-up will run next after saving")
+    );
+    assert!(!app.has_pending_worker_commands());
+
+    let second = queued_conversation_input_entry("queue_2", "second queued prompt")?;
+    let entries = vec![durable, second];
+    let items = sigil_kernel::ConversationQueueProjection::from_entries(&entries).items;
+    app.handle_worker_message(crate::runner::WorkerMessage::ConversationQueueUpdated {
+        items,
+        paused: false,
+        entries,
+    })?;
+
+    assert!(matches!(
+        app.drain_pending_worker_commands().as_slice(),
+        [crate::runner::WorkerCommand::PromoteQueuedConversationInput { queue_id }]
+            if queue_id.as_str() == "queue_2"
+    ));
     Ok(())
 }
 
@@ -868,6 +913,37 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
     assert!(tab.is_none());
     assert!(!app.is_composer_queue_panel_focused());
     assert_eq!(app.active_pane, PaneFocus::Composer);
+    Ok(())
+}
+
+#[test]
+fn dispatched_queue_edit_clears_the_edit_buffer_and_restores_compact_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(79, 11);
+    let queued = queued_conversation_input_entry("queue_1", "line one\n\n\nline five")?;
+    app.sync_current_session_state(vec![queued.clone()]);
+
+    assert!(app.begin_edit_selected_queue_item());
+    assert_eq!(app.composer.input, "line one\n\n\nline five");
+    assert!(app.composer_height() > 3);
+
+    let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1")?;
+    app.sync_current_session_state(vec![
+        queued,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(
+            sigil_kernel::ConversationInputStatusEntry {
+                queue_id,
+                status: sigil_kernel::ConversationInputStatus::Dispatching,
+                reason: Some("promotion_bound".to_owned()),
+                updated_at_ms: Some(2),
+            },
+        )),
+    ]);
+
+    assert!(app.composer_queue_rows().is_empty());
+    assert!(app.composer.queue_edit_target.is_none());
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer_height(), 3);
     Ok(())
 }
 
@@ -1998,7 +2074,7 @@ fn input_helpers_edit_and_navigate_multiline_text() {
 
     assert_eq!(app.input_char_len(), 5);
     assert_eq!(app.composer_input_rows(), 2);
-    assert_eq!(app.composer_height(), 6);
+    assert_eq!(app.composer_height(), 4);
     assert_eq!(app.visual_position_for_cursor(5, 4), (1, 2));
     assert_eq!(app.cursor_for_visual_position(1, 1, 4), 4);
 

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::session_lifecycle_flow::SessionModalAction;
-use crate::app::{AppAction, ApprovalAction};
+use crate::app::{AppAction, ApprovalAction, ComposerQueueAction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseInput {
@@ -56,6 +56,8 @@ pub(crate) enum HitTarget {
     ToolCard { entry_index: usize },
     ThinkingBlock { entry_index: usize },
     VerificationCard,
+    ComposerQueueItem { index: usize },
+    ComposerQueueAction { action: ComposerQueueAction },
     Composer,
     LivePanel,
     InfoRailAgentRow { index: usize },

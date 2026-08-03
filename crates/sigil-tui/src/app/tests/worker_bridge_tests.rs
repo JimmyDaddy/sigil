@@ -4110,3 +4110,36 @@ fn worker_terminal_entry(
         updated_at_ms: 20,
     })
 }
+#[test]
+fn shell_tool_result_refreshes_visible_workspace_git_status() -> Result<()> {
+    let temp = tempdir()?;
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(temp.path())
+        .status()?;
+    assert!(init.success());
+
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    assert_eq!(
+        app.workspace_git_status()
+            .expect("git status")
+            .compact_label(),
+        "main · clean"
+    );
+
+    std::fs::write(temp.path().join("note.txt"), "changed\n")?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-git-refresh",
+        "bash",
+        String::new(),
+        ToolResultMeta::default(),
+    )))?;
+
+    let status = app.workspace_git_status().expect("refreshed git status");
+    assert_eq!(status.branch, "main");
+    assert_eq!(status.changed_entries, 1);
+    assert_eq!(status.untracked_entries, 1);
+    Ok(())
+}

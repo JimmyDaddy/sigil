@@ -19,7 +19,6 @@ use super::{
 const COMPOSER_HORIZONTAL_INSET: u16 = 3;
 const COMPOSER_VERTICAL_INSET: u16 = 1;
 const COMPOSER_HEADER_HEIGHT: u16 = 1;
-const COMPOSER_HEADER_INPUT_GAP: u16 = 1;
 const COMPOSER_AGENT_LABEL_WIDTH: usize = 22;
 
 #[cfg(test)]
@@ -41,7 +40,7 @@ pub(crate) fn render_input_with_theme(
     render_panel_separator(frame, area, panel_bg, palette.border_subtle);
     render_composer_gutter(frame, area, accent, panel_bg);
 
-    let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
+    let inner = composer_content_area(area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -174,12 +173,13 @@ pub(crate) fn composer_cursor_origin(
 }
 
 pub(crate) fn composer_input_area(area: Rect, _input_rows: u16, attachment_count: usize) -> Rect {
-    let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
+    let inner = composer_content_area(area);
     if inner.width == 0 || inner.height == 0 {
         return Rect::default();
     }
+    let input_gap = u16::from(area.height >= 5);
     let header_rows = COMPOSER_HEADER_HEIGHT
-        .saturating_add(COMPOSER_HEADER_INPUT_GAP)
+        .saturating_add(input_gap)
         .saturating_add(attachment_count.min(u16::MAX as usize) as u16);
     if inner.height <= header_rows {
         return Rect::default();
@@ -194,6 +194,20 @@ pub(crate) fn composer_input_area(area: Rect, _input_rows: u16, attachment_count
     )
 }
 
+fn composer_content_area(area: Rect) -> Rect {
+    if area.width <= COMPOSER_HORIZONTAL_INSET.saturating_mul(2) || area.height <= 1 {
+        return Rect::default();
+    }
+    let bottom_inset = u16::from(area.height >= 5) * COMPOSER_VERTICAL_INSET;
+    Rect::new(
+        area.x.saturating_add(COMPOSER_HORIZONTAL_INSET),
+        area.y.saturating_add(1),
+        area.width
+            .saturating_sub(COMPOSER_HORIZONTAL_INSET.saturating_mul(2)),
+        area.height.saturating_sub(1).saturating_sub(bottom_inset),
+    )
+}
+
 fn render_image_attachments(
     frame: &mut Frame,
     area: Rect,
@@ -203,7 +217,7 @@ fn render_image_attachments(
     if view_model.image_attachments.is_empty() {
         return;
     }
-    let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
+    let inner = composer_content_area(area);
     if inner.width == 0 || inner.height <= COMPOSER_HEADER_HEIGHT {
         return;
     }

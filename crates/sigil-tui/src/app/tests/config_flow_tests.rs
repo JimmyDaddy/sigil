@@ -81,6 +81,69 @@ fn config_storage_section_shows_resolved_paths_readonly() {
 }
 
 #[test]
+fn provider_context_window_cycles_presets_without_numeric_input_modal() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        assert!(state.focus_field(ConfigField::ProviderContextWindowTokens));
+        state.draft.provider_context_window_tokens = "200000".to_owned();
+    }
+
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("Context window: custom · 200000 tokens  [Enter cycle]")
+    );
+
+    for (stored, displayed) in [
+        ("", "automatic"),
+        ("64000", "64K"),
+        ("128000", "128K"),
+        ("256000", "256K"),
+        ("1000000", "1M"),
+        ("", "automatic"),
+    ] {
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(action.is_none());
+        assert!(!app.config_is_editing());
+        let state = app
+            .config_state
+            .as_ref()
+            .expect("config state should exist");
+        assert_eq!(state.draft.provider_context_window_tokens, stored);
+        assert_eq!(
+            state.display_value(ConfigField::ProviderContextWindowTokens),
+            displayed
+        );
+    }
+
+    let before = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist")
+        .draft
+        .provider_context_window_tokens
+        .clone();
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(!app.config_is_editing());
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .provider_context_window_tokens,
+        before
+    );
+    Ok(())
+}
+
+#[test]
 fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
@@ -1806,7 +1869,7 @@ fn config_appearance_step_shows_info_rail_theme_and_scope() {
     assert!(detail.contains("preview shell: rail live composer footer"));
     assert!(detail.contains("preview composer: Build"));
     assert!(detail.contains("preview tool: read_file"));
-    assert!(detail.contains("preview modal: Review Tool Call"));
+    assert!(detail.contains("preview modal: Approve action"));
     assert!(detail.contains("preview token: surface_base #282828"));
     assert!(detail.contains("preview text: primary secondary muted"));
     assert!(detail.contains("preview status: success warning error pending"));

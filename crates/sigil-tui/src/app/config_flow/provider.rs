@@ -22,7 +22,7 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
         ConfigField::ProviderContextWindowTokens,
     ));
     lines.push(render_config_hint_row(
-        "Optional per-model limit; empty uses provider metadata or the global fallback",
+        "Enter cycles Automatic / 64K / 128K / 256K / 1M",
     ));
     lines.push(String::new());
     lines.push("[route status]".to_owned());

@@ -12,6 +12,7 @@ use crate::{
     commands::{global_control_hints, tool_card_control_hints},
     timeline::{ComposerQueueRow, RunPhase, SidebarAgentRow},
     ui::StatusKind,
+    workspace_git::WorkspaceGitStatus,
 };
 
 const INFO_RAIL_AGENT_ROW_LIMIT: usize = 3;
@@ -40,6 +41,7 @@ impl UiViewModel {
 pub(crate) struct InfoRailViewModel {
     pub session_title: String,
     pub workspace_label: String,
+    pub workspace_git_status: Option<WorkspaceGitStatus>,
     pub session_lines: Vec<String>,
     pub permission_lines: Vec<String>,
     pub agent_lines: Vec<String>,
@@ -58,6 +60,7 @@ impl InfoRailViewModel {
         Self {
             session_title: app.session_display_title(),
             workspace_label: display_path_label(&app.workspace_root),
+            workspace_git_status: app.workspace_git_status().cloned(),
             session_lines: if detail {
                 detail_info_rail_session_lines(app)
             } else {
@@ -492,6 +495,7 @@ pub(crate) struct FooterViewModel {
     pub is_busy: bool,
     pub run_label: String,
     pub hints: String,
+    pub workspace_git_label: String,
     pub context_label: String,
 }
 
@@ -941,6 +945,13 @@ impl FooterViewModel {
                     .is_some_and(|pending| pending.actions_available()),
             run_label: footer_run_label(app),
             hints: footer_hints(app),
+            workspace_git_label: if app.info_rail_visible() {
+                String::new()
+            } else {
+                app.workspace_git_status()
+                    .map(|status| status.compact_label())
+                    .unwrap_or_default()
+            },
             context_label: app.context_usage_line(),
         }
     }

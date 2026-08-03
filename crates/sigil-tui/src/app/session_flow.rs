@@ -479,6 +479,10 @@ impl AppState {
         self.review.checkpoint_request_id = None;
         self.review.checkpoint_action_pending = false;
         self.clear_integration_review();
+        self.composer.optimistic_queue_items.clear();
+        self.composer.deferred_queue_promotions.clear();
+        self.composer.queue_edit_target = None;
+        self.blur_composer_queue_panel();
         if self.checkpoint_restore_modal_open() || self.intent_stack_modal_open() {
             self.modal_state = None;
         }

@@ -234,7 +234,7 @@ impl ConfigField {
                 "Chat model used after saving. The current conversation stays open while the worker switches to the selected route."
             }
             Self::ProviderContextWindowTokens => {
-                "Optional exact token limit for this connection and model. Leave empty to use provider metadata, then the global fallback."
+                "Choose Automatic, 64K, 128K, 256K, or 1M. Automatic uses provider metadata, then the global fallback. Existing custom values remain unchanged until you cycle this field."
             }
             Self::ProviderApiKey => {
                 "Credential reference for this connection. New keys are staged in memory and saved only to the configured protected credential store."
@@ -349,7 +349,6 @@ impl ConfigField {
         matches!(
             self,
             Self::ProviderModel
-                | Self::ProviderContextWindowTokens
                 | Self::ModelRequestTimeoutSecs
                 | Self::ModelRequestStreamIdleTimeoutSecs
                 | Self::ProviderBaseUrl
@@ -392,9 +391,10 @@ impl ConfigField {
             | Self::TerminalOsc52Clipboard
             | Self::TerminalNotificationsEnabled
             | Self::AppearanceInfoRail => "Enter toggle",
-            Self::ProviderContextWindowTokens
-            | Self::TerminalScrollSensitivity
-            | Self::TerminalNotificationMinimumRunDurationMs => "Enter input",
+            Self::ProviderContextWindowTokens => "Enter cycle",
+            Self::TerminalScrollSensitivity | Self::TerminalNotificationMinimumRunDurationMs => {
+                "Enter input"
+            }
             Self::AppearanceColorOverride => "Enter input",
             Self::SkillId | Self::PluginId => "",
             _ if self.accepts_text_input() => "Enter input",

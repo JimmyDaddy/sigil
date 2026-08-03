@@ -3,7 +3,6 @@ use std::{
     path::Path,
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
 use serde_json::json;
 use sigil_kernel::{
@@ -71,7 +70,6 @@ fn render_approval_file_row_includes_changeset_action_and_risk() {
 fn approval_diff_status_line_includes_selected_file_diagnostics() {
     let view = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
-        call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "file write".to_owned(),
         risk: sigil_kernel::PermissionRisk::Medium,
@@ -123,10 +121,9 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
 }
 
 #[test]
-fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
+fn approval_header_and_review_lines_keep_metadata_secondary() {
     let base = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
-        call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "file write".to_owned(),
         risk: sigil_kernel::PermissionRisk::Medium,
@@ -157,14 +154,15 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
         },
         40,
     );
-    let empty = approval_header_lines(
+    let empty = approval_review_lines(
         &ApprovalModalView {
+            preview_title: String::new(),
             preview_summary: "   ".to_owned(),
             ..base.clone()
         },
         40,
     );
-    let markdown = approval_header_lines(
+    let markdown = approval_review_lines(
         &ApprovalModalView {
             preview_summary: "**bold** line\n`code` line\nthird line".to_owned(),
             ..base
@@ -176,18 +174,18 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
     let empty_text = plain_lines_text(&empty);
     let markdown_text = plain_lines_text(&markdown);
 
-    assert!(hidden_text.contains("meta hidden"));
-    assert!(hidden_text.contains("press M to expand"));
+    assert_eq!(hidden.len(), 1);
     assert!(hidden_text.contains("risk medium"));
-    assert!(hidden_text.contains("policy local:ask network:allow source:allow final:ask"));
-    assert!(empty_text.contains("No preview summary provided."));
+    assert!(!hidden_text.contains("summary"));
+    assert!(!hidden_text.contains("policy local:ask network:allow source:allow final:ask"));
+    assert!(empty_text.contains("No review content was provided."));
     assert!(markdown_text.contains("bold line"));
     assert!(markdown_text.contains("code line"));
     assert!(markdown_text.contains("third line"));
 }
 
 #[test]
-fn approval_header_explains_why_session_grant_is_unavailable() {
+fn approval_details_explain_why_session_grant_is_unavailable() {
     let view = ApprovalModalView {
         session_grant_available: false,
         session_grant_unavailable_reason: Some(
@@ -198,7 +196,7 @@ fn approval_header_explains_why_session_grant_is_unavailable() {
         ..ApprovalModalView::default()
     };
 
-    let text = approval_header_lines(&view, 120)
+    let text = approval_permission_metadata_lines(&view, 120, &theme::default_palette())
         .iter()
         .map(plain_line_text)
         .collect::<Vec<_>>()
@@ -209,7 +207,7 @@ fn approval_header_explains_why_session_grant_is_unavailable() {
 }
 
 #[test]
-fn approval_header_exposes_bounded_permission_plan_details() {
+fn approval_details_expose_bounded_permission_plan() {
     let mut view = modal_view("shell execute");
     view.effects = BTreeSet::from([sigil_kernel::ToolPermissionEffect::ExecuteWorkspaceCode]);
     view.subjects = vec![sigil_kernel::ToolSubject::command(
@@ -229,7 +227,7 @@ fn approval_header_exposes_bounded_permission_plan_details() {
         detail: "Workspace code must be reviewed".to_owned(),
     }];
 
-    let text = approval_header_lines(&view, 180)
+    let text = approval_permission_metadata_lines(&view, 180, &theme::default_palette())
         .iter()
         .map(plain_line_text)
         .collect::<Vec<_>>()
@@ -242,7 +240,7 @@ fn approval_header_exposes_bounded_permission_plan_details() {
 }
 
 #[test]
-fn approval_header_exposes_recovery_for_unsupported_shell_syntax() {
+fn approval_details_expose_recovery_for_unsupported_shell_syntax() {
     let view = ApprovalModalView {
         analysis: sigil_kernel::ToolAnalysisStatus::Unsupported {
             reason: sigil_kernel::ToolAnalysisReason::new(
@@ -253,7 +251,7 @@ fn approval_header_exposes_recovery_for_unsupported_shell_syntax() {
         ..modal_view("shell execute")
     };
 
-    let text = approval_header_lines(&view, 180)
+    let text = approval_permission_metadata_lines(&view, 180, &theme::default_palette())
         .iter()
         .map(plain_line_text)
         .collect::<Vec<_>>()
@@ -265,14 +263,14 @@ fn approval_header_exposes_recovery_for_unsupported_shell_syntax() {
 }
 
 #[test]
-fn approval_header_lines_with_palette_use_configured_markdown_colors() {
+fn approval_review_lines_with_palette_use_configured_markdown_colors() {
     let palette = crate::ui::theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
     let view = ApprovalModalView {
         preview_summary: "`code` summary".to_owned(),
         ..modal_view("file write")
     };
 
-    let lines = approval_header_lines_with_palette(&view, 40, SyntaxThemeId::default(), &palette);
+    let lines = approval_review_lines_with_palette(&view, 40, SyntaxThemeId::default(), &palette);
     let code_span = lines
         .iter()
         .flat_map(|line| line.spans.iter())
@@ -284,18 +282,16 @@ fn approval_header_lines_with_palette_use_configured_markdown_colors() {
 }
 
 #[test]
-fn approval_header_lines_render_changeset_risk_and_format_hint() {
-    let lines = approval_header_lines(
-        &ApprovalModalView {
-            change_set: Some(ApprovalChangeSetSummary {
-                id: "change-123".to_owned(),
-                risk: "high".to_owned(),
-                format_hint: "cargo fmt --all".to_owned(),
-            }),
-            ..modal_view("file write")
-        },
-        80,
-    );
+fn approval_details_render_changeset_risk_format_and_agent() {
+    let view = ApprovalModalView {
+        change_set: Some(ApprovalChangeSetSummary {
+            id: "change-123".to_owned(),
+            risk: "high".to_owned(),
+            format_hint: "cargo fmt --all".to_owned(),
+        }),
+        ..modal_view("file write")
+    };
+    let lines = approval_permission_metadata_lines(&view, 80, &theme::default_palette());
     let text = plain_lines_text(&lines);
 
     assert!(text.contains("change set"));
@@ -303,16 +299,14 @@ fn approval_header_lines_render_changeset_risk_and_format_hint() {
     assert!(text.contains("risk high"));
     assert!(text.contains("format cargo fmt --all"));
 
-    let lines = approval_header_lines(
-        &ApprovalModalView {
-            source_agent: Some("Kernel Mapper · thread_1".to_owned()),
-            ..modal_view("file write")
-        },
-        80,
-    );
+    let view = ApprovalModalView {
+        source_agent: Some("Kernel Mapper · thread_1".to_owned()),
+        ..modal_view("file write")
+    };
+    let lines = approval_permission_metadata_lines(&view, 80, &theme::default_palette());
     let text = plain_lines_text(&lines);
 
-    assert!(text.contains(" agent "));
+    assert!(text.contains("agent "));
     assert!(text.contains("Kernel Mapper · thread_1"));
 }
 
@@ -320,7 +314,6 @@ fn approval_header_lines_render_changeset_risk_and_format_hint() {
 fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() {
     let single = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
-        call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "file write".to_owned(),
         risk: sigil_kernel::PermissionRisk::Medium,
@@ -329,6 +322,7 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
         preview_summary: String::new(),
         change_set: None,
         metadata_collapsed: false,
+        has_diff_preview: true,
         file_rows: vec![ApprovalFileRow {
             path: "src/lib.rs".to_owned(),
             selected: true,
@@ -450,7 +444,7 @@ fn plain_lines_text(lines: &[Line<'static>]) -> String {
 }
 
 #[test]
-fn approval_header_lines_use_access_badges_and_hidden_metadata_hint() {
+fn approval_header_lines_use_access_risk_and_compact_details_badges() {
     let write_view = modal_view("file write");
     let read_view = modal_view("file read");
     let high_view = ApprovalModalView {
@@ -461,36 +455,40 @@ fn approval_header_lines_use_access_badges_and_hidden_metadata_hint() {
     let write_lines = approval_header_lines(&write_view, 80);
     let read_lines = approval_header_lines(&read_view, 80);
     let high_lines = approval_header_lines(&high_view, 80);
-    let hidden_text = plain_line_text(
-        &approval_header_lines(
-            &ApprovalModalView {
-                metadata_collapsed: true,
-                changed_files: vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
-                ..modal_view("mcp read · network unknown")
-            },
-            80,
-        )[3],
-    );
+    let hidden_text = plain_lines_text(&approval_header_lines(
+        &ApprovalModalView {
+            metadata_collapsed: true,
+            has_diff_preview: false,
+            file_rows: Vec::new(),
+            changed_files: vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
+            ..modal_view("mcp read · network unknown")
+        },
+        80,
+    ));
 
     assert_eq!(write_lines[0].spans[0].style.bg, Some(Color::Yellow));
     assert_eq!(read_lines[0].spans[0].style.bg, Some(Color::Green));
     let risk_high = theme::default_palette().risk_high;
     assert_eq!(high_lines[0].spans[0].style.bg, Some(risk_high));
-    assert_eq!(high_lines[2].spans[0].style.bg, Some(risk_high));
-    assert!(hidden_text.contains("meta hidden"));
-    assert!(hidden_text.contains("press M to expand"));
+    assert_eq!(
+        high_lines[0].spans.last().and_then(|span| span.style.bg),
+        Some(risk_high)
+    );
+    assert!(hidden_text.contains("Details"));
+    assert!(!hidden_text.contains("policy"));
 }
 
 #[test]
-fn approval_header_lines_handle_empty_and_multiline_summaries() {
-    let empty = approval_header_lines(
+fn approval_review_lines_handle_empty_and_multiline_content() {
+    let empty = approval_review_lines(
         &ApprovalModalView {
+            preview_title: String::new(),
             preview_summary: "  \n".to_owned(),
             ..modal_view("file read")
         },
         80,
     );
-    let multiline = approval_header_lines(
+    let multiline = approval_review_lines(
         &ApprovalModalView {
             preview_summary: "line one\nline two\nline three".to_owned(),
             ..modal_view("file read")
@@ -498,11 +496,26 @@ fn approval_header_lines_handle_empty_and_multiline_summaries() {
         80,
     );
 
-    assert_eq!(plain_line_text(&empty[3]), "No preview summary provided.");
-    assert_eq!(multiline.len(), 12);
-    assert!(plain_line_text(&multiline[3]).contains("line one"));
-    assert!(plain_line_text(&multiline[4]).contains("line two"));
-    assert!(plain_line_text(&multiline[5]).contains("line three"));
+    assert!(plain_lines_text(&empty).contains("No review content was provided."));
+    assert_eq!(multiline.len(), 4);
+    assert!(plain_lines_text(&multiline).contains("line one"));
+    assert!(plain_lines_text(&multiline).contains("line two"));
+    assert!(plain_lines_text(&multiline).contains("line three"));
+}
+
+#[test]
+fn approval_review_lines_omit_generic_shell_copy_around_the_command() {
+    let lines = approval_review_lines(
+        &ApprovalModalView {
+            tool_name: "bash".to_owned(),
+            preview_title: "Run shell command".to_owned(),
+            preview_summary: "cargo test -p sigil-tui".to_owned(),
+            ..ApprovalModalView::default()
+        },
+        80,
+    );
+
+    assert_eq!(plain_lines_text(&lines), "cargo test -p sigil-tui");
 }
 
 #[test]
@@ -744,7 +757,7 @@ fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<
     terminal.draw(|frame| render_approval_modal(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Review Tool Call"));
+    assert!(rendered.contains("Review file changes"));
     assert!(rendered.contains("Files 1/2"));
     assert!(rendered.contains("src/lib.rs"));
     assert!(rendered.contains("Allow"));
@@ -818,7 +831,7 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
     terminal.draw(|frame| render_approval_modal(frame, &app))?;
 
     assert_eq!(
-        cell_colors_at_text(&terminal, "Review Tool Call", "Review Tool Call"),
+        cell_colors_at_text(&terminal, "Review file changes", "Review file changes"),
         (Color::Rgb(241, 242, 243), Color::Rgb(17, 34, 51))
     );
     assert_eq!(
@@ -873,24 +886,105 @@ fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::
         command_permission_matches: Vec::new(),
         preview: None,
     })?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
     let backend = TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render_approval_modal(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Approve action?"));
+    assert!(rendered.contains("Content to approve"));
     assert!(rendered.contains("Run remote_tool"));
-    assert!(rendered.contains("meta hidden"));
-    assert!(rendered.contains("No structured diff preview available."));
+    assert!(rendered.contains("Details"));
+    assert!(rendered.contains("Decision"));
+    assert!(!rendered.contains("No file changes to review."));
+    assert!(!rendered.contains("Summary"));
+    assert!(!rendered.contains("No structured diff preview available."));
+    assert!(!rendered.contains("call-remote"));
     assert!(!rendered.contains("Files 1/"));
+    Ok(())
+}
+
+#[test]
+fn render_shell_approval_prioritizes_command_without_internal_identity_or_empty_diff()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-shell-internal"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: Some(
+            sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
+                code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
+            },
+        ),
+        call: ToolCall {
+            id: "call-shell-internal".to_owned(),
+            name: "bash".to_owned(),
+            args_json: json!({
+                "command": "cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -15"
+            })
+            .to_string(),
+        },
+        spec: ToolSpec {
+            name: "bash".to_owned(),
+            description: "Run bash".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: vec![sigil_kernel::ToolSubject::command(
+            "family:cargo_check",
+            "family:cargo_check",
+        )],
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        operation: sigil_kernel::ToolOperation::ExecuteWorkspaceCheckCommand,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        preview: None,
+    })?;
+    let backend = TestBackend::new(110, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_approval_modal(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Approve command?"));
+    assert!(rendered.contains("Command to run"));
+    assert!(rendered.contains("cargo clippy --workspace --all-targets"));
+    assert!(rendered.contains("-D warnings"));
+    assert!(rendered.contains("Details"));
+    assert!(rendered.contains("Decision"));
+    assert!(!rendered.contains("No file changes to review."));
+    assert!(!rendered.contains("Summary"));
+    assert!(!rendered.contains("call-shell-internal"));
+    assert!(!rendered.contains("local:ask network:allow"));
+    assert!(!rendered.contains("No structured diff preview available."));
+    assert_eq!(
+        cell_colors_at_text(&terminal, "cargo clippy --workspace", "cargo"),
+        (
+            theme::default_palette().text_primary,
+            theme::default_palette().surface_code
+        )
+    );
     Ok(())
 }
 
 fn modal_view(access_label: &str) -> ApprovalModalView {
     ApprovalModalView {
         tool_name: "write_file".to_owned(),
-        call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: access_label.to_owned(),
         risk: if access_label.contains("read") {
@@ -903,6 +997,7 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         preview_summary: "summary".to_owned(),
         change_set: None,
         metadata_collapsed: false,
+        has_diff_preview: true,
         file_rows: vec![ApprovalFileRow {
             path: "src/lib.rs".to_owned(),
             selected: true,

@@ -803,6 +803,20 @@ impl AppState {
                                 config_state.draft.provider_api_key.clone(),
                             ));
                         }
+                        ConfigField::ProviderContextWindowTokens => {
+                            let next = cycle_provider_context_window(
+                                &config_state.draft.provider_context_window_tokens,
+                            );
+                            if config_state.draft.provider_context_window_tokens != next {
+                                config_state.draft.provider_context_window_tokens = next.to_owned();
+                                config_state.mark_edited();
+                            }
+                            self.last_notice = Some(format!(
+                                "context window -> {}",
+                                config_state.display_value(field)
+                            ));
+                            return Ok(None);
+                        }
                         ConfigField::PermissionMode => {
                             config_state.draft.permission_mode =
                                 cycle_permission_mode(config_state.draft.permission_mode);

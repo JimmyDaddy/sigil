@@ -307,7 +307,6 @@ impl AppState {
         let Some(preview) = pending.preview.as_ref() else {
             return Some(ApprovalModalView {
                 tool_name,
-                call_id: pending.call.id.clone(),
                 source_agent,
                 access_label,
                 risk: pending.risk,
@@ -328,6 +327,7 @@ impl AppState {
                     .unwrap_or_else(|| "Tool preview unavailable for this call.".to_owned()),
                 change_set: None,
                 metadata_collapsed: self.approval.metadata_collapsed,
+                has_diff_preview: false,
                 file_rows: Vec::new(),
                 changed_files: Vec::new(),
                 diff_mode_label: self.approval.diff_mode.label(),
@@ -354,6 +354,11 @@ impl AppState {
         let raw_diff = self
             .selected_approval_diff()
             .unwrap_or(preview.body.as_str());
+        let has_diff_preview = preview
+            .file_diffs
+            .iter()
+            .any(|file| !file.diff.trim().is_empty())
+            || approval_body_looks_like_unified_diff(&preview.body);
         let transformed_diff = self.transform_approval_diff(raw_diff);
         let transformed_lines = transformed_diff.lines().collect::<Vec<_>>();
         let hunk_positions = self.approval_hunk_positions();
@@ -438,7 +443,6 @@ impl AppState {
 
         Some(ApprovalModalView {
             tool_name,
-            call_id: pending.call.id.clone(),
             source_agent,
             access_label,
             risk: pending.risk,
@@ -458,6 +462,7 @@ impl AppState {
                 .unwrap_or_else(|| preview.summary.clone()),
             change_set,
             metadata_collapsed: self.approval.metadata_collapsed,
+            has_diff_preview,
             file_rows,
             changed_files: preview.changed_files.clone(),
             diff_mode_label: self.approval.diff_mode.label(),
@@ -723,6 +728,58 @@ struct ShellApprovalPreview {
     summary: String,
 }
 
+pub(super) fn approval_activity_label(pending: &PendingApproval) -> String {
+    let label = approval_shell_preview(pending)
+        .or_else(|| approval_terminal_input_preview(pending))
+        .and_then(|preview| {
+            preview
+                .summary
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            pending
+                .preview
+                .as_ref()
+                .map(|preview| preview.title.trim())
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            let title = pending.safe_summary.title.trim();
+            (!title.is_empty()).then(|| title.to_owned())
+        })
+        .unwrap_or_else(|| pending.call.name.clone());
+    bounded_approval_activity_label(&label, 180)
+}
+
+fn bounded_approval_activity_label(label: &str, max_chars: usize) -> String {
+    let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut truncated = normalized
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+fn approval_body_looks_like_unified_diff(body: &str) -> bool {
+    let mut has_old_header = false;
+    let mut has_new_header = false;
+    for line in body.lines() {
+        has_old_header |= line.starts_with("--- ");
+        has_new_header |= line.starts_with("+++ ");
+        if has_old_header && has_new_header {
+            return true;
+        }
+    }
+    false
+}
+
 fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPreview> {
     if pending.call.name != "bash" {
         return None;
@@ -736,57 +793,16 @@ fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPrev
         (subject.kind == sigil_kernel::ToolSubjectKind::Command)
             .then_some(subject.normalized.as_str())
     });
-    let (title, reason, grant) = match family {
-        Some("family:cargo_check") => (
-            "Run workspace check",
-            "Runs a Cargo build check through bash.",
-            "Allow cargo-check commands in this workspace for this session.",
-        ),
-        Some("family:cargo_fmt_check") => (
-            "Run workspace check",
-            "Runs a Cargo formatting check through bash.",
-            "Allow cargo-fmt-check commands in this workspace for this session.",
-        ),
-        Some("family:cargo_test") => (
-            "Run workspace tests",
-            "Runs Cargo tests through bash.",
-            "Allow cargo-test commands in this workspace for this session.",
-        ),
-        Some(value) if value.starts_with("family:check_touched") => (
-            "Run repository check",
-            "Runs the repository touched-file gate through bash.",
-            "Allow matching check-touched commands in this workspace for this session.",
-        ),
-        Some("family:git_read_only" | "family:search" | "family:list_read") => (
-            "Run workspace read",
-            "Reads workspace state through bash without external writes.",
-            "Allow matching read-only shell commands in this workspace for this session.",
-        ),
-        _ => (
-            "Run shell command",
-            "Runs a shell command whose effects need confirmation.",
-            "Session grant is not available for this command.",
-        ),
+    let title = match family {
+        Some("family:cargo_check" | "family:cargo_fmt_check") => "Run workspace check",
+        Some("family:cargo_test") => "Run workspace tests",
+        Some(value) if value.starts_with("family:check_touched") => "Run repository check",
+        Some("family:git_read_only" | "family:search" | "family:list_read") => "Run workspace read",
+        _ => "Run shell command",
     };
-    let access = approval_shell_access_summary(pending);
-    let command_rule = approval_command_permission_summary(&pending.command_permission_matches);
-    let grant_line = if pending.session_grant_available {
-        format!("Session grant: {grant}")
-    } else {
-        format!(
-            "Session grant: not available because {}.",
-            super::session_grant_unavailable_reason_label(pending.session_grant_unavailable_reason)
-        )
-    };
-    let mut summary = vec![command.to_owned(), format!("Access: {access}")];
-    if let Some(command_rule) = command_rule {
-        summary.push(format!("Rule: {command_rule}"));
-    }
-    summary.push(format!("Reason: {reason}"));
-    summary.push(grant_line);
     Some(ShellApprovalPreview {
         title: title.to_owned(),
-        summary: summary.join("\n"),
+        summary: command.to_owned(),
     })
 }
 

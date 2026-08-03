@@ -114,6 +114,8 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
             }
             QueueCompactionCommand::PromoteQueuedConversationInput { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
@@ -129,6 +131,8 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
             }
             QueueCompactionCommand::SendQueuedConversationInputNow { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
@@ -162,6 +166,8 @@ where
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
+                state.session.task_guidance_dirty = true;
+                state.session.conversation_queue_dirty = true;
             }
             QueueCompactionCommand::SetConversationQueuePaused { paused } => {
                 match set_conversation_queue_paused(
@@ -174,6 +180,10 @@ where
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
+                }
+                if !paused {
+                    state.session.task_guidance_dirty = true;
+                    state.session.conversation_queue_dirty = true;
                 }
             }
             QueueCompactionCommand::StartV2Compaction => {

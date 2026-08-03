@@ -1,8 +1,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use sigil_kernel::{ToolAnalysisReasonCode, ToolAnalysisStatus};
 
 use crate::{
     app::{
-        AppState, ApprovalAction, ApprovalModalView, session_lifecycle_flow::SessionModalAction,
+        AppState, ApprovalAction, ApprovalModalView, ComposerQueueAction,
+        session_lifecycle_flow::SessionModalAction,
     },
     config_panel::{ConfigField, ConfigSection},
     mouse::HitTarget,
@@ -44,6 +46,7 @@ pub struct LayoutSnapshot {
     pub footer: Rect,
     pub info_rail: Rect,
     pub verification_card: Option<Rect>,
+    pub(crate) composer_queue_hit_areas: Option<ComposerQueueHitAreas>,
     pub live_text_rows: Vec<LiveTextRowHitArea>,
     pub tool_cards: Vec<ToolCardHitArea>,
     pub thinking_blocks: Vec<ThinkingBlockHitArea>,
@@ -94,6 +97,24 @@ pub struct LiveTextPosition {
 pub struct ComposerInputPosition {
     pub row: usize,
     pub column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComposerQueueHitAreas {
+    pub(crate) item_rows: Vec<ComposerQueueItemHitArea>,
+    pub(crate) actions: Vec<ComposerQueueActionHitArea>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ComposerQueueItemHitArea {
+    pub(crate) index: usize,
+    pub(crate) area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ComposerQueueActionHitArea {
+    pub(crate) action: ComposerQueueAction,
+    pub(crate) area: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +255,7 @@ impl LayoutSnapshot {
             footer: shell.footer,
             info_rail: shell.info_rail,
             verification_card: verification_card_area_for_app(live_content, app),
+            composer_queue_hit_areas: composer_queue_hit_areas(live_content, app),
             live_text_rows: live_text_row_hit_areas(live_content, app),
             tool_cards: tool_card_hit_areas(live_content, app),
             thinking_blocks: thinking_block_hit_areas(live_content, app),
@@ -267,6 +289,7 @@ impl LayoutSnapshot {
             footer: Rect::default(),
             info_rail: Rect::default(),
             verification_card: None,
+            composer_queue_hit_areas: None,
             live_text_rows: Vec::new(),
             tool_cards: Vec::new(),
             thinking_blocks: Vec::new(),
@@ -402,6 +425,20 @@ impl LayoutSnapshot {
         {
             return HitTarget::VerificationCard;
         }
+        if let Some(areas) = &self.composer_queue_hit_areas {
+            for action in &areas.actions {
+                if contains(action.area, column, row) {
+                    return HitTarget::ComposerQueueAction {
+                        action: action.action,
+                    };
+                }
+            }
+            for item in &areas.item_rows {
+                if contains(item.area, column, row) {
+                    return HitTarget::ComposerQueueItem { index: item.index };
+                }
+            }
+        }
         if contains(self.composer, column, row) || contains(self.agent_panel, column, row) {
             return HitTarget::Composer;
         }
@@ -474,6 +511,76 @@ impl LayoutSnapshot {
             column: column.saturating_sub(self.composer_input.x) as usize,
         })
     }
+}
+
+fn composer_queue_hit_areas(live_area: Rect, app: &AppState) -> Option<ComposerQueueHitAreas> {
+    let item_count = app.composer_queue_rows().len();
+    if item_count == 0 {
+        return None;
+    }
+    let inner = inset_rect(live_area, 1, 0);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let content_frame = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner
+            .height
+            .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
+            .max(1),
+    );
+    let status_height = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
+    if status_height < item_count as u16 + 3 {
+        return None;
+    }
+    let status_area = Rect::new(
+        content_frame.x,
+        content_frame
+            .y
+            .saturating_add(content_frame.height.saturating_sub(status_height)),
+        content_frame.width,
+        status_height,
+    );
+    let content = Rect::new(
+        status_area.x.saturating_add(2),
+        status_area.y.saturating_add(1),
+        status_area.width.saturating_sub(2),
+        status_area.height.saturating_sub(1),
+    );
+    if content.width == 0 || content.height < item_count as u16 + 2 {
+        return None;
+    }
+
+    let item_rows = (0..item_count)
+        .map(|index| ComposerQueueItemHitArea {
+            index,
+            area: Rect::new(
+                content.x,
+                content.y.saturating_add(1 + index as u16),
+                content.width,
+                1,
+            ),
+        })
+        .collect::<Vec<_>>();
+    let action_y = content.y.saturating_add(1 + item_count as u16);
+    let end = content.x.saturating_add(content.width);
+    let mut cursor = content.x.saturating_add("Actions ".len() as u16);
+    let mut actions = Vec::new();
+    for action in ComposerQueueAction::ORDER {
+        cursor = cursor.saturating_add(1);
+        if cursor >= end {
+            break;
+        }
+        let width = (action.label().len() + 2) as u16;
+        actions.push(ComposerQueueActionHitArea {
+            action,
+            area: Rect::new(cursor, action_y, width.min(end.saturating_sub(cursor)), 1),
+        });
+        cursor = cursor.saturating_add(width);
+    }
+    Some(ComposerQueueHitAreas { item_rows, actions })
 }
 
 fn session_modal_hit_areas(screen: Rect, app: &AppState) -> Option<SessionModalHitAreas> {
@@ -1022,13 +1129,70 @@ pub(super) fn approval_modal_area(screen: Rect, view: &ApprovalModalView) -> Rec
         72usize,
         diff_width.saturating_add(12),
         view.preview_title.chars().count().saturating_add(10),
+        view.preview_summary
+            .lines()
+            .take(5)
+            .map(|line| line.chars().count().saturating_add(10))
+            .max()
+            .unwrap_or(0),
     ]
     .into_iter()
     .max()
     .unwrap_or(72)
     .min(screen.width.saturating_sub(8).max(36) as usize);
 
-    centered_rect(inner_width as u16 + 2, screen.height.min(34), screen)
+    let height = if view.has_diff_preview {
+        screen.height.min(34)
+    } else {
+        let review_width = inner_width.saturating_sub(6).max(1);
+        let review_height = approval_review_line_count(view, review_width)
+            .saturating_add(2)
+            .clamp(6, 14);
+        let metadata_height = approval_metadata_section_height(view);
+        approval_header_line_count(view)
+            .saturating_add(2)
+            .saturating_add(review_height)
+            .saturating_add(metadata_height)
+            .saturating_add(4)
+            .saturating_add(2)
+            .min(screen.height)
+    };
+    centered_rect(inner_width as u16 + 2, height, screen)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ApprovalModalSections {
+    pub(super) header: Rect,
+    pub(super) body: Rect,
+    pub(super) metadata: Option<Rect>,
+    pub(super) footer: Rect,
+}
+
+pub(super) fn approval_modal_sections(
+    inner: Rect,
+    view: &ApprovalModalView,
+) -> ApprovalModalSections {
+    let metadata_height = approval_metadata_section_height(view);
+    let mut constraints = vec![
+        Constraint::Length(approval_header_line_count(view).saturating_add(2)),
+        Constraint::Min(if view.has_diff_preview { 8 } else { 6 }),
+    ];
+    if metadata_height > 0 {
+        constraints.push(Constraint::Length(metadata_height));
+    }
+    constraints.push(Constraint::Length(4));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+    let metadata = (metadata_height > 0).then_some(chunks[2]);
+    let footer = chunks[if metadata.is_some() { 3 } else { 2 }];
+    ApprovalModalSections {
+        header: chunks[0],
+        body: chunks[1],
+        metadata,
+        footer,
+    }
 }
 
 fn approval_modal_hit_areas(
@@ -1041,28 +1205,19 @@ fn approval_modal_hit_areas(
         return None;
     }
 
-    let footer_height = 4u16.min(inner.height);
-    let header_height = approval_header_line_count(view)
-        .saturating_add(2)
-        .min(inner.height.saturating_sub(footer_height));
-    let body_y = inner.y.saturating_add(header_height);
-    let footer_y = inner
-        .y
-        .saturating_add(inner.height.saturating_sub(footer_height));
-    let body_area = Rect::new(
-        inner.x,
-        body_y,
-        inner.width,
-        footer_y.saturating_sub(body_y),
-    );
-    let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
-    let footer_inner = inset_rect(footer_area, 1, 1);
+    let sections = approval_modal_sections(inner, view);
+    let footer_inner = inset_rect(sections.footer, 1, 1);
     let (allow_once_action, allow_session_action, deny_action) =
         approval_action_hit_areas(footer_inner, view);
-    let diff_area = approval_diff_area(body_area, view);
+    let diff_area = approval_diff_area(sections.body, view);
     let diff_inner = inset_rect(diff_area, 1, 1);
     let diff_status = Rect::new(diff_inner.x, diff_inner.y, diff_inner.width, 1);
     let diff_controls = approval_diff_control_hit_areas(diff_status, view);
+    let metadata_toggle = if view.has_diff_preview {
+        diff_controls.metadata_toggle
+    } else {
+        approval_header_metadata_hit_area(inset_rect(sections.header, 1, 1), view)
+    };
 
     Some(ApprovalModalHitAreas {
         modal,
@@ -1070,8 +1225,8 @@ fn approval_modal_hit_areas(
         hunk_previous: diff_controls.hunk_previous,
         hunk_next: diff_controls.hunk_next,
         diff_view_toggle: diff_controls.diff_view_toggle,
-        metadata_toggle: diff_controls.metadata_toggle,
-        file_rows: approval_file_row_hit_areas(body_area, view),
+        metadata_toggle,
+        file_rows: approval_file_row_hit_areas(sections.body, view),
         allow_once_action,
         allow_session_action,
         deny_action,
@@ -1079,18 +1234,95 @@ fn approval_modal_hit_areas(
 }
 
 fn approval_header_line_count(view: &ApprovalModalView) -> u16 {
-    let summary_lines = if view.metadata_collapsed || view.preview_summary.trim().is_empty() {
-        1
+    let _ = view;
+    1
+}
+
+fn approval_metadata_section_height(view: &ApprovalModalView) -> u16 {
+    if view.metadata_collapsed {
+        0
     } else {
-        view.preview_summary.lines().take(4).count().max(1) as u16
-    };
-    let change_set_lines = if view.change_set.is_some() { 2 } else { 0 };
-    let source_agent_lines = u16::from(view.source_agent.is_some());
-    let permission_metadata_lines = if view.metadata_collapsed { 0 } else { 4 };
-    4u16.saturating_add(summary_lines)
-        .saturating_add(source_agent_lines)
-        .saturating_add(change_set_lines)
-        .saturating_add(permission_metadata_lines)
+        8u16.saturating_add(u16::from(approval_analysis_has_recovery_hint(
+            &view.analysis,
+        )))
+        .saturating_add(u16::from(view.source_agent.is_some()))
+        .saturating_add(if view.change_set.is_some() { 2 } else { 0 })
+    }
+}
+
+fn approval_review_line_count(view: &ApprovalModalView, width: usize) -> u16 {
+    let title_lines = wrapped_approval_line_count(view.preview_title.trim(), width);
+    let summary_lines = wrapped_approval_line_count(view.preview_summary.trim(), width);
+    title_lines
+        .saturating_add(summary_lines)
+        .max(1)
+        .min(u16::MAX as usize) as u16
+}
+
+fn wrapped_approval_line_count(value: &str, width: usize) -> usize {
+    if value.is_empty() {
+        return 0;
+    }
+    value
+        .lines()
+        .map(|line| line.chars().count().max(1).div_ceil(width.max(1)))
+        .sum()
+}
+
+fn approval_header_metadata_hit_area(header_inner: Rect, view: &ApprovalModalView) -> Rect {
+    if header_inner.width == 0 || header_inner.height == 0 {
+        return Rect::default();
+    }
+    let prefix_width = view
+        .access_label
+        .chars()
+        .count()
+        .saturating_add(2)
+        .saturating_add(1)
+        .saturating_add(view.tool_name.chars().count())
+        .saturating_add(2)
+        .saturating_add("risk ".chars().count())
+        .saturating_add(approval_risk_label_width(view.risk))
+        .saturating_add(2)
+        .saturating_add(2) as u16;
+    let x = header_inner.x.saturating_add(prefix_width);
+    let end = header_inner.x.saturating_add(header_inner.width);
+    if x >= end {
+        return Rect::default();
+    }
+    let width = approval_metadata_control_label(view.metadata_collapsed)
+        .chars()
+        .count()
+        .saturating_add(2) as u16;
+    Rect::new(x, header_inner.y, width.min(end.saturating_sub(x)), 1)
+}
+
+fn approval_risk_label_width(risk: sigil_kernel::PermissionRisk) -> usize {
+    match risk {
+        sigil_kernel::PermissionRisk::Low => 3,
+        sigil_kernel::PermissionRisk::Medium => 6,
+        sigil_kernel::PermissionRisk::High => 4,
+        sigil_kernel::PermissionRisk::Destructive => 11,
+        sigil_kernel::PermissionRisk::Protected => 9,
+    }
+}
+
+fn approval_analysis_has_recovery_hint(analysis: &ToolAnalysisStatus) -> bool {
+    match analysis {
+        ToolAnalysisStatus::Unsupported { reason } | ToolAnalysisStatus::Invalid { reason } => {
+            matches!(
+                reason.code,
+                ToolAnalysisReasonCode::UnsupportedSyntax | ToolAnalysisReasonCode::InvalidSyntax
+            )
+        }
+        ToolAnalysisStatus::Conservative { reasons } => reasons.iter().any(|reason| {
+            matches!(
+                reason.code,
+                ToolAnalysisReasonCode::UnsupportedSyntax | ToolAnalysisReasonCode::InvalidSyntax
+            )
+        }),
+        ToolAnalysisStatus::Complete => false,
+    }
 }
 
 fn approval_file_row_hit_areas(
@@ -1177,6 +1409,20 @@ pub(super) fn approval_diff_control_hit_areas(
 
     let end = status_area.x.saturating_add(status_area.width);
     let mut cursor = status_area.x;
+    if !view.has_diff_preview {
+        let metadata_toggle = approval_status_badge_rect(
+            status_area.y,
+            &mut cursor,
+            end,
+            approval_metadata_control_label(view.metadata_collapsed),
+        );
+        return ApprovalDiffControlHitAreas {
+            hunk_previous: Rect::default(),
+            hunk_next: Rect::default(),
+            diff_view_toggle: Rect::default(),
+            metadata_toggle,
+        };
+    }
     let hunk_previous = approval_status_badge_rect(status_area.y, &mut cursor, end, "Prev");
     let hunk_next = approval_status_badge_rect(status_area.y, &mut cursor, end, "Next");
     let diff_view_toggle = approval_status_badge_rect(
@@ -1206,9 +1452,9 @@ pub(super) fn approval_diff_view_control_label(diff_mode_label: &str) -> String 
 
 pub(super) fn approval_metadata_control_label(metadata_collapsed: bool) -> &'static str {
     if metadata_collapsed {
-        "Meta hidden"
+        "Details"
     } else {
-        "Meta"
+        "Hide details"
     }
 }
 

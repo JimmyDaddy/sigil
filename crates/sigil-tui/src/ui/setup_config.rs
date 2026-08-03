@@ -1255,7 +1255,7 @@ fn render_theme_preview_line_with_palette(
             push_theme_preview_sample(
                 &mut spans,
                 &mut remaining,
-                "Review Tool Call",
+                "Approve action",
                 Style::default()
                     .fg(palette.text_inverse)
                     .bg(palette.approval_selected_bg)
