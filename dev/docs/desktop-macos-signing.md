@@ -48,7 +48,7 @@ pnpm --dir apps/desktop package:macos:signed
 ```bash
 pnpm --dir apps/desktop package:macos:signed -- \
   --target all \
-  --tag v0.0.1-beta.1
+  --tag v0.0.1-beta.2
 ```
 
 若 Keychain profile 使用了其他名称：
@@ -57,7 +57,7 @@ pnpm --dir apps/desktop package:macos:signed -- \
 SIGIL_NOTARY_PROFILE="<profile>" \
   pnpm --dir apps/desktop package:macos:signed -- \
     --target all \
-    --tag v0.0.1-beta.1
+    --tag v0.0.1-beta.2
 ```
 
 本地打包脚本会把当前 workspace version 与 `git rev-parse --short=12 HEAD`
@@ -78,7 +78,7 @@ Apple Team ID、Keychain profile label、目标架构、精确字节数和 SHA-2
 SIGIL_NOTARY_WEBHOOK_URL="https://<relay>/apple-notary/<secret>" \
   pnpm --dir apps/desktop package:macos:signed -- \
     --target all \
-    --tag v0.0.1-beta.1
+    --tag v0.0.1-beta.2
 ```
 
 ## 单次状态检查与离线 finalize
@@ -87,7 +87,7 @@ SIGIL_NOTARY_WEBHOOK_URL="https://<relay>/apple-notary/<secret>" \
 
 ```bash
 scripts/status-desktop-macos-notarization.sh \
-  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
+  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.2/<commit>/<timestamp>
 ```
 
 该命令只查询尚未终止的 submission，每个 invocation 最多查询一次，不轮询。只看本地状态：
@@ -127,8 +127,8 @@ commit-bound candidate manifest 建立 draft Release。随后用唯一上传入�
 
 ```bash
 scripts/upload-desktop-macos-release.sh \
-  --tag v0.0.1-beta.1 \
-  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.1/<commit>/<timestamp>
+  --tag v0.0.1-beta.2 \
+  --artifact-dir .repo-local-dev/desktop-macos/0.0.1-beta.2/<commit>/<timestamp>
 ```
 
 该命令会先复验本地与远端 tag/main、精确 SHA 的 CI、`build.txt`、双架构、checksum、

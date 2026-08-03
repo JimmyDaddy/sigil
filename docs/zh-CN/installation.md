@@ -73,7 +73,7 @@ sigil doctor
 首个发布版本通过 Git tag 安装，不从 crates.io 分发：
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.2 --locked sigil
 ```
 
 这会把 `sigil` 可执行文件安装到 Cargo 的二进制目录。macOS 和 Linux 默认为 `~/.cargo/bin`，Windows 默认为 `%USERPROFILE%\.cargo\bin`。
@@ -128,7 +128,7 @@ sigil run "总结一下当前仓库"
 ```bash
 npm install -g @sigil-ai/sigil@beta
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.1 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-beta.2 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

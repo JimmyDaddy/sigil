@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -8,7 +8,26 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been recorded after `v0.0.1-beta.1` yet.
+No user-facing changes have been recorded after `v0.0.1-beta.2` yet.
+
+## v0.0.1-beta.2 - 2026-08-03
+
+This beta removes model-catalog discovery from the critical path for first-run setup and allows
+the frozen TUI packages to ship before the matching Desktop artifacts are ready.
+
+- Quick Setup, `/config`, Desktop Settings, and the HTTP setup route now treat remote model lists
+  as optional guidance. Bundled models stay selectable while discovery runs, and an exact model
+  ID can always be entered when a provider has no `/models` endpoint or discovery fails. The first
+  real generation request remains the authority for credential, protocol, endpoint, and model
+  compatibility.
+- Unsupported reasoning parameters are omitted using the exact provider/model capability mapping
+  instead of being guessed for unknown or non-reasoning models.
+- Alpha and beta TUI npm packages can now be published from the frozen release candidate while
+  the GitHub Release remains a draft. Desktop DMGs, updater archives, Pages updates, Homebrew, and
+  public GitHub Release publication continue later from the same immutable tag.
+- macOS Desktop notarization is now asynchronous and resumable. Immutable DMG and app submissions
+  are recorded in an append-only ledger, status checks are one-shot, and an offline finalizer
+  verifies accepted submissions before the Desktop assets can be uploaded.
 
 ## v0.0.1-beta.1 - 2026-08-02
 

@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -8,7 +8,22 @@
 
 ## 尚未发布 - main
 
-`v0.0.1-beta.1` 之后暂未记录新的用户可见变更。
+`v0.0.1-beta.2` 之后暂未记录新的用户可见变更。
+
+## v0.0.1-beta.2 - 2026-08-03
+
+本 beta 将模型目录发现移出首次配置关键路径，并允许冻结后的 TUI 包先于对应 Desktop 资产发布。
+
+- 快速设置、`/config`、Desktop 设置和 HTTP 配置接口现在都把远端模型列表视为可选增强。
+  刷新期间 bundled 模型仍可选择；Provider 没有 `/models` 接口或 discovery 失败时，也始终可以
+  输入精确模型 ID。凭据、协议、端点和模型是否真正兼容，仍由第一次真实生成请求判定。
+- 不再为未知模型或不支持 reasoning 的模型猜测并发送 reasoning 参数；请求只使用精确
+  provider/model capability 明确支持的 effort。
+- Alpha/Beta 的 TUI npm 包现在可从已冻结 release candidate 独立发布，同时保持 GitHub Release
+  为 draft。Desktop DMG、更新包、Pages 更新、Homebrew 和公开 GitHub Release 后续继续从同一
+  不可变 tag 完成。
+- macOS Desktop 公证改为异步且可恢复：不可变 DMG/app submission 记录在 append-only 账本，
+  状态命令只做单次查询，offline finalizer 会在上传 Desktop 资产前复验所有 Accepted submission。
 
 ## v0.0.1-beta.1 - 2026-08-02
 
