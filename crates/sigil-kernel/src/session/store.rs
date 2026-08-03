@@ -553,6 +553,7 @@ impl JsonlSessionStore {
         initial_provider_name: String,
         initial_model_name: String,
         initial_route: Option<crate::ResolvedModelRoute>,
+        initial_route_trust: Option<crate::RouteEgressTrustBinding>,
     ) -> Result<(
         Vec<SessionLogEntry>,
         Vec<SessionStreamRecord>,
@@ -581,6 +582,9 @@ impl JsonlSessionStore {
                 )),
                 "current session stream is missing its required session identity"
             );
+            let route_semantic_fingerprint = initial_route
+                .as_ref()
+                .map(|route| route.semantic_fingerprint.clone());
             let entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: initial_provider_name,
                 model_name: initial_model_name,
@@ -588,6 +592,21 @@ impl JsonlSessionStore {
             });
             entries.push(entry);
             reconciled_entries.push(entries.last().expect("identity entry was pushed").clone());
+            if let (Some(route_semantic_fingerprint), Some(egress_trust_binding)) =
+                (route_semantic_fingerprint, initial_route_trust)
+            {
+                let entry = SessionLogEntry::Control(ControlEntry::SessionRouteTrustBound {
+                    route_semantic_fingerprint,
+                    egress_trust_binding,
+                });
+                entries.push(entry);
+                reconciled_entries.push(
+                    entries
+                        .last()
+                        .expect("route trust entry was pushed")
+                        .clone(),
+                );
+            }
         }
         let (provider_name, model_name) = session_identity_from_entries(&entries)
             .ok_or_else(|| anyhow::anyhow!("current session identity could not be decoded"))?;

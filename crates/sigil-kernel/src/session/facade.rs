@@ -333,6 +333,23 @@ impl Session {
         initial_route: Option<ResolvedModelRoute>,
         store: JsonlSessionStore,
     ) -> Result<Self> {
+        Self::load_from_store_with_route_and_trust(
+            provider_name,
+            model_name,
+            initial_route,
+            None,
+            store,
+        )
+    }
+
+    /// Loads a durable session and atomically initializes a new route epoch with its trust proof.
+    pub fn load_from_store_with_route_and_trust(
+        provider_name: impl Into<String>,
+        model_name: impl Into<String>,
+        initial_route: Option<ResolvedModelRoute>,
+        initial_route_trust: Option<crate::RouteEgressTrustBinding>,
+        store: JsonlSessionStore,
+    ) -> Result<Self> {
         let initial_provider_name = provider_name.into();
         let initial_model_name = model_name.into();
         // Establish the V2 session envelope (including tail repair and identity) before the
@@ -342,6 +359,7 @@ impl Session {
             initial_provider_name,
             initial_model_name,
             initial_route,
+            initial_route_trust,
         )?;
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover_from_records(&records)
@@ -1058,6 +1076,45 @@ impl Session {
         self.resolved_model_route.as_ref()
     }
 
+    /// Returns the proven egress trust binding for the latest route epoch, when present.
+    #[must_use]
+    pub fn route_egress_trust_binding(&self) -> Option<crate::RouteEgressTrustBinding> {
+        crate::session::session_route_trust_binding_from_entries(&self.entries)
+    }
+
+    /// Proves that the latest durable route boundary is exactly one requested rebind.
+    #[must_use]
+    pub fn route_rebind_matches(
+        &self,
+        source_route: &ResolvedModelRoute,
+        target_route: &ResolvedModelRoute,
+        egress_trust_binding: &crate::RouteEgressTrustBinding,
+    ) -> bool {
+        let Some(boundary_index) = self.entries.iter().rposition(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(
+                    ControlEntry::SessionIdentity { .. }
+                        | ControlEntry::SessionModelSelected { .. }
+                        | ControlEntry::SessionRouteRebound { .. }
+                )
+            )
+        }) else {
+            return false;
+        };
+        let SessionLogEntry::Control(ControlEntry::SessionRouteRebound {
+            resolved_model_route,
+            ..
+        }) = &self.entries[boundary_index]
+        else {
+            return false;
+        };
+        resolved_model_route == target_route
+            && session_resolved_route_from_entries(&self.entries[..boundary_index]).as_ref()
+                == Some(source_route)
+            && self.route_egress_trust_binding().as_ref() == Some(egress_trust_binding)
+    }
+
     /// Selects the exact provider route used by subsequent runs without forking the session.
     ///
     /// The selection is append-only. Provider-native continuation material written before this
@@ -1085,6 +1142,86 @@ impl Session {
         self.provider_name = provider_name;
         self.model_name = model_name;
         self.resolved_model_route = Some(resolved_model_route);
+        Ok(())
+    }
+
+    /// Selects an exact route and commits its opaque trust proof in one ordered writer batch.
+    pub fn select_model_route_with_trust(
+        &mut self,
+        provider_name: impl Into<String>,
+        resolved_model_route: ResolvedModelRoute,
+        egress_trust_binding: crate::RouteEgressTrustBinding,
+    ) -> Result<()> {
+        let provider_name = provider_name.into();
+        if provider_name.trim().is_empty() {
+            bail!("session provider selection must not be empty");
+        }
+        let model_name = resolved_model_route.model_ref.model_id.clone();
+        if provider_name == self.provider_name
+            && self.resolved_model_route.as_ref() == Some(&resolved_model_route)
+        {
+            if self.route_egress_trust_binding().as_ref() == Some(&egress_trust_binding) {
+                return Ok(());
+            }
+            self.append_control(ControlEntry::SessionRouteTrustBound {
+                route_semantic_fingerprint: resolved_model_route.semantic_fingerprint.clone(),
+                egress_trust_binding,
+            })?;
+            return Ok(());
+        }
+        self.append_controls(vec![
+            ControlEntry::SessionModelSelected {
+                provider_name: provider_name.clone(),
+                model_name: model_name.clone(),
+                resolved_model_route: resolved_model_route.clone(),
+            },
+            ControlEntry::SessionRouteTrustBound {
+                route_semantic_fingerprint: resolved_model_route.semantic_fingerprint.clone(),
+                egress_trust_binding,
+            },
+        ])?;
+        self.provider_name = provider_name;
+        self.model_name = model_name;
+        self.resolved_model_route = Some(resolved_model_route);
+        Ok(())
+    }
+
+    /// Commits one automatic portable route rebind after runtime quiescence validation.
+    ///
+    /// Callers must hold the session-scoped route mutation authority. This kernel operation
+    /// verifies the source route and makes the boundary plus trust proof durable before updating
+    /// the in-memory route projection.
+    pub fn commit_route_rebind(
+        &mut self,
+        provider_name: impl Into<String>,
+        source_route: &ResolvedModelRoute,
+        target_route: ResolvedModelRoute,
+        egress_trust_binding: crate::RouteEgressTrustBinding,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.resolved_model_route.as_ref() == Some(source_route),
+            "session route source is stale"
+        );
+        let provider_name = provider_name.into();
+        anyhow::ensure!(
+            !provider_name.trim().is_empty(),
+            "session provider rebind must not be empty"
+        );
+        let model_name = target_route.model_ref.model_id.clone();
+        self.append_controls(vec![
+            ControlEntry::SessionRouteRebound {
+                provider_name: provider_name.clone(),
+                model_name: model_name.clone(),
+                resolved_model_route: target_route.clone(),
+            },
+            ControlEntry::SessionRouteTrustBound {
+                route_semantic_fingerprint: target_route.semantic_fingerprint.clone(),
+                egress_trust_binding,
+            },
+        ])?;
+        self.provider_name = provider_name;
+        self.model_name = model_name;
+        self.resolved_model_route = Some(target_route);
         Ok(())
     }
 
@@ -1179,7 +1316,7 @@ impl Session {
     pub fn continuation_states(&self, provider_name: &str) -> Vec<ProviderContinuationState> {
         let mut latest_by_key: HashMap<(String, Option<String>), ProviderContinuationState> =
             HashMap::new();
-        for entry in self.entries_after_latest_model_selection() {
+        for entry in self.entries_after_latest_route_boundary() {
             if let SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(state)) = entry
                 && state.provider_name == provider_name
             {
@@ -1193,7 +1330,7 @@ impl Session {
     }
 
     pub fn latest_response_handle(&self, provider_name: &str) -> Option<ResponseHandle> {
-        self.entries_after_latest_model_selection()
+        self.entries_after_latest_route_boundary()
             .iter()
             .rev()
             .find_map(|entry| match entry {
@@ -1206,18 +1343,22 @@ impl Session {
             })
     }
 
-    fn entries_after_latest_model_selection(&self) -> &[SessionLogEntry] {
+    fn entries_after_latest_route_boundary(&self) -> &[SessionLogEntry] {
         let boundary = self.entries.iter().rposition(|entry| {
             matches!(
                 entry,
-                SessionLogEntry::Control(ControlEntry::SessionModelSelected { .. })
+                SessionLogEntry::Control(
+                    ControlEntry::SessionIdentity { .. }
+                        | ControlEntry::SessionModelSelected { .. }
+                        | ControlEntry::SessionRouteRebound { .. }
+                )
             )
         });
         boundary.map_or(&self.entries, |index| &self.entries[index + 1..])
     }
 
     pub fn latest_prefix_snapshot(&self) -> Option<PrefixSnapshot> {
-        self.entries_after_latest_model_selection()
+        self.entries_after_latest_route_boundary()
             .iter()
             .rev()
             .find_map(|entry| match entry {

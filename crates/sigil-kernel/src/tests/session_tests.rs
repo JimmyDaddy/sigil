@@ -4712,6 +4712,84 @@ fn model_selection_is_durable_and_cuts_off_native_continuation_material() -> Res
 }
 
 #[test]
+fn route_rebind_and_trust_are_durable_and_cut_off_private_continuation_material() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let source_route = crate::ResolvedModelRoute::new(
+        crate::ModelRef::new(crate::ConnectionId::new("gateway-team")?, "gpt-5")?,
+        "openai",
+        "responses",
+        "sha256:source-route",
+    )?;
+    let source_binding = crate::RouteEgressTrustBinding::new("sha256:source-trust")?;
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::load_from_store_with_route_and_trust(
+        "openai_responses",
+        "gpt-5",
+        Some(source_route.clone()),
+        Some(source_binding.clone()),
+        store,
+    )?;
+    assert_eq!(session.route_egress_trust_binding(), Some(source_binding));
+    session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
+        provider_name: "openai_responses".to_owned(),
+        response_id: "response-source".to_owned(),
+        continuation_cursor: None,
+    }))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "openai_responses".to_owned(),
+            state_kind: "responses".to_owned(),
+            message_id: Some("message-source".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"source"}),
+        },
+    ))?;
+    session.append_control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
+        materialization: test_prefix_materialization("prefix-source".len()),
+        sha256: "source".to_owned(),
+        provider_name: "openai_responses".to_owned(),
+        model_name: "gpt-5".to_owned(),
+        memory_fingerprint: "memory-source".to_owned(),
+        tool_schema_fingerprint: "tools-source".to_owned(),
+        skill_index_fingerprint: "skills-source".to_owned(),
+    }))?;
+
+    let target_route = crate::ResolvedModelRoute::new(
+        source_route.model_ref.clone(),
+        "openai",
+        "responses",
+        "sha256:target-route",
+    )?;
+    let target_binding = crate::RouteEgressTrustBinding::new("sha256:source-trust")?;
+    session.commit_route_rebind(
+        "openai_responses",
+        &source_route,
+        target_route.clone(),
+        target_binding.clone(),
+    )?;
+
+    assert_eq!(session.resolved_model_route(), Some(&target_route));
+    assert_eq!(
+        session.route_egress_trust_binding(),
+        Some(target_binding.clone())
+    );
+    assert!(session.latest_response_handle("openai_responses").is_none());
+    assert!(session.continuation_states("openai_responses").is_empty());
+    assert!(session.latest_prefix_snapshot().is_none());
+    assert!(session.route_rebind_matches(&source_route, &target_route, &target_binding));
+
+    let restored = Session::load_from_store("other", "other", JsonlSessionStore::new(&path)?)?;
+    assert_eq!(restored.resolved_model_route(), Some(&target_route));
+    assert_eq!(restored.route_egress_trust_binding(), Some(target_binding));
+    assert!(
+        restored
+            .latest_response_handle("openai_responses")
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {

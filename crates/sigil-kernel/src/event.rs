@@ -1310,9 +1310,55 @@ impl PublicRunEvent {
 ///
 /// Lifecycle events are owned by adapters because the kernel's internal [`RunEvent`] stream only
 /// represents events produced inside an already-running agent loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicRouteRecoveryCode {
+    SessionRouteConfirmationRequired,
+    SessionRouteSelectionRequired,
+    ModelRouteNotConfigured,
+    ConnectionConfigInvalid,
+    ProviderUnavailable,
+    SessionAlreadyActive,
+    SessionWriterBusy,
+    SessionStreamInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicRouteRecoveryAction {
+    ConfirmCurrentRoute,
+    RepairConnection,
+    SelectReplacement,
+    StartNewSession,
+    RetryProvider,
+    RetrySessionAttach,
+    BackToSessionLibrary,
+}
+
+/// Stable public classification for one admitted session-route transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicSessionRouteTransitionKind {
+    Exact,
+    Rebound,
+    ExplicitlyConfirmed,
+}
+
+/// Public-safe receipt for the route admitted by an open or run invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicSessionRouteTransitionView {
+    pub kind: PublicSessionRouteTransitionKind,
+    pub connection_id: Option<String>,
+    pub model_id: Option<String>,
+    pub remote_context_reset: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicRunEventKind {
+    RouteTransition {
+        transition: PublicSessionRouteTransitionView,
+    },
     RunStarted {
         prompt: String,
     },
@@ -1368,6 +1414,12 @@ pub enum PublicRunEventKind {
     },
     RunFailed {
         error: String,
+    },
+    RouteRecoveryRequired {
+        code: PublicRouteRecoveryCode,
+        actions: Vec<PublicRouteRecoveryAction>,
+        recovery_binding: String,
+        retryable: bool,
     },
     RunCancelled,
     TextDelta {
@@ -1581,6 +1633,8 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
         ControlEntry::SessionIdentity { .. } => "session_identity",
         ControlEntry::SessionModelSelected { .. } => "session_model_selected",
+        ControlEntry::SessionRouteRebound { .. } => "session_route_rebound",
+        ControlEntry::SessionRouteTrustBound { .. } => "session_route_trust_bound",
         ControlEntry::ContinuationStateSaved(_) => "continuation_state_saved",
         ControlEntry::ResponseHandleTracked(_) => "response_handle_tracked",
         ControlEntry::BackgroundTaskTracked(_) => "background_task_tracked",

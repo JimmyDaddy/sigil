@@ -275,11 +275,18 @@ pub(super) fn session_identity_from_entries(
             }) if identity.is_none() => {
                 identity = Some((provider_name.clone(), model_name.clone()));
             }
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
-                provider_name,
-                model_name,
-                ..
-            }) if identity.is_some() => {
+            SessionLogEntry::Control(
+                ControlEntry::SessionModelSelected {
+                    provider_name,
+                    model_name,
+                    ..
+                }
+                | ControlEntry::SessionRouteRebound {
+                    provider_name,
+                    model_name,
+                    ..
+                },
+            ) if identity.is_some() => {
                 if let Some((current_provider, current_model)) = identity.as_mut() {
                     *current_provider = provider_name.clone();
                     *current_model = model_name.clone();
@@ -305,14 +312,63 @@ pub(super) fn session_resolved_route_from_entries(
                 identity_seen = true;
                 route = resolved_model_route.clone();
             }
-            SessionLogEntry::Control(ControlEntry::SessionModelSelected {
-                resolved_model_route,
-                ..
-            }) if identity_seen => route = Some(resolved_model_route.clone()),
+            SessionLogEntry::Control(
+                ControlEntry::SessionModelSelected {
+                    resolved_model_route,
+                    ..
+                }
+                | ControlEntry::SessionRouteRebound {
+                    resolved_model_route,
+                    ..
+                },
+            ) if identity_seen => route = Some(resolved_model_route.clone()),
             _ => {}
         }
     }
     let route = route?;
     let (_, final_model) = session_identity_from_entries(entries)?;
     (route.model_ref.model_id == final_model).then_some(route)
+}
+
+pub(super) fn session_route_trust_binding_from_entries(
+    entries: &[SessionLogEntry],
+) -> Option<crate::RouteEgressTrustBinding> {
+    let mut current_fingerprint = None::<String>;
+    let mut trust_binding = None;
+    let mut identity_seen = false;
+    for entry in entries {
+        match entry {
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                resolved_model_route,
+                ..
+            }) if !identity_seen => {
+                identity_seen = true;
+                current_fingerprint = resolved_model_route
+                    .as_ref()
+                    .map(|route| route.semantic_fingerprint.clone());
+                trust_binding = None;
+            }
+            SessionLogEntry::Control(
+                ControlEntry::SessionModelSelected {
+                    resolved_model_route,
+                    ..
+                }
+                | ControlEntry::SessionRouteRebound {
+                    resolved_model_route,
+                    ..
+                },
+            ) if identity_seen => {
+                current_fingerprint = Some(resolved_model_route.semantic_fingerprint.clone());
+                trust_binding = None;
+            }
+            SessionLogEntry::Control(ControlEntry::SessionRouteTrustBound {
+                route_semantic_fingerprint,
+                egress_trust_binding,
+            }) if current_fingerprint.as_deref() == Some(route_semantic_fingerprint.as_str()) => {
+                trust_binding = Some(egress_trust_binding.clone());
+            }
+            _ => {}
+        }
+    }
+    trust_binding
 }

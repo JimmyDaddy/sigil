@@ -238,12 +238,13 @@ pub use event::{
     DurableEventPayloadMetadata, DurableEventPayloadStorage, DurableEventType, EventClass,
     EventHandler, EventId, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, NoopEventHandler,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
-    PublicAssistantMessage, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
-    RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent, STORED_EVENT_SCHEMA_VERSION, SessionId,
-    StoredEvent, StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode, decode_stored_event,
-    decode_typed_stored_event, is_transient_run_event, projection_apply_decision,
-    projection_apply_decision_for_record, reducer_disposition, stable_event_hash,
-    stable_event_uuid,
+    PublicAssistantMessage, PublicControlEvent, PublicRouteRecoveryAction, PublicRouteRecoveryCode,
+    PublicRunEvent, PublicRunEventKind, PublicSessionRouteTransitionKind,
+    PublicSessionRouteTransitionView, RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent,
+    STORED_EVENT_SCHEMA_VERSION, SessionId, StoredEvent, StoredEventDecode, TypedDomainEvent,
+    TypedStoredEventDecode, decode_stored_event, decode_typed_stored_event, is_transient_run_event,
+    projection_apply_decision, projection_apply_decision_for_record, reducer_disposition,
+    stable_event_hash, stable_event_uuid,
 };
 pub use execution_backend::{
     EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION, ExecutionBackend, ExecutionBackendCapabilities,
@@ -355,7 +356,9 @@ pub use intent_operation::{
     cancel_intent_operation, execute_intent_drop, preview_intent_drop, reconcile_intent_operations,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
-pub use model_route::{ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute};
+pub use model_route::{
+    ConnectionId, ModelRef, ModelRouteValidationError, ResolvedModelRoute, RouteEgressTrustBinding,
+};
 pub use mutation::{
     CheckpointRestoreConflict, CheckpointRestoreConflictReason, CheckpointRestored,
     CommittedDirectoryMutation, CommittedFileMutation, ExecutionMutationProfile,

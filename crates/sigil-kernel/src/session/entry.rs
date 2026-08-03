@@ -183,6 +183,15 @@ pub enum ControlEntry {
         model_name: String,
         resolved_model_route: crate::ResolvedModelRoute,
     },
+    SessionRouteRebound {
+        provider_name: String,
+        model_name: String,
+        resolved_model_route: crate::ResolvedModelRoute,
+    },
+    SessionRouteTrustBound {
+        route_semantic_fingerprint: String,
+        egress_trust_binding: crate::RouteEgressTrustBinding,
+    },
     ContinuationStateSaved(ProviderContinuationState),
     ResponseHandleTracked(crate::provider::ResponseHandle),
     BackgroundTaskTracked(crate::provider::BackgroundTaskHandle),

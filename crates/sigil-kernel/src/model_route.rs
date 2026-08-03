@@ -6,6 +6,7 @@ const CONNECTION_ID_MAX_BYTES: usize = 64;
 const MODEL_ID_MAX_BYTES: usize = 256;
 const ROUTE_LABEL_MAX_BYTES: usize = 64;
 const ROUTE_FINGERPRINT_MAX_BYTES: usize = 128;
+const ROUTE_TRUST_BINDING_MAX_BYTES: usize = 128;
 
 /// Stable provider-neutral identity for one saved provider connection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -105,6 +106,53 @@ pub struct ResolvedModelRoute {
     pub provider_family: String,
     pub protocol: String,
     pub semantic_fingerprint: String,
+}
+
+/// Opaque, secret-free proof of the network and tenant trust boundary for a route epoch.
+///
+/// The runtime computes this value from provider-neutral egress material. Kernel persistence
+/// deliberately treats it as an opaque bounded token so endpoints and tenant identifiers never
+/// enter the durable session stream.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct RouteEgressTrustBinding(String);
+
+impl RouteEgressTrustBinding {
+    /// Constructs a validated opaque route trust binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the binding is empty, oversized, or terminal-unsafe.
+    pub fn new(value: impl Into<String>) -> Result<Self, ModelRouteValidationError> {
+        let value = value.into();
+        validate_safe_text(
+            "route egress trust binding",
+            &value,
+            ROUTE_TRUST_BINDING_MAX_BYTES,
+        )?;
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for RouteEgressTrustBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RouteEgressTrustBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ResolvedModelRoute {

@@ -1628,6 +1628,11 @@ fn apply_control_entry_to_session_list(
             provider_name,
             model_name,
             ..
+        }
+        | ControlEntry::SessionRouteRebound {
+            provider_name,
+            model_name,
+            ..
         } => {
             projection.provider_name = Some(provider_name.clone());
             projection.model_name = Some(model_name.clone());
