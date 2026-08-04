@@ -501,7 +501,7 @@ async fn bash_large_output_publishes_truthful_truncated_artifact_without_large_i
         .execute(
             context,
             "bash-large".to_owned(),
-            json!({"command": "yes x | head -c 10485760"}),
+            json!({"command": "yes aaaaaaaaaa | head -c 5000000; echo MIDDLE-SENTINEL-XYZ; yes bbbbbbbbbb | head -c 5000000"}),
         )
         .await?;
 
@@ -516,6 +516,24 @@ async fn bash_large_output_publishes_truthful_truncated_artifact_without_large_i
     };
     assert!(descriptor.observed_bytes > descriptor.persisted_bytes);
     assert!(descriptor.persisted_bytes < 70 * 1024);
+    // RFC-0062 5.1 characterization: the current process-backed Bash artifact is built from the
+    // backend's bounded head/tail collector, so the middle of a large output is permanently lost.
+    // observed_bytes stays truthful about the full child output, but the persisted body must not
+    // be claimed as a complete capture.
+    let persisted = artifact_store.read_all(&descriptor)?;
+    let persisted_text = String::from_utf8_lossy(&persisted);
+    assert!(
+        persisted_text.contains("aaaaaaaaaa"),
+        "artifact must retain the bounded head"
+    );
+    assert!(
+        persisted_text.contains("bbbbbbbbbb"),
+        "artifact must retain the bounded tail"
+    );
+    assert!(
+        !persisted_text.contains("MIDDLE-SENTINEL-XYZ"),
+        "artifact must not contain the middle bytes dropped by the bounded collector"
+    );
     Ok(())
 }
 

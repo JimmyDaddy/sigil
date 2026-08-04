@@ -586,7 +586,13 @@ pub(in crate::runner) fn read_tool_artifact_page_for_display(
     }
 
     let call_id = format!("tui-artifact-read-{}", uuid::Uuid::new_v4().simple());
-    let read = match budget.read_page_for_call(&store, artifact_ref, selector.clone(), &call_id) {
+    let read = match budget.read_page_for_call(
+        &store,
+        artifact_ref,
+        selector.clone(),
+        &call_id,
+        &active_epoch_id,
+    ) {
         Ok(read) => read,
         Err(_) => {
             let (reads, bytes) = budget.usage();

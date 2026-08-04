@@ -3,7 +3,7 @@ use std::{io::Write, time::Instant};
 use anyhow::{Context, Result};
 
 use super::*;
-use crate::{ControlEntry, Session, SessionLogEntry};
+use crate::{ControlEntry, Session, SessionLogEntry, ToolErrorKind};
 
 fn store_fixture() -> Result<(tempfile::TempDir, ToolArtifactStore)> {
     let temp = tempfile::tempdir()?;
@@ -1024,5 +1024,378 @@ fn read_receipt_event_is_body_free_and_recovery_critical() -> Result<()> {
         Some(SessionLogEntry::Control(ControlEntry::ToolArtifactRead(value)))
             if value == receipt
     ));
+    Ok(())
+}
+
+#[test]
+fn utf8_preview_cap_boundary_never_splits_code_points() -> Result<()> {
+    // "α" is two UTF-8 bytes, so the exact cap is reachable without splitting a code point.
+    let unit = "α";
+    let unit_bytes = unit.len();
+    let body = unit.repeat(TOOL_MODEL_VIEW_INITIAL_MAX_BYTES / unit_bytes);
+    let exact = body.len();
+    assert_eq!(exact, TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+
+    let (preview_exact, kind_exact) =
+        bounded_model_preview(&body, TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+    assert_eq!(preview_exact.len(), TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+    assert_eq!(kind_exact, ToolPreviewKind::Complete);
+
+    let overflow = format!("{body}α");
+    let (preview_overflow, kind_overflow) =
+        bounded_model_preview(&overflow, TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+    assert!(preview_overflow.len() <= TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+    assert_eq!(kind_overflow, ToolPreviewKind::HeadTail);
+    assert!(preview_overflow.is_char_boundary(preview_overflow.len()));
+    assert!(std::str::from_utf8(preview_overflow.as_bytes()).is_ok());
+
+    let (recorded, display) = ToolResultRecordedV2::capture(
+        &ToolResult::ok(
+            "call-utf8",
+            "shell",
+            &overflow,
+            crate::ToolResultMeta::default(),
+        ),
+        None,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let preview = recorded.initial_model_view.preview.clone();
+    assert!(preview.len() <= TOOL_MODEL_VIEW_INITIAL_MAX_BYTES);
+    assert!(std::str::from_utf8(preview.as_bytes()).is_ok());
+    assert!(preview.is_char_boundary(preview.len()));
+    assert_eq!(
+        recorded.initial_model_view_sha256,
+        stable_event_hash(recorded.model_content()?.as_bytes())
+    );
+    assert!(display.preview.is_char_boundary(display.preview.len()));
+    Ok(())
+}
+
+#[test]
+fn page_read_dedupe_is_epoch_scoped() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-dedupe",
+        "shell",
+        "first line\nsecond line\nthird line\n",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let selector = ToolArtifactSelectorV1::LinePage {
+        start_line: 0,
+        line_count: 3,
+    };
+    let budget = ToolArtifactReadBudgetV1::default();
+    let first = budget.read_page_for_call(
+        &store,
+        &descriptor.artifact_ref,
+        selector.clone(),
+        "call-a",
+        "context-epoch:root",
+    )?;
+    assert!(first.deduplicated_from_call_id.is_none());
+    assert!(first.page.body.contains("first line"));
+
+    let repeat = budget.read_page_for_call(
+        &store,
+        &descriptor.artifact_ref,
+        selector.clone(),
+        "call-b",
+        "context-epoch:root",
+    )?;
+    assert_eq!(
+        repeat.deduplicated_from_call_id.as_deref(),
+        Some("call-a"),
+        "same epoch must dedupe the immutable page"
+    );
+
+    let after_rotation = budget.read_page_for_call(
+        &store,
+        &descriptor.artifact_ref,
+        selector.clone(),
+        "call-c",
+        "context-epoch:tool-aging-1",
+    )?;
+    assert!(
+        after_rotation.deduplicated_from_call_id.is_none(),
+        "a rotated context epoch must not assume the provider remembers the old page"
+    );
+    assert!(after_rotation.page.body.contains("first line"));
+    assert_eq!(
+        budget.usage().0,
+        2,
+        "the rotated read consumes a fresh per-epoch delivery"
+    );
+    Ok(())
+}
+
+#[test]
+fn corrupt_blob_page_read_fails_closed_without_partial_content() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-corrupt-page",
+        "shell",
+        "0123456789",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let digest = descriptor
+        .content_sha256
+        .strip_prefix("sha256:")
+        .expect("hash prefix");
+    let blob = store
+        .root()
+        .join("blobs")
+        .join(&digest[..2])
+        .join(format!("{digest}.blob"));
+    std::fs::write(&blob, b"tampered")?;
+
+    let selector = ToolArtifactSelectorV1::ByteSlice {
+        offset: 0,
+        limit: 4,
+    };
+    let error = store
+        .read_page(&descriptor.artifact_ref, selector.clone())
+        .expect_err("corrupt blob must fail closed");
+    assert!(
+        format!("{error:#}").contains("content hash mismatch"),
+        "unexpected error: {error:#}"
+    );
+    let budget = ToolArtifactReadBudgetV1::default();
+    assert!(
+        budget
+            .read_page_for_call(
+                &store,
+                &descriptor.artifact_ref,
+                selector,
+                "call-corrupt",
+                "context-epoch:root",
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn grace_expired_artifact_retrieval_fails_closed_as_missing() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let orphan = store.capture_text(
+        "call-expired",
+        "shell",
+        "expired evidence",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let newest_manifest_ms = store
+        .manifest_inventory()?
+        .iter()
+        .map(|entry| entry.manifest_modified_at_unix_ms)
+        .max()
+        .unwrap_or(0);
+    let report = store.garbage_collect(
+        &ToolArtifactGcRootsV1::default(),
+        newest_manifest_ms.saturating_add(TOOL_ARTIFACT_ORPHAN_GRACE_MS),
+        TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 1);
+
+    assert_eq!(
+        store.availability(&orphan),
+        ToolArtifactAvailability::Missing
+    );
+    assert!(store.resolve(&orphan.artifact_ref).is_err());
+    assert!(store.read_all(&orphan).is_err());
+    assert!(
+        store
+            .read_page(
+                &orphan.artifact_ref,
+                ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: 4,
+                },
+            )
+            .is_err(),
+        "expired artifact must never yield a page"
+    );
+    Ok(())
+}
+
+#[test]
+fn unavailable_artifact_display_never_advertises_has_more() -> Result<()> {
+    let result = ToolResult::ok(
+        "call-unavailable",
+        "shell",
+        "x".repeat(TOOL_MODEL_VIEW_INITIAL_MAX_BYTES + 1024),
+        crate::ToolResultMeta::default(),
+    )
+    .with_unavailable_artifact_capture((TOOL_MODEL_VIEW_INITIAL_MAX_BYTES + 4096) as u64);
+    let (recorded, display) =
+        ToolResultRecordedV2::capture(&result, None, ToolArtifactSensitivity::Ordinary)?;
+    assert!(matches!(
+        recorded.artifact,
+        ToolArtifactBindingV1::Unavailable { .. }
+    ));
+    assert!(
+        display.observed_bytes > display.preview.len() as u64,
+        "preview must still be a truncation of observed output"
+    );
+    assert!(
+        !display.has_more,
+        "an unavailable artifact must not advertise content that cannot be retrieved"
+    );
+    assert!(
+        !display
+            .display_capabilities
+            .contains(&ToolDisplayCapability::ReadNextPage)
+    );
+    let restored = recorded.display_view();
+    assert!(!restored.has_more);
+    Ok(())
+}
+
+#[test]
+fn oversized_error_message_fails_capture_without_publishing_a_partial_event() -> Result<()> {
+    // Characterization of the RFC-0062 5.2 gap: a tool error whose message exceeds the 8 KiB
+    // facts cap currently fails V2 capture closed instead of degrading to a bounded summary.
+    // RFC-0062 R62.0 will replace this with a bounded error summary; until then the run-facing
+    // behavior must not silently truncate or claim completeness.
+    let (_temp, store) = store_fixture()?;
+    let oversized_message = "error detail ".repeat(1024);
+    assert!(oversized_message.len() > 8 * 1024);
+    let result = ToolResult::error(
+        "call-large-error",
+        "shell",
+        ToolErrorKind::ExitStatus,
+        oversized_message,
+    );
+    let error =
+        ToolResultRecordedV2::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)
+            .expect_err("oversized error message must exceed the facts cap");
+    assert!(
+        format!("{error:#}").contains("tool result facts exceed their byte limit"),
+        "unexpected error: {error:#}"
+    );
+    // RFC-0059 8.4: publish-before-append means a failed append may leave an orphan manifest
+    // that grace GC reclaims; it must never become a durable ref to a partial event.
+    let orphans = store.manifest_inventory()?;
+    if !orphans.is_empty() {
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].descriptor.tool_call_id, "call-large-error");
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_result_publishes_a_complete_zero_byte_artifact() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor =
+        store.capture_text("call-empty", "shell", "", ToolArtifactSensitivity::Ordinary)?;
+    assert_eq!(descriptor.observed_bytes, 0);
+    assert_eq!(descriptor.policy_projected_bytes, 0);
+    assert_eq!(descriptor.persisted_bytes, 0);
+    assert!(matches!(
+        descriptor.completeness,
+        ToolArtifactCompleteness::Complete
+    ));
+    assert!(
+        store.read_all(&descriptor).is_err(),
+        "a zero-byte artifact has nothing to retrieve and must fail closed"
+    );
+    assert!(
+        store
+            .read_page(
+                &descriptor.artifact_ref,
+                ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: 1,
+                },
+            )
+            .is_err(),
+        "a zero-byte artifact has nothing to retrieve and must fail closed"
+    );
+    Ok(())
+}
+
+#[test]
+fn has_more_compares_against_the_bytes_actually_displayed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let session = Session::new("test", "model").with_store(store);
+    let artifact_store = session.tool_artifact_store().expect("durable store");
+
+    // Between the model cap (16 KiB) and the display cap (~31 KiB): a complete 20 KiB inline
+    // output is fully shown in the live display, so live has_more must be false even though the
+    // model preview was truncated to 16 KiB.
+    let body_between = "x".repeat(TOOL_MODEL_VIEW_INITIAL_MAX_BYTES + 4096);
+    let result = ToolResult::ok(
+        "call-between",
+        "shell",
+        &body_between,
+        crate::ToolResultMeta::default(),
+    );
+    let (recorded, live) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert_eq!(
+        recorded.initial_model_view.preview.len(),
+        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES,
+        "model preview stays truncated to its own cap"
+    );
+    assert_eq!(
+        live.preview.len(),
+        body_between.len(),
+        "display shows the whole body"
+    );
+    assert!(
+        !live.has_more,
+        "a complete output fully shown in the display must not advertise more"
+    );
+    assert!(
+        live.display_capabilities
+            .contains(&ToolDisplayCapability::ReadNextPage)
+    );
+
+    // Restore has no display preview beyond the durable model view, so the same record shows
+    // 16 KiB of 20 KiB and must truthfully report has_more.
+    let restored = recorded.display_view();
+    assert!(restored.preview.len() <= recorded.initial_model_view.preview.len());
+    assert!(
+        restored.has_more,
+        "restored view shows fewer bytes than persisted, so more is retrievable"
+    );
+
+    // Beyond the display cap: the live display is truncated and paging is advertised.
+    let body_over = "y".repeat(TOOL_DISPLAY_VIEW_MAX_BYTES + 8192);
+    let result = ToolResult::ok(
+        "call-over",
+        "shell",
+        &body_over,
+        crate::ToolResultMeta::default(),
+    );
+    let (recorded, live) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert!(live.preview.len() < body_over.len());
+    assert!(live.has_more);
+    assert!(recorded.display_view().has_more);
+
+    // Small complete output: no more in either live or restored view.
+    let body_small = "z".repeat(4096);
+    let result = ToolResult::ok(
+        "call-small",
+        "shell",
+        &body_small,
+        crate::ToolResultMeta::default(),
+    );
+    let (recorded, live) = ToolResultRecordedV2::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    assert_eq!(live.preview.len(), body_small.len());
+    assert!(!live.has_more);
+    assert!(!recorded.display_view().has_more);
     Ok(())
 }

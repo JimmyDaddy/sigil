@@ -1755,9 +1755,6 @@ impl HttpRunDriver for HttpProductionRunDriver {
         {
             return Err(HttpToolArtifactReadDriverError::InvalidSelector);
         }
-        let page = store
-            .read_page(&artifact_ref, request.selector.clone().into())
-            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
         match store.availability(&descriptor) {
             ToolArtifactAvailability::Available => {}
             ToolArtifactAvailability::HashMismatch => {
@@ -1772,6 +1769,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 return Err(HttpToolArtifactReadDriverError::Unavailable);
             }
         }
+        let page = store
+            .read_page(&artifact_ref, request.selector.clone().into())
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
         Ok(HttpToolArtifactPage::from_kernel(&session.id, page))
     }
 

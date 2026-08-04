@@ -787,19 +787,20 @@ impl ToolResultRecordedV2 {
             }
         };
         let status_label = if result.is_error() { "error" } else { "ok" }.to_owned();
+        let display_preview = bounded_utf8(
+            &safe_content,
+            TOOL_DISPLAY_VIEW_MAX_BYTES.saturating_sub(1024),
+        );
         let display = ToolDisplayViewV1 {
             status_label: status_label.clone(),
             summary: format!(
                 "{} {} ({} observed bytes, {} persisted bytes)",
                 result.tool_name, status_label, observed_bytes, persisted_bytes
             ),
-            preview: bounded_utf8(
-                &safe_content,
-                TOOL_DISPLAY_VIEW_MAX_BYTES.saturating_sub(1024),
-            ),
+            preview: display_preview.clone(),
             observed_bytes,
             persisted_bytes,
-            has_more: observed_bytes > model.preview.len() as u64 || !available,
+            has_more: available && persisted_bytes > display_preview.len() as u64,
             artifact_ref,
             display_capabilities: if available {
                 vec![
@@ -849,19 +850,20 @@ impl ToolResultRecordedV2 {
                 (unavailable.observed_bytes, 0, None, false)
             }
         };
+        let display_preview = bounded_utf8(
+            &self.initial_model_view.preview,
+            TOOL_DISPLAY_VIEW_MAX_BYTES.saturating_sub(1024),
+        );
         ToolDisplayViewV1 {
             status_label: self.facts.status.clone(),
             summary: format!(
                 "{} {} ({} observed bytes, {} persisted bytes)",
                 self.tool_name, self.facts.status, observed_bytes, persisted_bytes
             ),
-            preview: bounded_utf8(
-                &self.initial_model_view.preview,
-                TOOL_DISPLAY_VIEW_MAX_BYTES.saturating_sub(1024),
-            ),
+            preview: display_preview.clone(),
             observed_bytes,
             persisted_bytes,
-            has_more: observed_bytes > self.initial_model_view.preview.len() as u64 || !available,
+            has_more: available && persisted_bytes > display_preview.len() as u64,
             artifact_ref,
             display_capabilities: if available {
                 vec![
@@ -1077,20 +1079,26 @@ pub struct ToolArtifactReadBudgetV1 {
 }
 
 impl ToolArtifactReadBudgetV1 {
-    /// Reads a page once per immutable ref/selector pair and reports repeat delivery explicitly.
+    /// Reads a page once per immutable ref/selector pair inside the same context epoch and
+    /// reports repeat delivery explicitly. After an epoch rotation the provider is not assumed to
+    /// remember the previously injected page, so the page body is delivered again.
     pub fn read_page_for_call(
         &self,
         store: &ToolArtifactStore,
         artifact_ref: &ToolArtifactRefV1,
         selector: ToolArtifactSelectorV1,
         call_id: &str,
+        active_epoch_id: &str,
     ) -> Result<ToolArtifactBudgetedReadV1> {
         if call_id.trim().is_empty() || call_id.len() > 512 {
             bail!("tool artifact read call id is malformed");
         }
+        if active_epoch_id.trim().is_empty() || active_epoch_id.len() > 512 {
+            bail!("tool artifact read epoch id is malformed");
+        }
         artifact_ref.validate()?;
         selector.validate()?;
-        let dedupe_key = serde_json::to_string(&(artifact_ref, &selector))
+        let dedupe_key = serde_json::to_string(&(artifact_ref, &selector, active_epoch_id))
             .context("failed to encode tool artifact read dedupe key")?;
         if let Some((original_call_id, page)) = self
             .state
@@ -1957,6 +1965,11 @@ impl ToolArtifactStore {
             .context("tool artifact is being retired")?;
         let descriptor = self.resolve(artifact_ref)?;
         let path = self.blob_path(&descriptor.content_sha256)?;
+        let blob_hash = hash_file(&path, TOOL_ARTIFACT_MAX_BYTES as u64)
+            .with_context(|| format!("failed to verify tool artifact {}", path.display()))?;
+        if blob_hash != descriptor.content_sha256 {
+            bail!("tool artifact content hash mismatch");
+        }
         let selected = match &selector {
             ToolArtifactSelectorV1::ByteSlice { offset, limit } => {
                 read_byte_slice(&path, *offset, *limit)?

@@ -123,7 +123,7 @@ where
     result.content = display.preview.clone();
     result.metadata.bytes = Some(display.observed_bytes);
     result.metadata.returned_bytes = Some(display.preview.len() as u64);
-    result.metadata.truncated = display.has_more;
+    result.metadata.truncated = display.observed_bytes > display.preview.len() as u64;
     result.metadata.details = serde_json::to_value(&display)
         .unwrap_or_else(|_| serde_json::json!({"projection": "unavailable"}));
     handler.handle(RunEvent::ToolResult(result))

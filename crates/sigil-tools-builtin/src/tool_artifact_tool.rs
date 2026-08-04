@@ -148,8 +148,17 @@ impl Tool for ReadToolArtifactTool {
             ));
         };
         let sensitivity = descriptor.sensitivity;
-        let read = match budget.read_page_for_call(store, &artifact_ref, selector.clone(), &call_id)
-        {
+        let active_epoch_id = ctx
+            .active_context_epoch_id()
+            .context("active context epoch is unavailable")?
+            .to_owned();
+        let read = match budget.read_page_for_call(
+            store,
+            &artifact_ref,
+            selector.clone(),
+            &call_id,
+            &active_epoch_id,
+        ) {
             Ok(read) => read,
             Err(_error) => {
                 return Ok(ToolResult::error(
@@ -163,10 +172,6 @@ impl Tool for ReadToolArtifactTool {
         let page = read.page;
         let deduplicated_from_call_id = read.deduplicated_from_call_id;
         let unchanged = deduplicated_from_call_id.is_some();
-        let active_epoch_id = ctx
-            .active_context_epoch_id()
-            .context("active context epoch is unavailable")?
-            .to_owned();
         let receipt = ToolArtifactReadRecordedV1 {
             schema_version: TOOL_ARTIFACT_READ_SCHEMA_VERSION,
             call_id: call_id.clone(),
