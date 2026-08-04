@@ -768,6 +768,12 @@ pub enum DesktopConversationDisplayContent {
         persisted_bytes: Option<u64>,
         #[serde(default)]
         has_more: bool,
+        #[serde(default)]
+        preview_truncated: bool,
+        #[serde(default)]
+        truncation_reason: Option<String>,
+        #[serde(default)]
+        capture_completeness: Option<String>,
     },
     Approval {
         call_id: String,

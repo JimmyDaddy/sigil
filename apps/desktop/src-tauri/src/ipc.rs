@@ -1517,6 +1517,12 @@ pub(crate) enum DesktopConversationDisplayContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         persisted_bytes: Option<u64>,
         has_more: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preview_truncated: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        truncation_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        capture_completeness: Option<String>,
     },
     Approval {
         call_id: String,
@@ -2910,6 +2916,9 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 observed_bytes,
                 persisted_bytes,
                 has_more,
+                preview_truncated,
+                truncation_reason,
+                capture_completeness,
             } => Self::Tool {
                 call_id,
                 tool_name,
@@ -2931,6 +2940,9 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 observed_bytes,
                 persisted_bytes,
                 has_more,
+                preview_truncated: Some(preview_truncated),
+                truncation_reason,
+                capture_completeness,
             },
             NativeConversationDisplayContent::Approval {
                 call_id,

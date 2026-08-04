@@ -1641,7 +1641,7 @@ pub fn http_openapi_document() -> Value {
                         {
                             "type": "object",
                             "additionalProperties": false,
-                            "required": ["type", "truncated", "original_content_bytes", "has_more"],
+                            "required": ["type", "truncated", "original_content_bytes", "has_more", "preview_truncated"],
                             "properties": {
                                 "type": { "const": "tool" },
                                 "call_id": { "type": ["string", "null"], "maxLength": 512 },
@@ -1653,7 +1653,10 @@ pub fn http_openapi_document() -> Value {
                                 "artifact_availability": { "type": ["string", "null"], "enum": ["available", "expired", "missing", "hash_mismatch", "policy_revoked", "unavailable", null] },
                                 "observed_bytes": { "type": ["integer", "null"], "format": "uint64" },
                                 "persisted_bytes": { "type": ["integer", "null"], "format": "uint64", "maximum": 16777216 },
-                                "has_more": { "type": "boolean" }
+                                "has_more": { "type": "boolean" },
+                                "preview_truncated": { "type": "boolean" },
+                                "truncation_reason": { "type": ["string", "null"], "enum": ["initial_cap", "batch_budget", "binary_only", "fallback", null] },
+                                "capture_completeness": { "type": ["string", "null"], "maxLength": 256 }
                             }
                         },
                         {

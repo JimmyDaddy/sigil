@@ -230,6 +230,12 @@ pub enum ConversationDisplayContentV1 {
         persisted_bytes: Option<u64>,
         #[serde(default)]
         has_more: bool,
+        #[serde(default)]
+        preview_truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncation_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture_completeness: Option<String>,
     },
     Approval {
         call_id: String,
@@ -1250,6 +1256,9 @@ fn project_session_entry(
                         observed_bytes: None,
                         persisted_bytes: None,
                         has_more: false,
+                        preview_truncated: false,
+                        truncation_reason: None,
+                        capture_completeness: None,
                     },
                 );
                 if let Some(run_id) = run_id.as_deref() {
@@ -1318,6 +1327,18 @@ fn project_session_entry(
                     observed_bytes: Some(display.observed_bytes),
                     persisted_bytes: Some(display.persisted_bytes),
                     has_more: display.has_more,
+                    preview_truncated: display.preview_truncated,
+                    truncation_reason: display
+                        .truncation_reason
+                        .map(|reason| reason.as_str().to_owned()),
+                    capture_completeness: display.capture_completeness.map(|completeness| {
+                        format!(
+                            "source={},policy={},storage={}",
+                            completeness.source.as_str(),
+                            completeness.policy.as_str(),
+                            completeness.storage.as_str()
+                        )
+                    }),
                 },
             );
             let mut reconciles = tool

@@ -2265,12 +2265,26 @@ where
                 }
                 // RFC-0062 11.2/11.5: settle the whole assistant tool-call batch with the
                 // deterministic two-phase preview allocator before the next provider request.
-                emit_tool_result_batch(
+                // A settlement failure keeps the same cleanup contract as a per-tool emit
+                // failure: join dependencies are aborted before the error propagates.
+                if let Err(error) = emit_tool_result_batch(
                     session,
                     &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
                     &mut outcome,
                     std::mem::take(&mut assistant_batch_results),
-                )?;
+                ) {
+                    if let Some(delegate) = agent_delegate.as_deref_mut()
+                        && let Err(cleanup_error) = delegate.abort_join_dependencies(
+                            session,
+                            handler,
+                            "tool result settlement failed before host join settle",
+                        )
+                    {
+                        return Err(error
+                            .context(format!("host join cleanup also failed: {cleanup_error:#}")));
+                    }
+                    return Err(error);
+                }
                 let settled_join_context = match agent_delegate.as_deref_mut() {
                     Some(delegate) => delegate.settle_join_dependencies(session, handler).await?,
                     None => None,

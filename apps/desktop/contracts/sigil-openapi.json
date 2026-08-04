@@ -1877,6 +1877,13 @@
                   "null"
                 ]
               },
+              "capture_completeness": {
+                "maxLength": 256,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "has_more": {
                 "type": "boolean"
               },
@@ -1906,6 +1913,9 @@
                   "null"
                 ]
               },
+              "preview_truncated": {
+                "type": "boolean"
+              },
               "tool_name": {
                 "maxLength": 512,
                 "type": [
@@ -1916,6 +1926,19 @@
               "truncated": {
                 "type": "boolean"
               },
+              "truncation_reason": {
+                "enum": [
+                  "initial_cap",
+                  "batch_budget",
+                  "binary_only",
+                  "fallback",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "type": {
                 "const": "tool"
               }
@@ -1924,7 +1947,8 @@
               "type",
               "truncated",
               "original_content_bytes",
-              "has_more"
+              "has_more",
+              "preview_truncated"
             ],
             "type": "object"
           },

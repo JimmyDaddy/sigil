@@ -1046,6 +1046,12 @@ pub enum HttpConversationDisplayContent {
         persisted_bytes: Option<u64>,
         #[serde(default)]
         has_more: bool,
+        #[serde(default)]
+        preview_truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncation_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture_completeness: Option<String>,
     },
     Approval {
         call_id: String,
@@ -1626,6 +1632,9 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 observed_bytes,
                 persisted_bytes,
                 has_more,
+                preview_truncated,
+                truncation_reason,
+                capture_completeness,
             } => Self::Tool {
                 call_id,
                 tool_name,
@@ -1637,6 +1646,9 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 observed_bytes,
                 persisted_bytes,
                 has_more,
+                preview_truncated,
+                truncation_reason,
+                capture_completeness,
             },
             ConversationDisplayContentV1::Approval {
                 call_id,

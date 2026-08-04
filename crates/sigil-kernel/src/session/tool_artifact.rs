@@ -526,6 +526,15 @@ pub struct ToolDisplayViewV1 {
     pub artifact_ref: Option<ToolArtifactRefV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub display_capabilities: Vec<ToolDisplayCapability>,
+    /// RFC-0062 15: whether the displayed preview is shorter than the persisted output.
+    pub preview_truncated: bool,
+    /// RFC-0062 9.7/15: why the preview is truncated (shared surface vocabulary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<ToolPreviewTruncationReasonV1>,
+    /// RFC-0062 9.3/15: immutable source/policy/storage capture completeness shared by every
+    /// surface; absent only when no capture evidence exists (legacy projections).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_completeness: Option<ToolResultCaptureCompletenessV1>,
 }
 
 impl ToolDisplayViewV1 {
@@ -666,6 +675,18 @@ pub enum ToolSourceCompletenessV1 {
     ReaderFailed,
 }
 
+impl ToolSourceCompletenessV1 {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Interrupted => "interrupted",
+            Self::ResourceLimited => "resource_limited",
+            Self::ReaderFailed => "reader_failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPolicyCompletenessV1 {
@@ -675,12 +696,35 @@ pub enum ToolPolicyCompletenessV1 {
     Rejected,
 }
 
+impl ToolPolicyCompletenessV1 {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preserved => "preserved",
+            Self::Redacted => "redacted",
+            Self::EphemeralOnly => "ephemeral_only",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStorageCompletenessV1 {
     Complete,
     TruncatedAtLimit,
     Unavailable,
+}
+
+impl ToolStorageCompletenessV1 {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::TruncatedAtLimit => "truncated_at_limit",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 /// RFC-0062 9.3: immutable capture completeness frozen at tool settlement.
@@ -941,6 +985,18 @@ pub enum ToolPreviewTruncationReasonV1 {
     BatchBudget,
     BinaryOnly,
     Fallback,
+}
+
+impl ToolPreviewTruncationReasonV1 {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialCap => "initial_cap",
+            Self::BatchBudget => "batch_budget",
+            Self::BinaryOnly => "binary_only",
+            Self::Fallback => "fallback",
+        }
+    }
 }
 
 /// RFC-0062 9.6: provider-facing typed tool result payload; adapters pattern-match this and
@@ -1209,6 +1265,10 @@ impl ToolResultRecordedV3 {
             } else {
                 vec![ToolDisplayCapability::CopySummary]
             },
+            preview_truncated: preview_kind == ToolPreviewKind::HeadTail,
+            truncation_reason: (preview_kind == ToolPreviewKind::HeadTail)
+                .then_some(ToolPreviewTruncationReasonV1::InitialCap),
+            capture_completeness: Some(completeness),
         };
         let preview_bytes = model.preview.len();
         let truncation_reason = if preview_kind == ToolPreviewKind::HeadTail {
@@ -1386,6 +1446,10 @@ impl ToolResultRecordedV3 {
             } else {
                 vec![ToolDisplayCapability::CopySummary]
             },
+            preview_truncated: persisted_bytes > display_preview.len() as u64
+                || self.initial_model_view.preview_kind == ToolPreviewKind::HeadTail,
+            truncation_reason: self.preview_truncation_reason,
+            capture_completeness: Some(self.capture_completeness),
         }
     }
 }
@@ -1528,6 +1592,13 @@ impl ToolResultRecordedV2 {
             has_more: false,
             artifact_ref: None,
             display_capabilities: vec![ToolDisplayCapability::CopySummary],
+            preview_truncated: observed_bytes > 0,
+            truncation_reason: Some(ToolPreviewTruncationReasonV1::Fallback),
+            capture_completeness: Some(ToolResultCaptureCompletenessV1 {
+                source: ToolSourceCompletenessV1::Interrupted,
+                policy: ToolPolicyCompletenessV1::Preserved,
+                storage: ToolStorageCompletenessV1::Unavailable,
+            }),
         };
         let mut record = Self {
             schema_version: TOOL_RESULT_RECORDED_SCHEMA_VERSION,
@@ -1730,6 +1801,11 @@ impl ToolResultRecordedV2 {
             } else {
                 vec![ToolDisplayCapability::CopySummary]
             },
+            preview_truncated: preview_kind == ToolPreviewKind::HeadTail
+                || persisted_bytes > display_preview.len() as u64,
+            truncation_reason: (preview_kind == ToolPreviewKind::HeadTail)
+                .then_some(ToolPreviewTruncationReasonV1::InitialCap),
+            capture_completeness: display_capture_completeness(&artifact),
         };
         display.validate()?;
         let mut record = Self {
@@ -1793,6 +1869,11 @@ impl ToolResultRecordedV2 {
             } else {
                 vec![ToolDisplayCapability::CopySummary]
             },
+            preview_truncated: persisted_bytes > display_preview.len() as u64
+                || self.initial_model_view.preview_kind == ToolPreviewKind::HeadTail,
+            truncation_reason: (self.initial_model_view.preview_kind == ToolPreviewKind::HeadTail)
+                .then_some(ToolPreviewTruncationReasonV1::InitialCap),
+            capture_completeness: display_capture_completeness(&self.artifact),
         }
     }
 
@@ -1917,6 +1998,45 @@ pub fn allocate_batch_preview_limits(
         remaining = remaining.saturating_sub(extra);
     }
     limits
+}
+
+/// RFC-0062 9.3: derives the display completeness from an artifact binding for legacy
+/// projections that predate the V3 capture evidence.
+fn display_capture_completeness(
+    artifact: &ToolArtifactBindingV1,
+) -> Option<ToolResultCaptureCompletenessV1> {
+    match artifact {
+        ToolArtifactBindingV1::Published { descriptor } => {
+            let (policy, storage) = match &descriptor.completeness {
+                ToolArtifactCompleteness::Complete => (
+                    ToolPolicyCompletenessV1::Preserved,
+                    ToolStorageCompletenessV1::Complete,
+                ),
+                ToolArtifactCompleteness::PolicyRedacted { .. } => (
+                    ToolPolicyCompletenessV1::Redacted,
+                    ToolStorageCompletenessV1::Complete,
+                ),
+                ToolArtifactCompleteness::StorageTruncated(_) => (
+                    ToolPolicyCompletenessV1::Preserved,
+                    ToolStorageCompletenessV1::TruncatedAtLimit,
+                ),
+                ToolArtifactCompleteness::EphemeralUnavailableAfterRestart => (
+                    ToolPolicyCompletenessV1::EphemeralOnly,
+                    ToolStorageCompletenessV1::Unavailable,
+                ),
+            };
+            Some(ToolResultCaptureCompletenessV1 {
+                source: ToolSourceCompletenessV1::Complete,
+                policy,
+                storage,
+            })
+        }
+        ToolArtifactBindingV1::Unavailable { .. } => Some(ToolResultCaptureCompletenessV1 {
+            source: ToolSourceCompletenessV1::Interrupted,
+            policy: ToolPolicyCompletenessV1::Preserved,
+            storage: ToolStorageCompletenessV1::Unavailable,
+        }),
+    }
 }
 
 pub fn tool_model_view_initial_limit(tool_name: &str) -> usize {

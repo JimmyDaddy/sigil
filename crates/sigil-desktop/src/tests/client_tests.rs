@@ -499,6 +499,11 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
         // control material is replaced or escaped. These are independent truthful coordinates.
         persisted_bytes: Some(8_403),
         has_more: true,
+        preview_truncated: true,
+        truncation_reason: Some("initial_cap".to_owned()),
+        capture_completeness: Some(
+            "source=complete,policy=preserved,storage=truncated_at_limit".to_owned(),
+        ),
     };
     validate_conversation_display_page(&typed_tool_page, "http-session-1")
         .expect("typed artifact metadata should validate");

@@ -2522,6 +2522,7 @@ export interface components {
             artifact_availability?: "available" | "expired" | "missing" | "hash_mismatch" | "policy_revoked" | "unavailable" | null;
             artifact_ref?: string | null;
             call_id?: string | null;
+            capture_completeness?: string | null;
             has_more: boolean;
             /** Format: uint64 */
             observed_bytes?: number | null;
@@ -2530,8 +2531,11 @@ export interface components {
             output?: string | null;
             /** Format: uint64 */
             persisted_bytes?: number | null;
+            preview_truncated: boolean;
             tool_name?: string | null;
             truncated: boolean;
+            /** @enum {string|null} */
+            truncation_reason?: "initial_cap" | "batch_budget" | "binary_only" | "fallback" | null;
             /** @constant */
             type: "tool";
         } | {
