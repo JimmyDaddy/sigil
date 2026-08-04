@@ -3621,16 +3621,30 @@ impl Drop for ToolArtifactCaptureSink {
 
 impl Clone for ToolArtifactCaptureSink {
     fn clone(&self) -> Self {
+        let mut process_write_failed = self.process_write_failed;
         let process = self.process.as_ref().map(|state| ProcessCaptureState {
             config: state.config,
-            stdout_staging: state
-                .stdout_staging
-                .as_ref()
-                .and_then(|file| file.try_clone().ok()),
+            stdout_staging: state.stdout_staging.as_ref().and_then(|file| {
+                match file.try_clone() {
+                    Ok(clone) => Some(clone),
+                    Err(_) => {
+                        // RFC-0062 16.2: a failed staging-handle clone must never be silently
+                        // dropped; settlement reports storage Unavailable for the whole capture.
+                        process_write_failed = true;
+                        None
+                    }
+                }
+            }),
             stderr_staging: state
                 .stderr_staging
                 .as_ref()
-                .and_then(|file| file.try_clone().ok()),
+                .and_then(|file| match file.try_clone() {
+                    Ok(clone) => Some(clone),
+                    Err(_) => {
+                        process_write_failed = true;
+                        None
+                    }
+                }),
             stdout_staging_path: state.stdout_staging_path.clone(),
             stderr_staging_path: state.stderr_staging_path.clone(),
             stdout_bytes: state.stdout_bytes,
@@ -3649,7 +3663,7 @@ impl Clone for ToolArtifactCaptureSink {
             head: self.head.clone(),
             tail: self.tail.clone(),
             observed_bytes: self.observed_bytes,
-            process_write_failed: self.process_write_failed,
+            process_write_failed,
             process,
         }
     }
@@ -3774,6 +3788,9 @@ impl ToolArtifactCaptureSink {
             ToolOutputStreamV1::Combined => return Ok(()),
         };
         let Some(file) = file else {
+            // A missing staging handle means the capture cannot persist this stream; record the
+            // failure so settlement marks storage Unavailable instead of claiming completeness.
+            self.process_write_failed = true;
             return Ok(());
         };
         let before = *stream_bytes;
@@ -4555,18 +4572,55 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
 
 #[cfg(not(unix))]
 fn open_read_write_private_file(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("failed to create private tool artifact {}", path.display()))?;
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        let _ = file;
+        // RFC-0062 16.2: Windows delete-on-close. The OS removes the directory entry when the
+        // last handle closes, so crash / TerminateProcess / power loss cannot leave
+        // policy-unredacted raw bytes in a .part file. FILE_SHARE_DELETE is required for
+        // FILE_FLAG_DELETE_ON_CLOSE to behave correctly.
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
+        };
+        let wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            bail!(
+                "failed to create delete-on-close private tool artifact {}",
+                path.display()
+            );
+        }
+        // SAFETY: CreateFileW returned a valid handle with delete-on-close semantics.
+        return Ok(unsafe { std::fs::File::from_raw_handle(handle as _) });
     }
-    Ok(file)
+    #[cfg(not(windows))]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| {
+                format!("failed to create private tool artifact {}", path.display())
+            })?;
+        Ok(file)
+    }
 }
 
 #[cfg(not(unix))]

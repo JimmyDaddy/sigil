@@ -1831,3 +1831,112 @@ fn process_capture_ledger_uses_policy_safe_sizes_for_expanding_redaction() -> Re
     );
     Ok(())
 }
+
+#[test]
+fn availability_batch_api_rejects_duplicate_refs_and_state_gaps() -> Result<()> {
+    // RFC-0062 9.4: the batch API must protect the ledger invariants itself; a caller-supplied
+    // transition that skips the current state or repeats a ref fails before any durable write.
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
+    let mut session = Session::new("test", "model").with_store(session_store);
+    session.append_user_message(ModelMessage::user("start"))?;
+    let result = ToolResult::ok(
+        "call-ledger",
+        "shell",
+        "out",
+        crate::ToolResultMeta::default(),
+    );
+    let (recorded, _) = ToolResultRecordedV3::capture(
+        &result,
+        Some(&artifact_store),
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    session.append_tool_result_bundle(recorded, Vec::new())?;
+    let snapshot = session
+        .active_projection_snapshot()?
+        .expect("durable projection")
+        .tool_output_pressure();
+    let artifact_ref = snapshot
+        .artifact_source_bindings()?
+        .into_iter()
+        .next()
+        .expect("one binding")
+        .artifact_ref;
+
+    // Duplicate ref in one batch must fail.
+    let error = session
+        .append_availability_transitions(
+            vec![
+                (
+                    artifact_ref.clone(),
+                    crate::ToolArtifactAvailabilityStateV1::Available,
+                    crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                    crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+                ),
+                (
+                    artifact_ref.clone(),
+                    crate::ToolArtifactAvailabilityStateV1::Available,
+                    crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                    crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+                ),
+            ],
+            1,
+        )
+        .expect_err("duplicate refs must fail");
+    assert!(format!("{error:#}").contains("repeats an opaque ref"));
+
+    // Skipping a state (Available -> Expired without DisabledPendingDelete) must fail.
+    let error = session
+        .append_availability_transitions(
+            vec![(
+                artifact_ref,
+                crate::ToolArtifactAvailabilityStateV1::Available,
+                crate::ToolArtifactAvailabilityStateV1::Expired,
+                crate::ToolArtifactAvailabilityReasonV1::GcExpired,
+            )],
+            1,
+        )
+        .expect_err("state gap must fail");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("not state-contiguous") || message.contains("allowed state machine"),
+        "unexpected error: {message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn dropped_sink_never_leaves_staging_files() -> Result<()> {
+    // RFC-0062 16.2: a sink dropped WITHOUT finalize (simulating cancelled execution,
+    // supervisor error, or mutex poison) must not leave .part files behind on unix (the
+    // directory entry was unlinked at creation).
+    let (_temp, store) = store_fixture()?;
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: 1024 * 1024,
+        artifact_reservation_stdout_bytes: 512 * 1024,
+        artifact_reservation_stderr_bytes: 512 * 1024,
+        artifact_staging_limit_bytes_per_stream: 1024 * 1024,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    {
+        let sink = store.begin_policy_safe_capture(
+            "call-dropped",
+            "shell",
+            "text/plain; charset=utf-8",
+            ToolArtifactEncoding::Utf8,
+            ToolArtifactSensitivity::Ordinary,
+        );
+        let mut sink = sink.begin_process_capture(config)?;
+        sink.write_stream(ToolOutputStreamV1::Stdout, b"raw secret token=x")?;
+        // sink dropped here without finish
+    }
+    let staging = store.root().join("staging");
+    assert!(
+        !staging.exists() || std::fs::read_dir(&staging)?.next().is_none(),
+        "dropped sink must not leave staging files"
+    );
+    Ok(())
+}

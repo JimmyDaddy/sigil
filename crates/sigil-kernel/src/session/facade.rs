@@ -657,6 +657,23 @@ impl Session {
         )>,
         changed_at_ms: u64,
     ) -> Result<()> {
+        // RFC-0062 9.4: the batch API protects the ledger invariants itself — every transition
+        // must start from the artifact's CURRENT state, and a ref may appear at most once per
+        // batch so the durable stream can never be made reducer-invalid by a caller.
+        let mut seen = std::collections::BTreeSet::new();
+        for (artifact_ref, previous, _, _) in &transitions {
+            if !seen.insert(artifact_ref.clone()) {
+                bail!("tool artifact availability batch repeats an opaque ref");
+            }
+            let current = self.artifact_availability_state(artifact_ref);
+            if *previous != current {
+                bail!(
+                    "tool artifact availability transition is not state-contiguous: expected {:?}, got {:?}",
+                    current,
+                    previous
+                );
+            }
+        }
         let controls = transitions
             .into_iter()
             .map(|(artifact_ref, previous, next, reason)| {

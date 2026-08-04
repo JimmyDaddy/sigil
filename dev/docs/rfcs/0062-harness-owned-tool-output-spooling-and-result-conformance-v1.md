@@ -39,21 +39,23 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `artifact_gc_fails_closed_when_durable_disable_cannot_be_written`、
   `availability_disable_event_denies_retrieval_binding`；
   **active-reader lease 集成、scratch quota/TTL 尚未落地**。
-- R62.6 部分：TUI/HTTP/Desktop 已随 V3 cutover 消费同一 typed descriptor；**共享 DTO 的
-  completeness/truncation reason 显式字段与 OpenAPI 同步尚未落地**。
+- R62.6 完成：TUI/HTTP/Desktop/Tauri IPC 消费同一 typed descriptor；`ToolDisplayViewV1` 携带
+  `preview_truncated`/`truncation_reason`/`capture_completeness`，HTTP/Desktop DTO、OpenAPI 与
+  生成的 TypeScript schema 均已同步并通过 drift check。
 - R62.7 部分：V2 rejection、10 MiB 完整捕获、Anthropic/Gemini fixtures、availability 状态机、
   per-batch 预算、128-result floor 测试已过；`process_capture_canonical_hash_is_identical_across_chunk_schedulings`
   （dual-stream cap 确定性）与 `process_capture_redacts_secrets_that_span_chunk_boundaries`
   （secret 跨 chunk）已过；**PTY ordering e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、
   paid provider smoke 未执行**。
-- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5405 passed）、
+- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5409 passed）、
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
 - 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
   跨流 secret 拆分不参与脱敏（只按流内整体检测）；GC 物理删除后、Expired append 前崩溃时，ledger
   可能停在 DisabledPendingDelete（需 journal 化 tombstone 计划才能自动补 Expired，当前由
   DisabledPendingDelete 状态安全拒绝读取兜底）；retrieval budget 仍为 per-root-run 累计而非
-  per-model-turn。
+  per-model-turn；Windows crash 场景的 staging 清理依赖 FILE_FLAG_DELETE_ON_CLOSE（本机未做
+  Windows 实机验证，仅交叉编译检查）。
 
 创建日期：2026-08-03
 
