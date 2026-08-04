@@ -14,8 +14,12 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
 - R62.2 完成：harness-owned 双 staging spool（spawn 前创建 plan+sink、stdout/stderr 独立 staging、
   canonical stdout-then-stderr 双 segment、observed 128 MiB 与 preview/artifact 分离、drain-to-EOF、
   逐流 redaction 后执行 8 MiB/8 MiB reservation-reclaim 结算（combined <=16 MiB）、segments 从
-  redaction 后的真实布局推导、staging 文件在 finalize 与 sink Drop 双路径 RAII 删除、write 失败
-  标记 storage Unavailable）；`attach_bounded_shell_artifact` 删除；10 MiB bash 输出完整捕获验收通过。
+  redaction 后的真实布局推导、**三轴账本基于 policy-safe 尺寸**（eligible=脱敏后完整长度、
+  policy_projected=eligible 之和、truncation=persisted<eligible 或 raw staging cap 截断，
+  扩张型脱敏如 token=x->token=[redacted] 完整保存且不误报）、**staging crash-safe**（unix
+  unlink-after-open 使 kill -9/断电不残留原始字节，finalize 与 sink Drop 双路径兜底关闭句柄后
+  删除）、write 失败标记 storage Unavailable、capture ownership 丢失显式失败）；`attach_bounded_shell_artifact`
+  删除；10 MiB bash 输出完整捕获验收通过。
 - R62.3 完成：root-run cumulative preview counter 删除；per-assistant-batch 两阶段 allocator
   （512 B floor、64 KiB batch cap、128 results、declaration order）接入 agent 主循环；普通工具
   执行、审批拒绝与授权错误分支全部在 assistant batch 结算（settlement 失败先 abort join
@@ -46,9 +50,10 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
 - 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
-  process staging 在运行期间以 0600 保存未经脱敏的原始字节（finalize 逐流脱敏后才发布，RAII 双路径
-  删除保证不泄漏）；跨流 secret 拆分不参与脱敏（只按流内整体检测）；retrieval budget 仍为
-  per-root-run 累计而非 per-model-turn。
+  跨流 secret 拆分不参与脱敏（只按流内整体检测）；GC 物理删除后、Expired append 前崩溃时，ledger
+  可能停在 DisabledPendingDelete（需 journal 化 tombstone 计划才能自动补 Expired，当前由
+  DisabledPendingDelete 状态安全拒绝读取兜底）；retrieval budget 仍为 per-root-run 累计而非
+  per-model-turn。
 
 创建日期：2026-08-03
 

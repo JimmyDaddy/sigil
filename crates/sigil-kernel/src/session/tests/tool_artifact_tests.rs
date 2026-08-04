@@ -1778,3 +1778,56 @@ fn process_capture_segment_boundaries_survive_variable_length_redaction() -> Res
     );
     Ok(())
 }
+
+#[test]
+fn process_capture_ledger_uses_policy_safe_sizes_for_expanding_redaction() -> Result<()> {
+    // RFC-0062 9.2/9.3: redaction can LENGTHEN content (token=x -> token=[redacted]). eligible
+    // and policy_projected must be the post-redaction sizes so the full safe result is kept and
+    // no false storage truncation is reported for a complete policy-safe capture.
+    let (_temp, store) = store_fixture()?;
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: 1024 * 1024,
+        artifact_reservation_stdout_bytes: 512 * 1024,
+        artifact_reservation_stderr_bytes: 512 * 1024,
+        artifact_staging_limit_bytes_per_stream: 1024 * 1024,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = store.begin_policy_safe_capture(
+        "call-expand-redact",
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    let raw_stdout = "token=x";
+    sink.write_stream(ToolOutputStreamV1::Stdout, raw_stdout.as_bytes())?;
+    sink.write_stream(ToolOutputStreamV1::Stderr, b"err")?;
+    let (descriptor, segments, completeness) = sink.finish_process_capture(
+        (raw_stdout.len() + 3) as u64,
+        0,
+        ToolSourceCompletenessV1::Complete,
+    )?;
+    let body = store.read_all(&descriptor)?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.starts_with("token=[redacted]"),
+        "expanded redaction must be persisted fully, got: {text:?}"
+    );
+    assert_eq!(segments[0].eligible_bytes, "token=[redacted]".len() as u64);
+    assert_eq!(segments[0].persisted_bytes, segments[0].eligible_bytes);
+    assert_eq!(
+        descriptor.policy_projected_bytes,
+        ("token=[redacted]".len() + 3) as u64,
+        "policy_projected must be the post-policy size"
+    );
+    assert_eq!(descriptor.observed_bytes, (raw_stdout.len() + 3) as u64);
+    assert_eq!(
+        completeness.storage,
+        ToolStorageCompletenessV1::Complete,
+        "a fully persisted policy-safe capture must not report storage truncation"
+    );
+    Ok(())
+}

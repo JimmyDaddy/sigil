@@ -1323,6 +1323,12 @@ impl ToolResultRecordedV3 {
     ) -> Result<()> {
         let model_preview_limit =
             model_preview_limit.min(tool_model_view_initial_limit(&self.tool_name));
+        if self.initial_model_view.preview.len() <= model_preview_limit {
+            // The batch budget does not shrink the already-bounded preview: keep the original
+            // preview kind, truncation reason and canonical hash so the durable facts that the
+            // model first saw are not erased.
+            return self.validate();
+        }
         let safe_content = safe_persistence_text(self.initial_model_view.preview.as_str());
         let (preview, preview_kind) = bounded_model_preview(&safe_content, model_preview_limit);
         self.initial_model_view.preview = preview;
@@ -3597,9 +3603,12 @@ impl Drop for ToolArtifactCaptureSink {
     fn drop(&mut self) {
         // RFC-0062 16.2: staging files must never survive, including when the sink is dropped
         // without finalize (cancelled execution, supervisor error, mutex poison, partial
-        // staging creation). Files may contain policy-unredacted raw output, so removal is
-        // mandatory and best-effort.
-        if let Some(state) = self.process.as_ref() {
+        // staging creation). Close the descriptors first so removal also works on platforms
+        // that cannot delete an open file, then best-effort remove the tracked paths. On unix
+        // the entries were already unlinked at creation, so this is a no-op safety net.
+        if let Some(state) = self.process.as_mut() {
+            state.stdout_staging.take();
+            state.stderr_staging.take();
             for path in [&state.stdout_staging_path, &state.stderr_staging_path]
                 .into_iter()
                 .flatten()
@@ -3698,7 +3707,31 @@ impl ToolArtifactCaptureSink {
         let stdout_path = staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple()));
         let stderr_path = staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple()));
         let stdout_staging = open_read_write_private_file(&stdout_path)?;
-        let stderr_staging = open_read_write_private_file(&stderr_path)?;
+        // RFC-0062 16.2: unlink-after-open makes staging crash-safe on unix — the directory
+        // entry disappears immediately, so process crash / kill -9 / power loss cannot leave
+        // policy-unredacted raw bytes on disk; the open descriptor keeps the file alive for
+        // the capture lifetime. On platforms that cannot unlink an open file the paths stay
+        // tracked and are removed by finalize/Drop/grace GC instead.
+        #[cfg(unix)]
+        if let Err(error) = std::fs::remove_file(&stdout_path) {
+            return Err(error).with_context(|| {
+                format!("failed to unlink staged capture {}", stdout_path.display())
+            });
+        }
+        let stderr_staging = match open_read_write_private_file(&stderr_path) {
+            Ok(file) => file,
+            Err(error) => {
+                #[cfg(unix)]
+                let _ = std::fs::remove_file(&stderr_path);
+                return Err(error);
+            }
+        };
+        #[cfg(unix)]
+        if let Err(error) = std::fs::remove_file(&stderr_path) {
+            return Err(error).with_context(|| {
+                format!("failed to unlink staged capture {}", stderr_path.display())
+            });
+        }
         sink.process = Some(ProcessCaptureState {
             config,
             stdout_staging: Some(stdout_staging),
@@ -3812,11 +3845,15 @@ impl ToolArtifactCaptureSink {
         } else {
             redaction_count
         };
-        // RFC-0062 9.2: reservation-reclaim settlement against policy-eligible bytes.
+        // RFC-0062 9.2: the three-axis ledger is computed on POLICY-SAFE sizes. eligible is the
+        // full post-redaction length (redaction may shorten OR lengthen, e.g. token=x ->
+        // token=[redacted]); policy_projected is the sum of eligible bytes; persisted is the
+        // reservation-reclaim settlement result; truncation is persisted < eligible, or the raw
+        // staging cap having dropped observed bytes.
         let stdout_reservation = state.config.artifact_reservation_stdout_bytes;
         let stderr_reservation = state.config.artifact_reservation_stderr_bytes;
-        let stdout_eligible = state.stdout_bytes.min(stdout_bytes.len() as u64);
-        let stderr_eligible = state.stderr_bytes.min(stderr_bytes.len() as u64);
+        let stdout_eligible = stdout_bytes.len() as u64;
+        let stderr_eligible = stderr_bytes.len() as u64;
         let unused_stdout =
             stdout_reservation.saturating_sub(stdout_eligible.min(stdout_reservation));
         let unused_stderr =
@@ -3825,13 +3862,13 @@ impl ToolArtifactCaptureSink {
             stdout_eligible.min(stdout_reservation.saturating_add(unused_stderr));
         let stderr_persisted =
             stderr_eligible.min(stderr_reservation.saturating_add(unused_stdout));
-        let stdout_truncated = state.stdout_truncated || stdout_persisted < state.stdout_bytes;
-        let stderr_truncated = state.stderr_truncated || stderr_persisted < state.stderr_bytes;
+        let stdout_truncated = state.stdout_truncated || stdout_persisted < stdout_eligible;
+        let stderr_truncated = state.stderr_truncated || stderr_persisted < stderr_eligible;
         stdout_bytes.truncate(stdout_persisted as usize);
         stderr_bytes.truncate(stderr_persisted as usize);
         let stdout_final_len = stdout_bytes.len() as u64;
         let stderr_final_len = stderr_bytes.len() as u64;
-        let policy_projected_bytes = state.stdout_bytes.saturating_add(state.stderr_bytes);
+        let policy_projected_bytes = stdout_eligible.saturating_add(stderr_eligible);
         let mut bytes = stdout_bytes;
         bytes.extend_from_slice(&stderr_bytes);
         let descriptor = self.store.publish_descriptor(

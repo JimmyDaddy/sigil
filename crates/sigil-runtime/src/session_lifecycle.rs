@@ -922,29 +922,31 @@ impl LocalSessionLifecycleService {
         // straight to deletion; terminal states are skipped entirely; the disable batch is
         // appended atomically so a partial failure cannot leave a half-disabled set.
         let mut pending_disable = Vec::new();
-        let mut generation_of = std::collections::BTreeMap::new();
         for artifact_ref in &disabled {
-            let generation = session.artifact_availability_generation(artifact_ref);
             let state = session.artifact_availability_state(artifact_ref);
             match state {
                 sigil_kernel::ToolArtifactAvailabilityStateV1::Available => {
-                    generation_of.insert(artifact_ref.clone(), generation);
                     pending_disable.push(artifact_ref.clone());
                 }
-                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete => {
-                    generation_of.insert(artifact_ref.clone(), generation);
-                }
+                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete => {}
                 _ => {}
             }
         }
-        for artifact_ref in &pending_disable {
-            let generation = generation_of.get(artifact_ref).copied().unwrap_or(0);
-            session.append_artifact_availability_transition(
-                artifact_ref,
-                generation,
-                sigil_kernel::ToolArtifactAvailabilityStateV1::Available,
-                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
-                sigil_kernel::ToolArtifactAvailabilityReasonV1::GcDisable,
+        // RFC-0062 9.4: the whole disable set is appended as ONE durable batch so a partial
+        // failure cannot leave half the candidates disabled; retry restarts from scratch.
+        if !pending_disable.is_empty() {
+            session.append_availability_transitions(
+                pending_disable
+                    .into_iter()
+                    .map(|artifact_ref| {
+                        (
+                            artifact_ref,
+                            sigil_kernel::ToolArtifactAvailabilityStateV1::Available,
+                            sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                            sigil_kernel::ToolArtifactAvailabilityReasonV1::GcDisable,
+                        )
+                    })
+                    .collect(),
                 now_unix_ms,
             )?;
         }

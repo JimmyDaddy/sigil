@@ -1119,25 +1119,14 @@ async fn supervise_execution_child(
                     Err(poisoned) => poisoned.into_inner(),
                 },
                 Err(_) => {
-                    // RFC-0062 16.2: the capture handle must not be silently lost; the readers
-                    // have already been joined, so an extra strong reference is a bug. Settle
-                    // the terminal outcome without capture evidence instead of dropping it.
-                    return Ok(SupervisedExecutionOutcome {
-                        resources,
-                        exit_code,
-                        stdout: stdout.bytes,
-                        stderr: stderr.bytes,
-                        output: ExecutionOutputReceipt {
-                            schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
-                            stdout: stdout.evidence,
-                            stderr: stderr.evidence,
-                            combined_total_bytes,
-                            combined_hard_limit_bytes: output_limits.hard_bytes_combined,
-                            termination,
-                        },
-                        timed_out,
-                        capture: None,
-                    });
+                    // RFC-0062 16.2: the capture handle must never be silently lost; the readers
+                    // have already been joined, so an extra strong reference is an ownership
+                    // invariant violation. Surface it as an explicit internal failure so callers
+                    // never mistake it for "capture was not configured" and fall back to inline
+                    // projection of truncated content.
+                    bail!(
+                        "execution capture handle ownership was violated: the capture was configured but could not be recovered after reader join"
+                    );
                 }
             };
             Some(handle)

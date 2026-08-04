@@ -644,6 +644,38 @@ impl Session {
     ///
     /// Returns an error when `controls` is empty or the durable writer cannot append the complete
     /// batch.
+    /// RFC-0062 9.4: atomically appends a batch of availability transitions. The writer appends
+    /// the whole batch under one durable intent, so a partial failure cannot leave half the
+    /// artifacts disabled.
+    pub fn append_availability_transitions(
+        &mut self,
+        transitions: Vec<(
+            ToolArtifactRefV1,
+            ToolArtifactAvailabilityStateV1,
+            ToolArtifactAvailabilityStateV1,
+            ToolArtifactAvailabilityReasonV1,
+        )>,
+        changed_at_ms: u64,
+    ) -> Result<()> {
+        let controls = transitions
+            .into_iter()
+            .map(|(artifact_ref, previous, next, reason)| {
+                let generation = self.artifact_availability_generation(&artifact_ref);
+                ControlEntry::ToolArtifactAvailabilityChanged(ToolArtifactAvailabilityChangedV1 {
+                    schema_version: TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+                    artifact_ref,
+                    expected_generation: generation,
+                    generation: generation.saturating_add(1),
+                    previous,
+                    next,
+                    reason,
+                    changed_at_ms,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.append_controls(controls)
+    }
+
     pub fn append_controls(&mut self, controls: Vec<ControlEntry>) -> Result<()> {
         if controls.is_empty() {
             bail!("control append batch must not be empty");
