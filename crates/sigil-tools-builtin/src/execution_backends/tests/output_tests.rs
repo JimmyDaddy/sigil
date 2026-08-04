@@ -92,6 +92,7 @@ async fn bounded_output_async_collector_tracks_lines_without_full_allocation() {
         stream_total,
         combined_total,
         alert_tx,
+        None,
     )
     .await;
     writer_task.await.expect("writer task");

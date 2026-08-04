@@ -3628,7 +3628,7 @@ pub fn application_session_transcript_page(
                     MessageRole::Assistant,
                 )
             }
-            SessionLogEntry::ToolResultV2(result) => (
+            SessionLogEntry::ToolResultV3(result) => (
                 result.model_message()?,
                 ApplicationTranscriptRole::Tool,
                 MessageRole::Tool,

@@ -253,7 +253,7 @@ impl ToolOutputProjection {
                 .get(event_id.as_str())
                 .copied()
                 .expect("validated fold plan references its current durable stream");
-            let Some(SessionLogEntry::ToolResultV2(result)) =
+            let Some(SessionLogEntry::ToolResultV3(result)) =
                 session_entry_from_stored_event(event)?
             else {
                 continue;
@@ -272,7 +272,7 @@ impl ToolOutputProjection {
 
 fn project_tool_result_v2(
     source_event: CompactionEventRef,
-    result: &ToolResultRecordedV2,
+    result: &ToolResultRecordedV3,
     policy: &ToolOutputProjectionPolicy,
 ) -> Result<Option<ProjectedToolOutput>> {
     result.validate()?;

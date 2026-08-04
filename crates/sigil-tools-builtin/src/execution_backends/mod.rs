@@ -6,7 +6,10 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -196,11 +199,12 @@ struct SupervisedExecutionOutcome {
     stderr: Vec<u8>,
     output: ExecutionOutputReceipt,
     timed_out: bool,
+    capture: Option<sigil_kernel::ExecutionCaptureOutcome>,
 }
 
 impl SupervisedExecutionOutcome {
     fn into_receipt(
-        self,
+        mut self,
         backend: ExecutionBackendKind,
         capabilities: ExecutionBackendCapabilities,
         network: ExecutionNetworkReceipt,
@@ -217,6 +221,7 @@ impl SupervisedExecutionOutcome {
             stderr: self.stderr,
             output: self.output,
             timed_out: self.timed_out,
+            capture: self.capture.take(),
         }
     }
 }
@@ -358,6 +363,7 @@ pub fn long_lived_stdio_process_plan(
                 cpu_time_ms: None,
                 memory_limit_bytes: None,
                 process_count_limit: None,
+                capture: None,
             };
             let mut planned_args = linux_bubblewrap_args(
                 &canonical_cwd,
@@ -679,6 +685,7 @@ async fn bounded_preflight_command_output(
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     };
     let mut command = Command::new(program);
     command.args(args).kill_on_drop(true);
@@ -687,7 +694,7 @@ async fn bounded_preflight_command_output(
         ExecutionBackendCapabilities::default(),
         ExecutionNetworkReceipt::unknown("bounded local preflight command"),
         command,
-        &request,
+        request,
         OutputCollectionLimits::preflight(),
         reader_fault,
         None,
@@ -752,6 +759,7 @@ pub(super) async fn bounded_short_path_command_output_with_environment(
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     };
     let mut command = Command::new(program);
     command.args(args).kill_on_drop(true);
@@ -761,7 +769,7 @@ pub(super) async fn bounded_short_path_command_output_with_environment(
         ExecutionBackendCapabilities::default(),
         ExecutionNetworkReceipt::unknown("bounded local preflight command"),
         command,
-        &request,
+        request,
         OutputCollectionLimits::preflight(),
         PreflightReaderFault::None,
         None,
@@ -775,7 +783,7 @@ pub(crate) async fn command_output_to_receipt_with_cancellation(
     capabilities: ExecutionBackendCapabilities,
     network: ExecutionNetworkReceipt,
     command: Command,
-    request: &ExecutionRequest,
+    request: ExecutionRequest,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     command_output_to_receipt_with_limits(
@@ -797,7 +805,7 @@ async fn command_output_to_receipt_with_docker_cleanup(
     capabilities: ExecutionBackendCapabilities,
     network: ExecutionNetworkReceipt,
     command: Command,
-    request: &ExecutionRequest,
+    request: ExecutionRequest,
     docker_cleanup: docker::DockerContainerCleanup,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
@@ -820,7 +828,7 @@ async fn command_output_to_receipt_with_limits(
     capabilities: ExecutionBackendCapabilities,
     network: ExecutionNetworkReceipt,
     mut command: Command,
-    request: &ExecutionRequest,
+    mut request: ExecutionRequest,
     output_limits: OutputCollectionLimits,
     reader_fault: PreflightReaderFault,
     docker_cleanup: Option<docker::DockerContainerCleanup>,
@@ -832,11 +840,13 @@ async fn command_output_to_receipt_with_limits(
     command.kill_on_drop(true);
     configure_execution_process_group(&mut command);
 
-    let deadline = execution_deadline(request)?;
+    let deadline = execution_deadline(&request)?;
     let child = SupervisedExecutionChild::Tokio(command.spawn()?);
+    let capture_handle = request.capture.take();
     let outcome = supervise_execution_child(
         child,
-        request,
+        &request,
+        capture_handle,
         output_limits,
         reader_fault,
         docker_cleanup,
@@ -861,6 +871,7 @@ fn execution_deadline(request: &ExecutionRequest) -> Result<Option<TokioInstant>
 async fn supervise_execution_child(
     mut child: SupervisedExecutionChild,
     request: &ExecutionRequest,
+    capture_handle: Option<sigil_kernel::ExecutionCaptureHandle>,
     output_limits: OutputCollectionLimits,
     reader_fault: PreflightReaderFault,
     docker_cleanup: Option<docker::DockerContainerCleanup>,
@@ -908,6 +919,11 @@ async fn supervise_execution_child(
     let stdout_total = Arc::new(AtomicU64::new(0));
     let stderr_total = Arc::new(AtomicU64::new(0));
     let (alert_tx, mut alert_rx) = mpsc::channel(8);
+    // The capture handle is created before spawn and moved into the shared state; both pipe
+    // readers tee into the same staging sink under the mutex (RFC-0062 8.2).
+    let shared_capture = capture_handle.map(|handle| Arc::new(Mutex::new(handle)));
+    let stdout_capture = shared_capture.clone();
+    let stderr_capture = shared_capture.clone();
     let stdout_task = Some({
         let stdout_alert_tx = alert_tx.clone();
         let stdout_stream_total = Arc::clone(&stdout_total);
@@ -930,6 +946,7 @@ async fn supervise_execution_child(
                 stdout_stream_total,
                 stdout_total,
                 stdout_alert_tx,
+                stdout_capture,
             )
             .await
         })
@@ -942,6 +959,7 @@ async fn supervise_execution_child(
             Arc::clone(&stderr_total),
             Arc::clone(&combined_total),
             alert_tx,
+            stderr_capture,
         ))
     });
 
@@ -1011,13 +1029,17 @@ async fn supervise_execution_child(
         }
     }
 
+    // RFC-0062 8.2/10.4: on a clean child exit all pipe write ends are closed, so the readers
+    // must be drained to EOF instead of being aborted by a short grace window; a 10 MiB capture
+    // legitimately takes longer than a 1s drain grace in debug builds. Non-exit terminations
+    // still bound the drain with the grace window before aborting.
     let (collector_wait, collector_wait_failure) =
         if matches!(termination, ExecutionTerminationCause::Exited) {
             match deadline {
                 Some(deadline) => {
                     let remaining = deadline.saturating_duration_since(TokioInstant::now());
                     (
-                        Some(remaining.min(OUTPUT_DRAIN_GRACE)),
+                        Some(remaining.max(OUTPUT_DRAIN_GRACE)),
                         if remaining <= OUTPUT_DRAIN_GRACE {
                             ExecutionTerminationCause::TimedOut
                         } else {
@@ -1025,7 +1047,7 @@ async fn supervise_execution_child(
                         },
                     )
                 }
-                None => (Some(OUTPUT_DRAIN_GRACE), output_reader_drain_failure()),
+                None => (None, output_reader_drain_failure()),
             }
         } else {
             (Some(OUTPUT_DRAIN_GRACE), termination.clone())
@@ -1081,12 +1103,42 @@ async fn supervise_execution_child(
             ),
         };
     }
+    let output_termination_source = termination.clone();
     let timed_out = matches!(termination, ExecutionTerminationCause::TimedOut);
     let resources = resource_receipt_for_request(request, timed_out, cleanup);
     let combined_total_bytes = stdout
         .evidence
         .total_bytes
         .saturating_add(stderr.evidence.total_bytes);
+
+    let capture = shared_capture
+        .and_then(|shared| Arc::try_unwrap(shared).ok())
+        .map(|mutex| mutex.into_inner().expect("capture mutex not poisoned"))
+        .map(|handle| {
+            let source = match &output_termination_source {
+                ExecutionTerminationCause::Cancelled | ExecutionTerminationCause::TimedOut => {
+                    sigil_kernel::ToolSourceCompletenessV1::Interrupted
+                }
+                ExecutionTerminationCause::OutputLimit { .. } => {
+                    sigil_kernel::ToolSourceCompletenessV1::ResourceLimited
+                }
+                ExecutionTerminationCause::ReaderFailed { .. } => {
+                    sigil_kernel::ToolSourceCompletenessV1::ReaderFailed
+                }
+                ExecutionTerminationCause::Exited => {
+                    sigil_kernel::ToolSourceCompletenessV1::Complete
+                }
+            };
+            sigil_kernel::ExecutionCaptureOutcome {
+                sink: handle.sink,
+                source,
+                observed_bytes: combined_total.load(Ordering::Relaxed),
+                reader_failed: matches!(
+                    termination,
+                    ExecutionTerminationCause::ReaderFailed { .. }
+                ),
+            }
+        });
 
     Ok(SupervisedExecutionOutcome {
         resources,
@@ -1102,6 +1154,7 @@ async fn supervise_execution_child(
             termination,
         },
         timed_out,
+        capture,
     })
 }
 

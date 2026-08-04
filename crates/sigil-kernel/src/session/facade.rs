@@ -1,4 +1,3 @@
-use super::tool_artifact::{TOOL_MODEL_VIEW_RUN_BUDGET_BYTES, tool_model_view_initial_limit};
 use super::*;
 use crate::{ResolvedModelRoute, TaskGuidancePromotedEntry};
 
@@ -20,7 +19,6 @@ pub struct Session {
 pub(super) struct SessionRuntimeAttachments {
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn crate::ImageAttachmentResolver>>,
-    tool_model_view_run_budget_remaining: Option<usize>,
 }
 
 /// Immutable live-session material proven to correspond to one durable projection frontier.
@@ -135,10 +133,6 @@ impl std::fmt::Debug for SessionRuntimeAttachments {
                     .image_attachment_resolver
                     .as_ref()
                     .map(|_| "configured"),
-            )
-            .field(
-                "tool_model_view_run_budget_remaining",
-                &self.tool_model_view_run_budget_remaining,
             )
             .finish()
     }
@@ -399,7 +393,7 @@ impl Session {
     /// Appends a single entry to the in-memory log and durable store when present.
     pub fn append(&mut self, entry: SessionLogEntry) -> Result<()> {
         match &entry {
-            SessionLogEntry::ToolResultV2(result) => result.validate()?,
+            SessionLogEntry::ToolResultV3(result) => result.validate()?,
             SessionLogEntry::Control(control) => {
                 control.validate_durable_contract()?;
                 if let ControlEntry::ToolArtifactRead(receipt) = control {
@@ -480,12 +474,12 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn append_test_tool_result(&mut self, result: ToolResult) -> Result<()> {
         let artifact_store = self.tool_artifact_store();
-        let (recorded, _) = ToolResultRecordedV2::capture(
+        let (recorded, _) = ToolResultRecordedV3::capture(
             &result,
             artifact_store.as_ref(),
             ToolArtifactSensitivity::Ordinary,
         )?;
-        self.append(SessionLogEntry::ToolResultV2(recorded))
+        self.append(SessionLogEntry::ToolResultV3(recorded))
     }
 
     #[must_use]
@@ -493,42 +487,6 @@ impl Session {
         self.store
             .as_ref()
             .map(ToolArtifactStore::for_session_store)
-    }
-
-    pub(crate) fn begin_tool_model_view_run(&mut self) {
-        self.runtime_attachments
-            .tool_model_view_run_budget_remaining = Some(TOOL_MODEL_VIEW_RUN_BUDGET_BYTES);
-    }
-
-    pub(crate) fn tool_model_view_available_bytes(&self, tool_name: &str) -> usize {
-        let per_result_limit = tool_model_view_initial_limit(tool_name);
-        // Typed artifact reads already have their own per-call and per-turn byte budgets. They
-        // must not consume, or be hidden by, the aggregate budget for initial tool previews;
-        // otherwise exhausting that preview budget also disables the documented recovery path.
-        if tool_name.rsplit("__").next() == Some("read_tool_artifact") {
-            return per_result_limit;
-        }
-        let Some(remaining) = self
-            .runtime_attachments
-            .tool_model_view_run_budget_remaining
-            .as_ref()
-        else {
-            return per_result_limit;
-        };
-        per_result_limit.min(*remaining)
-    }
-
-    pub(crate) fn consume_tool_model_view_bytes(&mut self, tool_name: &str, bytes: usize) {
-        if tool_name.rsplit("__").next() == Some("read_tool_artifact") {
-            return;
-        }
-        if let Some(remaining) = self
-            .runtime_attachments
-            .tool_model_view_run_budget_remaining
-            .as_mut()
-        {
-            *remaining = remaining.saturating_sub(bytes);
-        }
     }
 
     /// Persists one tool result and its body-free receipts/provenance as one crash-safe bundle.
@@ -539,7 +497,7 @@ impl Session {
     /// record range as all-or-none.
     pub(crate) fn append_tool_result_bundle(
         &mut self,
-        result: ToolResultRecordedV2,
+        result: ToolResultRecordedV3,
         controls: Vec<ControlEntry>,
     ) -> Result<()> {
         result.validate()?;
@@ -577,7 +535,7 @@ impl Session {
         }
 
         let mut entries = Vec::with_capacity(controls.len() + 1);
-        entries.push(SessionLogEntry::ToolResultV2(result));
+        entries.push(SessionLogEntry::ToolResultV3(result));
         entries.extend(controls.into_iter().map(SessionLogEntry::Control));
         let events = self
             .store
@@ -892,7 +850,7 @@ impl Session {
                 {
                     Some(message.clone())
                 }
-                SessionLogEntry::ToolResultV2(result)
+                SessionLogEntry::ToolResultV3(result)
                     if result.message_id == provenance.message_id =>
                 {
                     result.model_message().ok()
@@ -2380,7 +2338,7 @@ fn validated_recovered_entries(
                     {
                         Some(message.clone())
                     }
-                    SessionLogEntry::ToolResultV2(result)
+                    SessionLogEntry::ToolResultV3(result)
                         if result.message_id == provenance.message_id =>
                     {
                         result.model_message().ok()
@@ -2411,7 +2369,7 @@ fn validated_recovered_entries(
                                 crate::WebUrlProvenanceKind::WebSearchResult
                                 | crate::WebUrlProvenanceKind::PriorWebFetch
                                 | crate::WebUrlProvenanceKind::RedirectTarget,
-                                SessionLogEntry::ToolResultV2(result),
+                                SessionLogEntry::ToolResultV3(result),
                             ) => result.message_id == descriptor.durable_entry_id,
                             _ => false,
                         }

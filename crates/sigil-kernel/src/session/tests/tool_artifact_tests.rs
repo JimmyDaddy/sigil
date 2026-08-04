@@ -50,7 +50,7 @@ fn high_volume_tools_use_a_smaller_initial_model_view() -> Result<()> {
         "mcp__workspace__read_file",
         "mcp__docs__search",
     ] {
-        let (recorded, _) = ToolResultRecordedV2::capture(
+        let (recorded, _) = ToolResultRecordedV3::capture(
             &ToolResult::ok(
                 format!("call-{tool_name}"),
                 tool_name,
@@ -65,7 +65,7 @@ fn high_volume_tools_use_a_smaller_initial_model_view() -> Result<()> {
             TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES
         );
     }
-    let (shell, _) = ToolResultRecordedV2::capture(
+    let (shell, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-shell",
             "shell",
@@ -84,83 +84,72 @@ fn high_volume_tools_use_a_smaller_initial_model_view() -> Result<()> {
 }
 
 #[test]
-fn root_run_budget_bounds_many_initial_tool_previews() -> Result<()> {
-    let mut session = Session::new("test", "model");
-    session.begin_tool_model_view_run();
+fn assistant_batch_preview_budget_is_per_batch_and_not_cumulative_across_batches() -> Result<()> {
+    // RFC-0062 11.2/11.3: the 64 KiB preview budget belongs to one assistant tool-call batch.
+    // A later batch always receives a fresh budget; history is governed by token aging, never by
+    // a root-run byte bucket that hides new current results.
     let mut preview_bytes = 0;
-
-    for index in 0..20 {
-        let tool_name = if index % 2 == 0 { "read_file" } else { "shell" };
-        let limit = session.tool_model_view_available_bytes(tool_name);
-        let (recorded, _) = ToolResultRecordedV2::capture_with_model_preview_limit(
-            &ToolResult::ok(
-                format!("call-{index}"),
-                tool_name,
-                "x".repeat(32 * 1024),
-                crate::ToolResultMeta::default(),
-            ),
-            None,
-            ToolArtifactSensitivity::Ordinary,
-            limit,
-        )?;
-        let actual_preview_bytes = recorded.initial_model_view.preview.len();
-        session.consume_tool_model_view_bytes(tool_name, actual_preview_bytes);
-        preview_bytes += actual_preview_bytes;
+    for index in 0..2 {
+        let order = (0..4)
+            .map(|i| format!("call-{index}-{i}"))
+            .collect::<Vec<_>>();
+        let candidates = order
+            .iter()
+            .map(|id| (id.clone(), 32 * 1024))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let limits = allocate_batch_preview_limits(&order, &candidates);
+        preview_bytes += limits.values().copied().sum::<usize>();
+        assert_eq!(
+            limits.values().copied().sum::<usize>(),
+            TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES
+        );
     }
-
-    assert_eq!(preview_bytes, TOOL_MODEL_VIEW_RUN_BUDGET_BYTES);
+    assert_eq!(preview_bytes, TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES * 2);
     Ok(())
 }
 
 #[test]
-fn typed_artifact_retrieval_remains_visible_after_initial_preview_budget_is_exhausted() {
-    let mut session = Session::new("test", "model");
-    session.begin_tool_model_view_run();
-
-    while session.tool_model_view_available_bytes("shell") > 0 {
-        let available = session.tool_model_view_available_bytes("shell");
-        session.consume_tool_model_view_bytes("shell", available);
+fn batch_allocator_guarantees_minimum_preview_floor_for_safe_results() {
+    // RFC-0062 11.2: a 128-result oversized batch still gives every safe non-empty result its
+    // deterministic 512 B floor, and the total never exceeds the batch budget.
+    let order = (0..128).map(|i| format!("call-{i}")).collect::<Vec<_>>();
+    let candidates = order
+        .iter()
+        .map(|id| (id.clone(), 16 * 1024))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let limits = allocate_batch_preview_limits(&order, &candidates);
+    assert_eq!(limits.len(), 128);
+    for limit in limits.values() {
+        assert_eq!(*limit, TOOL_MODEL_VIEW_BATCH_FLOOR_BYTES);
     }
-
-    assert_eq!(session.tool_model_view_available_bytes("shell"), 0);
     assert_eq!(
-        session.tool_model_view_available_bytes("read_tool_artifact"),
-        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES
+        limits.values().copied().sum::<usize>(),
+        TOOL_MODEL_VIEW_BATCH_FLOOR_BYTES * 128,
+        "128 floors fit exactly inside the 64 KiB batch budget"
     );
 }
 
 #[test]
-fn root_run_budget_charges_actual_preview_bytes_instead_of_tool_maxima() -> Result<()> {
-    let mut session = Session::new("test", "model");
-    session.begin_tool_model_view_run();
-
-    for index in 0..20 {
-        let tool_name = if index % 2 == 0 { "read_file" } else { "shell" };
-        let body = format!("small result {index}");
-        let limit = session.tool_model_view_available_bytes(tool_name);
-        let (recorded, _) = ToolResultRecordedV2::capture_with_model_preview_limit(
-            &ToolResult::ok(
-                format!("call-small-{index}"),
-                tool_name,
-                body.clone(),
-                crate::ToolResultMeta::default(),
-            ),
-            None,
-            ToolArtifactSensitivity::Ordinary,
-            limit,
-        )?;
-        assert_eq!(recorded.initial_model_view.preview, body);
-        session.consume_tool_model_view_bytes(tool_name, recorded.initial_model_view.preview.len());
-    }
-
-    assert_eq!(
-        session.tool_model_view_available_bytes("shell"),
-        TOOL_MODEL_VIEW_INITIAL_MAX_BYTES
-    );
-    assert_eq!(
-        session.tool_model_view_available_bytes("read_file"),
-        TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES
-    );
+fn batch_allocator_charges_actual_candidate_bytes_and_respects_declaration_order() -> Result<()> {
+    // RFC-0062 11.2: allocation follows assistant declaration order; smaller candidates consume
+    // only their actual bytes, so later results keep visible previews instead of being hidden by
+    // a pre-charged maximum.
+    let order = vec![
+        "call-a".to_owned(),
+        "call-b".to_owned(),
+        "call-c".to_owned(),
+    ];
+    let candidates = std::collections::BTreeMap::from([
+        ("call-a".to_owned(), 32 * 1024),
+        ("call-b".to_owned(), 1024),
+        ("call-c".to_owned(), 32 * 1024),
+    ]);
+    let limits = allocate_batch_preview_limits(&order, &candidates);
+    assert_eq!(limits.get("call-a"), Some(&(512 + 32 * 1024 - 512)));
+    assert_eq!(limits.get("call-b"), Some(&1024));
+    assert!(limits.get("call-c").copied().unwrap_or(0) > 0);
+    let total: usize = limits.values().copied().sum();
+    assert!(total <= TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES);
     Ok(())
 }
 
@@ -268,7 +257,7 @@ fn hundred_ten_megabyte_outputs_keep_events_bounded_and_enforce_session_budget()
                 accepted += 1;
                 assert_eq!(descriptor.observed_bytes, OUTPUT_BYTES as u64);
                 assert_eq!(descriptor.persisted_bytes, OUTPUT_BYTES as u64);
-                let (recorded, _) = ToolResultRecordedV2::capture(
+                let (recorded, _) = ToolResultRecordedV3::capture(
                     &ToolResult::ok(
                         &call_id,
                         "shell",
@@ -281,7 +270,7 @@ fn hundred_ten_megabyte_outputs_keep_events_bounded_and_enforce_session_budget()
                 )?;
                 let encoded = serde_json::to_vec(&recorded)?;
                 assert!(encoded.len() <= TOOL_RESULT_EVENT_TARGET_BYTES);
-                durable_store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+                durable_store.append(&SessionLogEntry::ToolResultV3(recorded))?;
             }
             Err(error) => {
                 rejected += 1;
@@ -315,13 +304,13 @@ fn thousand_small_results_keep_incremental_artifact_overhead_bounded() -> Result
         let call_id = format!("call-small-{index}");
         let body = format!("small-result-{index}");
         artifact_bytes = artifact_bytes.saturating_add(body.len() as u64);
-        let (recorded, _) = ToolResultRecordedV2::capture(
+        let (recorded, _) = ToolResultRecordedV3::capture(
             &ToolResult::ok(&call_id, "shell", body, crate::ToolResultMeta::default()),
             Some(&artifact_store),
             ToolArtifactSensitivity::Ordinary,
         )?;
         assert!(serde_json::to_vec(&recorded)?.len() <= TOOL_RESULT_EVENT_TARGET_BYTES);
-        durable_store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+        durable_store.append(&SessionLogEntry::ToolResultV3(recorded))?;
     }
 
     let elapsed = started.elapsed();
@@ -414,7 +403,7 @@ fn invalid_pre_captured_descriptor_fails_closed_without_recapturing_inline_previ
     )
     .with_captured_artifact(descriptor);
 
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
         Some(&target_store),
         ToolArtifactSensitivity::Ordinary,
@@ -450,7 +439,7 @@ fn oversized_inline_capture_hits_hard_guard_without_publishing_raw_body() -> Res
         crate::ToolResultMeta::default(),
     );
 
-    let (recorded, display) = ToolResultRecordedV2::capture(
+    let (recorded, display) = ToolResultRecordedV3::capture(
         &result,
         Some(&store),
         ToolArtifactSensitivity::SensitiveLocal,
@@ -499,7 +488,7 @@ fn bounded_inline_capture_remains_available_and_reports_telemetry() -> Result<()
     );
 
     let (recorded, _) =
-        ToolResultRecordedV2::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
+        ToolResultRecordedV3::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
 
     assert!(matches!(
         recorded.artifact,
@@ -781,7 +770,7 @@ fn durable_v2_event_is_bounded_while_artifact_keeps_the_complete_body() -> Resul
         crate::ToolResultMeta::default(),
     )
     .with_captured_artifact(pre_captured);
-    let (recorded, display) = ToolResultRecordedV2::capture(
+    let (recorded, display) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -810,11 +799,11 @@ fn durable_v2_event_is_bounded_while_artifact_keeps_the_complete_body() -> Resul
     let records = JsonlSessionStore::read_event_records(&session_path)?;
     assert_eq!(
         records[0].stored_event().event_kind(),
-        Some(crate::DurableEventType::ToolResultRecordedV2)
+        Some(crate::DurableEventType::ToolResultRecordedV3)
     );
     assert!(matches!(
         records[0].session_log_entry()?,
-        Some(SessionLogEntry::ToolResultV2(_))
+        Some(SessionLogEntry::ToolResultV3(_))
     ));
     Ok(())
 }
@@ -1049,7 +1038,7 @@ fn utf8_preview_cap_boundary_never_splits_code_points() -> Result<()> {
     assert!(preview_overflow.is_char_boundary(preview_overflow.len()));
     assert!(std::str::from_utf8(preview_overflow.as_bytes()).is_ok());
 
-    let (recorded, display) = ToolResultRecordedV2::capture(
+    let (recorded, display) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-utf8",
             "shell",
@@ -1227,7 +1216,7 @@ fn unavailable_artifact_display_never_advertises_has_more() -> Result<()> {
     )
     .with_unavailable_artifact_capture((TOOL_MODEL_VIEW_INITIAL_MAX_BYTES + 4096) as u64);
     let (recorded, display) =
-        ToolResultRecordedV2::capture(&result, None, ToolArtifactSensitivity::Ordinary)?;
+        ToolResultRecordedV3::capture(&result, None, ToolArtifactSensitivity::Ordinary)?;
     assert!(matches!(
         recorded.artifact,
         ToolArtifactBindingV1::Unavailable { .. }
@@ -1251,11 +1240,10 @@ fn unavailable_artifact_display_never_advertises_has_more() -> Result<()> {
 }
 
 #[test]
-fn oversized_error_message_fails_capture_without_publishing_a_partial_event() -> Result<()> {
-    // Characterization of the RFC-0062 5.2 gap: a tool error whose message exceeds the 8 KiB
-    // facts cap currently fails V2 capture closed instead of degrading to a bounded summary.
-    // RFC-0062 R62.0 will replace this with a bounded error summary; until then the run-facing
-    // behavior must not silently truncate or claim completeness.
+fn oversized_error_message_is_bounded_in_facts_without_failing_capture() -> Result<()> {
+    // RFC-0062 5.2/9.5: a large tool error body must never overflow facts or abort the run;
+    // the error summary is capped at 1 KiB with UTF-8-safe truncation while the full body
+    // stays on the result content and flows into the artifact.
     let (_temp, store) = store_fixture()?;
     let oversized_message = "error detail ".repeat(1024);
     assert!(oversized_message.len() > 8 * 1024);
@@ -1265,20 +1253,50 @@ fn oversized_error_message_fails_capture_without_publishing_a_partial_event() ->
         ToolErrorKind::ExitStatus,
         oversized_message,
     );
-    let error =
-        ToolResultRecordedV2::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)
-            .expect_err("oversized error message must exceed the facts cap");
+    let (recorded, display) =
+        ToolResultRecordedV3::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
+    let error = recorded
+        .facts
+        .error
+        .clone()
+        .expect("error facts are preserved");
     assert!(
-        format!("{error:#}").contains("tool result facts exceed their byte limit"),
-        "unexpected error: {error:#}"
+        error.message.len() <= TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES,
+        "error summary must stay bounded"
     );
-    // RFC-0059 8.4: publish-before-append means a failed append may leave an orphan manifest
-    // that grace GC reclaims; it must never become a durable ref to a partial event.
-    let orphans = store.manifest_inventory()?;
-    if !orphans.is_empty() {
-        assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0].descriptor.tool_call_id, "call-large-error");
-    }
+    assert!(error.message.starts_with("error detail "));
+    assert_eq!(recorded.facts.status, "error");
+    assert_eq!(display.status_label, "error");
+    let encoded = serde_json::to_vec(&recorded)?;
+    assert!(encoded.len() <= TOOL_RESULT_EVENT_TARGET_BYTES);
+    Ok(())
+}
+
+#[test]
+fn capture_failure_settles_bounded_terminal_fallback() -> Result<()> {
+    // RFC-0062 10.5: when the regular projection fails, the record layer settles a bounded
+    // terminal fallback instead of amplifying a tool error into an agent runtime failure.
+    let result = ToolResult::error(
+        "call-fallback",
+        "shell",
+        ToolErrorKind::ExitStatus,
+        "failing projection",
+    );
+    let (recorded, display) = ToolResultRecordedV3::terminal_fallback(
+        &result,
+        ToolArtifactSensitivity::Ordinary,
+        &anyhow::anyhow!("injected projection failure"),
+    )?;
+    assert!(matches!(
+        recorded.artifact,
+        ToolArtifactBindingV1::Unavailable { .. }
+    ));
+    assert!(recorded.initial_model_view.preview.is_empty());
+    assert_eq!(recorded.facts.status, "error");
+    assert!(!display.has_more);
+    assert!(recorded.initial_model_view_sha256.starts_with("sha256:"));
+    let encoded = serde_json::to_vec(&recorded)?;
+    assert!(encoded.len() <= TOOL_RESULT_EVENT_TARGET_BYTES);
     Ok(())
 }
 
@@ -1331,7 +1349,7 @@ fn has_more_compares_against_the_bytes_actually_displayed() -> Result<()> {
         &body_between,
         crate::ToolResultMeta::default(),
     );
-    let (recorded, live) = ToolResultRecordedV2::capture(
+    let (recorded, live) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -1372,7 +1390,7 @@ fn has_more_compares_against_the_bytes_actually_displayed() -> Result<()> {
         &body_over,
         crate::ToolResultMeta::default(),
     );
-    let (recorded, live) = ToolResultRecordedV2::capture(
+    let (recorded, live) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -1389,7 +1407,7 @@ fn has_more_compares_against_the_bytes_actually_displayed() -> Result<()> {
         &body_small,
         crate::ToolResultMeta::default(),
     );
-    let (recorded, live) = ToolResultRecordedV2::capture(
+    let (recorded, live) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -1397,5 +1415,168 @@ fn has_more_compares_against_the_bytes_actually_displayed() -> Result<()> {
     assert_eq!(live.preview.len(), body_small.len());
     assert!(!live.has_more);
     assert!(!recorded.display_view().has_more);
+    Ok(())
+}
+
+#[test]
+fn v2_tool_result_session_is_rejected_with_bounded_diagnostic() -> Result<()> {
+    // RFC-0062 9.7 clean cutover: a session containing a legacy tool_result_recorded_v2 event is
+    // rejected wholesale with a bounded schema diagnostic; nothing is migrated, aliased, or
+    // partially restored, and no tool can be re-executed against it.
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("legacy-v2.jsonl");
+    let v2_payload = serde_json::json!({
+        "session_log_entry": {
+            "tool_result_recorded_v2": {
+                "schema_version": 2,
+                "message_id": "legacy-message",
+                "call_id": "legacy-call",
+                "tool_name": "shell",
+                "artifact": { "kind": "unavailable", "unavailable": {
+                    "availability": "unavailable",
+                    "observed_bytes": 0,
+                    "reason": "legacy"
+                } },
+                "facts": {
+                    "status": "ok",
+                    "exit_code": null,
+                    "duration_ms": null,
+                    "changed_files": [],
+                    "error": null,
+                    "mutation_receipt_refs": [],
+                    "approval_receipt_refs": [],
+                    "verification_receipt_refs": [],
+                    "external_provenance_refs": [],
+                    "tool_specific": {}
+                },
+                "initial_model_view": {
+                    "preview": "legacy preview",
+                    "preview_kind": "complete",
+                    "artifact_ref": null,
+                    "retrieval_hint": null,
+                    "token_upper_bound": 2,
+                    "projection_version": 1
+                },
+                "initial_model_view_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "capture_telemetry": {
+                    "capture_path": "inline_capture",
+                    "observed_inline_bytes": 14,
+                    "hard_guard_bytes": 262144,
+                    "hard_guard_exceeded": false,
+                    "inline_projection_truncated": false
+                },
+                "recorded_at_ms": 1
+            }
+        }
+    });
+    let mut record = crate::StoredEvent {
+        schema_version: crate::STORED_EVENT_SCHEMA_VERSION,
+        event_type: "tool_result_recorded_v2".to_owned(),
+        event_version: 1,
+        event_class: crate::EventClass::Critical,
+        event_id: "legacy-event-1".to_owned(),
+        session_id: "legacy-session".to_owned(),
+        stream_sequence: 1,
+        occurred_at: None,
+        correlation_id: None,
+        causation_id: None,
+        parent_session_id: None,
+        record_checksum: String::new(),
+        payload: v2_payload,
+    };
+    record.record_checksum = record.compute_record_checksum()?;
+    std::fs::write(
+        &session_path,
+        format!("{}\n", serde_json::to_string(&record)?),
+    )?;
+
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let error = records[0]
+        .session_log_entry()
+        .expect_err("legacy V2 session must be rejected on decode");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("unsupported session schema"),
+        "unexpected diagnostic: {message}"
+    );
+    assert!(message.contains("tool-result-v3"));
+    let file_bytes = std::fs::read(&session_path)?;
+    assert!(
+        file_bytes
+            .windows(b"legacy preview".len())
+            .any(|w| w == b"legacy preview"),
+        "rejection must never rewrite the original file"
+    );
+    Ok(())
+}
+
+#[test]
+fn availability_change_events_are_generation_guarded_and_durable() -> Result<()> {
+    // RFC-0062 9.4: availability is append-only control state; transitions are generation
+    // ordered and the session log keeps the body-free audit trail.
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::new("test", "model").with_store(store);
+    let artifact_ref = ToolArtifactRefV1::random();
+    let disable = ToolArtifactAvailabilityChangedV1 {
+        schema_version: TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+        artifact_ref: artifact_ref.clone(),
+        expected_generation: 0,
+        generation: 1,
+        previous: ToolArtifactAvailabilityStateV1::Available,
+        next: ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+        reason: ToolArtifactAvailabilityReasonV1::GcDisable,
+        changed_at_ms: 1,
+    };
+    disable.validate()?;
+    session.append_control(ControlEntry::ToolArtifactAvailabilityChanged(
+        disable.clone(),
+    ))?;
+    let expired = ToolArtifactAvailabilityChangedV1 {
+        schema_version: TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+        artifact_ref,
+        expected_generation: 1,
+        generation: 2,
+        previous: ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+        next: ToolArtifactAvailabilityStateV1::Expired,
+        reason: ToolArtifactAvailabilityReasonV1::GcExpired,
+        changed_at_ms: 2,
+    };
+    expired.validate()?;
+    session.append_control(ControlEntry::ToolArtifactAvailabilityChanged(
+        expired.clone(),
+    ))?;
+
+    let jsonl = std::fs::read_to_string(&session_path)?;
+    assert!(!jsonl.contains("tool artifact body"));
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let entries = records
+        .iter()
+        .map(|record| record.session_log_entry())
+        .collect::<Result<Vec<_>>>()?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        Some(SessionLogEntry::Control(ControlEntry::ToolArtifactAvailabilityChanged(value)))
+            if *value == disable
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        Some(SessionLogEntry::Control(ControlEntry::ToolArtifactAvailabilityChanged(value)))
+            if *value == expired
+    )));
+
+    // Terminal states never return to Available and stale generations fail closed.
+    let illegal = ToolArtifactAvailabilityChangedV1 {
+        schema_version: TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+        artifact_ref: ToolArtifactRefV1::random(),
+        expected_generation: 0,
+        generation: 1,
+        previous: ToolArtifactAvailabilityStateV1::Expired,
+        next: ToolArtifactAvailabilityStateV1::Available,
+        reason: ToolArtifactAvailabilityReasonV1::PolicyRevoked,
+        changed_at_ms: 3,
+    };
+    assert!(illegal.validate().is_err());
     Ok(())
 }

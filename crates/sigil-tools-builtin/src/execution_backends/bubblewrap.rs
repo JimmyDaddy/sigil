@@ -196,7 +196,7 @@ pub(crate) async fn linux_bubblewrap_execute(
         capabilities,
         network,
         command,
-        &request,
+        request,
         cancellation,
     )
     .await

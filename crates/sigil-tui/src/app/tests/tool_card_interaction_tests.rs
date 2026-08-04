@@ -292,7 +292,7 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
     let session_path = temp.path().join("session-artifact.jsonl");
     let durable_store = sigil_kernel::JsonlSessionStore::new(&session_path)?;
     let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&durable_store);
-    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-restored-artifact",
             "bash",
@@ -304,7 +304,7 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
     )?;
     let mut session =
         sigil_kernel::Session::new("deepseek", "deepseek-v4-flash").with_store(durable_store);
-    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    session.append(SessionLogEntry::ToolResultV3(recorded))?;
     let entries = session.entries().to_vec();
 
     let mut available_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());

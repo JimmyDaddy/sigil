@@ -344,6 +344,7 @@ SOURCE_INDEX={source_json}"
         tool_call_id: None,
         assistant_kind: None,
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     })
 }
 
@@ -450,7 +451,7 @@ impl ContinuationSourceCatalog {
                     promotion.durable_user_message
                 }
                 SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => message,
-                SessionLogEntry::ToolResultV2(result) => result.model_message()?,
+                SessionLogEntry::ToolResultV3(result) => result.model_message()?,
                 SessionLogEntry::Control(_) => {
                     bail!("folded checkpoint source cannot be a control entry");
                 }
@@ -729,6 +730,7 @@ impl ContinuationCheckpointV1 {
             tool_call_id: None,
             assistant_kind: None,
             image_attachments: Vec::new(),
+            tool_result_payload: None,
         })
     }
 

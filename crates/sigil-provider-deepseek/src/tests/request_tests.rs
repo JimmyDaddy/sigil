@@ -170,6 +170,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         assistant_kind: None,
         id: "assistant-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let tool = ModelMessage {
         role: MessageRole::Tool,
@@ -179,6 +180,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         assistant_kind: None,
         id: "tool-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let request = sigil_kernel::CompletionRequest {
         provider_name: "deepseek".to_owned(),

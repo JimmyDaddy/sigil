@@ -208,7 +208,7 @@ impl PluginHookExecutionRequest {
 }
 
 /// Result of one hook command execution plus durable control entries the caller should append.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PluginHookExecutionOutcome {
     pub started: PluginHookExecutionStartedEntry,
     pub finished: PluginHookExecutionFinishedEntry,
@@ -425,6 +425,7 @@ impl PluginHookExecutionRunner {
                 cpu_time_ms: None,
                 memory_limit_bytes: None,
                 process_count_limit: None,
+                capture: None,
             })
             .await
         {

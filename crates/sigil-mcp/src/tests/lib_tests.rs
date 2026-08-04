@@ -13,7 +13,7 @@ use sigil_kernel::{
     McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
     ReasoningStreamSupport, SecretRedactor, SecretString, ToolAccess, ToolArtifactBindingV1,
     ToolArtifactSensitivity, ToolArtifactStore, ToolCategory, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV2, ToolResultStatus, ToolSubject,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolResultStatus, ToolSubject,
     ToolSubjectKind, ToolSubjectScope, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
 };
 use tokio::{
@@ -139,7 +139,7 @@ fn mcp_large_json_capture_streams_policy_safe_artifact_without_expanding_tool_co
     );
 
     assert_eq!(result.content, "bounded preview");
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::ExternalUntrusted,

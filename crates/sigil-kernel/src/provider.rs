@@ -731,6 +731,10 @@ pub struct ModelMessage {
     pub assistant_kind: Option<AssistantMessageKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_attachments: Vec<crate::ImageAttachment>,
+    /// RFC-0062 9.6: typed tool-result payload. Provider adapters must pattern-match this and
+    /// never parse `content` to guess the outcome. Absent for non-tool messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_payload: Option<crate::session::ProviderToolResultMessageV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1397,7 +1401,24 @@ impl ModelMessage {
             tool_call_id: None,
             assistant_kind: None,
             image_attachments: Vec::new(),
+            tool_result_payload: None,
         }
+    }
+
+    /// RFC-0062 9.6: attaches the typed tool-result payload used by provider adapters.
+    #[must_use]
+    pub fn with_tool_result_payload(
+        mut self,
+        payload: crate::session::ProviderToolResultMessageV1,
+    ) -> Self {
+        self.tool_result_payload = Some(payload);
+        self
+    }
+
+    /// Returns the typed tool-result payload if this message is a typed tool result.
+    #[must_use]
+    pub fn tool_result_payload(&self) -> Option<&crate::session::ProviderToolResultMessageV1> {
+        self.tool_result_payload.as_ref()
     }
 }
 

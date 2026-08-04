@@ -236,6 +236,7 @@ impl ExecutionBackend for FakeTaskExecutionBackend {
                 },
                 output: Default::default(),
                 timed_out: false,
+                capture: None,
             })
         })
     }

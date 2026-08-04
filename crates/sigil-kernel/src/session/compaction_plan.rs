@@ -434,7 +434,7 @@ fn prepare_fold_candidates(
                     message,
                 });
             }
-            Some(SessionLogEntry::ToolResultV2(result)) => {
+            Some(SessionLogEntry::ToolResultV3(result)) => {
                 messages.push(FoldMessage {
                     event: reference,
                     message: result.model_message()?,

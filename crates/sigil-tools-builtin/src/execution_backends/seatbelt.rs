@@ -151,7 +151,7 @@ pub(crate) async fn macos_seatbelt_execute(
         capabilities,
         network,
         command,
-        &request,
+        request,
         cancellation,
     )
     .await

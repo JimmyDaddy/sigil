@@ -295,14 +295,17 @@ pub use store::{
     session_io_lock_metrics,
 };
 pub use tool_artifact::{
+    ModelMessagePayloadV1, ProcessStreamCaptureConfigV1, ProviderToolResultMessageV1,
     TOOL_ARTIFACT_DESCRIPTOR_SCHEMA_VERSION, TOOL_ARTIFACT_MAX_BYTES,
     TOOL_ARTIFACT_ORPHAN_GRACE_MS, TOOL_ARTIFACT_READ_BYTES_PER_TURN, TOOL_ARTIFACT_READ_MAX_BYTES,
     TOOL_ARTIFACT_READ_MAX_LINES, TOOL_ARTIFACT_READ_SCHEMA_VERSION, TOOL_ARTIFACT_READS_PER_TURN,
     TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES, TOOL_ARTIFACT_SEARCH_MAX_MATCHES,
     TOOL_ARTIFACT_SESSION_BUDGET_BYTES, TOOL_DISPLAY_VIEW_MAX_BYTES, TOOL_MODEL_VIEW_MAX_BYTES,
-    TOOL_MODEL_VIEW_SCHEMA_VERSION, TOOL_RESULT_EVENT_TARGET_BYTES,
-    TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES, TOOL_RESULT_RECORDED_SCHEMA_VERSION,
-    ToolArtifactAvailability, ToolArtifactBindingV1, ToolArtifactBudgetedReadV1,
+    TOOL_MODEL_VIEW_SCHEMA_VERSION, TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES,
+    TOOL_RESULT_EVENT_TARGET_BYTES, TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES,
+    TOOL_RESULT_RECORDED_SCHEMA_VERSION, ToolArtifactAvailability,
+    ToolArtifactAvailabilityChangedV1, ToolArtifactAvailabilityReasonV1,
+    ToolArtifactAvailabilityStateV1, ToolArtifactBindingV1, ToolArtifactBudgetedReadV1,
     ToolArtifactCaptureSink, ToolArtifactCompleteness, ToolArtifactDescriptorV1,
     ToolArtifactEncoding, ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactId,
     ToolArtifactManifestEntryV1, ToolArtifactPageEncoding, ToolArtifactPageV1,
@@ -310,9 +313,18 @@ pub use tool_artifact::{
     ToolArtifactRefV1, ToolArtifactRetentionClass, ToolArtifactRetrievalPolicyV1,
     ToolArtifactSelectorV1, ToolArtifactSensitivity, ToolArtifactStore,
     ToolArtifactTrashPruneReportV1, ToolArtifactTruncationV1, ToolArtifactUnavailableV1,
-    ToolDisplayCapability, ToolDisplayViewV1, ToolModelViewV1, ToolPreviewKind,
-    ToolResultCapturePathV1, ToolResultCaptureTelemetryV1, ToolResultFactsV1, ToolResultRecordedV2,
-    ToolResultViewsV2,
+    ToolDisplayCapability, ToolDisplayViewV1, ToolErrorSummaryV1, ToolExecutionCapturePlanV1,
+    ToolModelViewV1, ToolOutputPersistencePolicy, ToolOutputSegmentV1, ToolOutputStreamLayoutV1,
+    ToolOutputStreamV1, ToolPolicyCompletenessV1, ToolPreviewKind, ToolPreviewTruncationReasonV1,
+    ToolResultCaptureCompletenessV1, ToolResultCapturePathV1, ToolResultCaptureTelemetryV1,
+    ToolResultFactsV1, ToolResultFailureStageV1, ToolResultOutcomeV1, ToolResultRecordedV2,
+    ToolResultRecordedV3, ToolResultTerminalFallbackV1, ToolResultViewsV2,
+    ToolResultWireSemanticsV1, ToolSourceCompletenessV1, ToolStorageCompletenessV1,
+};
+pub use tool_artifact::{
+    TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES, TOOL_MODEL_VIEW_BATCH_FLOOR_BYTES,
+    TOOL_MODEL_VIEW_BATCH_MAX_RESULTS, allocate_batch_preview_limits,
+    tool_model_view_initial_limit,
 };
 pub use tool_output_pressure_projection::{
     TOOL_OUTPUT_AGED_RESULT_MAX_BYTES, TOOL_OUTPUT_AGED_RESULT_TARGET_TOKENS,

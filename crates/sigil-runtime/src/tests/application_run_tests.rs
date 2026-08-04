@@ -26,7 +26,7 @@ use sigil_kernel::{
     TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess,
     ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
     ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
-    ToolResultRecordedV2, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
+    ToolResultRecordedV3, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
@@ -1804,7 +1804,7 @@ fn transcript_page_is_scope_checked_chronological_bounded_and_argument_free() ->
         ),
     ))?;
     let artifact_store = ToolArtifactStore::for_session_store(&store);
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-1",
             "read_file",
@@ -1814,7 +1814,7 @@ fn transcript_page_is_scope_checked_chronological_bounded_and_argument_free() ->
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
     )?;
-    store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+    store.append(&SessionLogEntry::ToolResultV3(recorded))?;
     store.append(&SessionLogEntry::Assistant(
         ModelMessage::assistant_with_kind(
             Some("final".to_owned()),

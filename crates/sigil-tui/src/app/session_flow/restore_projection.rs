@@ -52,7 +52,7 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                     });
                 }
             }
-            SessionLogEntry::ToolResultV2(result) => {
+            SessionLogEntry::ToolResultV3(result) => {
                 let execution = restored_tool_executions.get(&result.call_id);
                 let preview = restored_tool_previews.get(&result.call_id);
                 let tool_call = restored_tool_calls.get(&result.call_id);

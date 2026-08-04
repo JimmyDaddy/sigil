@@ -16,7 +16,7 @@ use crate::{
     RequestFitProof, SourceCacheStatus, SourceFreshness, TaskMemoryV1, TokenMeasurementBinding,
     TokenMeasurementScope, ToolArtifactBindingV1, ToolArtifactSensitivity, ToolArtifactStore,
     ToolCall, ToolOutputProjectionPolicy, ToolRestartPolicy, ToolResult, ToolResultMeta,
-    ToolResultRecordedV2, UsageStats, VersionedProfileIdentity,
+    ToolResultRecordedV3, UsageStats, VersionedProfileIdentity,
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
     write_file_with_mutation,
 };
@@ -311,7 +311,7 @@ fn conversation_fork_remaps_v2_artifact_ref_and_preserves_retrieval() -> Result<
         }],
     ))?;
     let artifact_store = source.tool_artifact_store().context("artifact store")?;
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-fork-artifact",
             "shell",
@@ -368,7 +368,7 @@ fn conversation_fork_remaps_v2_artifact_ref_and_preserves_retrieval() -> Result<
     let mut destination_result = None;
     let mut destination_result_event_id = None;
     for record in &destination_records {
-        if let Some(SessionLogEntry::ToolResultV2(result)) = record.session_log_entry()? {
+        if let Some(SessionLogEntry::ToolResultV3(result)) = record.session_log_entry()? {
             destination_result = Some(result);
             destination_result_event_id = Some(record.event_id().to_owned());
             break;

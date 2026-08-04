@@ -227,6 +227,7 @@ impl TerminalExecutionConfig {
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         };
         let mut args = linux_bubblewrap_args(resolved_cwd, &request, self.network_allowed);
         args.push(shell.program().as_os_str().to_owned());

@@ -112,7 +112,7 @@ use tool_audit::{
 };
 use tool_results::{
     agent_tool_result_satisfies_delegation, append_invalid_tool_input_result, emit_tool_result,
-    record_and_emit_tool_result, record_tool_run_outcome,
+    emit_tool_result_batch, record_and_emit_tool_result, record_tool_run_outcome,
 };
 
 const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
@@ -1628,7 +1628,6 @@ where
         if logical_run_id.trim().is_empty() {
             return Err(anyhow!("agent logical run id is empty"));
         }
-        session.begin_tool_model_view_run();
         let has_initial_frozen_provider_request = initial_frozen_provider_request.is_some();
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
@@ -2011,6 +2010,7 @@ where
                 let mut accepted_task_handoff = None;
                 let mut accepted_direct_conversation = false;
                 let mut accepted_task_guidance = false;
+                let mut assistant_batch_results: Vec<(crate::ToolCall, ToolResult)> = Vec::new();
                 for call in completed_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
@@ -2075,7 +2075,8 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            record_tool_run_outcome(&mut outcome, &result);
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         }
                         let accepted = handle_continue_without_task_planning_call(
@@ -2104,7 +2105,8 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            record_tool_run_outcome(&mut outcome, &result);
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         }
                         let Some(binding) = task_handoff_binding.as_ref() else {
@@ -2123,7 +2125,8 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            record_tool_run_outcome(&mut outcome, &result);
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
                         accepted_task_handoff = handle_task_planning_request_call(
@@ -2167,7 +2170,8 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            record_tool_run_outcome(&mut outcome, &result);
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
                         let accepted = handle_task_plan_update_call(
@@ -2197,7 +2201,8 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            record_tool_run_outcome(&mut outcome, &result);
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
                         let accepted = handle_task_guidance_apply_call(
@@ -2258,6 +2263,14 @@ where
                         }
                     }
                 }
+                // RFC-0062 11.2/11.5: settle the whole assistant tool-call batch with the
+                // deterministic two-phase preview allocator before the next provider request.
+                emit_tool_result_batch(
+                    session,
+                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
+                    &mut outcome,
+                    std::mem::take(&mut assistant_batch_results),
+                )?;
                 let settled_join_context = match agent_delegate.as_deref_mut() {
                     Some(delegate) => delegate.settle_join_dependencies(session, handler).await?,
                     None => None,

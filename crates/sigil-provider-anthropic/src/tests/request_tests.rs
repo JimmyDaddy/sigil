@@ -297,6 +297,7 @@ fn build_messages_request_rejects_malformed_tool_args_and_missing_result_id() {
         tool_call_id: None,
         assistant_kind: None,
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     }];
     let error = build_messages_request(&invalid, 1024).expect_err("missing id should fail");
     assert!(error.to_string().contains("missing tool_call_id"));
@@ -444,5 +445,36 @@ fn build_messages_request_replays_live_exact_blocks_and_rematerializes_safely_af
     for secret in ["private query", "token=secret", "encrypted-content"] {
         assert!(!restarted_wire.contains(secret));
     }
+    Ok(())
+}
+
+#[test]
+fn build_messages_request_maps_typed_error_outcome_to_is_error() -> anyhow::Result<()> {
+    // RFC-0062 12.1: is_error comes only from the typed wire semantics; the output JSON is
+    // deliberately written with a contradicting "status" to prove adapters never parse it.
+    let assistant = ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "toolu_err".to_owned(),
+            name: "bash".to_owned(),
+            args_json: r#"{"command":"false"}"#.to_owned(),
+        }],
+    );
+    let payload = sigil_kernel::ProviderToolResultMessageV1 {
+        call_id: "toolu_err".to_owned(),
+        output: r#"{"status":"success","summary":"contradicting json"}"#.to_owned(),
+        wire_semantics: sigil_kernel::ToolResultWireSemanticsV1 {
+            outcome: sigil_kernel::ToolResultOutcomeV1::ToolError,
+            error_kind: Some(sigil_kernel::ToolErrorKind::ExitStatus),
+        },
+    };
+    let tool = ModelMessage::tool("toolu_err", "bounded output").with_tool_result_payload(payload);
+    let request = completion_request(vec![ModelMessage::user("run"), assistant, tool]);
+    let body = build_messages_request(&request, 1024)?;
+    let content = body.messages[2]["content"]
+        .as_array()
+        .expect("tool results should be content array");
+    assert_eq!(content[0]["tool_use_id"], "toolu_err");
+    assert_eq!(content[0]["is_error"], serde_json::Value::Bool(true));
     Ok(())
 }

@@ -1199,7 +1199,7 @@ fn durable_message_count(entries: &[SessionLogEntry]) -> usize {
                 entry,
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
-                    | SessionLogEntry::ToolResultV2(_)
+                    | SessionLogEntry::ToolResultV3(_)
             )
         })
         .count()

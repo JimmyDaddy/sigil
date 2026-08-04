@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -9,9 +9,11 @@ use std::{io::Read, sync::mpsc as std_mpsc};
 use sigil_kernel::{ExecutionOutputStream, ExecutionStreamCapture, ExecutionTerminationCause};
 use tokio::{io::AsyncRead, io::AsyncReadExt, sync::mpsc};
 
+/// RFC-0062 10.3: in-memory preview bound per stream; reaching it never stops the child.
 pub(super) const EXECUTION_RETAINED_BYTES_PER_STREAM: u64 = 64 * 1024;
-pub(super) const EXECUTION_HARD_BYTES_PER_STREAM: u64 = 8 * 1024 * 1024;
-pub(super) const EXECUTION_HARD_BYTES_COMBINED: u64 = 16 * 1024 * 1024;
+/// RFC-0062 10.3: observed output resource limit; only this may terminate the process tree.
+pub(super) const EXECUTION_HARD_BYTES_PER_STREAM: u64 = 128 * 1024 * 1024;
+pub(super) const EXECUTION_HARD_BYTES_COMBINED: u64 = 128 * 1024 * 1024;
 pub(super) const PREFLIGHT_RETAINED_BYTES_PER_STREAM: u64 = 16 * 1024;
 pub(super) const PREFLIGHT_HARD_BYTES_PER_STREAM: u64 = 256 * 1024;
 pub(super) const PREFLIGHT_HARD_BYTES_COMBINED: u64 = 512 * 1024;
@@ -90,6 +92,7 @@ pub(super) async fn collect_async_pipe<R>(
     stream_total: Arc<AtomicU64>,
     combined_total: Arc<AtomicU64>,
     alert_tx: mpsc::Sender<OutputAlert>,
+    capture: Option<Arc<Mutex<sigil_kernel::ExecutionCaptureHandle>>>,
 ) -> CollectedPipe
 where
     R: AsyncRead + Unpin,
@@ -97,6 +100,7 @@ where
     let mut collector = HeadTailCollector::new(limits.retained_bytes_per_stream);
     let mut read_buffer = [0u8; OUTPUT_READ_BUFFER_BYTES];
     let mut limit_reported = false;
+    let mut reader_failed = false;
     loop {
         match reader.read(&mut read_buffer).await {
             Ok(0) => break,
@@ -104,6 +108,25 @@ where
                 let stream_observed = add_to_total(&stream_total, read as u64);
                 let combined = add_to_total(&combined_total, read as u64);
                 collector.push(&read_buffer[..read]);
+                if let Some(capture) = capture.as_ref() {
+                    // RFC-0062 8.2: tee every chunk into the policy-bound staging sink while
+                    // keeping the observed resource meter independent. The staging cap never
+                    // stops draining the child; only the observed resource meter may.
+                    if let Ok(mut handle) = capture.lock() {
+                        let tool_stream = match stream {
+                            sigil_kernel::ExecutionOutputStream::Stdout => {
+                                sigil_kernel::ToolOutputStreamV1::Stdout
+                            }
+                            sigil_kernel::ExecutionOutputStream::Stderr => {
+                                sigil_kernel::ToolOutputStreamV1::Stderr
+                            }
+                            sigil_kernel::ExecutionOutputStream::Combined => {
+                                sigil_kernel::ToolOutputStreamV1::Combined
+                            }
+                        };
+                        let _ = handle.sink.write_stream(tool_stream, &read_buffer[..read]);
+                    }
+                }
                 if !limit_reported
                     && let Some(alert) =
                         output_limit_alert(stream, stream_observed, combined, limits)
@@ -114,6 +137,7 @@ where
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
+                reader_failed = true;
                 let _ = alert_tx.try_send(OutputAlert::ReaderFailed {
                     stream,
                     reason: bounded_reader_error(&error),
@@ -122,6 +146,7 @@ where
             }
         }
     }
+    let _ = reader_failed;
     collector.finish(limits.hard_bytes_per_stream)
 }
 

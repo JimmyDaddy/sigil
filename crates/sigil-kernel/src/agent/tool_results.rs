@@ -8,7 +8,7 @@ use crate::{
     event::{EventHandler, RunEvent},
     provider::ToolCall,
     session::{
-        ControlEntry, Session, ToolArtifactSensitivity, ToolExecutionStatus, ToolResultRecordedV2,
+        ControlEntry, Session, ToolArtifactSensitivity, ToolExecutionStatus, ToolResultRecordedV3,
     },
     tool::{ToolErrorKind, ToolResult, ToolResultStatus, ToolSubject},
 };
@@ -31,10 +31,60 @@ where
     emit_tool_result(session, handler, result)
 }
 
+/// RFC-0062 11.2: settles one assistant tool-call batch with deterministic two-phase preview
+/// allocation in assistant declaration order, then appends each result in that order.
+pub(super) fn emit_tool_result_batch<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    batch: Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<()>
+where
+    H: EventHandler,
+{
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let declaration_order = batch
+        .iter()
+        .map(|(call, _)| call.id.clone())
+        .collect::<Vec<_>>();
+    let candidate_bytes = batch
+        .iter()
+        .map(|(call, result)| {
+            let cap = crate::tool_model_view_initial_limit(&result.tool_name);
+            (call.id.clone(), result.content.len().min(cap))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let limits = crate::allocate_batch_preview_limits(&declaration_order, &candidate_bytes);
+    for (_, result) in batch {
+        let limit = limits
+            .get(&result.call_id)
+            .copied()
+            .unwrap_or_else(|| crate::tool_model_view_initial_limit(&result.tool_name));
+        record_tool_run_outcome(outcome, &result);
+        emit_tool_result_with_limit(session, handler, result, limit)?;
+    }
+    Ok(())
+}
+
 pub(super) fn emit_tool_result<H>(
     session: &mut Session,
     handler: &mut H,
+    result: ToolResult,
+) -> Result<()>
+where
+    H: EventHandler,
+{
+    let limit = crate::tool_model_view_initial_limit(&result.tool_name);
+    emit_tool_result_with_limit(session, handler, result, limit)
+}
+
+fn emit_tool_result_with_limit<H>(
+    session: &mut Session,
+    handler: &mut H,
     mut result: ToolResult,
+    model_preview_limit: usize,
 ) -> Result<()>
 where
     H: EventHandler,
@@ -53,14 +103,20 @@ where
     } else {
         ToolArtifactSensitivity::ExternalUntrusted
     };
-    let model_preview_limit = session.tool_model_view_available_bytes(&result.tool_name);
     let artifact_store = session.tool_artifact_store();
-    let (recorded, display) = ToolResultRecordedV2::capture_with_model_preview_limit(
-        &result,
-        artifact_store.as_ref(),
-        sensitivity,
-        model_preview_limit,
-    )?;
+    let (recorded, display) = if let Some(recorded) = result.durable_v3_projection() {
+        // RFC-0062 8: harness-owned process capture already published the artifact and settled
+        // the durable V3 projection; the agent loop appends it without re-capturing.
+        (recorded.clone(), recorded.display_view())
+    } else {
+        ToolResultRecordedV3::capture_with_model_preview_limit(
+            &result,
+            artifact_store.as_ref(),
+            sensitivity,
+            model_preview_limit,
+            None,
+        )?
+    };
     let message = recorded.model_message()?;
     for registration in registrations.iter_mut() {
         registration.durable_entry_id.clone_from(&message.id);
@@ -95,7 +151,6 @@ where
         };
         controls.push(ControlEntry::ExternalProvenance(provenance));
     }
-    let model_preview_bytes = recorded.initial_model_view.preview.len();
     if let Err(error) = session.append_tool_result_bundle(recorded, controls.clone()) {
         if !registrations.is_empty()
             && let Some(registrar) = registrar.as_ref()
@@ -104,7 +159,6 @@ where
         }
         return Err(error);
     }
-    session.consume_tool_model_view_bytes(&result.tool_name, model_preview_bytes);
     if !registrations.is_empty()
         && let Some(registrar) = registrar.as_ref()
         && let Err(error) = registrar.commit_message(&message.id)

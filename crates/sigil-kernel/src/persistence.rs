@@ -575,6 +575,7 @@ pub fn project_user_message_with_attachments_for_persistence_with_nonce_and_issu
             .iter()
             .map(crate::ImageAttachment::without_resolved_bytes)
             .collect(),
+        tool_result_payload: None,
     };
     let exact_message = ModelMessage {
         id: durable_message_id.clone(),
@@ -584,6 +585,7 @@ pub fn project_user_message_with_attachments_for_persistence_with_nonce_and_issu
         tool_call_id: None,
         assistant_kind: None,
         image_attachments,
+        tool_result_payload: None,
     };
     let overlay = TransientMessageOverlay::new(durable_message_id, exact_message)?;
     Ok(UserMessagePersistenceProjection {

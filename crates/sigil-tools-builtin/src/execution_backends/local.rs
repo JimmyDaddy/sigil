@@ -66,7 +66,7 @@ pub(crate) async fn local_execute(
         capabilities,
         ExecutionNetworkReceipt::unknown("local backend does not report network enforcement"),
         command,
-        &request,
+        request,
         cancellation,
     )
     .await

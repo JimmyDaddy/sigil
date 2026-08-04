@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::*;
-use crate::session::ToolResultRecordedV2;
+use crate::session::ToolResultRecordedV3;
 use crate::{
     ControlEntry, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope,
     ExternalProvenanceEntry, ExternalTrust, FileType, JsonlSessionStore, ModelMessage,
@@ -54,7 +54,7 @@ fn append_named_result(
         .tool_artifact_store()
         .expect("durable artifact store");
     let (recorded, _) =
-        ToolResultRecordedV2::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
+        ToolResultRecordedV3::capture(&result, Some(&store), ToolArtifactSensitivity::Ordinary)?;
     let message_id = recorded.message_id.clone();
     session.append_tool_result_bundle(recorded, Vec::new())?;
     Ok(message_id)
@@ -80,7 +80,7 @@ fn verification_for(call_id: &str, source_event_id: &str) -> VerificationRecorde
                 receipt_id: format!("verification-{call_id}"),
                 source_session_id: "session-test".to_owned(),
                 source_event_id: source_event_id.to_owned(),
-                source_event_type: DurableEventType::ToolResultRecordedV2.as_str().to_owned(),
+                source_event_type: DurableEventType::ToolResultRecordedV3.as_str().to_owned(),
                 scope: EvidenceScope::Run("run-test".to_owned()),
                 producer_tool_call: Some(call_id.to_owned()),
                 workspace_revision: Some(1),

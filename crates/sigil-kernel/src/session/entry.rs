@@ -17,8 +17,8 @@ use crate::{
 pub enum SessionLogEntry {
     User(ModelMessage),
     Assistant(ModelMessage),
-    /// Artifact-backed result used by all new tool executions.
-    ToolResultV2(ToolResultRecordedV2),
+    /// Artifact-backed result used by all new tool executions (RFC-0062 V3 contract).
+    ToolResultV3(ToolResultRecordedV3),
     Control(ControlEntry),
 }
 
@@ -212,6 +212,8 @@ pub enum ControlEntry {
     ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry),
     ToolExecution(Box<ToolExecutionEntry>),
     ToolArtifactRead(ToolArtifactReadRecordedV1),
+    /// RFC-0062 9.4: generation-guarded availability transition for one artifact.
+    ToolArtifactAvailabilityChanged(ToolArtifactAvailabilityChangedV1),
     ToolEgress(Box<ToolEgressEntry>),
     McpElicitation(Box<McpElicitationEntry>),
     ToolPreviewCaptured(ToolPreviewSnapshot),
@@ -325,6 +327,7 @@ impl ControlEntry {
             Self::ToolApprovalSessionGrant(entry) => entry.validate(),
             Self::ToolExecution(entry) => entry.validate(),
             Self::TerminalTask(entry) => entry.validate_durable(),
+            Self::ToolArtifactAvailabilityChanged(entry) => entry.validate(),
             _ => Ok(()),
         }
     }

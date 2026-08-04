@@ -833,7 +833,7 @@ impl JsonlSessionStore {
 fn validate_session_entry_durable_contract(entry: &SessionLogEntry) -> Result<()> {
     match entry {
         SessionLogEntry::Control(control) => control.validate_durable_contract(),
-        SessionLogEntry::ToolResultV2(result) => result.validate(),
+        SessionLogEntry::ToolResultV3(result) => result.validate(),
         _ => Ok(()),
     }
 }
@@ -1036,7 +1036,7 @@ pub(super) fn session_entry_event_type(entry: &SessionLogEntry) -> DurableEventT
     match entry {
         SessionLogEntry::User(_) => DurableEventType::UserMessageRecorded,
         SessionLogEntry::Assistant(_) => DurableEventType::AssistantMessageRecorded,
-        SessionLogEntry::ToolResultV2(_) => DurableEventType::ToolResultRecordedV2,
+        SessionLogEntry::ToolResultV3(_) => DurableEventType::ToolResultRecordedV3,
         SessionLogEntry::Control(control) => control_entry_event_type(control),
     }
 }
@@ -1172,15 +1172,20 @@ pub(super) fn session_entry_from_stored_event(
             ControlEntry::ConversationInputPromoted(entry),
         )));
     }
+    if event.event_kind() == Some(DurableEventType::ToolResultRecordedV2) {
+        bail!(
+            "unsupported session schema: found legacy tool_result_recorded_v2 (expected tool-result-v3); old sessions are not migratable"
+        );
+    }
     let Some(value) = event.payload.get("session_log_entry") else {
         return Ok(None);
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from stored event payload")?;
     validate_session_entry_durable_contract(&entry)?;
-    if let SessionLogEntry::ToolResultV2(result) = &entry {
-        if event.event_kind() != Some(DurableEventType::ToolResultRecordedV2) {
-            bail!("tool result V2 payload used the wrong durable event type");
+    if let SessionLogEntry::ToolResultV3(result) = &entry {
+        if event.event_kind() != Some(DurableEventType::ToolResultRecordedV3) {
+            bail!("tool result payload used the wrong durable event type");
         }
         result.validate()?;
     }
@@ -1204,6 +1209,11 @@ pub(crate) fn session_entry_from_domain_event(
             ControlEntry::ConversationInputPromoted(entry),
         )));
     }
+    if event.event_type() == DurableEventType::ToolResultRecordedV2 {
+        bail!(
+            "unsupported session schema: found legacy tool_result_recorded_v2 (expected tool-result-v3); old sessions are not migratable"
+        );
+    }
     let payload = event
         .payload()
         .expect("v2 durable domain event must carry a payload");
@@ -1213,9 +1223,9 @@ pub(crate) fn session_entry_from_domain_event(
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from domain event payload")?;
     validate_session_entry_durable_contract(&entry)?;
-    if let SessionLogEntry::ToolResultV2(result) = &entry {
-        if event.event_type() != DurableEventType::ToolResultRecordedV2 {
-            bail!("tool result V2 payload used the wrong durable event type");
+    if let SessionLogEntry::ToolResultV3(result) = &entry {
+        if event.event_type() != DurableEventType::ToolResultRecordedV3 {
+            bail!("tool result payload used the wrong durable event type");
         }
         result.validate()?;
     }

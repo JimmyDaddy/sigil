@@ -1275,7 +1275,7 @@ fn project_session_entry(
             }
             Ok(items)
         }
-        SessionLogEntry::ToolResultV2(result) => {
+        SessionLogEntry::ToolResultV3(result) => {
             let tool = tools.get(&result.call_id).cloned();
             let display = result.display_view();
             let (artifact_ref, artifact_availability) = match &result.artifact {

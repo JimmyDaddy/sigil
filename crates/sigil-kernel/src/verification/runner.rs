@@ -455,6 +455,7 @@ async fn execute_check_command(
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     };
     let receipt = execution_backend.execute(request).await.with_context(|| {
         format!(

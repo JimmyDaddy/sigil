@@ -124,13 +124,13 @@ pub(crate) fn v2_tool_result_entry(
 }
 
 pub(crate) fn v2_tool_result_from_result(result: &ToolResult) -> SessionLogEntry {
-    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
         result,
         None,
         sigil_kernel::ToolArtifactSensitivity::Ordinary,
     )
     .expect("bounded TUI test tool result must project to V2");
-    SessionLogEntry::ToolResultV2(recorded)
+    SessionLogEntry::ToolResultV3(recorded)
 }
 
 pub(crate) fn adaptive_test_compaction_preview(

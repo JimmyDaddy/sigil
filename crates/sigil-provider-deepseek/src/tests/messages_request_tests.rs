@@ -99,6 +99,7 @@ fn maps_assistant_tool_calls_to_tool_use_and_tool_results() {
         assistant_kind: None,
         id: "assistant-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let tool = ModelMessage {
         role: MessageRole::Tool,
@@ -108,6 +109,7 @@ fn maps_assistant_tool_calls_to_tool_use_and_tool_results() {
         assistant_kind: None,
         id: "tool-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let request = request_with(
         vec![ModelMessage::user("hi"), assistant, tool],
@@ -143,6 +145,7 @@ fn collects_system_messages_into_system_param() {
         assistant_kind: None,
         id: "system-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let request = request_with(
         vec![system, ModelMessage::user("hi")],
@@ -190,6 +193,7 @@ fn replays_live_continuation_blocks_into_last_assistant_message() {
         assistant_kind: None,
         id: "assistant-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let request = request_with(vec![assistant], hosted_request("auth-1"));
     let mut state = store
@@ -238,6 +242,7 @@ fn interrupted_continuation_fails_closed() {
         assistant_kind: None,
         id: "assistant-1".to_owned(),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let request = request_with(vec![assistant], hosted_request("auth-1"));
     let mut state = crate::messages_continuation::DeepSeekHostedContinuationStore::default()

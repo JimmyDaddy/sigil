@@ -244,7 +244,7 @@ fn adaptive_tail_never_splits_a_waiting_approval_from_its_active_turn() -> Resul
                 Ok(Some(
                     SessionLogEntry::User(_)
                         | SessionLogEntry::Assistant(_)
-                        | SessionLogEntry::ToolResultV2(_)
+                        | SessionLogEntry::ToolResultV3(_)
                 ))
             )
         })

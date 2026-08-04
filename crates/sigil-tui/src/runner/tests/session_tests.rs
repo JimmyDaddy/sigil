@@ -30,7 +30,7 @@ fn tui_tool_artifact_reads_share_budget_and_fail_closed_on_descriptor_drift() ->
     let session_path = temp.path().join("artifact-session.jsonl");
     let durable_store = JsonlSessionStore::new(&session_path)?;
     let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&durable_store);
-    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
         &sigil_kernel::ToolResult::ok(
             "call-artifact",
             "shell",
@@ -47,7 +47,7 @@ fn tui_tool_artifact_reads_share_budget_and_fail_closed_on_descriptor_drift() ->
         .artifact_ref
         .clone();
     let mut session = sigil_kernel::Session::load_from_store("deepseek", "model", durable_store)?;
-    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    session.append(SessionLogEntry::ToolResultV3(recorded))?;
 
     let shared_budget = sigil_kernel::ToolArtifactReadBudgetV1::default();
     let first_page = read_tool_artifact_page_for_display(

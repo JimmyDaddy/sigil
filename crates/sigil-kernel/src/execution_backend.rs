@@ -1298,8 +1298,26 @@ impl ExecutionConfig {
     }
 }
 
+/// RFC-0062 8/9.1: harness-owned capture handle bound to one process execution. Created before
+/// spawn by the tool layer; the backend tees stdout/stderr chunks into the sink while keeping the
+/// observed resource meter independent. The sink is never serialized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionCaptureHandle {
+    pub sink: crate::session::ToolArtifactCaptureSink,
+    pub config: crate::session::ProcessStreamCaptureConfigV1,
+}
+
+/// RFC-0062 8/9.3: capture evidence returned with the execution receipt for terminal settlement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionCaptureOutcome {
+    pub sink: crate::session::ToolArtifactCaptureSink,
+    pub source: crate::session::ToolSourceCompletenessV1,
+    pub observed_bytes: u64,
+    pub reader_failed: bool,
+}
+
 /// One non-interactive process execution request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecutionRequest {
     pub program: String,
@@ -1319,6 +1337,9 @@ pub struct ExecutionRequest {
     pub memory_limit_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_count_limit: Option<u32>,
+    /// RFC-0062 8: harness-owned capture handle created before spawn; never serialized.
+    #[serde(skip)]
+    pub capture: Option<ExecutionCaptureHandle>,
 }
 
 impl ExecutionRequest {
@@ -1342,7 +1363,7 @@ impl ExecutionRequest {
 }
 
 /// Result captured by an execution backend.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecutionReceipt {
     pub backend: ExecutionBackendKind,
@@ -1357,6 +1378,9 @@ pub struct ExecutionReceipt {
     /// Bounded collection statistics and the single supervisor-selected terminal cause.
     pub output: ExecutionOutputReceipt,
     pub timed_out: bool,
+    /// RFC-0062 8: harness-owned capture evidence for terminal settlement; never serialized.
+    #[serde(skip)]
+    pub capture: Option<ExecutionCaptureOutcome>,
 }
 
 impl ExecutionReceipt {

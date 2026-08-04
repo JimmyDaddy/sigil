@@ -25,7 +25,7 @@ use sigil_kernel::{
     ToolAnalysisReasonCode, ToolAnalysisStatus, ToolArtifactBindingV1, ToolArtifactEncoding,
     ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolContext, ToolErrorKind,
     ToolOperation, ToolPermissionEffect, ToolPreviewCapability, ToolProgressEvent,
-    ToolProgressSink, ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV2,
+    ToolProgressSink, ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV3,
     ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
@@ -425,7 +425,7 @@ async fn read_file_streams_large_slice_into_artifact_with_bounded_inline_content
         .await?;
 
     assert!(result.content.len() < 70 * 1024);
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -471,7 +471,7 @@ async fn grep_streams_all_matches_while_bounding_inline_projection() -> Result<(
         result.metadata.returned_matches,
         Some(projected_matches.len() as u64)
     );
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -491,7 +491,7 @@ async fn bash_large_output_publishes_truthful_truncated_artifact_without_large_i
     let temp = tempfile::tempdir()?;
     let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let artifact_store = ToolArtifactStore::for_session_store(&session_store);
-    let context = ToolContext::new(temp.path(), 10).with_tool_artifact_reader(
+    let context = ToolContext::new(temp.path(), 60).with_tool_artifact_reader(
         artifact_store.clone(),
         ToolArtifactReadBudgetV1::default(),
         "context-epoch:test",
@@ -505,34 +505,40 @@ async fn bash_large_output_publishes_truthful_truncated_artifact_without_large_i
         )
         .await?;
 
+    eprintln!(
+        "R62-DEBUG meta: total={:?} stdout_bytes={:?} truncated={:?}",
+        result.metadata.total_bytes, result.metadata.stdout_bytes, result.metadata.truncated
+    );
     assert!(result.content.len() < 70 * 1024);
-    let (recorded, _) = ToolResultRecordedV2::capture(
-        &result,
-        Some(&artifact_store),
-        ToolArtifactSensitivity::Ordinary,
-    )?;
-    let ToolArtifactBindingV1::Published { descriptor } = recorded.artifact else {
-        panic!("bounded bash output should publish an artifact");
+    let recorded = result
+        .durable_v3_projection()
+        .expect("harness capture must settle a durable V3 projection");
+    let ToolArtifactBindingV1::Published { descriptor } = &recorded.artifact else {
+        panic!("harness capture must publish a complete artifact");
     };
-    assert!(descriptor.observed_bytes > descriptor.persisted_bytes);
-    assert!(descriptor.persisted_bytes < 70 * 1024);
-    // RFC-0062 5.1 characterization: the current process-backed Bash artifact is built from the
-    // backend's bounded head/tail collector, so the middle of a large output is permanently lost.
-    // observed_bytes stays truthful about the full child output, but the persisted body must not
-    // be claimed as a complete capture.
-    let persisted = artifact_store.read_all(&descriptor)?;
+    // RFC-0062 18 acceptance: 10 MiB stdout with exit 0 must be captured completely by the
+    // harness-owned spool; observed == persisted == the full child output, while the model and
+    // inline view stay bounded.
+    assert_eq!(descriptor.observed_bytes, 10_000_020);
+    assert_eq!(descriptor.persisted_bytes, descriptor.observed_bytes);
+    assert!(matches!(
+        descriptor.completeness,
+        sigil_kernel::ToolArtifactCompleteness::Complete
+    ));
+    let persisted = artifact_store.read_all(descriptor)?;
+    assert_eq!(persisted.len(), 10_000_020);
     let persisted_text = String::from_utf8_lossy(&persisted);
     assert!(
         persisted_text.contains("aaaaaaaaaa"),
-        "artifact must retain the bounded head"
+        "artifact must contain the head bytes"
+    );
+    assert!(
+        persisted_text.contains("MIDDLE-SENTINEL-XYZ"),
+        "artifact must contain the middle bytes that the old bounded collector dropped"
     );
     assert!(
         persisted_text.contains("bbbbbbbbbb"),
-        "artifact must retain the bounded tail"
-    );
-    assert!(
-        !persisted_text.contains("MIDDLE-SENTINEL-XYZ"),
-        "artifact must not contain the middle bytes dropped by the bounded collector"
+        "artifact must contain the tail bytes"
     );
     Ok(())
 }
@@ -574,7 +580,7 @@ fn terminal_log_page_publishes_policy_safe_artifact_when_content_is_omitted_from
     );
 
     assert!(!result.content.contains("local-secret"));
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::SensitiveLocal,
@@ -894,6 +900,7 @@ fn linux_bubblewrap_args_mount_workspace_scratch_and_disable_network_by_default(
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     };
 
     let args = super::linux_bubblewrap_args(&canonical_workspace, &request, false)
@@ -941,6 +948,7 @@ fn linux_bubblewrap_args_keep_tmp_workspace_visible_after_tmpfs() {
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     };
 
     let args = super::linux_bubblewrap_args(&canonical_workspace, &request, false)
@@ -1021,6 +1029,7 @@ async fn linux_bubblewrap_execution_backend_real_conformance() -> Result<()> {
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -1358,6 +1367,7 @@ fn docker_cleanup_request(workspace: &Path, timeout_ms: u64) -> ExecutionRequest
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     }
 }
 
@@ -1412,7 +1422,7 @@ async fn docker_cleanup_output_limit_force_removes_and_verifies_daemon_container
     let temp = tempfile::tempdir()?;
     let fixture = write_stateful_docker_cleanup_fixture(
         &temp,
-        "dd if=/dev/zero bs=1048576 count=9 2>/dev/null; while :; do sleep 1; done",
+        "dd if=/dev/zero bs=1048576 count=140 2>/dev/null; while :; do sleep 1; done",
         true,
         true,
     )?;
@@ -1642,6 +1652,7 @@ async fn docker_execution_backend_builds_offline_container_command() -> Result<(
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -1690,6 +1701,7 @@ async fn docker_execution_backend_networked_receipt_allows_network() -> Result<(
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -1737,6 +1749,7 @@ async fn docker_execution_backend_real_daemon_conformance() -> Result<()> {
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -1816,6 +1829,7 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -1848,6 +1862,7 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
     assert_eq!(String::from_utf8_lossy(&inherited.stdout), home);
@@ -1869,6 +1884,7 @@ async fn process_environment_policy_preserves_user_shell_and_clears_extension_am
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
     assert_eq!(String::from_utf8_lossy(&isolated.stdout), "unset");
@@ -1896,6 +1912,7 @@ async fn execution_backend_records_timeout_cleanup_and_unsupported_limits() -> R
             cpu_time_ms: Some(100),
             memory_limit_bytes: Some(1024),
             process_count_limit: Some(2),
+            capture: None,
         })
         .await?;
 
@@ -1944,6 +1961,7 @@ async fn execution_backend_timeout_cleans_process_group_children() -> Result<()>
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -1982,6 +2000,7 @@ async fn bounded_output_execution_preserves_head_tail_and_exact_totals() -> Resu
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -2065,7 +2084,7 @@ async fn bounded_output_hard_limit_kills_group_and_maps_resource_limit() -> Resu
     let temp = tempfile::tempdir()?;
     let pid_file = temp.path().join("output-limit-child.pid");
     let script = "trap '' TERM; sleep 30 & echo $! > \"$1\"; \
-                  dd if=/dev/zero bs=1048576 count=20 2>/dev/null; wait";
+                  dd if=/dev/zero bs=1048576 count=140 2>/dev/null; wait";
     let receipt = LocalExecutionBackend
         .execute(ExecutionRequest {
             program: "sh".to_owned(),
@@ -2083,6 +2102,7 @@ async fn bounded_output_hard_limit_kills_group_and_maps_resource_limit() -> Resu
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -2091,9 +2111,9 @@ async fn bounded_output_hard_limit_kills_group_and_maps_resource_limit() -> Resu
         output.termination,
         ExecutionTerminationCause::OutputLimit {
             stream: ExecutionOutputStream::Stdout,
-            limit_bytes: 8_388_608,
+            limit_bytes: 134_217_728,
             observed_bytes,
-        } if observed_bytes > 8_388_608
+        } if observed_bytes > 134_217_728
     ));
     assert_eq!(
         receipt.resources.cleanup.status,
@@ -2186,6 +2206,7 @@ async fn macos_seatbelt_execution_backend_allows_workspace_write_and_denies_exte
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -2280,6 +2301,7 @@ async fn sandbox_conformance_macos_seatbelt_enforces_filesystem_write_claim() ->
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -2318,6 +2340,7 @@ async fn sandbox_conformance_macos_seatbelt_missing_binary_fails_closed() -> Res
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await
         .expect_err("missing sandbox-exec should fail closed before command execution");
@@ -2353,6 +2376,7 @@ async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
 
@@ -2386,6 +2410,7 @@ async fn local_execution_backend_rejects_unrepresentable_deadline_before_spawn()
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await
         .expect_err("unrepresentable monotonic deadline must fail before spawn");
@@ -2416,6 +2441,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await?;
     assert!(timed_out.timed_out);
@@ -2435,6 +2461,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             cpu_time_ms: None,
             memory_limit_bytes: None,
             process_count_limit: None,
+            capture: None,
         })
         .await
         .expect_err("missing program should surface spawn error");
@@ -3378,6 +3405,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             stderr: Vec::new(),
             output: output_receipt(0, 0, ExecutionTerminationCause::TimedOut),
             timed_out: true,
+            capture: None,
         },
     )?;
     let ToolResultStatus::Error(timeout_error) = timeout.status else {
@@ -3399,6 +3427,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             stderr: b"stderr".to_vec(),
             output: output_receipt(6, 6, ExecutionTerminationCause::Exited),
             timed_out: false,
+            capture: None,
         },
     )?;
     assert!(matches!(success.status, ToolResultStatus::Ok));
@@ -3421,6 +3450,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             stderr: b"bad".to_vec(),
             output: output_receipt(0, 3, ExecutionTerminationCause::Exited),
             timed_out: false,
+            capture: None,
         },
     )?;
     let ToolResultStatus::Error(error) = &failed.status else {
@@ -3467,6 +3497,7 @@ fn bash_truncated_invalid_utf8_stays_within_text_budget() -> Result<()> {
                 termination: ExecutionTerminationCause::Exited,
             },
             timed_out: false,
+            capture: None,
         },
     )?;
 
@@ -5683,6 +5714,7 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
         resources: Default::default(),
         environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
         output: Default::default(),
+        capture: None,
     };
     let workspace = tempfile::tempdir()?;
     let analysis = super::analyze_shell_command(

@@ -2165,6 +2165,7 @@ impl ExecutionBackend for RecordingExecutionBackend {
                 stderr,
                 output,
                 timed_out: false,
+                capture: None,
             })
         })
     }

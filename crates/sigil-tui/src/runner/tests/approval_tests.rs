@@ -81,7 +81,7 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     let tool_result = entries
         .iter()
         .find_map(|entry| match entry {
-            SessionLogEntry::ToolResultV2(result) => Some(result),
+            SessionLogEntry::ToolResultV3(result) => Some(result),
             _ => None,
         })
         .expect("expected tool result session message");
@@ -260,7 +260,7 @@ allowed_tools = ["grep"]
     assert!(entries.iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::ToolResultV2(result)
+            SessionLogEntry::ToolResultV3(result)
                 if result.call_id == "call-spawn-agent"
                     && result.facts.error.as_ref().is_some_and(|error| {
                         error.kind == sigil_kernel::ToolErrorKind::ApprovalDenied

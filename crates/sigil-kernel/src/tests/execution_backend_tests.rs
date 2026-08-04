@@ -22,6 +22,7 @@ fn execution_receipt_requires_structured_output_evidence() {
         stderr: b"err".to_vec(),
         output: ExecutionOutputReceipt::default(),
         timed_out: true,
+        capture: None,
     })
     .expect("execution receipt should serialize");
     incomplete

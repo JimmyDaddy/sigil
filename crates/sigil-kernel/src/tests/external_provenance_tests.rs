@@ -299,6 +299,7 @@ fn external_provenance_rewrites_remote_id_and_binds_utf8_citation() -> Result<()
         tool_call_id: None,
         assistant_kind: Some(crate::AssistantMessageKind::FinalAnswer),
         image_attachments: Vec::new(),
+        tool_result_payload: None,
     };
     let start = "依据：".len();
     let citation = CitationSupport::for_final_safe_text(

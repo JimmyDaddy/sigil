@@ -2,7 +2,7 @@ use anyhow::Result;
 use sigil_kernel::{
     ConnectionId, ControlEntry, JsonlSessionStore, ModelMessage, ModelRef, Session,
     SessionLogEntry, ToolArtifactEncoding, ToolArtifactSensitivity, ToolCall, ToolResult,
-    ToolResultMeta, ToolResultRecordedV2,
+    ToolResultMeta, ToolResultRecordedV3,
 };
 
 use super::*;
@@ -221,12 +221,12 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         ToolResultMeta::default(),
     )
     .with_captured_artifact(descriptor);
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
     )?;
-    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    session.append(SessionLogEntry::ToolResultV3(recorded))?;
     // The newest bounded tool-token window is protected by design. Fill it with high-signal
     // failures so the original successful build log becomes the only ageable artifact.
     for index in 0..9 {
@@ -251,12 +251,12 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
                 ..ToolResultMeta::default()
             },
         );
-        let (recorded, _) = ToolResultRecordedV2::capture(
+        let (recorded, _) = ToolResultRecordedV3::capture(
             &error_result,
             Some(&artifact_store),
             ToolArtifactSensitivity::Ordinary,
         )?;
-        session.append(SessionLogEntry::ToolResultV2(recorded))?;
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
     }
     session.append_assistant_message(ModelMessage::assistant(
         Some("old build log inspected".to_owned()),

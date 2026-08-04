@@ -295,7 +295,7 @@ pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessag
             SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
                 Some(message.clone())
             }
-            SessionLogEntry::ToolResultV2(result) => Some(
+            SessionLogEntry::ToolResultV3(result) => Some(
                 result
                     .model_message()
                     .expect("validated in-memory tool result V2 must materialize"),
@@ -366,7 +366,7 @@ fn raw_model_messages_from_durable_records(
                 .get(event.event_id.as_str())
                 .cloned()
                 .unwrap_or(message),
-            SessionLogEntry::ToolResultV2(result) => {
+            SessionLogEntry::ToolResultV3(result) => {
                 if let Some(aged) = aged_outputs.get(event.event_id.as_str()) {
                     if aged.source_message_id != result.message_id
                         || aged.call_id != result.call_id
@@ -447,7 +447,7 @@ fn portable_retained_raw_event_ids_for_plan(
             entry,
             SessionLogEntry::User(_)
                 | SessionLogEntry::Assistant(_)
-                | SessionLogEntry::ToolResultV2(_)
+                | SessionLogEntry::ToolResultV3(_)
         ) || (matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
@@ -506,7 +506,7 @@ fn portable_retained_raw_event_ids(
             Some(
                 SessionLogEntry::User(_)
                     | SessionLogEntry::Assistant(_)
-                    | SessionLogEntry::ToolResultV2(_)
+                    | SessionLogEntry::ToolResultV3(_)
             )
         ) || (matches!(
             entry,

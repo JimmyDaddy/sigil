@@ -15,7 +15,7 @@ use sigil_kernel::{
     TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
     ToolApprovalDecisionReceiptV2, ToolApprovalEntry, ToolApprovalTerminalStatusV2,
     ToolApprovalUserDecision, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolOperation,
-    ToolResult, ToolResultMeta, ToolResultRecordedV2, conversation_promotion_capability_digest,
+    ToolResult, ToolResultMeta, ToolResultRecordedV3, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
 };
 
@@ -120,7 +120,7 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
     let artifact_store = session
         .tool_artifact_store()
         .expect("durable session exposes its artifact store");
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-1",
             "read_file",
@@ -130,7 +130,7 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
     )?;
-    session.append(SessionLogEntry::ToolResultV2(recorded))?;
+    session.append(SessionLogEntry::ToolResultV3(recorded))?;
     recorder.append_finalized(&ConversationRunFinalizedEntryV1::new(
         "run-1",
         ConversationRunTerminalStatusV1::Succeeded,
@@ -588,7 +588,7 @@ fn production_display_reconciles_declared_artifact_state_with_physical_availabil
     let (_temp, store, session) = durable_session()?;
     let scope = session.session_scope_id().to_owned();
     let artifact_store = ToolArtifactStore::for_session_store(&store);
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             "call-artifact-display",
             "shell",
@@ -604,7 +604,7 @@ fn production_display_reconciles_declared_artifact_state_with_physical_availabil
         .expect("published artifact")
         .artifact_ref
         .clone();
-    store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+    store.append(&SessionLogEntry::ToolResultV3(recorded))?;
 
     let available = conversation_display_page(store.path(), &scope, None, 10)?;
     assert!(matches!(

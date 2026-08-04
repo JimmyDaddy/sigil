@@ -86,7 +86,7 @@ fn append_v2_tool_artifact(
 ) -> Result<sigil_kernel::session::ToolArtifactDescriptorV1> {
     let store = JsonlSessionStore::new(path)?;
     let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&store);
-    let (recorded, _) = sigil_kernel::ToolResultRecordedV2::capture(
+    let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
         &sigil_kernel::ToolResult::ok(
             call_id,
             "shell",
@@ -101,7 +101,7 @@ fn append_v2_tool_artifact(
         .descriptor()
         .context("published tool artifact")?
         .clone();
-    store.append(&SessionLogEntry::ToolResultV2(recorded))?;
+    store.append(&SessionLogEntry::ToolResultV3(recorded))?;
     let source_event_id = JsonlSessionStore::read_event_records(path)?
         .last()
         .context("tool result event")?

@@ -208,6 +208,10 @@ impl Tool for McpTool {
         let result = response
             .get("result")
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
+        let is_error_result = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let artifact = capture_mcp_result_artifact(
             &ctx,
             &call_id,
@@ -244,10 +248,20 @@ impl Tool for McpTool {
             "tools/call",
             budget,
         );
-        Ok(attach_mcp_artifact(
-            ToolResult::ok(call_id, self.spec.name.clone(), content, metadata),
-            artifact,
-        ))
+        // RFC-0062 13: JSON-RPC success with result-level isError is a tool execution error that
+        // still carries the server's actionable content; it never becomes a protocol error.
+        let result = if is_error_result {
+            ToolResult::error(
+                call_id,
+                self.spec.name.clone(),
+                ToolErrorKind::Protocol,
+                content,
+            )
+            .with_error_details(false, metadata.details)
+        } else {
+            ToolResult::ok(call_id, self.spec.name.clone(), content, metadata)
+        };
+        Ok(attach_mcp_artifact(result, artifact))
     }
 }
 

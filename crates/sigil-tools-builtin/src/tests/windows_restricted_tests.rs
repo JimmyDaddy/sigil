@@ -40,6 +40,7 @@ fn probe_request(program: String, args: Vec<String>) -> ExecutionRequest {
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     }
 }
 

@@ -23,6 +23,11 @@ use crate::{
 
 pub const TOOL_ARTIFACT_DESCRIPTOR_SCHEMA_VERSION: u16 = 1;
 pub const TOOL_RESULT_RECORDED_SCHEMA_VERSION: u16 = 2;
+/// RFC-0062 9.7: durable schema written by all new tool executions.
+pub const TOOL_RESULT_RECORDED_V3_SCHEMA_VERSION: u16 = 3;
+pub const TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION: u16 = 1;
+pub const TOOL_EXECUTION_CAPTURE_PLAN_SCHEMA_VERSION: u16 = 1;
+pub const TOOL_RESULT_TERMINAL_FALLBACK_SCHEMA_VERSION: u16 = 1;
 pub const TOOL_ARTIFACT_READ_SCHEMA_VERSION: u16 = 1;
 pub const TOOL_MODEL_VIEW_SCHEMA_VERSION: u16 = 1;
 pub const TOOL_ARTIFACT_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -35,8 +40,6 @@ pub const TOOL_MODEL_VIEW_MAX_BYTES: usize = 32 * 1024;
 pub const TOOL_MODEL_VIEW_INITIAL_MAX_BYTES: usize = TOOL_MODEL_VIEW_MAX_BYTES / 2;
 /// Smaller initial preview for tools whose results are commonly paged or searched.
 pub const TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES: usize = 8 * 1024;
-/// Aggregate initial-preview budget for one root agent run.
-pub const TOOL_MODEL_VIEW_RUN_BUDGET_BYTES: usize = 64 * 1024;
 pub const TOOL_DISPLAY_VIEW_MAX_BYTES: usize = 32 * 1024;
 pub const TOOL_ARTIFACT_READ_MAX_BYTES: u32 = 16 * 1024;
 pub const TOOL_ARTIFACT_READ_MAX_LINES: u32 = 200;
@@ -47,6 +50,8 @@ pub const TOOL_ARTIFACT_READ_BYTES_PER_TURN: u64 = 64 * 1024;
 pub const TOOL_ARTIFACT_ORPHAN_GRACE_MS: u64 = 24 * 60 * 60 * 1_000;
 
 const TOOL_RESULT_FACTS_MAX_BYTES: usize = 8 * 1024;
+/// RFC-0062 9.5: bounded error summaries never clone large bodies into facts or messages.
+pub const TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES: usize = 1024;
 const TOOL_RESULT_FACT_PATH_LIMIT: usize = 128;
 const TOOL_RESULT_FACT_PATH_MAX_BYTES: usize = 1024;
 const TOOL_ARTIFACT_REF_PREFIX: &str = "ta1_";
@@ -317,7 +322,10 @@ impl ToolResultFactsV1 {
             crate::ToolResultStatus::Ok => None,
             crate::ToolResultStatus::Error(error) => {
                 let mut error = error.clone();
-                error.message = safe_persistence_text(&error.message);
+                error.message = bounded_utf8(
+                    &safe_persistence_text(&error.message),
+                    TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES,
+                );
                 error.details = safe_persistence_json_value(error.details);
                 Some(error)
             }
@@ -599,6 +607,394 @@ impl ToolResultCaptureTelemetryV1 {
     }
 }
 
+/// RFC-0062 9.5: typed tool outcome is the only authority for provider wire error mapping.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultOutcomeV1 {
+    Success,
+    ToolError,
+}
+
+/// RFC-0062 9.5: provider-neutral wire semantics attached to every V3 tool result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolResultWireSemanticsV1 {
+    pub outcome: ToolResultOutcomeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<crate::ToolErrorKind>,
+}
+
+impl ToolResultWireSemanticsV1 {
+    pub fn from_result(result: &crate::ToolResult) -> Self {
+        match &result.status {
+            crate::ToolResultStatus::Ok => Self {
+                outcome: ToolResultOutcomeV1::Success,
+                error_kind: None,
+            },
+            crate::ToolResultStatus::Error(error) => Self {
+                outcome: ToolResultOutcomeV1::ToolError,
+                error_kind: Some(error.kind),
+            },
+        }
+    }
+}
+
+/// RFC-0062 9.1: capture layout of process-backed streams. Ordinary pipes never claim a global
+/// cross-stream order; only a PTY may declare one ordered combined stream.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputStreamLayoutV1 {
+    SeparatePipesNoCrossStreamOrder,
+    PtyOrdered,
+    SingleStream,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputStreamV1 {
+    Stdout,
+    Stderr,
+    Combined,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSourceCompletenessV1 {
+    Complete,
+    Interrupted,
+    ResourceLimited,
+    ReaderFailed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPolicyCompletenessV1 {
+    Preserved,
+    Redacted,
+    EphemeralOnly,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStorageCompletenessV1 {
+    Complete,
+    TruncatedAtLimit,
+    Unavailable,
+}
+
+/// RFC-0062 9.3: immutable capture completeness frozen at tool settlement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolResultCaptureCompletenessV1 {
+    pub source: ToolSourceCompletenessV1,
+    pub policy: ToolPolicyCompletenessV1,
+    pub storage: ToolStorageCompletenessV1,
+}
+
+/// RFC-0062 9.2: one canonical persisted output segment. Ordinary pipes persist at most one
+/// contiguous segment per stream in stdout-then-stderr storage order.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolOutputSegmentV1 {
+    pub stream: ToolOutputStreamV1,
+    pub artifact_offset: u64,
+    pub persisted_bytes: u64,
+    pub eligible_bytes: u64,
+    pub observed_bytes: u64,
+    pub preview_bytes: u64,
+    pub preview_truncated: bool,
+    pub storage: ToolStorageCompletenessV1,
+}
+
+/// RFC-0062 9.4: append-only retrieval availability state. Terminal states never return to
+/// Available in V1; recovery requires a future republish contract.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolArtifactAvailabilityStateV1 {
+    Available,
+    DisabledPendingDelete,
+    Expired,
+    Missing,
+    HashMismatch,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolArtifactAvailabilityReasonV1 {
+    GcDisable,
+    GcExpired,
+    ReaderDetectedMissing,
+    ReaderDetectedHashMismatch,
+    PolicyRevoked,
+    CaptureFallback,
+}
+
+/// RFC-0062 9.4: generation-guarded availability transition. Projections only apply events whose
+/// expected_generation matches; stale or duplicate transitions fail closed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolArtifactAvailabilityChangedV1 {
+    pub schema_version: u16,
+    pub artifact_ref: ToolArtifactRefV1,
+    pub expected_generation: u64,
+    pub generation: u64,
+    pub previous: ToolArtifactAvailabilityStateV1,
+    pub next: ToolArtifactAvailabilityStateV1,
+    pub reason: ToolArtifactAvailabilityReasonV1,
+    pub changed_at_ms: u64,
+}
+
+impl ToolArtifactAvailabilityChangedV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION {
+            bail!("tool artifact availability change schema version is unsupported");
+        }
+        self.artifact_ref.validate()?;
+        if self.expected_generation.saturating_add(1) != self.generation
+            || self.previous == self.next
+        {
+            bail!("tool artifact availability transition is not generation-ordered");
+        }
+        let allowed = matches!(
+            (self.previous, self.next),
+            (
+                ToolArtifactAvailabilityStateV1::Available,
+                ToolArtifactAvailabilityStateV1::DisabledPendingDelete
+            ) | (
+                ToolArtifactAvailabilityStateV1::Available,
+                ToolArtifactAvailabilityStateV1::Missing
+            ) | (
+                ToolArtifactAvailabilityStateV1::Available,
+                ToolArtifactAvailabilityStateV1::HashMismatch
+            ) | (
+                ToolArtifactAvailabilityStateV1::Available,
+                ToolArtifactAvailabilityStateV1::Unavailable
+            ) | (
+                ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                ToolArtifactAvailabilityStateV1::Expired
+            )
+        );
+        if !allowed {
+            bail!("tool artifact availability transition is not in the allowed state machine");
+        }
+        Ok(())
+    }
+}
+
+/// RFC-0062 9.1: session-aware capture plan frozen before spawn. Execution backends derive a
+/// process-local config from it and receive an opaque sink; they never see session authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolExecutionCapturePlanV1 {
+    pub schema_version: u16,
+    pub session_scope_id_hash: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub media_type: String,
+    pub stream_layout: ToolOutputStreamLayoutV1,
+    pub preview_limit_bytes_per_stream: u64,
+    pub artifact_limit_bytes_combined: u64,
+    pub artifact_reservation_stdout_bytes: u64,
+    pub artifact_reservation_stderr_bytes: u64,
+    pub artifact_staging_limit_bytes_per_stream: u64,
+    pub observed_limit_bytes_combined: u64,
+    pub retention_class: ToolArtifactRetentionClass,
+    pub persistence_policy: ToolOutputPersistencePolicy,
+}
+
+impl ToolExecutionCapturePlanV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TOOL_EXECUTION_CAPTURE_PLAN_SCHEMA_VERSION {
+            bail!("tool execution capture plan schema version is unsupported");
+        }
+        if self.session_scope_id_hash.is_empty()
+            || self.tool_call_id.trim().is_empty()
+            || self.tool_name.trim().is_empty()
+        {
+            bail!("tool execution capture plan identity is incomplete");
+        }
+        if matches!(
+            self.stream_layout,
+            ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder
+        ) && self
+            .artifact_reservation_stdout_bytes
+            .saturating_add(self.artifact_reservation_stderr_bytes)
+            != self.artifact_limit_bytes_combined
+        {
+            bail!("separate-pipe reservations must sum to the combined artifact payload cap");
+        }
+        if self.artifact_reservation_stdout_bytes > self.artifact_staging_limit_bytes_per_stream
+            || self.artifact_reservation_stderr_bytes > self.artifact_staging_limit_bytes_per_stream
+        {
+            bail!("artifact reservation exceeds its per-stream staging bound");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn canonical_hash(&self) -> String {
+        stable_event_hash(serde_json::to_vec(self).unwrap_or_default().as_slice())
+    }
+
+    #[must_use]
+    pub fn process_capture_config(&self) -> ProcessStreamCaptureConfigV1 {
+        ProcessStreamCaptureConfigV1 {
+            stream_layout: self.stream_layout,
+            preview_limit_bytes_per_stream: self.preview_limit_bytes_per_stream,
+            artifact_payload_limit_bytes_combined: self.artifact_limit_bytes_combined,
+            artifact_reservation_stdout_bytes: self.artifact_reservation_stdout_bytes,
+            artifact_reservation_stderr_bytes: self.artifact_reservation_stderr_bytes,
+            artifact_staging_limit_bytes_per_stream: self.artifact_staging_limit_bytes_per_stream,
+            observed_limit_bytes_combined: self.observed_limit_bytes_combined,
+        }
+    }
+}
+
+/// RFC-0062 9.1: session-free capture configuration derived by the execution backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProcessStreamCaptureConfigV1 {
+    pub stream_layout: ToolOutputStreamLayoutV1,
+    pub preview_limit_bytes_per_stream: u64,
+    pub artifact_payload_limit_bytes_combined: u64,
+    pub artifact_reservation_stdout_bytes: u64,
+    pub artifact_reservation_stderr_bytes: u64,
+    pub artifact_staging_limit_bytes_per_stream: u64,
+    pub observed_limit_bytes_combined: u64,
+}
+
+/// RFC-0062 9.1: what the persistence policy allows into the durable artifact.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputPersistencePolicy {
+    Preserve,
+    Redact,
+    EphemeralOnly,
+    Reject,
+}
+
+/// RFC-0062 9.5: bounded error summary; the message cap is UTF-8 safe and bodies never copy
+/// stderr or artifact content into the message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolErrorSummaryV1 {
+    pub kind: crate::ToolErrorKind,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    pub retryable: bool,
+}
+
+impl ToolErrorSummaryV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.message.len() > TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES {
+            bail!("tool error summary exceeds its byte limit");
+        }
+        Ok(())
+    }
+}
+
+/// RFC-0062 10.5: stage that failed while settling a tool result into a terminal fallback.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultFailureStageV1 {
+    FactsProjection,
+    PreviewProjection,
+    ArtifactFinalize,
+    DescriptorAppend,
+}
+
+/// RFC-0062 10.5: bounded terminal fallback persisted when a capture stage fails; only a dead
+/// session writer escalates to the control plane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolResultTerminalFallbackV1 {
+    pub schema_version: u16,
+    pub tool_call_id: String,
+    pub outcome: ToolResultOutcomeV1,
+    pub failure_stage: ToolResultFailureStageV1,
+    pub summary: String,
+    pub artifact_published_at_settlement: bool,
+}
+
+impl ToolResultTerminalFallbackV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TOOL_RESULT_TERMINAL_FALLBACK_SCHEMA_VERSION
+            || self.tool_call_id.trim().is_empty()
+            || self.summary.len() > TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES
+        {
+            bail!("tool result terminal fallback is malformed");
+        }
+        Ok(())
+    }
+}
+
+/// RFC-0062 9.7: why the initial model preview is shorter than the persisted output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPreviewTruncationReasonV1 {
+    InitialCap,
+    BatchBudget,
+    BinaryOnly,
+    Fallback,
+}
+
+/// RFC-0062 9.6: provider-facing typed tool result payload; adapters pattern-match this and
+/// never parse the output JSON to guess the outcome.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProviderToolResultMessageV1 {
+    pub call_id: String,
+    pub output: String,
+    pub wire_semantics: ToolResultWireSemanticsV1,
+}
+
+/// RFC-0062 9.6: typed message payload carried by provider request materialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMessagePayloadV1 {
+    Text {
+        content: String,
+    },
+    AssistantToolCalls {
+        content: String,
+        tool_calls: Vec<crate::provider::ToolCall>,
+    },
+    ToolResult(ProviderToolResultMessageV1),
+}
+
+/// RFC-0062 9.7: durable V3 tool result. New executions write only V3; sessions containing V2
+/// tool-result events are rejected as unsupported schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolResultRecordedV3 {
+    pub schema_version: u16,
+    pub message_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub artifact: ToolArtifactBindingV1,
+    pub facts: ToolResultFactsV1,
+    pub initial_model_view: ToolModelViewV1,
+    pub initial_model_view_sha256: String,
+    pub capture_telemetry: ToolResultCaptureTelemetryV1,
+    pub recorded_at_ms: u64,
+    pub wire_semantics: ToolResultWireSemanticsV1,
+    pub stream_layout: ToolOutputStreamLayoutV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<ToolOutputSegmentV1>,
+    pub capture_completeness: ToolResultCaptureCompletenessV1,
+    pub initial_availability: ToolArtifactAvailabilityStateV1,
+    pub preview_actual_bytes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_truncation_reason: Option<ToolPreviewTruncationReasonV1>,
+    pub capture_plan_hash: String,
+    pub artifact_hash: String,
+}
+
 /// New durable session payload for a provider-visible tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -613,6 +1009,436 @@ pub struct ToolResultRecordedV2 {
     pub initial_model_view_sha256: String,
     pub capture_telemetry: ToolResultCaptureTelemetryV1,
     pub recorded_at_ms: u64,
+}
+
+impl ToolResultRecordedV3 {
+    /// Builds a bounded terminal fallback V3 record when the regular projection fails
+    /// (RFC-0062 10.5); only a dead session writer may escalate to the control plane.
+    #[cfg(test)]
+    fn terminal_fallback(
+        result: &ToolResult,
+        sensitivity: ToolArtifactSensitivity,
+        capture_error: &anyhow::Error,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        let (v2, display) =
+            ToolResultRecordedV2::terminal_fallback(result, sensitivity, capture_error)?;
+        let plan =
+            ToolExecutionCapturePlanV1::inline_default(String::new(), &v2.call_id, &v2.tool_name);
+        Ok((Self::from_v2_projection(v2, &plan), display))
+    }
+
+    /// Captures an in-process result into the durable V3 contract.
+    pub fn capture(
+        result: &ToolResult,
+        store: Option<&ToolArtifactStore>,
+        sensitivity: ToolArtifactSensitivity,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        Self::capture_with_model_preview_limit(
+            result,
+            store,
+            sensitivity,
+            tool_model_view_initial_limit(&result.tool_name),
+            None,
+        )
+    }
+
+    pub(crate) fn capture_with_model_preview_limit(
+        result: &ToolResult,
+        store: Option<&ToolArtifactStore>,
+        sensitivity: ToolArtifactSensitivity,
+        model_preview_limit: usize,
+        capture_plan: Option<&ToolExecutionCapturePlanV1>,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        let (v2, display) = ToolResultRecordedV2::capture_with_model_preview_limit(
+            result,
+            store,
+            sensitivity,
+            model_preview_limit,
+        )?;
+        let plan = match capture_plan {
+            Some(plan) => plan.clone(),
+            None => ToolExecutionCapturePlanV1::inline_default(
+                store
+                    .map(|s| s.session_scope_id_hash.clone())
+                    .unwrap_or_default(),
+                &result.call_id,
+                &result.tool_name,
+            ),
+        };
+        Ok((Self::from_v2_projection(v2, &plan), display))
+    }
+
+    /// Lifts a V2 projection into the V3 durable record by adding the RFC-0062 fields. This is
+    /// the single projection path for non-process-backed tools; process backends publish their
+    /// own capture evidence through the harness spool (R62.2).
+    fn from_v2_projection(v2: ToolResultRecordedV2, plan: &ToolExecutionCapturePlanV1) -> Self {
+        let (storage, policy, initial_availability, artifact_hash) = match &v2.artifact {
+            ToolArtifactBindingV1::Published { descriptor } => {
+                let (storage, policy) = match &descriptor.completeness {
+                    ToolArtifactCompleteness::Complete => (
+                        ToolStorageCompletenessV1::Complete,
+                        ToolPolicyCompletenessV1::Preserved,
+                    ),
+                    ToolArtifactCompleteness::PolicyRedacted { .. } => (
+                        ToolStorageCompletenessV1::Complete,
+                        ToolPolicyCompletenessV1::Redacted,
+                    ),
+                    ToolArtifactCompleteness::StorageTruncated(_) => (
+                        ToolStorageCompletenessV1::TruncatedAtLimit,
+                        ToolPolicyCompletenessV1::Preserved,
+                    ),
+                    ToolArtifactCompleteness::EphemeralUnavailableAfterRestart => (
+                        ToolStorageCompletenessV1::Unavailable,
+                        ToolPolicyCompletenessV1::EphemeralOnly,
+                    ),
+                };
+                (
+                    storage,
+                    policy,
+                    ToolArtifactAvailabilityStateV1::Available,
+                    descriptor.content_sha256.clone(),
+                )
+            }
+            ToolArtifactBindingV1::Unavailable { .. } => (
+                ToolStorageCompletenessV1::Unavailable,
+                ToolPolicyCompletenessV1::Preserved,
+                ToolArtifactAvailabilityStateV1::Unavailable,
+                stable_event_hash(b""),
+            ),
+        };
+        let preview_bytes = v2.initial_model_view.preview.len();
+        let truncation_reason = if v2.capture_telemetry.inline_projection_truncated
+            || v2.initial_model_view.preview_kind == ToolPreviewKind::HeadTail
+        {
+            Some(ToolPreviewTruncationReasonV1::InitialCap)
+        } else {
+            None
+        };
+        let wire_semantics = ToolResultWireSemanticsV1 {
+            outcome: if v2.facts.status == "ok" {
+                ToolResultOutcomeV1::Success
+            } else {
+                ToolResultOutcomeV1::ToolError
+            },
+            error_kind: v2.facts.error.as_ref().map(|error| error.kind),
+        };
+        Self {
+            schema_version: TOOL_RESULT_RECORDED_V3_SCHEMA_VERSION,
+            message_id: v2.message_id,
+            call_id: v2.call_id,
+            tool_name: v2.tool_name,
+            artifact: v2.artifact,
+            facts: v2.facts,
+            initial_model_view: v2.initial_model_view,
+            initial_model_view_sha256: v2.initial_model_view_sha256,
+            capture_telemetry: v2.capture_telemetry,
+            recorded_at_ms: v2.recorded_at_ms,
+            wire_semantics,
+            stream_layout: plan.stream_layout,
+            segments: Vec::new(),
+            capture_completeness: ToolResultCaptureCompletenessV1 {
+                source: ToolSourceCompletenessV1::Complete,
+                policy,
+                storage,
+            },
+            initial_availability,
+            preview_actual_bytes: preview_bytes as u32,
+            preview_truncation_reason: truncation_reason,
+            capture_plan_hash: plan.canonical_hash(),
+            artifact_hash,
+        }
+    }
+
+    /// RFC-0062 8/9.2: builds the durable V3 record from harness-owned process capture evidence.
+    /// The artifact was already published by the execution backend's sink; no body is re-captured.
+    pub fn from_process_capture(
+        result: &ToolResult,
+        descriptor: ToolArtifactDescriptorV1,
+        plan: &ToolExecutionCapturePlanV1,
+        segments: Vec<ToolOutputSegmentV1>,
+        completeness: ToolResultCaptureCompletenessV1,
+        model_preview_limit: usize,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        if descriptor.tool_call_id != result.call_id || descriptor.tool_name != result.tool_name {
+            bail!("process capture descriptor does not belong to its result");
+        }
+        let model_preview_limit =
+            model_preview_limit.min(tool_model_view_initial_limit(&result.tool_name));
+        let safe_content = safe_persistence_text(&result.content);
+        let (preview, preview_kind) = bounded_model_preview(&safe_content, model_preview_limit);
+        let artifact_ref = Some(descriptor.artifact_ref.clone());
+        let retrieval_hint = Some(
+            "preview may be partial; use read_tool_artifact with the opaque artifact_ref and a line_page or search_literal selector"
+                .to_owned(),
+        );
+        let model = ToolModelViewV1 {
+            token_upper_bound: preview.len().div_ceil(4) as u64,
+            preview,
+            preview_kind,
+            artifact_ref: artifact_ref.clone(),
+            retrieval_hint,
+            projection_version: TOOL_MODEL_VIEW_SCHEMA_VERSION,
+        };
+        let facts = ToolResultFactsV1::from_result(result);
+        let available = descriptor.retrieval_available();
+        let status_label = if result.is_error() { "error" } else { "ok" }.to_owned();
+        let display_preview = bounded_utf8(
+            &safe_content,
+            TOOL_DISPLAY_VIEW_MAX_BYTES.saturating_sub(1024),
+        );
+        let display = ToolDisplayViewV1 {
+            status_label: status_label.clone(),
+            summary: format!(
+                "{} {} ({} observed bytes, {} persisted bytes)",
+                result.tool_name,
+                status_label,
+                descriptor.observed_bytes,
+                descriptor.persisted_bytes
+            ),
+            preview: display_preview.clone(),
+            observed_bytes: descriptor.observed_bytes,
+            persisted_bytes: descriptor.persisted_bytes,
+            has_more: available && descriptor.persisted_bytes > display_preview.len() as u64,
+            artifact_ref,
+            display_capabilities: if available {
+                vec![
+                    ToolDisplayCapability::ReadNextPage,
+                    ToolDisplayCapability::SearchLiteral,
+                    ToolDisplayCapability::CopySummary,
+                ]
+            } else {
+                vec![ToolDisplayCapability::CopySummary]
+            },
+        };
+        let preview_bytes = model.preview.len();
+        let truncation_reason = if preview_kind == ToolPreviewKind::HeadTail {
+            Some(ToolPreviewTruncationReasonV1::InitialCap)
+        } else {
+            None
+        };
+        let mut record = Self {
+            schema_version: TOOL_RESULT_RECORDED_V3_SCHEMA_VERSION,
+            message_id: ModelMessage::tool(result.call_id.clone(), "").id,
+            call_id: result.call_id.clone(),
+            tool_name: result.tool_name.clone(),
+            artifact: ToolArtifactBindingV1::Published { descriptor },
+            facts,
+            initial_model_view: model,
+            initial_model_view_sha256: String::new(),
+            capture_telemetry: ToolResultCaptureTelemetryV1 {
+                capture_path: ToolResultCapturePathV1::PreCapturedArtifact,
+                observed_inline_bytes: result.content.len() as u64,
+                hard_guard_bytes: None,
+                hard_guard_exceeded: false,
+                inline_projection_truncated: preview_kind == ToolPreviewKind::HeadTail,
+            },
+            recorded_at_ms: current_unix_ms(),
+            wire_semantics: ToolResultWireSemanticsV1::from_result(result),
+            stream_layout: plan.stream_layout,
+            segments,
+            capture_completeness: completeness,
+            initial_availability: ToolArtifactAvailabilityStateV1::Available,
+            preview_actual_bytes: preview_bytes as u32,
+            preview_truncation_reason: truncation_reason,
+            capture_plan_hash: plan.canonical_hash(),
+            artifact_hash: stable_event_hash(b""),
+        };
+        record.artifact_hash = record
+            .artifact
+            .descriptor()
+            .map(|d| d.content_sha256.clone())
+            .unwrap_or_else(|| stable_event_hash(b""));
+        record.initial_model_view_sha256 = stable_event_hash(record.model_content()?.as_bytes());
+        record.validate()?;
+        Ok((record, display))
+    }
+
+    pub fn model_message(&self) -> Result<ModelMessage> {
+        self.model_message_with_view(&self.initial_model_view)
+    }
+
+    pub fn model_message_with_view(&self, view: &ToolModelViewV1) -> Result<ModelMessage> {
+        self.validate()?;
+        view.validate()?;
+        let output = serde_json::to_string(&ToolModelEnvelopeV1 {
+            facts: &self.facts,
+            projection: view,
+        })
+        .context("failed to encode tool model envelope")?;
+        Ok(ModelMessage {
+            id: self.message_id.clone(),
+            role: MessageRole::Tool,
+            content: Some(output.clone()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(self.call_id.clone()),
+            assistant_kind: None,
+            image_attachments: Vec::new(),
+            tool_result_payload: Some(ProviderToolResultMessageV1 {
+                call_id: self.call_id.clone(),
+                output,
+                wire_semantics: self.wire_semantics.clone(),
+            }),
+        })
+    }
+
+    pub fn model_content(&self) -> Result<String> {
+        self.validate_shape()?;
+        serde_json::to_string(&ToolModelEnvelopeV1 {
+            facts: &self.facts,
+            projection: &self.initial_model_view,
+        })
+        .context("failed to encode tool model envelope")
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_shape()?;
+        let model_hash = stable_event_hash(self.model_content()?.as_bytes());
+        if model_hash != self.initial_model_view_sha256 {
+            bail!("tool result initial model view hash mismatch");
+        }
+        if self.wire_semantics.outcome == ToolResultOutcomeV1::ToolError
+            && self.facts.status == "ok"
+        {
+            bail!("tool result wire semantics contradict a successful facts status");
+        }
+        if self.wire_semantics.outcome == ToolResultOutcomeV1::Success
+            && self.facts.status == "error"
+        {
+            bail!("tool result wire semantics contradict an error facts status");
+        }
+        let encoded = serde_json::to_vec(self).context("failed to encode tool result V3 record")?;
+        if encoded.len() > TOOL_RESULT_EVENT_TARGET_BYTES {
+            bail!("tool result V3 record exceeds its event target");
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<()> {
+        if self.schema_version != TOOL_RESULT_RECORDED_V3_SCHEMA_VERSION
+            || self.message_id.trim().is_empty()
+            || self.call_id.trim().is_empty()
+            || self.tool_name.trim().is_empty()
+        {
+            bail!("tool result V3 record is malformed");
+        }
+        if let Some(artifact) = self.artifact.descriptor()
+            && (artifact.tool_call_id != self.call_id || artifact.tool_name != self.tool_name)
+        {
+            bail!("tool result artifact does not belong to its result");
+        }
+        self.artifact.validate()?;
+        self.facts.validate()?;
+        self.initial_model_view.validate()?;
+        self.capture_telemetry.validate()?;
+        if !self.capture_plan_hash.starts_with("sha256:")
+            || !self.artifact_hash.starts_with("sha256:")
+        {
+            bail!("tool result V3 hashes are malformed");
+        }
+        for segment in &self.segments {
+            if segment.persisted_bytes > segment.eligible_bytes
+                || segment.eligible_bytes > segment.observed_bytes
+                || segment.preview_bytes > segment.persisted_bytes
+            {
+                bail!("tool result V3 segment accounting is inconsistent");
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn display_view(&self) -> ToolDisplayViewV1 {
+        let (observed_bytes, persisted_bytes, artifact_ref, available) = match &self.artifact {
+            ToolArtifactBindingV1::Published { descriptor } => (
+                descriptor.observed_bytes,
+                descriptor.persisted_bytes,
+                Some(descriptor.artifact_ref.clone()),
+                descriptor.retrieval_available()
+                    && self.initial_availability == ToolArtifactAvailabilityStateV1::Available,
+            ),
+            ToolArtifactBindingV1::Unavailable { unavailable } => {
+                (unavailable.observed_bytes, 0, None, false)
+            }
+        };
+        let display_preview = bounded_utf8(
+            &self.initial_model_view.preview,
+            TOOL_DISPLAY_VIEW_MAX_BYTES.saturating_sub(1024),
+        );
+        ToolDisplayViewV1 {
+            status_label: self.facts.status.clone(),
+            summary: format!(
+                "{} {} ({} observed bytes, {} persisted bytes)",
+                self.tool_name, self.facts.status, observed_bytes, persisted_bytes
+            ),
+            preview: display_preview.clone(),
+            observed_bytes,
+            persisted_bytes,
+            has_more: available
+                && persisted_bytes > display_preview.len() as u64
+                && self.initial_availability == ToolArtifactAvailabilityStateV1::Available,
+            artifact_ref,
+            display_capabilities: if available {
+                vec![
+                    ToolDisplayCapability::ReadNextPage,
+                    ToolDisplayCapability::SearchLiteral,
+                    ToolDisplayCapability::CopySummary,
+                ]
+            } else {
+                vec![ToolDisplayCapability::CopySummary]
+            },
+        }
+    }
+}
+
+impl ToolExecutionCapturePlanV1 {
+    /// Default capture plan for tools that do not spawn a process (inline or pre-captured
+    /// adapters). Process backends construct their own plan before spawn.
+    pub fn inline_default(
+        session_scope_id_hash: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: TOOL_EXECUTION_CAPTURE_PLAN_SCHEMA_VERSION,
+            session_scope_id_hash: session_scope_id_hash.into(),
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            media_type: "text/plain; charset=utf-8".to_owned(),
+            stream_layout: ToolOutputStreamLayoutV1::SingleStream,
+            preview_limit_bytes_per_stream: TOOL_MODEL_VIEW_INITIAL_MAX_BYTES as u64,
+            artifact_limit_bytes_combined: TOOL_ARTIFACT_MAX_BYTES as u64,
+            artifact_reservation_stdout_bytes: TOOL_ARTIFACT_MAX_BYTES as u64,
+            artifact_reservation_stderr_bytes: 0,
+            artifact_staging_limit_bytes_per_stream: TOOL_ARTIFACT_MAX_BYTES as u64,
+            observed_limit_bytes_combined: TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
+            retention_class: ToolArtifactRetentionClass::SessionBound,
+            persistence_policy: ToolOutputPersistencePolicy::Preserve,
+        }
+    }
+
+    /// Process-backed defaults per RFC-0062 10.3.
+    pub fn process_defaults(
+        session_scope_id_hash: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: TOOL_EXECUTION_CAPTURE_PLAN_SCHEMA_VERSION,
+            session_scope_id_hash: session_scope_id_hash.into(),
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            media_type: "text/plain; charset=utf-8".to_owned(),
+            stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+            preview_limit_bytes_per_stream: 64 * 1024,
+            artifact_limit_bytes_combined: TOOL_ARTIFACT_MAX_BYTES as u64,
+            artifact_reservation_stdout_bytes: TOOL_ARTIFACT_MAX_BYTES as u64 / 2,
+            artifact_reservation_stderr_bytes: TOOL_ARTIFACT_MAX_BYTES as u64 / 2,
+            artifact_staging_limit_bytes_per_stream: TOOL_ARTIFACT_MAX_BYTES as u64,
+            observed_limit_bytes_combined: 128 * 1024 * 1024,
+            retention_class: ToolArtifactRetentionClass::SessionBound,
+            persistence_policy: ToolOutputPersistencePolicy::Preserve,
+        }
+    }
 }
 
 impl ToolResultRecordedV2 {
@@ -634,6 +1460,99 @@ impl ToolResultRecordedV2 {
     }
 
     pub(crate) fn capture_with_model_preview_limit(
+        result: &ToolResult,
+        store: Option<&ToolArtifactStore>,
+        sensitivity: ToolArtifactSensitivity,
+        model_preview_limit: usize,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        match Self::capture_with_model_preview_limit_inner(
+            result,
+            store,
+            sensitivity,
+            model_preview_limit,
+        ) {
+            Ok(captured) => Ok(captured),
+            Err(capture_error) => {
+                let fallback = Self::terminal_fallback(result, sensitivity, &capture_error)?;
+                Ok(fallback)
+            }
+        }
+    }
+
+    /// Builds a bounded terminal fallback record when the regular projection fails.
+    ///
+    /// RFC-0062 10.5: only a dead session writer may escalate capture failure into a
+    /// control-plane failure; ordinary tool results always settle with bounded facts and an
+    /// explicit `Unavailable` artifact state instead of aborting the agent run.
+    fn terminal_fallback(
+        result: &ToolResult,
+        _sensitivity: ToolArtifactSensitivity,
+        capture_error: &anyhow::Error,
+    ) -> Result<(Self, ToolDisplayViewV1)> {
+        let observed_bytes = result.content.len() as u64;
+        let mut facts = ToolResultFactsV1::from_result(result);
+        if let Some(error) = facts.error.as_mut() {
+            error.message = bounded_utf8(
+                &safe_persistence_text(&error.message),
+                TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES,
+            );
+        }
+        let model = ToolModelViewV1 {
+            token_upper_bound: 0,
+            preview: String::new(),
+            preview_kind: ToolPreviewKind::HeadTail,
+            artifact_ref: None,
+            retrieval_hint: None,
+            projection_version: TOOL_MODEL_VIEW_SCHEMA_VERSION,
+        };
+        let artifact = ToolArtifactBindingV1::Unavailable {
+            unavailable: ToolArtifactUnavailableV1 {
+                availability: ToolArtifactAvailability::Unavailable,
+                observed_bytes,
+                reason: "tool result capture failed and settled a bounded terminal fallback"
+                    .to_owned(),
+            },
+        };
+        let display = ToolDisplayViewV1 {
+            status_label: if result.is_error() { "error" } else { "ok" }.to_owned(),
+            summary: format!(
+                "{} {} ({} observed bytes, 0 persisted bytes; capture failed: {})",
+                result.tool_name,
+                if result.is_error() { "error" } else { "ok" },
+                observed_bytes,
+                bounded_utf8(&capture_error.to_string(), 256)
+            ),
+            preview: String::new(),
+            observed_bytes,
+            persisted_bytes: 0,
+            has_more: false,
+            artifact_ref: None,
+            display_capabilities: vec![ToolDisplayCapability::CopySummary],
+        };
+        let mut record = Self {
+            schema_version: TOOL_RESULT_RECORDED_SCHEMA_VERSION,
+            message_id: ModelMessage::tool(result.call_id.clone(), "").id,
+            call_id: result.call_id.clone(),
+            tool_name: result.tool_name.clone(),
+            artifact,
+            facts,
+            initial_model_view: model,
+            initial_model_view_sha256: String::new(),
+            capture_telemetry: ToolResultCaptureTelemetryV1 {
+                capture_path: ToolResultCapturePathV1::InlineCapture,
+                observed_inline_bytes: observed_bytes,
+                hard_guard_bytes: Some(TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64),
+                hard_guard_exceeded: observed_bytes > TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES as u64,
+                inline_projection_truncated: true,
+            },
+            recorded_at_ms: current_unix_ms(),
+        };
+        record.initial_model_view_sha256 = stable_event_hash(record.model_content()?.as_bytes());
+        record.validate()?;
+        Ok((record, display))
+    }
+
+    fn capture_with_model_preview_limit_inner(
         result: &ToolResult,
         store: Option<&ToolArtifactStore>,
         sensitivity: ToolArtifactSensitivity,
@@ -907,6 +1826,7 @@ impl ToolResultRecordedV2 {
             tool_call_id: Some(self.call_id.clone()),
             assistant_kind: None,
             image_attachments: Vec::new(),
+            tool_result_payload: None,
         })
     }
 
@@ -953,7 +1873,53 @@ impl ToolResultRecordedV2 {
     }
 }
 
-pub(super) fn tool_model_view_initial_limit(tool_name: &str) -> usize {
+/// RFC-0062 11.2: minimum preview floor for one safe non-empty current-batch result.
+pub const TOOL_MODEL_VIEW_BATCH_FLOOR_BYTES: usize = 512;
+/// RFC-0062 11.2: total initial-preview cap for one assistant tool-call batch.
+pub const TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES: usize = 64 * 1024;
+/// RFC-0062 11.2: hard limit on results in one assistant tool-call batch.
+pub const TOOL_MODEL_VIEW_BATCH_MAX_RESULTS: usize = 128;
+
+/// RFC-0062 11.2: deterministic two-phase allocation of the assistant-batch preview budget.
+///
+/// Phase 1 gives every safe non-empty candidate its `min(candidate, 512 B)` floor in declaration
+/// order; phase 2 distributes the remaining budget in declaration order up to each candidate's own
+/// cap. Only the final actual UTF-8 preview bytes are charged by the caller.
+pub fn allocate_batch_preview_limits(
+    declaration_order: &[String],
+    candidate_bytes: &std::collections::BTreeMap<String, usize>,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut limits = std::collections::BTreeMap::new();
+    if declaration_order.len() > TOOL_MODEL_VIEW_BATCH_MAX_RESULTS {
+        return limits;
+    }
+    let mut remaining = TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES;
+    for call_id in declaration_order {
+        let candidate = candidate_bytes.get(call_id).copied().unwrap_or(0);
+        if candidate == 0 {
+            limits.insert(call_id.clone(), 0);
+            continue;
+        }
+        let floor = candidate.min(TOOL_MODEL_VIEW_BATCH_FLOOR_BYTES);
+        let awarded = floor.min(remaining);
+        limits.insert(call_id.clone(), awarded);
+        remaining = remaining.saturating_sub(awarded);
+    }
+    for call_id in declaration_order {
+        let candidate = candidate_bytes.get(call_id).copied().unwrap_or(0);
+        let floor = candidate.min(TOOL_MODEL_VIEW_BATCH_FLOOR_BYTES);
+        if candidate <= floor || remaining == 0 {
+            continue;
+        }
+        let awarded = limits.get(call_id).copied().unwrap_or(0);
+        let extra = (candidate - floor).min(remaining);
+        limits.insert(call_id.clone(), awarded + extra);
+        remaining = remaining.saturating_sub(extra);
+    }
+    limits
+}
+
+pub fn tool_model_view_initial_limit(tool_name: &str) -> usize {
     let base_name = tool_name.rsplit("__").next().unwrap_or(tool_name);
     if matches!(base_name, "read_file" | "grep" | "glob" | "ls" | "search") {
         TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES
@@ -1347,6 +2313,12 @@ pub struct ToolArtifactStore {
 }
 
 impl ToolArtifactStore {
+    /// RFC-0062 9.1: exposes the opaque session scope hash for capture plan construction.
+    #[must_use]
+    pub fn session_scope_id_hash(&self) -> &str {
+        &self.session_scope_id_hash
+    }
+
     #[must_use]
     pub fn for_session_store(store: &JsonlSessionStore) -> Self {
         Self::for_session_path(store.path())
@@ -1571,6 +2543,7 @@ impl ToolArtifactStore {
             head: Vec::with_capacity(TOOL_ARTIFACT_MAX_BYTES / 2),
             tail: VecDeque::with_capacity(TOOL_ARTIFACT_MAX_BYTES / 2),
             observed_bytes: 0,
+            process: None,
         }
     }
 
@@ -2393,9 +3366,271 @@ pub struct ToolArtifactCaptureSink {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     observed_bytes: u64,
+    /// RFC-0062 9.2: process-backed dual-stream staging. Each stream gets its own bounded
+    /// staging file so the canonical artifact is stdout-then-stderr regardless of reader
+    /// scheduling; the sink only enters this mode through `begin_process_capture`.
+    process: Option<ProcessCaptureState>,
+}
+
+/// RFC-0062 9.2: per-stream staging for harness-owned process capture.
+struct ProcessCaptureState {
+    config: ProcessStreamCaptureConfigV1,
+    stdout_staging: Option<std::fs::File>,
+    stderr_staging: Option<std::fs::File>,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    staged_bytes: u64,
+}
+
+impl std::fmt::Debug for ToolArtifactCaptureSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolArtifactCaptureSink")
+            .field("tool_call_id", &self.tool_call_id)
+            .field("tool_name", &self.tool_name)
+            .field("observed_bytes", &self.observed_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for ToolArtifactCaptureSink {
+    fn clone(&self) -> Self {
+        let process = self.process.as_ref().map(|state| ProcessCaptureState {
+            config: state.config,
+            stdout_staging: state
+                .stdout_staging
+                .as_ref()
+                .and_then(|file| file.try_clone().ok()),
+            stderr_staging: state
+                .stderr_staging
+                .as_ref()
+                .and_then(|file| file.try_clone().ok()),
+            stdout_bytes: state.stdout_bytes,
+            stderr_bytes: state.stderr_bytes,
+            stdout_truncated: state.stdout_truncated,
+            stderr_truncated: state.stderr_truncated,
+            staged_bytes: state.staged_bytes,
+        });
+        Self {
+            store: self.store.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            media_type: self.media_type.clone(),
+            encoding: self.encoding,
+            sensitivity: self.sensitivity,
+            head: self.head.clone(),
+            tail: self.tail.clone(),
+            observed_bytes: self.observed_bytes,
+            process,
+        }
+    }
+}
+
+impl PartialEq for ToolArtifactCaptureSink {
+    fn eq(&self, other: &Self) -> bool {
+        self.tool_call_id == other.tool_call_id
+            && self.tool_name == other.tool_name
+            && self.media_type == other.media_type
+            && self.encoding == other.encoding
+            && self.sensitivity == other.sensitivity
+            && self.observed_bytes == other.observed_bytes
+    }
 }
 
 impl ToolArtifactCaptureSink {
+    /// RFC-0062 8.1: enters process capture mode before spawn. Two bounded owner-only staging
+    /// files are created inside the store staging namespace; their paths never enter the child
+    /// environment, model, session, UI, or logs.
+    pub fn begin_process_capture(&self, config: ProcessStreamCaptureConfigV1) -> Result<Self> {
+        let mut sink = self.store.begin_policy_safe_capture(
+            &self.tool_call_id,
+            &self.tool_name,
+            &self.media_type,
+            self.encoding,
+            self.sensitivity,
+        );
+        self.store.ensure_root_dir()?;
+        let staging_dir = self.store.root.join("staging");
+        create_private_dir(&staging_dir)?;
+        let stdout_staging = open_read_write_private_file(
+            &staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple())),
+        )?;
+        let stderr_staging = open_read_write_private_file(
+            &staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple())),
+        )?;
+        sink.process = Some(ProcessCaptureState {
+            config,
+            stdout_staging: Some(stdout_staging),
+            stderr_staging: Some(stderr_staging),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            staged_bytes: 0,
+        });
+        Ok(sink)
+    }
+
+    /// RFC-0062 8.2: writes one stream chunk into its bounded staging file. Once a stream's
+    /// staging bound is reached, later chunks are counted but not persisted (storage truncation);
+    /// the child keeps running because this cap is independent of the observed resource meter.
+    pub fn write_stream(&mut self, stream: ToolOutputStreamV1, bytes: &[u8]) -> Result<()> {
+        let Some(state) = self.process.as_mut() else {
+            return Ok(());
+        };
+        let limit = state.config.artifact_staging_limit_bytes_per_stream;
+        let (file, stream_bytes, truncated) = match stream {
+            ToolOutputStreamV1::Stdout => (
+                state.stdout_staging.as_mut(),
+                &mut state.stdout_bytes,
+                &mut state.stdout_truncated,
+            ),
+            ToolOutputStreamV1::Stderr => (
+                state.stderr_staging.as_mut(),
+                &mut state.stderr_bytes,
+                &mut state.stderr_truncated,
+            ),
+            ToolOutputStreamV1::Combined => return Ok(()),
+        };
+        let Some(file) = file else {
+            return Ok(());
+        };
+        let before = *stream_bytes;
+        *stream_bytes = stream_bytes.saturating_add(bytes.len() as u64);
+        if before >= limit {
+            *truncated = true;
+            return Ok(());
+        }
+        let allowed = (limit.saturating_sub(before) as usize).min(bytes.len());
+        use std::io::Write as _;
+        file.write_all(&bytes[..allowed])
+            .with_context(|| format!("failed to stage {stream:?} capture bytes"))?;
+        state.staged_bytes = state.staged_bytes.saturating_add(allowed as u64);
+        if allowed < bytes.len() {
+            *truncated = true;
+        }
+        Ok(())
+    }
+
+    /// RFC-0062 9.2/9.3: finalizes the canonical dual-segment artifact (stdout segment then
+    /// stderr segment, both contiguous) and returns the descriptor plus immutable capture
+    /// evidence. Staging files are removed regardless of publication outcome.
+    pub fn finish_process_capture(
+        mut self,
+        source_observed_bytes: u64,
+        redaction_count: u32,
+        source: ToolSourceCompletenessV1,
+    ) -> Result<(
+        ToolArtifactDescriptorV1,
+        Vec<ToolOutputSegmentV1>,
+        ToolResultCaptureCompletenessV1,
+    )> {
+        let Some(state) = self.process.take() else {
+            bail!("finish_process_capture requires process capture mode");
+        };
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        if let Some(mut file) = state.stdout_staging {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            file.seek(SeekFrom::Start(0))?;
+            file.read_to_end(&mut stdout_bytes)?;
+        }
+        if let Some(mut file) = state.stderr_staging {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            file.seek(SeekFrom::Start(0))?;
+            file.read_to_end(&mut stderr_bytes)?;
+        }
+        let stdout_len = stdout_bytes.len() as u64;
+        let stderr_len = stderr_bytes.len() as u64;
+        let policy_projected_bytes = state.stdout_bytes.saturating_add(state.stderr_bytes);
+        let mut bytes = stdout_bytes;
+        bytes.extend_from_slice(&stderr_bytes);
+        // RFC-0062 10.2: policy redaction runs on the canonical merged bytes so patterns that
+        // span chunk boundaries are still detected deterministically. Binary content is left
+        // byte-identical; only UTF-8 text passes through the persistence text policy.
+        let redacted = if self.encoding == ToolArtifactEncoding::Utf8 {
+            let text = String::from_utf8_lossy(&bytes);
+            let safe = safe_persistence_text(&text);
+            (safe != text).then(|| safe.into_bytes())
+        } else {
+            None
+        };
+        let redaction_count = redaction_count.saturating_add(u32::from(redacted.is_some()));
+        let bytes = match redacted {
+            Some(redacted) => redacted,
+            None => bytes,
+        };
+        let final_len = bytes.len() as u64;
+        let descriptor = self.store.publish_descriptor(
+            &self.tool_call_id,
+            &self.tool_name,
+            BoundedArtifactBytes {
+                bytes,
+                retained_head_bytes: stdout_len.min(final_len),
+                retained_tail_bytes: stderr_len.min(final_len),
+            },
+            source_observed_bytes,
+            policy_projected_bytes,
+            &self.media_type,
+            self.encoding,
+            self.sensitivity,
+            redaction_count,
+        )?;
+        let stdout_storage = if state.stdout_truncated {
+            ToolStorageCompletenessV1::TruncatedAtLimit
+        } else {
+            ToolStorageCompletenessV1::Complete
+        };
+        let stderr_storage = if state.stderr_truncated {
+            ToolStorageCompletenessV1::TruncatedAtLimit
+        } else {
+            ToolStorageCompletenessV1::Complete
+        };
+        let segments = vec![
+            ToolOutputSegmentV1 {
+                stream: ToolOutputStreamV1::Stdout,
+                artifact_offset: 0,
+                persisted_bytes: stdout_len,
+                eligible_bytes: state.stdout_bytes,
+                observed_bytes: state.stdout_bytes,
+                preview_bytes: 0,
+                preview_truncated: false,
+                storage: stdout_storage,
+            },
+            ToolOutputSegmentV1 {
+                stream: ToolOutputStreamV1::Stderr,
+                artifact_offset: stdout_len,
+                persisted_bytes: stderr_len,
+                eligible_bytes: state.stderr_bytes,
+                observed_bytes: state.stderr_bytes,
+                preview_bytes: 0,
+                preview_truncated: false,
+                storage: stderr_storage,
+            },
+        ];
+        let storage = if state.stdout_truncated || state.stderr_truncated {
+            ToolStorageCompletenessV1::TruncatedAtLimit
+        } else {
+            ToolStorageCompletenessV1::Complete
+        };
+        let policy = if redaction_count > 0 {
+            ToolPolicyCompletenessV1::Redacted
+        } else {
+            ToolPolicyCompletenessV1::Preserved
+        };
+        Ok((
+            descriptor,
+            segments,
+            ToolResultCaptureCompletenessV1 {
+                source,
+                policy,
+                storage,
+            },
+        ))
+    }
+
     pub fn finish(self) -> Result<ToolArtifactDescriptorV1> {
         let observed_bytes = self.observed_bytes;
         self.finish_with_source_evidence(observed_bytes, 0)
@@ -2987,6 +4222,36 @@ fn create_private_file(path: &Path) -> Result<File> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .with_context(|| format!("failed to create private tool artifact {}", path.display()))
+}
+
+/// Owner-only read+write staging file used by harness-owned process capture.
+fn open_read_write_private_file(path: &Path) -> Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("failed to create private tool artifact {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn open_read_write_private_file(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("failed to create private tool artifact {}", path.display()))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let _ = file;
+    }
+    Ok(file)
 }
 
 #[cfg(not(unix))]

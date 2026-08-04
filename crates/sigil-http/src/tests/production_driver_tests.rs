@@ -17,7 +17,7 @@ use sigil_kernel::{
     ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
     ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore,
     ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta,
-    ToolResultRecordedV2, ToolSpec, VerificationPolicy, VerificationPolicyChangedEntry,
+    ToolResultRecordedV3, ToolSpec, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationProductAction, VerificationVerdict, VisibleCompletionState,
     build_workspace_snapshot, stable_workspace_id,
 };
@@ -607,7 +607,7 @@ fn append_durable_tool_artifact(
     let session_store = JsonlSessionStore::new(std::path::Path::new(&session.session_log_path))
         .expect("session store should reopen");
     let artifact_store = ToolArtifactStore::for_session_store(&session_store);
-    let (recorded, _display) = ToolResultRecordedV2::capture(
+    let (recorded, _display) = ToolResultRecordedV3::capture(
         &result,
         Some(&artifact_store),
         ToolArtifactSensitivity::Ordinary,
@@ -619,7 +619,7 @@ fn append_durable_tool_artifact(
         .expect("tool result should publish an artifact")
         .clone();
     session_store
-        .append(&SessionLogEntry::ToolResultV2(recorded))
+        .append(&SessionLogEntry::ToolResultV3(recorded))
         .expect("tool result should append durably");
     descriptor
 }

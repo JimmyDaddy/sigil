@@ -351,11 +351,19 @@ fn tool_result_block(message: &ModelMessage) -> Result<Value> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("Anthropic tool result message is missing tool_call_id"))?;
-    Ok(json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": non_empty_content(message).unwrap_or_default(),
-    }))
+    let mut block = json!({
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": non_empty_content(message).unwrap_or_default(),
+    });
+    // RFC-0062 12.1: the typed wire semantics are the only authority for is_error; the output
+    // JSON is never parsed to guess the outcome.
+    if let Some(payload) = message.tool_result_payload()
+        && payload.wire_semantics.outcome == sigil_kernel::ToolResultOutcomeV1::ToolError
+    {
+        block["is_error"] = Value::Bool(true);
+    }
+    Ok(block)
 }
 
 fn flush_tool_results(messages: &mut Vec<Value>, pending_tool_results: &mut Vec<Value>) {

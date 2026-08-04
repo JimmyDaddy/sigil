@@ -63,7 +63,6 @@ use super::{
 #[test]
 fn emitting_small_tool_results_keeps_later_model_previews_visible() -> Result<()> {
     let mut session = Session::new("test", "model");
-    session.begin_tool_model_view_run();
     let mut handler = RecordingEventHandler::default();
 
     for index in 0..12 {
@@ -81,7 +80,7 @@ fn emitting_small_tool_results_keeps_later_model_previews_visible() -> Result<()
         )?;
         assert!(matches!(
             session.entries().last(),
-            Some(SessionLogEntry::ToolResultV2(result))
+            Some(SessionLogEntry::ToolResultV3(result))
                 if result.initial_model_view.preview == body
         ));
     }
@@ -4774,7 +4773,7 @@ fn tool_result_bundle_is_durable_before_control_handlers_can_lock_the_session_fi
 
     let entries = JsonlSessionStore::read_entries(&session_path)?;
     assert_eq!(entries.len(), 4);
-    assert!(matches!(entries[0], SessionLogEntry::ToolResultV2(_)));
+    assert!(matches!(entries[0], SessionLogEntry::ToolResultV3(_)));
     assert!(matches!(
         entries[1],
         SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(_))
@@ -4858,7 +4857,7 @@ fn typed_retrieval_receipt_and_result_recover_as_one_provider_consumable_bundle(
         .position(|entry| {
             matches!(
                 entry,
-                SessionLogEntry::ToolResultV2(result)
+                SessionLogEntry::ToolResultV3(result)
                     if result.call_id == "read-call-crash"
             )
         })
@@ -5048,7 +5047,7 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
         SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
             message.content.as_deref() == Some("loaded transient skill body")
         }
-        SessionLogEntry::ToolResultV2(result) => {
+        SessionLogEntry::ToolResultV3(result) => {
             result.initial_model_view.preview == "loaded transient skill body"
         }
         SessionLogEntry::Control(_) => false,
@@ -6002,7 +6001,7 @@ async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() 
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::ToolResultV2(result)
+            SessionLogEntry::ToolResultV3(result)
                 if result.call_id == "call-late-handoff"
                     && result
                         .initial_model_view

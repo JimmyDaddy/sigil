@@ -976,6 +976,14 @@ pub struct ToolResult {
     pub external_sources: Box<Vec<crate::ExternalSourceRecord>>,
     #[serde(skip)]
     pre_captured_artifact: Option<Box<PreCapturedToolArtifact>>,
+    /// RFC-0062 8: harness-owned capture evidence returned with the execution receipt; settled
+    /// by the tool layer into the durable V3 projection.
+    #[serde(skip)]
+    capture_outcome: Option<crate::ExecutionCaptureOutcome>,
+    /// RFC-0062 9.7: already-materialized durable V3 projection (process capture path). When
+    /// present, the agent loop appends it directly instead of re-capturing the bounded content.
+    #[serde(skip)]
+    durable_v3_projection: Option<Box<crate::ToolResultRecordedV3>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1002,6 +1010,8 @@ impl ToolResult {
             url_capability_registrations: Box::default(),
             external_sources: Box::default(),
             pre_captured_artifact: None,
+            capture_outcome: None,
+            durable_v3_projection: None,
         }
     }
 
@@ -1016,6 +1026,8 @@ impl ToolResult {
             call_id: call_id.into(),
             tool_name: tool_name.into(),
             content: message.clone(),
+            capture_outcome: None,
+            durable_v3_projection: None,
             status: ToolResultStatus::Error(ToolError {
                 kind,
                 message,
@@ -1132,6 +1144,47 @@ impl ToolResult {
 
     pub fn to_model_message(&self) -> crate::provider::ModelMessage {
         crate::provider::ModelMessage::tool(self.call_id.clone(), self.to_model_content())
+    }
+
+    /// RFC-0062 8: takes the harness-owned capture outcome for terminal settlement.
+    #[must_use]
+    pub fn take_capture_outcome(&mut self) -> Option<crate::ExecutionCaptureOutcome> {
+        self.capture_outcome.take()
+    }
+
+    /// RFC-0062 8: attaches harness-owned capture evidence returned by the execution backend.
+    pub fn with_capture_outcome(mut self, outcome: crate::ExecutionCaptureOutcome) -> Self {
+        self.capture_outcome = Some(outcome);
+        self
+    }
+
+    /// RFC-0062 9.7: attaches the already-materialized durable V3 projection (process capture).
+    pub fn with_durable_v3_projection(
+        mut self,
+        recorded: crate::ToolResultRecordedV3,
+        _display: crate::session::ToolDisplayViewV1,
+    ) -> Self {
+        self.durable_v3_projection = Some(Box::new(recorded));
+        self
+    }
+
+    #[must_use]
+    pub fn durable_v3_projection(&self) -> Option<&crate::ToolResultRecordedV3> {
+        self.durable_v3_projection.as_deref()
+    }
+
+    pub fn set_durable_v3_projection(
+        &mut self,
+        recorded: crate::ToolResultRecordedV3,
+        display: crate::session::ToolDisplayViewV1,
+    ) {
+        self.durable_v3_projection = Some(Box::new(recorded));
+        let _ = display;
+    }
+
+    /// RFC-0062 8: installs the outcome and lets the caller finalize the artifact from it.
+    pub fn attach_capture_outcome(&mut self, outcome: crate::ExecutionCaptureOutcome) {
+        self.capture_outcome = Some(outcome);
     }
 
     pub fn summary(&self) -> ToolResultSummary {

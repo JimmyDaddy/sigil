@@ -480,7 +480,7 @@ pub(crate) async fn docker_execute(
         DockerExecutionBackend::new(docker, String::new(), network_allowed).capabilities(),
         network,
         command,
-        &request,
+        request,
         docker_cleanup,
         cancellation,
     )

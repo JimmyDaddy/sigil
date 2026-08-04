@@ -279,7 +279,7 @@ fn check_changed_files_runs_real_code_diagnostics_and_audits_control_state() -> 
     assert!(
         !entries
             .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::ToolResultV2(_)))
+            .any(|entry| matches!(entry, SessionLogEntry::ToolResultV3(_)))
     );
 
     worker.shutdown()?;

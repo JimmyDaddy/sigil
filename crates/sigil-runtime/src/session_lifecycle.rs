@@ -1708,7 +1708,7 @@ fn project_records(records: &[SessionStreamRecord]) -> Result<SessionRecordProje
                 messages_by_id.insert(message.id.clone(), message.clone());
                 projection.messages.push(message);
             }
-            SessionLogEntry::ToolResultV2(result) => {
+            SessionLogEntry::ToolResultV3(result) => {
                 match &result.artifact {
                     ToolArtifactBindingV1::Published { descriptor } => {
                         projection.tool_artifacts.push(descriptor.clone());
@@ -1858,6 +1858,7 @@ fn validate_export_provenance(
                     tool_call_id: None,
                     assistant_kind: message.assistant_kind,
                     image_attachments: message.image_attachments.clone(),
+                    tool_result_payload: None,
                 },
             )
         })

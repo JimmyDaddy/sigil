@@ -6,7 +6,7 @@ use std::{
 use sigil_kernel::{
     ControlEntry, ExternalEvidenceLevel, ExternalProvenanceEntry, ModelMessage, SessionLogEntry,
     ToolArtifactAvailability, ToolArtifactBindingV1, ToolArtifactStore, ToolCall, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResultRecordedV2,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResultRecordedV3,
 };
 
 use super::super::formatting::truncate_session_view_text;
@@ -56,7 +56,7 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
         SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
             render_model_message_line(message)
         }
-        SessionLogEntry::ToolResultV2(result) => {
+        SessionLogEntry::ToolResultV3(result) => {
             format!("[tool] {}", render_tool_result_v2_content(result))
         }
         SessionLogEntry::Control(control) => render_control_entry_line(control),
@@ -65,6 +65,10 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
     match control {
+        ControlEntry::ToolArtifactAvailabilityChanged(change) => format!(
+            "[ctl] artifact {} {:?} -> {:?} (generation {})",
+            change.artifact_ref.artifact_id, change.previous, change.next, change.generation
+        ),
         ControlEntry::SessionIdentity {
             provider_name,
             model_name,
@@ -992,18 +996,18 @@ pub(super) fn restored_tool_result_call_ids(entries: &[SessionLogEntry]) -> Hash
     entries
         .iter()
         .filter_map(|entry| match entry {
-            SessionLogEntry::ToolResultV2(result) => Some(result.call_id.clone()),
+            SessionLogEntry::ToolResultV3(result) => Some(result.call_id.clone()),
             _ => None,
         })
         .collect()
 }
 
-pub(super) fn render_tool_result_v2_content(result: &ToolResultRecordedV2) -> String {
+pub(super) fn render_tool_result_v2_content(result: &ToolResultRecordedV3) -> String {
     render_tool_result_v2_content_with_store(result, None)
 }
 
 pub(super) fn render_tool_result_v2_content_with_store(
-    result: &ToolResultRecordedV2,
+    result: &ToolResultRecordedV3,
     store: Option<&ToolArtifactStore>,
 ) -> String {
     let display = result.display_view();

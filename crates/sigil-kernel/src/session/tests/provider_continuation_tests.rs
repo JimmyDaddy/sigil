@@ -452,7 +452,7 @@ fn tool_result_event(
     stream_sequence: u64,
     tool_call_id: &str,
 ) -> Result<StoredEvent> {
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(
             tool_call_id,
             "write_file",
@@ -463,11 +463,11 @@ fn tool_result_event(
         ToolArtifactSensitivity::Ordinary,
     )?;
     direct_event(
-        DurableEventType::ToolResultRecordedV2,
+        DurableEventType::ToolResultRecordedV3,
         event_id.to_owned(),
         stream_sequence,
         serde_json::json!({
-            "session_log_entry": SessionLogEntry::ToolResultV2(recorded),
+            "session_log_entry": SessionLogEntry::ToolResultV3(recorded),
         }),
         None,
         None,

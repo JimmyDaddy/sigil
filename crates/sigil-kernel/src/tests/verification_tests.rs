@@ -220,6 +220,7 @@ impl ExecutionBackend for FakeVerificationBackend {
                 stdout,
                 stderr,
                 timed_out,
+                capture: None,
             })
         })
     }
@@ -260,6 +261,7 @@ impl ExecutionBackend for FakeSandboxVerificationBackend {
                 stdout,
                 stderr,
                 timed_out: false,
+                capture: None,
             })
         })
     }

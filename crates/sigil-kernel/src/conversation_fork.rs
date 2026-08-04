@@ -10,7 +10,7 @@ use crate::{
     ControlEntry, ControlledCheckpointProjection, DurableEventType, EventClass,
     ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session, SessionLogEntry,
     SessionRef, SessionStreamRecord, StoredEvent, ToolArtifactBindingV1, ToolArtifactStore,
-    ToolResultRecordedV2, stable_event_hash, stable_event_uuid,
+    ToolResultRecordedV3, stable_event_hash, stable_event_uuid,
 };
 
 /// Stable, append-only binding for one finalized user turn that can be forked safely.
@@ -329,7 +329,7 @@ fn create_conversation_fork(
 
     for entry in &prefix.messages {
         match entry {
-            SessionLogEntry::ToolResultV2(result) => {
+            SessionLogEntry::ToolResultV3(result) => {
                 destination.append_tool_result_bundle(result.clone(), Vec::new())?;
             }
             _ => destination.append(entry.clone())?,
@@ -360,7 +360,7 @@ fn remap_forked_tool_artifacts(
     let source_artifacts = ToolArtifactStore::for_session_store(source_store);
     let destination_artifacts = ToolArtifactStore::for_session_path(destination_path);
     for entry in messages {
-        let SessionLogEntry::ToolResultV2(result) = entry else {
+        let SessionLogEntry::ToolResultV3(result) = entry else {
             continue;
         };
         let ToolArtifactBindingV1::Published { descriptor } = &result.artifact else {
@@ -374,7 +374,7 @@ fn remap_forked_tool_artifacts(
 }
 
 fn remap_tool_result_artifact(
-    result: &mut ToolResultRecordedV2,
+    result: &mut ToolResultRecordedV3,
     descriptor: ToolArtifactDescriptorV1,
 ) -> Result<()> {
     result.initial_model_view.artifact_ref = Some(descriptor.artifact_ref.clone());
@@ -426,9 +426,9 @@ fn safe_prefix_for_complete_turn(
                     message_ids.insert(message.id.clone());
                     messages.push(SessionLogEntry::Assistant(message));
                 }
-                SessionLogEntry::ToolResultV2(result) => {
+                SessionLogEntry::ToolResultV3(result) => {
                     message_ids.insert(result.message_id.clone());
-                    messages.push(SessionLogEntry::ToolResultV2(result));
+                    messages.push(SessionLogEntry::ToolResultV3(result));
                 }
                 SessionLogEntry::Control(ControlEntry::ExternalProvenance(entry)) => {
                     provenance.push(entry);

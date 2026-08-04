@@ -1050,7 +1050,7 @@ impl AgentSupervisorTaskChildRunner {
             || child_session.entries().iter().any(|entry| {
                 matches!(
                     entry,
-                    SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV2(_)
+                    SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV3(_)
                 ) || matches!(
                     entry,
                     SessionLogEntry::Control(

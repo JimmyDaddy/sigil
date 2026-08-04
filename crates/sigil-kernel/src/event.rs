@@ -167,6 +167,7 @@ macro_rules! durable_event_types {
 durable_event_types! {
     UserMessageRecorded => ("user_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
     AssistantMessageRecorded => ("assistant_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
+    ToolResultRecordedV3 => ("tool_result_recorded_v3", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
     RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
@@ -1043,7 +1044,7 @@ fn maybe_decode_control_entry(event: &StoredEvent) -> Result<Option<ControlEntry
         SessionLogEntry::Control(control) => Ok(Some(control)),
         SessionLogEntry::User(_)
         | SessionLogEntry::Assistant(_)
-        | SessionLogEntry::ToolResultV2(_) => Ok(None),
+        | SessionLogEntry::ToolResultV3(_) => Ok(None),
     }
 }
 
@@ -1219,6 +1220,7 @@ fn canonicalize_number(number: &serde_json::Number) -> Result<serde_json::Number
 
 /// Structured runtime events emitted by the agent loop for UI, logging, and orchestration.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // session control payloads are bounded at append
 pub enum RunEvent {
     TextDelta(String),
     ReasoningDelta(String),
@@ -1355,6 +1357,7 @@ pub struct PublicSessionRouteTransitionView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum PublicRunEventKind {
     RouteTransition {
         transition: PublicSessionRouteTransitionView,
@@ -1651,6 +1654,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolApprovalSessionGrant(_) => "tool_approval_session_grant",
         ControlEntry::ToolExecution(_) => "tool_execution",
         ControlEntry::ToolArtifactRead(_) => "tool_artifact_read",
+        ControlEntry::ToolArtifactAvailabilityChanged(_) => "tool_artifact_availability_changed",
         ControlEntry::ToolEgress(_) => "tool_egress",
         ControlEntry::McpElicitation(_) => "mcp_elicitation",
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",

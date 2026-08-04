@@ -2,6 +2,36 @@
 
 状态：proposed / design complete / implementation deferred
 
+### 2026-08-04 partial implementation status
+
+R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 RFC **尚未满足全部 acceptance criteria**，
+因此状态保持 `proposed / design complete / implementation deferred`，不得写成 implemented：
+
+- R62.0 完成：bounded error summary（1 KiB）、capture 失败 terminal fallback、`unavailable => has_more`
+  推导移除（Prompt 1）、root-run cumulative preview 失败测试翻转、并行结算改为 declaration-order batch。
+- R62.1 完成：`ToolResultRecordedV3` clean cutover（新执行只写 V3；含 V2 tool-result 的 session 在
+  decode 时以 bounded `UnsupportedSessionSchema` 拒绝，文件不改写、不迁移、无 alias/default）。
+- R62.2 完成：harness-owned 双 staging spool（spawn 前创建 plan+sink、stdout/stderr 独立 staging、
+  canonical stdout-then-stderr 双 segment、observed 128 MiB 与 preview/artifact 分离、drain-to-EOF、
+  合并后跨 chunk redaction）；`attach_bounded_shell_artifact` 删除；10 MiB bash 输出完整捕获验收通过。
+- R62.3 完成：root-run cumulative preview counter 删除；per-assistant-batch 两阶段 allocator
+  （512 B floor、64 KiB batch cap、128 results、declaration order）接入 agent 主循环。
+- R62.4 完成（kernel/provider 侧）：`ProviderToolResultMessageV1` + `ModelMessagePayloadV1` typed
+  payload；Anthropic `is_error` 只读 typed outcome（含 contradicting-JSON fixture）；Gemini
+  GenerateContent 同批 function responses 合并为单一 user Content；OpenAI/DeepSeek exact call_id
+  验证；MCP stdio `isError` → 结构化 tool error（保留 actionable content）。
+- R62.5 部分：`ToolArtifactAvailabilityChangedV1` 已接入 ControlEntry（generation guard、状态机、
+  durable append、TUI audit 渲染）；**GC durable-disable-before-delete 与 active-reader lease 集成、
+  scratch quota/TTL、availability projection reducer 尚未落地**。
+- R62.6 部分：TUI/HTTP/Desktop 已随 V3 cutover 消费同一 typed descriptor；**共享 DTO 的
+  completeness/truncation reason 显式字段与 OpenAPI 同步尚未落地**。
+- R62.7 部分：V2 rejection、10 MiB 完整捕获、Anthropic/Gemini fixtures、availability 状态机、
+  per-batch 预算、128-result floor 测试已过；**PTY ordering、dual-stream cap 确定性、secret 跨 chunk
+  e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、paid provider smoke 未执行**。
+- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5400 passed）、
+  `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
+  `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
+
 创建日期：2026-08-03
 
 依赖：

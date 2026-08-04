@@ -24,6 +24,7 @@ pub fn build_generate_content_request(
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     let mut tool_names_by_id = BTreeMap::new();
+    let mut pending_function_responses: Vec<Value> = Vec::new();
     let thought_signatures = index_thought_signatures(request);
 
     for message in &request.messages {
@@ -33,8 +34,12 @@ pub fn build_generate_content_request(
                     system_parts.push(json!({"text": content}));
                 }
             }
-            MessageRole::User => contents.push(user_message_to_content(message)?),
+            MessageRole::User => {
+                flush_function_responses(&mut contents, &mut pending_function_responses);
+                contents.push(user_message_to_content(message)?);
+            }
             MessageRole::Assistant => {
+                flush_function_responses(&mut contents, &mut pending_function_responses);
                 contents.push(assistant_message_to_content(
                     message,
                     &mut tool_names_by_id,
@@ -42,10 +47,12 @@ pub fn build_generate_content_request(
                 )?);
             }
             MessageRole::Tool => {
-                contents.push(tool_result_message_to_content(message, &tool_names_by_id)?);
+                pending_function_responses
+                    .push(tool_result_function_response(message, &tool_names_by_id)?);
             }
         }
     }
+    flush_function_responses(&mut contents, &mut pending_function_responses);
 
     Ok(GeminiGenerateContentRequest {
         contents,
@@ -143,7 +150,7 @@ fn function_call_part(call: &ToolCall, thought_signature: Option<&str>) -> Resul
     Ok(part)
 }
 
-fn tool_result_message_to_content(
+fn tool_result_function_response(
     message: &ModelMessage,
     tool_names_by_id: &BTreeMap<String, String>,
 ) -> Result<Value> {
@@ -156,17 +163,26 @@ fn tool_result_message_to_content(
         anyhow!("Gemini tool result has no matching tool call for {tool_call_id}")
     })?;
     Ok(json!({
-        "role": "user",
-        "parts": [{
-            "functionResponse": {
-                "id": tool_call_id,
-                "name": tool_name,
-                "response": {
-                    "result": parse_tool_result_content(message.content.as_deref().unwrap_or_default()),
-                },
+        "functionResponse": {
+            "id": tool_call_id,
+            "name": tool_name,
+            "response": {
+                "result": parse_tool_result_content(message.content.as_deref().unwrap_or_default()),
             },
-        }],
+        },
     }))
+}
+
+/// RFC-0062 12.2: parallel function responses of one assistant turn are merged into a single
+/// user Content in assistant declaration order; identity/call ID stays the wire association.
+fn flush_function_responses(contents: &mut Vec<Value>, pending: &mut Vec<Value>) {
+    if pending.is_empty() {
+        return;
+    }
+    contents.push(json!({
+        "role": "user",
+        "parts": std::mem::take(pending),
+    }));
 }
 
 fn gemini_tools(request: &CompletionRequest) -> Result<Option<Vec<Value>>> {

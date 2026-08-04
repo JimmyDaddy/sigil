@@ -270,3 +270,45 @@ fn build_generate_content_request_allows_gemini_three_hosted_search_and_function
     assert_eq!(serialized["tools"][1], json!({"google_search": {}}));
     Ok(())
 }
+
+#[test]
+fn build_generate_content_request_merges_parallel_function_responses_into_one_user_content()
+-> anyhow::Result<()> {
+    // RFC-0062 12.2: parallel function responses of one assistant turn land in a single user
+    // Content, associated by identity/call ID in assistant declaration order.
+    let assistant = ModelMessage::assistant(
+        None,
+        vec![
+            ToolCall {
+                id: "call-1".to_owned(),
+                name: "grep".to_owned(),
+                args_json: r#"{"pattern":"foo"}"#.to_owned(),
+            },
+            ToolCall {
+                id: "call-2".to_owned(),
+                name: "ls".to_owned(),
+                args_json: r#"{"path":"."}"#.to_owned(),
+            },
+        ],
+    );
+    let request = completion_request(vec![
+        ModelMessage::user("search"),
+        assistant,
+        ModelMessage::tool("call-1", r#"{"status":"ok"}"#),
+        ModelMessage::tool("call-2", r#"{"status":"ok"}"#),
+    ]);
+    let body = build_generate_content_request(&request)?;
+    let serialized = serde_json::to_value(&body)?;
+    let contents = serialized["contents"].as_array().expect("contents array");
+    let last = contents.last().expect("merged user content");
+    assert_eq!(last["role"], "user");
+    let parts = last["parts"].as_array().expect("parts array");
+    assert_eq!(
+        parts.len(),
+        2,
+        "parallel responses must merge into one user content"
+    );
+    assert_eq!(parts[0]["functionResponse"]["id"], "call-1");
+    assert_eq!(parts[1]["functionResponse"]["id"], "call-2");
+    Ok(())
+}

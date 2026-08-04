@@ -352,7 +352,7 @@ impl ToolOutputPressureProjectionV1 {
                             self.open_tool_calls.insert(call_id);
                         }
                     }
-                    SessionLogEntry::ToolResultV2(result) => {
+                    SessionLogEntry::ToolResultV3(result) => {
                         self.trim_aged_items_to_soft_limit(
                             TOOL_OUTPUT_PRESSURE_MAX_RESULTS.saturating_sub(1),
                         )?;
@@ -820,7 +820,7 @@ fn pressure_item(
     stream_sequence: u64,
     turn_index: u64,
     pair_closed: bool,
-    result: super::ToolResultRecordedV2,
+    result: super::ToolResultRecordedV3,
 ) -> ToolOutputPressureItemV1 {
     let preview_excerpt = bounded_pressure_excerpt(&result.initial_model_view.preview);
     let (artifact_ref, artifact_sha256, availability, complete, observed_bytes, persisted_bytes) =

@@ -503,7 +503,7 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             Some(
                 DurableEventType::UserMessageRecorded
                 | DurableEventType::AssistantMessageRecorded
-                | DurableEventType::ToolResultRecordedV2
+                | DurableEventType::ToolResultRecordedV3
                 | DurableEventType::ToolOutputProjectionShrinkRecorded
                 | DurableEventType::ToolOutputAgingActivated,
             ) => {

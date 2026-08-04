@@ -29,7 +29,7 @@ use crate::{
     TaskStepStatus, TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus, ToolApprovalAuditAction, ToolApprovalEntry, ToolArtifactSensitivity,
     ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
-    ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultRecordedV2,
+    ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultRecordedV3,
     ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
     VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
     VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationPolicy,
@@ -46,12 +46,12 @@ use super::{
 };
 
 fn test_tool_result_v2(call_id: &str, tool_name: &str, content: &str) -> Result<SessionLogEntry> {
-    let (recorded, _) = ToolResultRecordedV2::capture(
+    let (recorded, _) = ToolResultRecordedV3::capture(
         &ToolResult::ok(call_id, tool_name, content, ToolResultMeta::default()),
         None,
         ToolArtifactSensitivity::Ordinary,
     )?;
-    Ok(SessionLogEntry::ToolResultV2(recorded))
+    Ok(SessionLogEntry::ToolResultV3(recorded))
 }
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
@@ -738,7 +738,7 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
     );
     assert_eq!(
         super::session_entry_event_type(&tool),
-        DurableEventType::ToolResultRecordedV2
+        DurableEventType::ToolResultRecordedV3
     );
     assert_eq!(
         super::session_entry_event_type(&test_tool_approval(ToolApprovalAuditAction::Resolved)),
@@ -937,7 +937,7 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
         ),
         (
             test_tool_result_v2("call-1", "read_file", "ok")?,
-            DurableEventType::ToolResultRecordedV2,
+            DurableEventType::ToolResultRecordedV3,
         ),
         (
             test_tool_approval(ToolApprovalAuditAction::Requested),

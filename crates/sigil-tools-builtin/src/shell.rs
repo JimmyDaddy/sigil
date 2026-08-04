@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -12,11 +11,11 @@ use sigil_kernel::{
     EnvironmentContainment, ExecutionBackend, ExecutionCleanupStatus, ExecutionContainmentRequest,
     ExecutionOutputReceipt, ExecutionReceipt, ExecutionRequest, ExecutionStreamCapture,
     ExecutionTerminationCause, FilesystemContainment, NetworkContainment, ProcessContainment, Tool,
-    ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode, ToolAnalysisStatus,
-    ToolArtifactEncoding, ToolArtifactSensitivity, ToolCategory, ToolContext, ToolErrorKind,
-    ToolExecutionId, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
-    ToolPermissionSummary, ToolPreviewCapability, ToolProgressEvent, ToolResult, ToolResultMeta,
-    ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope, safe_persistence_text,
+    ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode, ToolAnalysisStatus, ToolCategory,
+    ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation, ToolPermissionEffect,
+    ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreviewCapability, ToolProgressEvent,
+    ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope,
+    safe_persistence_text,
 };
 use tree_sitter::{Node, Parser};
 
@@ -191,6 +190,40 @@ impl Tool for BashTool {
             );
             (request, Some(analysis))
         };
+        // RFC-0062 8.1: create the harness-owned capture plan and staging sink BEFORE spawn so
+        // stdout/stderr chunks are tee'd as they arrive instead of being reconstructed from the
+        // bounded post-execution content.
+        let mut request = request;
+        let capture_plan = ctx.tool_artifact_store().map(|store| {
+            sigil_kernel::ToolExecutionCapturePlanV1::process_defaults(
+                store.session_scope_id_hash().to_owned(),
+                &call_id,
+                "bash",
+            )
+        });
+        if let Some(plan) = capture_plan.as_ref()
+            && let Some(sink) = ctx.create_policy_safe_tool_output_sink(
+                &call_id,
+                "bash",
+                "text/plain; charset=utf-8",
+                sigil_kernel::ToolArtifactEncoding::Utf8,
+                sigil_kernel::ToolArtifactSensitivity::Ordinary,
+            )
+        {
+            let config = plan.process_capture_config();
+            match sink.begin_process_capture(config) {
+                Ok(staged) => {
+                    request.capture = Some(sigil_kernel::ExecutionCaptureHandle {
+                        sink: staged,
+                        config,
+                    });
+                }
+                Err(_error) => {
+                    // Continue without spool; the result still settles through the bounded
+                    // inline adapter when no harness capture is available.
+                }
+            }
+        }
         let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         tokio::fs::create_dir_all(&scratch_root)
             .await
@@ -225,7 +258,7 @@ impl Tool for BashTool {
             cancellation.mark_cleanup_incomplete();
         }
         let observed_bytes = receipt.effective_output().combined_total_bytes;
-        let result = if let Some(analysis) = fallback_analysis.as_ref() {
+        let mut result = if let Some(analysis) = fallback_analysis.as_ref() {
             bash_tool_result_from_execution_receipt_with_analysis(
                 call_id,
                 self.spec().name,
@@ -243,7 +276,42 @@ impl Tool for BashTool {
                     .context("prepared permission plan disappeared before receipt projection")?,
             )?
         };
-        Ok(attach_bounded_shell_artifact(&ctx, result, observed_bytes))
+        let capture_outcome = result.take_capture_outcome();
+        if let Some(outcome) = capture_outcome {
+            // RFC-0062 9.2/9.3: settle the harness-owned capture into the canonical dual-segment
+            // artifact. The observed resource meter comes from the backend, not the bounded text.
+            match outcome.sink.finish_process_capture(
+                outcome.observed_bytes,
+                u32::from(result.content != safe_persistence_text(&result.content)),
+                outcome.source,
+            ) {
+                Ok((descriptor, segments, completeness)) => {
+                    if let Some(plan) = capture_plan.as_ref() {
+                        match sigil_kernel::ToolResultRecordedV3::from_process_capture(
+                            &result,
+                            descriptor,
+                            plan,
+                            segments,
+                            completeness,
+                            sigil_kernel::tool_model_view_initial_limit("bash"),
+                        ) {
+                            Ok((recorded, display)) => {
+                                result.set_durable_v3_projection(recorded, display);
+                            }
+                            Err(_error) => {
+                                result = result.with_unavailable_artifact_capture(observed_bytes);
+                            }
+                        }
+                    } else {
+                        result = result.with_unavailable_artifact_capture(observed_bytes);
+                    }
+                }
+                Err(_error) => {
+                    result = result.with_unavailable_artifact_capture(observed_bytes);
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -512,38 +580,6 @@ fn package_manager_finite_script(args: &[String]) -> Option<&str> {
         "build" | "check" | "ci" | "fmt" | "format" | "lint" | "test" | "typecheck" | "type-check"
     )
     .then_some(script)
-}
-
-fn attach_bounded_shell_artifact(
-    ctx: &ToolContext,
-    mut result: ToolResult,
-    observed_bytes: u64,
-) -> ToolResult {
-    let Some(mut sink) = ctx.create_policy_safe_tool_output_sink(
-        &result.call_id,
-        &result.tool_name,
-        "text/plain; charset=utf-8",
-        ToolArtifactEncoding::Utf8,
-        ToolArtifactSensitivity::Ordinary,
-    ) else {
-        return result;
-    };
-    let policy_safe_content = safe_persistence_text(&result.content);
-    let redaction_count = u32::from(policy_safe_content != result.content);
-    let observed_bytes = observed_bytes.max(result.content.len() as u64);
-    let publication = sink
-        .write_all(policy_safe_content.as_bytes())
-        .map_err(anyhow::Error::from)
-        .and_then(|()| {
-            sink.finish_with_projection_evidence(observed_bytes, observed_bytes, redaction_count)
-        });
-    match publication {
-        Ok(descriptor) => result.with_captured_artifact(descriptor),
-        Err(_) => {
-            result = result.with_unavailable_artifact_capture(observed_bytes);
-            result
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2450,6 +2486,7 @@ fn bash_execution_request_from_containment(
         cpu_time_ms: None,
         memory_limit_bytes: None,
         process_count_limit: None,
+        capture: None,
     }
 }
 
@@ -2557,9 +2594,10 @@ enum ShellReceiptContext<'a> {
 fn bash_tool_result_from_execution_receipt_inner(
     call_id: String,
     tool_name: String,
-    receipt: ExecutionReceipt,
+    mut receipt: ExecutionReceipt,
     shell_context: Option<ShellReceiptContext<'_>>,
 ) -> Result<ToolResult> {
+    let capture_outcome = receipt.capture.take();
     let output = receipt.effective_output();
     let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
     let limited_stdout = captured_stream_text(&receipt.stdout, &output.stdout, limit_bytes);
@@ -2621,23 +2659,38 @@ fn bash_tool_result_from_execution_receipt_inner(
             result.content = content;
         }
         result.metadata = metadata;
+        if let Some(outcome) = capture_outcome {
+            result.attach_capture_outcome(outcome);
+        }
         return Ok(result);
     }
     if receipt.exit_code == Some(0) {
-        Ok(ToolResult::ok(call_id, tool_name, content, metadata))
+        let mut result = ToolResult::ok(call_id, tool_name, content, metadata);
+        if let Some(outcome) = capture_outcome {
+            result.attach_capture_outcome(outcome);
+        }
+        Ok(result)
     } else {
-        let mut result = ToolResult::error(
-            call_id,
-            tool_name,
-            ToolErrorKind::ExitStatus,
-            if content.is_empty() {
-                "bash command exited with non-zero status".to_owned()
-            } else {
-                content.clone()
-            },
+        let summary_end = floor_char_boundary(
+            &content,
+            sigil_kernel::TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES.min(content.len()),
         );
+        let summary = &content[..summary_end];
+        let message = if summary_end < content.len() {
+            format!(
+                "bash command exited with non-zero status; full output is available in the tool artifact ({summary})"
+            )
+        } else if summary.is_empty() {
+            "bash command exited with non-zero status".to_owned()
+        } else {
+            summary.to_owned()
+        };
+        let mut result = ToolResult::error(call_id, tool_name, ToolErrorKind::ExitStatus, message);
         result.content = content;
         result.metadata = metadata;
+        if let Some(outcome) = capture_outcome {
+            result.attach_capture_outcome(outcome);
+        }
         Ok(result)
     }
 }
