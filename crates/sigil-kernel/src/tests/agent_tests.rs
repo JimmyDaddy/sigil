@@ -10324,3 +10324,48 @@ async fn agent_wraps_execute_errors_as_internal_tool_results() -> Result<()> {
     }));
     Ok(())
 }
+
+#[test]
+fn assistant_batch_settlement_keeps_provider_previews_within_budget() -> Result<()> {
+    // RFC-0062 11.2 integration: four parallel 32 KiB results settle through the batch
+    // allocator; the durable V3 records' provider-visible previews must total <= 64 KiB, every
+    // result keeps its deterministic minimum preview, and the declaration order is preserved.
+    let mut session = Session::new("test", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut outcome = AgentRunOutcome::default();
+    let batch = (0..4)
+        .map(|index| {
+            let call = crate::ToolCall {
+                id: format!("call-{index}"),
+                name: "shell".to_owned(),
+                args_json: "{}".to_owned(),
+            };
+            let result = ToolResult::ok(
+                format!("call-{index}"),
+                "shell",
+                "x".repeat(32 * 1024),
+                ToolResultMeta::default(),
+            );
+            (call, result)
+        })
+        .collect::<Vec<_>>();
+    crate::agent::tool_results::emit_tool_result_batch(
+        &mut session,
+        &mut handler,
+        &mut outcome,
+        batch,
+    )?;
+
+    let mut preview_total = 0usize;
+    let mut order = Vec::new();
+    for entry in session.entries() {
+        if let SessionLogEntry::ToolResultV3(result) = entry {
+            preview_total = preview_total.saturating_add(result.initial_model_view.preview.len());
+            order.push(result.call_id.clone());
+            assert!(result.initial_model_view.preview.len() >= 512);
+        }
+    }
+    assert!(preview_total <= 64 * 1024);
+    assert_eq!(order, vec!["call-0", "call-1", "call-2", "call-3"]);
+    Ok(())
+}

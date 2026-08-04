@@ -917,8 +917,28 @@ impl LocalSessionLifecycleService {
             now_unix_ms,
             sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
         )?;
+        // RFC-0062 9.4 interrupted-state recovery: read the current (generation, state) instead
+        // of hard-coding Available -> DisabledPendingDelete. Already-disabled artifacts resume
+        // straight to deletion; terminal states are skipped entirely; the disable batch is
+        // appended atomically so a partial failure cannot leave a half-disabled set.
+        let mut pending_disable = Vec::new();
+        let mut generation_of = std::collections::BTreeMap::new();
         for artifact_ref in &disabled {
             let generation = session.artifact_availability_generation(artifact_ref);
+            let state = session.artifact_availability_state(artifact_ref);
+            match state {
+                sigil_kernel::ToolArtifactAvailabilityStateV1::Available => {
+                    generation_of.insert(artifact_ref.clone(), generation);
+                    pending_disable.push(artifact_ref.clone());
+                }
+                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete => {
+                    generation_of.insert(artifact_ref.clone(), generation);
+                }
+                _ => {}
+            }
+        }
+        for artifact_ref in &pending_disable {
+            let generation = generation_of.get(artifact_ref).copied().unwrap_or(0);
             session.append_artifact_availability_transition(
                 artifact_ref,
                 generation,
@@ -935,14 +955,17 @@ impl LocalSessionLifecycleService {
         )?;
         for artifact_ref in &report.tombstoned_refs {
             let generation = session.artifact_availability_generation(artifact_ref);
-            session.append_artifact_availability_transition(
-                artifact_ref,
-                generation,
-                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
-                sigil_kernel::ToolArtifactAvailabilityStateV1::Expired,
-                sigil_kernel::ToolArtifactAvailabilityReasonV1::GcExpired,
-                now_unix_ms,
-            )?;
+            let state = session.artifact_availability_state(artifact_ref);
+            if state == sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete {
+                session.append_artifact_availability_transition(
+                    artifact_ref,
+                    generation,
+                    sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                    sigil_kernel::ToolArtifactAvailabilityStateV1::Expired,
+                    sigil_kernel::ToolArtifactAvailabilityReasonV1::GcExpired,
+                    now_unix_ms,
+                )?;
+            }
         }
         let operation_id = format!("session-artifact-gc:{}", uuid::Uuid::new_v4());
         self.lifecycle_journal().append(

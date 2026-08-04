@@ -1679,3 +1679,102 @@ fn process_capture_redacts_secrets_that_span_chunk_boundaries() -> Result<()> {
     assert_eq!(completeness.policy, ToolPolicyCompletenessV1::Redacted);
     Ok(())
 }
+
+#[test]
+fn process_capture_settles_reservations_and_keeps_segment_boundaries_true() -> Result<()> {
+    // RFC-0062 9.2/18: stdout 10 MiB + stderr 10 MiB with 8 MiB/8 MiB reservations must settle
+    // to a 16 MiB canonical body (8 + 8), and the stderr segment must start exactly where the
+    // stdout segment ends — never at a guessed offset.
+    let (_temp, store) = store_fixture()?;
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: 16 * 1024 * 1024,
+        artifact_reservation_stdout_bytes: 8 * 1024 * 1024,
+        artifact_reservation_stderr_bytes: 8 * 1024 * 1024,
+        artifact_staging_limit_bytes_per_stream: 16 * 1024 * 1024,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = store.begin_policy_safe_capture(
+        "call-dual-cap",
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    sink.write_stream(ToolOutputStreamV1::Stdout, &vec![b'a'; 10 * 1024 * 1024])?;
+    sink.write_stream(ToolOutputStreamV1::Stderr, &vec![b'b'; 10 * 1024 * 1024])?;
+    let (descriptor, segments, completeness) =
+        sink.finish_process_capture(20 * 1024 * 1024, 0, ToolSourceCompletenessV1::Complete)?;
+    assert_eq!(descriptor.persisted_bytes, 16 * 1024 * 1024);
+    assert_eq!(descriptor.observed_bytes, 20 * 1024 * 1024);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].persisted_bytes, 8 * 1024 * 1024);
+    assert_eq!(segments[0].artifact_offset, 0);
+    assert_eq!(segments[1].persisted_bytes, 8 * 1024 * 1024);
+    assert_eq!(segments[1].artifact_offset, 8 * 1024 * 1024);
+    assert_eq!(segments[0].eligible_bytes, 10 * 1024 * 1024);
+    assert_eq!(segments[1].eligible_bytes, 10 * 1024 * 1024);
+    assert_eq!(
+        completeness.storage,
+        ToolStorageCompletenessV1::TruncatedAtLimit
+    );
+    let body = store.read_all(&descriptor)?;
+    assert_eq!(body.len(), 16 * 1024 * 1024);
+    assert!(body[..8 * 1024 * 1024].iter().all(|b| *b == b'a'));
+    assert!(body[8 * 1024 * 1024..].iter().all(|b| *b == b'b'));
+    // Staging files must not survive finalize.
+    let staging = store.root().join("staging");
+    assert!(!staging.exists() || std::fs::read_dir(&staging)?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn process_capture_segment_boundaries_survive_variable_length_redaction() -> Result<()> {
+    // RFC-0062 9.2: redaction shortens the stdout stream; the stderr segment must still start
+    // exactly after the redacted stdout bytes, never at the pre-redaction offset.
+    let (_temp, store) = store_fixture()?;
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: 1024 * 1024,
+        artifact_reservation_stdout_bytes: 512 * 1024,
+        artifact_reservation_stderr_bytes: 512 * 1024,
+        artifact_staging_limit_bytes_per_stream: 1024 * 1024,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = store.begin_policy_safe_capture(
+        "call-redact-segment",
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    let stdout = format!("head {} tail", "token=SECRET-12345 ".repeat(10_000));
+    sink.write_stream(ToolOutputStreamV1::Stdout, stdout.as_bytes())?;
+    sink.write_stream(ToolOutputStreamV1::Stderr, b"stderr line")?;
+    let (descriptor, segments, _) = sink.finish_process_capture(
+        (stdout.len() + 11) as u64,
+        0,
+        ToolSourceCompletenessV1::Complete,
+    )?;
+    let body = store.read_all(&descriptor)?;
+    let body_text = String::from_utf8_lossy(&body);
+    assert!(!body_text.contains("SECRET-12345"));
+    assert_eq!(segments[0].artifact_offset, 0);
+    assert_eq!(
+        segments[1].artifact_offset, segments[0].persisted_bytes,
+        "stderr must start exactly after the redacted stdout bytes"
+    );
+    assert!(
+        body_text[segments[1].artifact_offset as usize..].starts_with("stderr line"),
+        "stderr segment must contain only stderr bytes"
+    );
+    assert_eq!(
+        segments[1].persisted_bytes as usize + segments[0].persisted_bytes as usize,
+        body.len()
+    );
+    Ok(())
+}

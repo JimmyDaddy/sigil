@@ -1316,7 +1316,11 @@ impl ToolResultRecordedV3 {
     /// RFC-0062 11.2: re-projects the initial model preview against a batch-allocated limit and
     /// recomputes the canonical hash. Used when a pre-settled process capture projection must
     /// honor a smaller per-result preview budget than the tool's own cap.
-    pub fn reproject_preview(&mut self, model_preview_limit: usize) -> Result<()> {
+    pub fn reproject_preview(
+        &mut self,
+        model_preview_limit: usize,
+        truncation_reason: ToolPreviewTruncationReasonV1,
+    ) -> Result<()> {
         let model_preview_limit =
             model_preview_limit.min(tool_model_view_initial_limit(&self.tool_name));
         let safe_content = safe_persistence_text(self.initial_model_view.preview.as_str());
@@ -1326,8 +1330,8 @@ impl ToolResultRecordedV3 {
         self.initial_model_view.token_upper_bound =
             self.initial_model_view.preview.len().div_ceil(4) as u64;
         self.preview_actual_bytes = self.initial_model_view.preview.len() as u32;
-        self.preview_truncation_reason = (preview_kind == ToolPreviewKind::HeadTail)
-            .then_some(ToolPreviewTruncationReasonV1::InitialCap);
+        self.preview_truncation_reason =
+            (preview_kind == ToolPreviewKind::HeadTail).then_some(truncation_reason);
         self.initial_model_view_sha256 = stable_event_hash(self.model_content()?.as_bytes());
         self.validate()
     }
@@ -3589,6 +3593,23 @@ impl std::fmt::Debug for ToolArtifactCaptureSink {
     }
 }
 
+impl Drop for ToolArtifactCaptureSink {
+    fn drop(&mut self) {
+        // RFC-0062 16.2: staging files must never survive, including when the sink is dropped
+        // without finalize (cancelled execution, supervisor error, mutex poison, partial
+        // staging creation). Files may contain policy-unredacted raw output, so removal is
+        // mandatory and best-effort.
+        if let Some(state) = self.process.as_ref() {
+            for path in [&state.stdout_staging_path, &state.stderr_staging_path]
+                .into_iter()
+                .flatten()
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 impl Clone for ToolArtifactCaptureSink {
     fn clone(&self) -> Self {
         let process = self.process.as_ref().map(|state| ProcessCaptureState {
@@ -3637,7 +3658,8 @@ impl PartialEq for ToolArtifactCaptureSink {
     }
 }
 
-/// RFC-0062 16.2: RAII removal of process staging files on every finish path (success or error).
+/// RFC-0062 16.2: RAII removal of process staging files on every finalize path (success or
+/// error); the sink Drop covers sinks that never reach finalize.
 struct StagingCleanupGuard {
     paths: Vec<std::path::PathBuf>,
 }
@@ -3756,6 +3778,8 @@ impl ToolArtifactCaptureSink {
         let Some(mut state) = self.process.take() else {
             bail!("finish_process_capture requires process capture mode");
         };
+        // Remove staging files on every path out of this function, including success. The sink
+        // Drop is the safety net for sinks that never reach finalize.
         let _staging_cleanup = StagingCleanupGuard::new(
             state.stdout_staging_path.take(),
             state.stderr_staging_path.take(),
@@ -3772,8 +3796,23 @@ impl ToolArtifactCaptureSink {
             file.seek(SeekFrom::Start(0))?;
             file.read_to_end(&mut stderr_bytes)?;
         }
-        // RFC-0062 9.2: settlement applies the reservation-reclaim algorithm against the
-        // per-stream staged bytes so the canonical body never exceeds the combined cap.
+        // RFC-0062 10.2/9.2: redact EACH stream first so policy-eligible sizes are exact; then
+        // apply the reservation-reclaim settlement on the redacted (eligible) bytes so segments
+        // and the canonical body always describe the true persisted layout. A secret split
+        // across chunks within one stream is still caught because the stream is redacted as a
+        // whole; cross-stream secret splitting is not a supported persistence boundary.
+        let redaction_count = if self.encoding == ToolArtifactEncoding::Utf8 {
+            let stdout_redacted = safe_persistence_text(&String::from_utf8_lossy(&stdout_bytes));
+            let stderr_redacted = safe_persistence_text(&String::from_utf8_lossy(&stderr_bytes));
+            let stdout_changed = stdout_redacted.as_bytes() != stdout_bytes.as_slice();
+            let stderr_changed = stderr_redacted.as_bytes() != stderr_bytes.as_slice();
+            stdout_bytes = stdout_redacted.into_bytes();
+            stderr_bytes = stderr_redacted.into_bytes();
+            redaction_count.saturating_add(u32::from(stdout_changed || stderr_changed))
+        } else {
+            redaction_count
+        };
+        // RFC-0062 9.2: reservation-reclaim settlement against policy-eligible bytes.
         let stdout_reservation = state.config.artifact_reservation_stdout_bytes;
         let stderr_reservation = state.config.artifact_reservation_stderr_bytes;
         let stdout_eligible = state.stdout_bytes.min(stdout_bytes.len() as u64);
@@ -3790,31 +3829,11 @@ impl ToolArtifactCaptureSink {
         let stderr_truncated = state.stderr_truncated || stderr_persisted < state.stderr_bytes;
         stdout_bytes.truncate(stdout_persisted as usize);
         stderr_bytes.truncate(stderr_persisted as usize);
-        let stdout_len = stdout_bytes.len() as u64;
-        let stderr_len = stderr_bytes.len() as u64;
+        let stdout_final_len = stdout_bytes.len() as u64;
+        let stderr_final_len = stderr_bytes.len() as u64;
         let policy_projected_bytes = state.stdout_bytes.saturating_add(state.stderr_bytes);
         let mut bytes = stdout_bytes;
         bytes.extend_from_slice(&stderr_bytes);
-        // RFC-0062 10.2: policy redaction runs on the canonical merged bytes so patterns that
-        // span chunk boundaries are still detected deterministically. Binary content is left
-        // byte-identical; only UTF-8 text passes through the persistence text policy.
-        let redacted = if self.encoding == ToolArtifactEncoding::Utf8 {
-            let text = String::from_utf8_lossy(&bytes);
-            let safe = safe_persistence_text(&text);
-            (safe != text).then(|| safe.into_bytes())
-        } else {
-            None
-        };
-        let redaction_count = redaction_count.saturating_add(u32::from(redacted.is_some()));
-        let bytes = match redacted {
-            Some(redacted) => redacted,
-            None => bytes,
-        };
-        // Segments are derived from the FINAL persisted layout so offsets stay valid even when
-        // reservation settlement or redaction changed the byte lengths.
-        let bytes_len = bytes.len() as u64;
-        let stdout_final_len = stdout_len.min(bytes_len);
-        let stderr_final_len = stderr_len.min(bytes_len.saturating_sub(stdout_final_len));
         let descriptor = self.store.publish_descriptor(
             &self.tool_call_id,
             &self.tool_name,
@@ -3850,7 +3869,7 @@ impl ToolArtifactCaptureSink {
                 stream: ToolOutputStreamV1::Stdout,
                 artifact_offset: 0,
                 persisted_bytes: stdout_final_len,
-                eligible_bytes: stdout_persisted,
+                eligible_bytes: stdout_eligible,
                 observed_bytes: state.stdout_bytes,
                 preview_bytes: 0,
                 preview_truncated: false,
@@ -3860,7 +3879,7 @@ impl ToolArtifactCaptureSink {
                 stream: ToolOutputStreamV1::Stderr,
                 artifact_offset: stdout_final_len,
                 persisted_bytes: stderr_final_len,
-                eligible_bytes: stderr_persisted,
+                eligible_bytes: stderr_eligible,
                 observed_bytes: state.stderr_bytes,
                 preview_bytes: 0,
                 preview_truncated: false,
@@ -3919,7 +3938,7 @@ impl ToolArtifactCaptureSink {
     /// collector. Supplying it preserves truthful storage-truncation evidence even when this sink
     /// only receives that collector's retained head/tail bytes.
     pub fn finish_with_projection_evidence(
-        self,
+        mut self,
         source_observed_bytes: u64,
         policy_projected_bytes: u64,
         redaction_count: u32,
@@ -3929,8 +3948,8 @@ impl ToolArtifactCaptureSink {
         if policy_projected_bytes < self.observed_bytes {
             bail!("policy-projected artifact bytes cannot be smaller than captured bytes");
         }
-        let mut bytes = self.head;
-        bytes.extend(self.tail);
+        let mut bytes = std::mem::take(&mut self.head);
+        bytes.extend(std::mem::take(&mut self.tail));
         self.store.publish_descriptor(
             &self.tool_call_id,
             &self.tool_name,

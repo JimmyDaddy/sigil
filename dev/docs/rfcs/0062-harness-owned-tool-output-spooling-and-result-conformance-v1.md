@@ -13,9 +13,9 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   decode 时以 bounded `UnsupportedSessionSchema` 拒绝，文件不改写、不迁移、无 alias/default）。
 - R62.2 完成：harness-owned 双 staging spool（spawn 前创建 plan+sink、stdout/stderr 独立 staging、
   canonical stdout-then-stderr 双 segment、observed 128 MiB 与 preview/artifact 分离、drain-to-EOF、
-  合并后跨 chunk redaction、staging RAII unlink、write 失败标记 storage Unavailable、finalize 时
-  执行 8 MiB/8 MiB reservation-reclaim 结算且 segments 在 redaction 后计算）；`attach_bounded_shell_artifact`
-  删除；10 MiB bash 输出完整捕获验收通过。
+  逐流 redaction 后执行 8 MiB/8 MiB reservation-reclaim 结算（combined <=16 MiB）、segments 从
+  redaction 后的真实布局推导、staging 文件在 finalize 与 sink Drop 双路径 RAII 删除、write 失败
+  标记 storage Unavailable）；`attach_bounded_shell_artifact` 删除；10 MiB bash 输出完整捕获验收通过。
 - R62.3 完成：root-run cumulative preview counter 删除；per-assistant-batch 两阶段 allocator
   （512 B floor、64 KiB batch cap、128 results、declaration order）接入 agent 主循环；普通工具
   执行、审批拒绝与授权错误分支全部在 assistant batch 结算（settlement 失败先 abort join
@@ -26,10 +26,11 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   验证；MCP stdio `isError` → 结构化 tool error（保留 actionable content）。
 - R62.5 部分：`ToolArtifactAvailabilityChangedV1` 已接入 ControlEntry（generation guard、状态机、
   durable append、TUI audit 渲染）；runtime `garbage_collect_session_artifacts` 按
-  durable-disable-before-delete 顺序 append（GC 前 Available->DisabledPendingDelete、GC 后
-  DisabledPendingDelete->Expired），**session 加载或 disable append 失败时 GC fail-closed 中止**
-  （artifact body 保留）；pressure projection 的 availability reducer 将事件归约为当前
-  retrieval 状态（disabled/expired 直接拒绝读取绑定，乱序事件 fail closed）；测试
+  durable-disable-before-delete 顺序 append，**session 加载或 disable append 失败时 GC fail-closed
+  中止**（artifact body 保留）；GC 读取当前 (generation, state) 恢复中断状态（Available -> disable、
+  DisabledPendingDelete -> 直接删除、terminal -> 跳过）；pressure projection 的 availability
+  reducer 在**单数与复数 binding 接口**上都应用 ledger（TUI/HTTP 显示读取与模型读取一致拒绝），
+  并校验 generation 连续性（乱序/跳代 fail closed）；测试
   `artifact_gc_appends_durable_disable_before_delete_and_expired_after`、
   `artifact_gc_fails_closed_when_durable_disable_cannot_be_written`、
   `availability_disable_event_denies_retrieval_binding`；
@@ -45,8 +46,9 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
 - 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
-  process staging 在运行期间以 0600 保存未经脱敏的原始字节（finalize 合并后才脱敏，RAII 删除已保证
-  无泄漏）；retrieval budget 仍为 per-root-run 累计而非 per-model-turn。
+  process staging 在运行期间以 0600 保存未经脱敏的原始字节（finalize 逐流脱敏后才发布，RAII 双路径
+  删除保证不泄漏）；跨流 secret 拆分不参与脱敏（只按流内整体检测）；retrieval budget 仍为
+  per-root-run 累计而非 per-model-turn。
 
 创建日期：2026-08-03
 

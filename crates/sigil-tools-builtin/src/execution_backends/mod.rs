@@ -1111,34 +1111,59 @@ async fn supervise_execution_child(
         .total_bytes
         .saturating_add(stderr.evidence.total_bytes);
 
-    let capture = shared_capture
-        .and_then(|shared| Arc::try_unwrap(shared).ok())
-        .map(|mutex| mutex.into_inner().expect("capture mutex not poisoned"))
-        .map(|handle| {
-            let source = match &output_termination_source {
-                ExecutionTerminationCause::Cancelled | ExecutionTerminationCause::TimedOut => {
-                    sigil_kernel::ToolSourceCompletenessV1::Interrupted
-                }
-                ExecutionTerminationCause::OutputLimit { .. } => {
-                    sigil_kernel::ToolSourceCompletenessV1::ResourceLimited
-                }
-                ExecutionTerminationCause::ReaderFailed { .. } => {
-                    sigil_kernel::ToolSourceCompletenessV1::ReaderFailed
-                }
-                ExecutionTerminationCause::Exited => {
-                    sigil_kernel::ToolSourceCompletenessV1::Complete
+    let capture = match shared_capture {
+        Some(shared) => {
+            let handle = match Arc::try_unwrap(shared) {
+                Ok(mutex) => match mutex.into_inner() {
+                    Ok(handle) => handle,
+                    Err(poisoned) => poisoned.into_inner(),
+                },
+                Err(_) => {
+                    // RFC-0062 16.2: the capture handle must not be silently lost; the readers
+                    // have already been joined, so an extra strong reference is a bug. Settle
+                    // the terminal outcome without capture evidence instead of dropping it.
+                    return Ok(SupervisedExecutionOutcome {
+                        resources,
+                        exit_code,
+                        stdout: stdout.bytes,
+                        stderr: stderr.bytes,
+                        output: ExecutionOutputReceipt {
+                            schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+                            stdout: stdout.evidence,
+                            stderr: stderr.evidence,
+                            combined_total_bytes,
+                            combined_hard_limit_bytes: output_limits.hard_bytes_combined,
+                            termination,
+                        },
+                        timed_out,
+                        capture: None,
+                    });
                 }
             };
-            sigil_kernel::ExecutionCaptureOutcome {
-                sink: handle.sink,
-                source,
-                observed_bytes: combined_total.load(Ordering::Relaxed),
-                reader_failed: matches!(
-                    termination,
-                    ExecutionTerminationCause::ReaderFailed { .. }
-                ),
+            Some(handle)
+        }
+        None => None,
+    };
+    let capture = capture.map(|handle| {
+        let source = match &output_termination_source {
+            ExecutionTerminationCause::Cancelled | ExecutionTerminationCause::TimedOut => {
+                sigil_kernel::ToolSourceCompletenessV1::Interrupted
             }
-        });
+            ExecutionTerminationCause::OutputLimit { .. } => {
+                sigil_kernel::ToolSourceCompletenessV1::ResourceLimited
+            }
+            ExecutionTerminationCause::ReaderFailed { .. } => {
+                sigil_kernel::ToolSourceCompletenessV1::ReaderFailed
+            }
+            ExecutionTerminationCause::Exited => sigil_kernel::ToolSourceCompletenessV1::Complete,
+        };
+        sigil_kernel::ExecutionCaptureOutcome {
+            sink: handle.sink,
+            source,
+            observed_bytes: combined_total.load(Ordering::Relaxed),
+            reader_failed: matches!(termination, ExecutionTerminationCause::ReaderFailed { .. }),
+        }
+    });
 
     Ok(SupervisedExecutionOutcome {
         resources,

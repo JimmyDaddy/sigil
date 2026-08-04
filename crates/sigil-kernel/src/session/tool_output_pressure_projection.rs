@@ -239,17 +239,29 @@ impl ToolOutputPressureSnapshotV1 {
         &self,
         artifact_ref: &ToolArtifactRefV1,
     ) -> Option<ToolOutputArchivedArtifactBindingV1> {
-        if let Some(item) = self
+        let mut binding = if let Some(binding) = self
             .items
             .iter()
             .find(|item| item.artifact_ref.as_ref() == Some(artifact_ref))
+            .and_then(|item| artifact_binding_from_item(item, false))
         {
-            return artifact_binding_from_item(item, false);
+            binding
+        } else {
+            self.archived_artifact_bindings
+                .get(&artifact_ref.artifact_id)
+                .filter(|binding| &binding.artifact_ref == artifact_ref)
+                .cloned()?
+        };
+        // RFC-0062 9.4: the append-only availability ledger overrides the initial descriptor
+        // state on every admission interface, including the single-binding path used by TUI
+        // and HTTP display reads.
+        if let Some(state) = self
+            .availability_states
+            .get(&binding.artifact_ref.artifact_id)
+        {
+            binding.artifact_availability = availability_from_state(*state);
         }
-        self.archived_artifact_bindings
-            .get(&artifact_ref.artifact_id)
-            .filter(|binding| &binding.artifact_ref == artifact_ref)
-            .cloned()
+        Some(binding)
     }
 
     /// Materializes every active and archived body-free source binding for model-read authority.
@@ -289,9 +301,15 @@ impl ToolOutputPressureSnapshotV1 {
 /// RFC-0062 9.4: current retrieval availability per artifact, reduced from the append-only
 /// ToolArtifactAvailabilityChangedV1 events. Retrieval admission reads this, never the initial
 /// descriptor state alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AvailabilityEntry {
+    state: ToolArtifactAvailabilityStateV1,
+    generation: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AvailabilityLedger {
-    states: std::collections::BTreeMap<ToolArtifactRefV1, ToolArtifactAvailabilityStateV1>,
+    entries: std::collections::BTreeMap<ToolArtifactRefV1, AvailabilityEntry>,
 }
 
 /// RFC-0062 9.4: maps the append-only availability state to the surface availability enum.
@@ -530,9 +548,9 @@ impl ToolOutputPressureProjectionV1 {
             archived_artifact_bindings: self.archived_artifact_bindings.clone(),
             availability_states: self
                 .availability_ledger
-                .states
+                .entries
                 .iter()
-                .map(|(reference, state)| (reference.artifact_id.clone(), *state))
+                .map(|(reference, entry)| (reference.artifact_id.clone(), entry.state))
                 .collect(),
             items,
         }
@@ -651,23 +669,28 @@ impl ToolOutputPressureProjectionV1 {
             }
             ControlEntry::ToolArtifactAvailabilityChanged(change) => {
                 change.validate()?;
-                let current = self
-                    .availability_ledger
-                    .states
-                    .get(&change.artifact_ref)
-                    .copied();
-                let expected_previous =
-                    current.unwrap_or(ToolArtifactAvailabilityStateV1::Available);
-                if change.previous != expected_previous {
+                let current = self.availability_ledger.entries.get(&change.artifact_ref);
+                let (expected_previous, expected_generation) = current
+                    .map(|entry| (entry.state, entry.generation))
+                    .unwrap_or((ToolArtifactAvailabilityStateV1::Available, 0));
+                if change.previous != expected_previous
+                    || change.expected_generation != expected_generation
+                {
                     bail!(
-                        "tool artifact availability transition skipped a state: expected {:?}, got {:?}",
+                        "tool artifact availability transition is not generation-contiguous: expected (state={:?}, generation={}), got (previous={:?}, expected_generation={})",
                         expected_previous,
-                        change.previous
+                        expected_generation,
+                        change.previous,
+                        change.expected_generation
                     );
                 }
-                self.availability_ledger
-                    .states
-                    .insert(change.artifact_ref.clone(), change.next);
+                self.availability_ledger.entries.insert(
+                    change.artifact_ref.clone(),
+                    AvailabilityEntry {
+                        state: change.next,
+                        generation: change.generation,
+                    },
+                );
             }
             _ => {}
         }

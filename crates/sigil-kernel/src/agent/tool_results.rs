@@ -53,7 +53,8 @@ where
         .iter()
         .map(|(call, result)| {
             let cap = crate::tool_model_view_initial_limit(&result.tool_name);
-            (call.id.clone(), result.content.len().min(cap))
+            let safe_len = crate::safe_persistence_text(&result.content).len();
+            (call.id.clone(), safe_len.min(cap))
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let limits = crate::allocate_batch_preview_limits(&declaration_order, &candidate_bytes);
@@ -121,7 +122,10 @@ where
         // pre-settled projection is re-projected against the batch-allocated preview budget so
         // the provider never sees more than the allocator awarded.
         let mut recorded = recorded.clone();
-        recorded.reproject_preview(model_preview_limit)?;
+        recorded.reproject_preview(
+            model_preview_limit,
+            crate::ToolPreviewTruncationReasonV1::BatchBudget,
+        )?;
         let display = recorded.display_view();
         (recorded, display)
     } else {

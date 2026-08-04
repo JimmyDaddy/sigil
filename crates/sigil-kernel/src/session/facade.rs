@@ -608,6 +608,29 @@ impl Session {
             .unwrap_or(0)
     }
 
+    /// RFC-0062 9.4: current availability state for one artifact from the durable transitions
+    /// (Available when no event exists yet).
+    pub fn artifact_availability_state(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+    ) -> ToolArtifactAvailabilityStateV1 {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                if let SessionLogEntry::Control(ControlEntry::ToolArtifactAvailabilityChanged(
+                    change,
+                )) = entry
+                    && change.artifact_ref == *artifact_ref
+                {
+                    Some(change.next)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(ToolArtifactAvailabilityStateV1::Available)
+    }
+
     pub fn append_control(&mut self, control: ControlEntry) -> Result<()> {
         self.append(SessionLogEntry::Control(control))
     }
