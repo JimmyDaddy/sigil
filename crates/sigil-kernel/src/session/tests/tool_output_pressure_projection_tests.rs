@@ -631,3 +631,77 @@ fn aging_activation_cas_rejects_a_changed_frontier_without_full_replay() -> Resu
     );
     Ok(())
 }
+
+#[test]
+fn availability_disable_event_denies_retrieval_binding() -> Result<()> {
+    // RFC-0062 9.4: after a durable Available -> DisabledPendingDelete transition, the pressure
+    // projection's retrieval bindings must report the artifact as expired so no surface admits
+    // a read; the initial descriptor availability is never trusted alone.
+    let (_temp, mut session) = session_fixture()?;
+    session.append_user_message(ModelMessage::user("start"))?;
+    append_result(&mut session, 0, 100, true)?;
+    let snapshot = session
+        .active_projection_snapshot()?
+        .expect("durable projection")
+        .tool_output_pressure();
+    let binding = snapshot
+        .artifact_source_bindings()?
+        .into_iter()
+        .next()
+        .expect("one binding");
+    assert_eq!(
+        binding.artifact_availability,
+        crate::ToolArtifactAvailability::Available
+    );
+    let artifact_ref = binding.artifact_ref.clone();
+
+    session.append_artifact_availability_transition(
+        &artifact_ref,
+        0,
+        crate::ToolArtifactAvailabilityStateV1::Available,
+        crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+        crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+        1,
+    )?;
+    let snapshot = session
+        .active_projection_snapshot()?
+        .expect("durable projection")
+        .tool_output_pressure();
+    assert_eq!(
+        snapshot
+            .artifact_source_bindings()?
+            .into_iter()
+            .next()
+            .expect("binding still present")
+            .artifact_availability,
+        crate::ToolArtifactAvailability::Expired
+    );
+
+    // A stale or out-of-order transition must fail closed instead of being applied.
+    let error = session
+        .append_control(ControlEntry::ToolArtifactAvailabilityChanged(
+            crate::ToolArtifactAvailabilityChangedV1 {
+                schema_version: super::super::TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+                artifact_ref: artifact_ref.clone(),
+                expected_generation: 0,
+                generation: 1,
+                previous: crate::ToolArtifactAvailabilityStateV1::Available,
+                next: crate::ToolArtifactAvailabilityStateV1::Missing,
+                reason: crate::ToolArtifactAvailabilityReasonV1::ReaderDetectedMissing,
+                changed_at_ms: 2,
+            },
+        ))
+        .and_then(|()| {
+            session
+                .active_projection_snapshot()?
+                .expect("durable projection")
+                .tool_output_pressure()
+                .artifact_source_bindings()
+                .map(|_| ())
+        });
+    assert!(
+        error.is_err(),
+        "a transition that skips the current state must fail the projection"
+    );
+    Ok(())
+}

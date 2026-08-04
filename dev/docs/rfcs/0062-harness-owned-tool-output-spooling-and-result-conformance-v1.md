@@ -13,29 +13,40 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   decode 时以 bounded `UnsupportedSessionSchema` 拒绝，文件不改写、不迁移、无 alias/default）。
 - R62.2 完成：harness-owned 双 staging spool（spawn 前创建 plan+sink、stdout/stderr 独立 staging、
   canonical stdout-then-stderr 双 segment、observed 128 MiB 与 preview/artifact 分离、drain-to-EOF、
-  合并后跨 chunk redaction）；`attach_bounded_shell_artifact` 删除；10 MiB bash 输出完整捕获验收通过。
+  合并后跨 chunk redaction、staging RAII unlink、write 失败标记 storage Unavailable、finalize 时
+  执行 8 MiB/8 MiB reservation-reclaim 结算且 segments 在 redaction 后计算）；`attach_bounded_shell_artifact`
+  删除；10 MiB bash 输出完整捕获验收通过。
 - R62.3 完成：root-run cumulative preview counter 删除；per-assistant-batch 两阶段 allocator
-  （512 B floor、64 KiB batch cap、128 results、declaration order）接入 agent 主循环。
+  （512 B floor、64 KiB batch cap、128 results、declaration order）接入 agent 主循环；普通工具
+  执行、审批拒绝与授权错误分支全部在 assistant batch 结算（settlement 失败先 abort join
+  dependencies 再尽力消费剩余 result，保证已完成线程显式终态）。
 - R62.4 完成（kernel/provider 侧）：`ProviderToolResultMessageV1` + `ModelMessagePayloadV1` typed
   payload；Anthropic `is_error` 只读 typed outcome（含 contradicting-JSON fixture）；Gemini
   GenerateContent 同批 function responses 合并为单一 user Content；OpenAI/DeepSeek exact call_id
   验证；MCP stdio `isError` → 结构化 tool error（保留 actionable content）。
 - R62.5 部分：`ToolArtifactAvailabilityChangedV1` 已接入 ControlEntry（generation guard、状态机、
-  durable append、TUI audit 渲染）；runtime `garbage_collect_session_artifacts` 已按
-  durable-disable-before-delete 顺序 append `Available -> DisabledPendingDelete`（GC 前）与
-  `DisabledPendingDelete -> Expired`（GC 后），generation 由 session 中既有事件派生，并有
-  `artifact_gc_appends_durable_disable_before_delete_and_expired_after` 集成测试；
-  **active-reader lease 集成、scratch quota/TTL、availability projection reducer 尚未落地**。
+  durable append、TUI audit 渲染）；runtime `garbage_collect_session_artifacts` 按
+  durable-disable-before-delete 顺序 append（GC 前 Available->DisabledPendingDelete、GC 后
+  DisabledPendingDelete->Expired），**session 加载或 disable append 失败时 GC fail-closed 中止**
+  （artifact body 保留）；pressure projection 的 availability reducer 将事件归约为当前
+  retrieval 状态（disabled/expired 直接拒绝读取绑定，乱序事件 fail closed）；测试
+  `artifact_gc_appends_durable_disable_before_delete_and_expired_after`、
+  `artifact_gc_fails_closed_when_durable_disable_cannot_be_written`、
+  `availability_disable_event_denies_retrieval_binding`；
+  **active-reader lease 集成、scratch quota/TTL 尚未落地**。
 - R62.6 部分：TUI/HTTP/Desktop 已随 V3 cutover 消费同一 typed descriptor；**共享 DTO 的
   completeness/truncation reason 显式字段与 OpenAPI 同步尚未落地**。
 - R62.7 部分：V2 rejection、10 MiB 完整捕获、Anthropic/Gemini fixtures、availability 状态机、
-  per-batch 预算、128-result floor 测试已过；新增 `process_capture_canonical_hash_is_identical_across_chunk_schedulings`
+  per-batch 预算、128-result floor 测试已过；`process_capture_canonical_hash_is_identical_across_chunk_schedulings`
   （dual-stream cap 确定性）与 `process_capture_redacts_secrets_that_span_chunk_boundaries`
-  （secret 跨 chunk）；**PTY ordering e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、
+  （secret 跨 chunk）已过；**PTY ordering e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、
   paid provider smoke 未执行**。
-- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5400 passed）、
+- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5405 passed）、
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
+- 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
+  process staging 在运行期间以 0600 保存未经脱敏的原始字节（finalize 合并后才脱敏，RAII 删除已保证
+  无泄漏）；retrieval budget 仍为 per-root-run 累计而非 per-model-turn。
 
 创建日期：2026-08-03
 

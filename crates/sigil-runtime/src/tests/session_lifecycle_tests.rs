@@ -1499,3 +1499,44 @@ fn artifact_gc_appends_durable_disable_before_delete_and_expired_after() -> Resu
     assert!(store.resolve(&orphan.artifact_ref).is_err());
     Ok(())
 }
+
+#[test]
+fn artifact_gc_fails_closed_when_durable_disable_cannot_be_written() -> Result<()> {
+    // RFC-0062 9.4: if the session cannot be loaded for the durable disable transition, the
+    // physical GC must abort and the artifact body must survive.
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-corrupt.jsonl");
+    // Valid enough for the store to find artifacts, invalid for session load.
+    fs::write(&source, b"{not valid jsonl\n")?;
+    let source_ref = sigil_kernel::SessionRef::new_relative("session-corrupt.jsonl")?;
+    let store = sigil_kernel::ToolArtifactStore::for_session_path(&source);
+    let artifact = store.capture_text(
+        "call-gc-fail-closed",
+        "shell",
+        "must survive a failed durable disable",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let error = service
+        .garbage_collect_session_artifacts(
+            &source_ref,
+            "any-session",
+            sigil_kernel::ToolArtifactGcRootsV1::default(),
+            u64::MAX,
+        )
+        .expect_err("GC must fail closed when durable disable cannot be written");
+    assert!(
+        format!("{error:#}").contains("artifact GC")
+            || format!("{error:#}").contains("session identity"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        store.read_all(&artifact)?,
+        b"must survive a failed durable disable",
+        "artifact body must survive an aborted GC"
+    );
+    Ok(())
+}

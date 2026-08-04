@@ -57,15 +57,27 @@ where
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let limits = crate::allocate_batch_preview_limits(&declaration_order, &candidate_bytes);
+    let mut first_error = None;
     for (_, result) in batch {
         let limit = limits
             .get(&result.call_id)
             .copied()
             .unwrap_or_else(|| crate::tool_model_view_initial_limit(&result.tool_name));
         record_tool_run_outcome(outcome, &result);
-        emit_tool_result_with_limit(session, handler, result, limit)?;
+        if let Err(error) = emit_tool_result_with_limit(session, handler, result, limit) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+            // RFC-0062 11.5: a settlement failure must not leave completed tool results
+            // un-consumed; keep draining the remaining batch so child threads and their
+            // supervisor reservations settle, then report the first failure.
+            continue;
+        }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn emit_tool_result<H>(
@@ -105,9 +117,13 @@ where
     };
     let artifact_store = session.tool_artifact_store();
     let (recorded, display) = if let Some(recorded) = result.durable_v3_projection() {
-        // RFC-0062 8: harness-owned process capture already published the artifact and settled
-        // the durable V3 projection; the agent loop appends it without re-capturing.
-        (recorded.clone(), recorded.display_view())
+        // RFC-0062 8/11.2: harness-owned process capture already published the artifact; the
+        // pre-settled projection is re-projected against the batch-allocated preview budget so
+        // the provider never sees more than the allocator awarded.
+        let mut recorded = recorded.clone();
+        recorded.reproject_preview(model_preview_limit)?;
+        let display = recorded.display_view();
+        (recorded, display)
     } else {
         ToolResultRecordedV3::capture_with_model_preview_limit(
             &result,

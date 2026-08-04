@@ -1313,6 +1313,25 @@ impl ToolResultRecordedV3 {
         Ok((record, display))
     }
 
+    /// RFC-0062 11.2: re-projects the initial model preview against a batch-allocated limit and
+    /// recomputes the canonical hash. Used when a pre-settled process capture projection must
+    /// honor a smaller per-result preview budget than the tool's own cap.
+    pub fn reproject_preview(&mut self, model_preview_limit: usize) -> Result<()> {
+        let model_preview_limit =
+            model_preview_limit.min(tool_model_view_initial_limit(&self.tool_name));
+        let safe_content = safe_persistence_text(self.initial_model_view.preview.as_str());
+        let (preview, preview_kind) = bounded_model_preview(&safe_content, model_preview_limit);
+        self.initial_model_view.preview = preview;
+        self.initial_model_view.preview_kind = preview_kind;
+        self.initial_model_view.token_upper_bound =
+            self.initial_model_view.preview.len().div_ceil(4) as u64;
+        self.preview_actual_bytes = self.initial_model_view.preview.len() as u32;
+        self.preview_truncation_reason = (preview_kind == ToolPreviewKind::HeadTail)
+            .then_some(ToolPreviewTruncationReasonV1::InitialCap);
+        self.initial_model_view_sha256 = stable_event_hash(self.model_content()?.as_bytes());
+        self.validate()
+    }
+
     pub fn model_message(&self) -> Result<ModelMessage> {
         self.model_message_with_view(&self.initial_model_view)
     }
@@ -2681,6 +2700,7 @@ impl ToolArtifactStore {
             head: Vec::with_capacity(TOOL_ARTIFACT_MAX_BYTES / 2),
             tail: VecDeque::with_capacity(TOOL_ARTIFACT_MAX_BYTES / 2),
             observed_bytes: 0,
+            process_write_failed: false,
             process: None,
         }
     }
@@ -3535,6 +3555,9 @@ pub struct ToolArtifactCaptureSink {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     observed_bytes: u64,
+    /// RFC-0062 10.2/16.2: set when a staging write failed; settlement must mark storage
+    /// Unavailable instead of claiming a complete artifact.
+    process_write_failed: bool,
     /// RFC-0062 9.2: process-backed dual-stream staging. Each stream gets its own bounded
     /// staging file so the canonical artifact is stdout-then-stderr regardless of reader
     /// scheduling; the sink only enters this mode through `begin_process_capture`.
@@ -3546,6 +3569,8 @@ struct ProcessCaptureState {
     config: ProcessStreamCaptureConfigV1,
     stdout_staging: Option<std::fs::File>,
     stderr_staging: Option<std::fs::File>,
+    stdout_staging_path: Option<std::path::PathBuf>,
+    stderr_staging_path: Option<std::path::PathBuf>,
     stdout_bytes: u64,
     stderr_bytes: u64,
     stdout_truncated: bool,
@@ -3576,6 +3601,8 @@ impl Clone for ToolArtifactCaptureSink {
                 .stderr_staging
                 .as_ref()
                 .and_then(|file| file.try_clone().ok()),
+            stdout_staging_path: state.stdout_staging_path.clone(),
+            stderr_staging_path: state.stderr_staging_path.clone(),
             stdout_bytes: state.stdout_bytes,
             stderr_bytes: state.stderr_bytes,
             stdout_truncated: state.stdout_truncated,
@@ -3592,6 +3619,7 @@ impl Clone for ToolArtifactCaptureSink {
             head: self.head.clone(),
             tail: self.tail.clone(),
             observed_bytes: self.observed_bytes,
+            process_write_failed: self.process_write_failed,
             process,
         }
     }
@@ -3605,11 +3633,33 @@ impl PartialEq for ToolArtifactCaptureSink {
             && self.encoding == other.encoding
             && self.sensitivity == other.sensitivity
             && self.observed_bytes == other.observed_bytes
+            && self.process_write_failed == other.process_write_failed
+    }
+}
+
+/// RFC-0062 16.2: RAII removal of process staging files on every finish path (success or error).
+struct StagingCleanupGuard {
+    paths: Vec<std::path::PathBuf>,
+}
+
+impl StagingCleanupGuard {
+    fn new(stdout: Option<std::path::PathBuf>, stderr: Option<std::path::PathBuf>) -> Self {
+        Self {
+            paths: stdout.into_iter().chain(stderr).collect(),
+        }
+    }
+}
+
+impl Drop for StagingCleanupGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
 impl ToolArtifactCaptureSink {
-    /// RFC-0062 8.1: enters process capture mode before spawn. Two bounded owner-only staging
+    /// RFC-0062 8.1: enters process capture mode before spawn. Two bounded owner-only
     /// files are created inside the store staging namespace; their paths never enter the child
     /// environment, model, session, UI, or logs.
     pub fn begin_process_capture(&self, config: ProcessStreamCaptureConfigV1) -> Result<Self> {
@@ -3623,16 +3673,16 @@ impl ToolArtifactCaptureSink {
         self.store.ensure_root_dir()?;
         let staging_dir = self.store.root.join("staging");
         create_private_dir(&staging_dir)?;
-        let stdout_staging = open_read_write_private_file(
-            &staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple())),
-        )?;
-        let stderr_staging = open_read_write_private_file(
-            &staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple())),
-        )?;
+        let stdout_path = staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple()));
+        let stderr_path = staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple()));
+        let stdout_staging = open_read_write_private_file(&stdout_path)?;
+        let stderr_staging = open_read_write_private_file(&stderr_path)?;
         sink.process = Some(ProcessCaptureState {
             config,
             stdout_staging: Some(stdout_staging),
             stderr_staging: Some(stderr_staging),
+            stdout_staging_path: Some(stdout_path),
+            stderr_staging_path: Some(stderr_path),
             stdout_bytes: 0,
             stderr_bytes: 0,
             stdout_truncated: false,
@@ -3640,6 +3690,11 @@ impl ToolArtifactCaptureSink {
             staged_bytes: 0,
         });
         Ok(sink)
+    }
+
+    /// RFC-0062 10.2: marks the capture as storage-failed so settlement reports Unavailable.
+    pub fn mark_process_write_failed(&mut self) {
+        self.process_write_failed = true;
     }
 
     /// RFC-0062 8.2: writes one stream chunk into its bounded staging file. Once a stream's
@@ -3674,8 +3729,10 @@ impl ToolArtifactCaptureSink {
         }
         let allowed = (limit.saturating_sub(before) as usize).min(bytes.len());
         use std::io::Write as _;
-        file.write_all(&bytes[..allowed])
-            .with_context(|| format!("failed to stage {stream:?} capture bytes"))?;
+        if let Err(error) = file.write_all(&bytes[..allowed]) {
+            self.process_write_failed = true;
+            return Err(error).with_context(|| format!("failed to stage {stream:?} capture bytes"));
+        }
         state.staged_bytes = state.staged_bytes.saturating_add(allowed as u64);
         if allowed < bytes.len() {
             *truncated = true;
@@ -3696,21 +3753,43 @@ impl ToolArtifactCaptureSink {
         Vec<ToolOutputSegmentV1>,
         ToolResultCaptureCompletenessV1,
     )> {
-        let Some(state) = self.process.take() else {
+        let Some(mut state) = self.process.take() else {
             bail!("finish_process_capture requires process capture mode");
         };
+        let _staging_cleanup = StagingCleanupGuard::new(
+            state.stdout_staging_path.take(),
+            state.stderr_staging_path.take(),
+        );
         let mut stdout_bytes = Vec::new();
         let mut stderr_bytes = Vec::new();
-        if let Some(mut file) = state.stdout_staging {
+        if let Some(mut file) = state.stdout_staging.take() {
             use std::io::{Read as _, Seek as _, SeekFrom};
             file.seek(SeekFrom::Start(0))?;
             file.read_to_end(&mut stdout_bytes)?;
         }
-        if let Some(mut file) = state.stderr_staging {
+        if let Some(mut file) = state.stderr_staging.take() {
             use std::io::{Read as _, Seek as _, SeekFrom};
             file.seek(SeekFrom::Start(0))?;
             file.read_to_end(&mut stderr_bytes)?;
         }
+        // RFC-0062 9.2: settlement applies the reservation-reclaim algorithm against the
+        // per-stream staged bytes so the canonical body never exceeds the combined cap.
+        let stdout_reservation = state.config.artifact_reservation_stdout_bytes;
+        let stderr_reservation = state.config.artifact_reservation_stderr_bytes;
+        let stdout_eligible = state.stdout_bytes.min(stdout_bytes.len() as u64);
+        let stderr_eligible = state.stderr_bytes.min(stderr_bytes.len() as u64);
+        let unused_stdout =
+            stdout_reservation.saturating_sub(stdout_eligible.min(stdout_reservation));
+        let unused_stderr =
+            stderr_reservation.saturating_sub(stderr_eligible.min(stderr_reservation));
+        let stdout_persisted =
+            stdout_eligible.min(stdout_reservation.saturating_add(unused_stderr));
+        let stderr_persisted =
+            stderr_eligible.min(stderr_reservation.saturating_add(unused_stdout));
+        let stdout_truncated = state.stdout_truncated || stdout_persisted < state.stdout_bytes;
+        let stderr_truncated = state.stderr_truncated || stderr_persisted < state.stderr_bytes;
+        stdout_bytes.truncate(stdout_persisted as usize);
+        stderr_bytes.truncate(stderr_persisted as usize);
         let stdout_len = stdout_bytes.len() as u64;
         let stderr_len = stderr_bytes.len() as u64;
         let policy_projected_bytes = state.stdout_bytes.saturating_add(state.stderr_bytes);
@@ -3731,14 +3810,18 @@ impl ToolArtifactCaptureSink {
             Some(redacted) => redacted,
             None => bytes,
         };
-        let final_len = bytes.len() as u64;
+        // Segments are derived from the FINAL persisted layout so offsets stay valid even when
+        // reservation settlement or redaction changed the byte lengths.
+        let bytes_len = bytes.len() as u64;
+        let stdout_final_len = stdout_len.min(bytes_len);
+        let stderr_final_len = stderr_len.min(bytes_len.saturating_sub(stdout_final_len));
         let descriptor = self.store.publish_descriptor(
             &self.tool_call_id,
             &self.tool_name,
             BoundedArtifactBytes {
                 bytes,
-                retained_head_bytes: stdout_len.min(final_len),
-                retained_tail_bytes: stderr_len.min(final_len),
+                retained_head_bytes: stdout_final_len,
+                retained_tail_bytes: stderr_final_len,
             },
             source_observed_bytes,
             policy_projected_bytes,
@@ -3747,12 +3830,17 @@ impl ToolArtifactCaptureSink {
             self.sensitivity,
             redaction_count,
         )?;
-        let stdout_storage = if state.stdout_truncated {
+        let write_failed = self.process_write_failed;
+        let stdout_storage = if write_failed {
+            ToolStorageCompletenessV1::Unavailable
+        } else if stdout_truncated {
             ToolStorageCompletenessV1::TruncatedAtLimit
         } else {
             ToolStorageCompletenessV1::Complete
         };
-        let stderr_storage = if state.stderr_truncated {
+        let stderr_storage = if write_failed {
+            ToolStorageCompletenessV1::Unavailable
+        } else if stderr_truncated {
             ToolStorageCompletenessV1::TruncatedAtLimit
         } else {
             ToolStorageCompletenessV1::Complete
@@ -3761,8 +3849,8 @@ impl ToolArtifactCaptureSink {
             ToolOutputSegmentV1 {
                 stream: ToolOutputStreamV1::Stdout,
                 artifact_offset: 0,
-                persisted_bytes: stdout_len,
-                eligible_bytes: state.stdout_bytes,
+                persisted_bytes: stdout_final_len,
+                eligible_bytes: stdout_persisted,
                 observed_bytes: state.stdout_bytes,
                 preview_bytes: 0,
                 preview_truncated: false,
@@ -3770,16 +3858,18 @@ impl ToolArtifactCaptureSink {
             },
             ToolOutputSegmentV1 {
                 stream: ToolOutputStreamV1::Stderr,
-                artifact_offset: stdout_len,
-                persisted_bytes: stderr_len,
-                eligible_bytes: state.stderr_bytes,
+                artifact_offset: stdout_final_len,
+                persisted_bytes: stderr_final_len,
+                eligible_bytes: stderr_persisted,
                 observed_bytes: state.stderr_bytes,
                 preview_bytes: 0,
                 preview_truncated: false,
                 storage: stderr_storage,
             },
         ];
-        let storage = if state.stdout_truncated || state.stderr_truncated {
+        let storage = if write_failed {
+            ToolStorageCompletenessV1::Unavailable
+        } else if stdout_truncated || stderr_truncated {
             ToolStorageCompletenessV1::TruncatedAtLimit
         } else {
             ToolStorageCompletenessV1::Complete

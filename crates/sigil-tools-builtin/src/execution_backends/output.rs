@@ -112,19 +112,35 @@ where
                     // RFC-0062 8.2: tee every chunk into the policy-bound staging sink while
                     // keeping the observed resource meter independent. The staging cap never
                     // stops draining the child; only the observed resource meter may.
-                    if let Ok(mut handle) = capture.lock() {
-                        let tool_stream = match stream {
-                            sigil_kernel::ExecutionOutputStream::Stdout => {
-                                sigil_kernel::ToolOutputStreamV1::Stdout
+                    // A staging write failure or poisoned lock is recorded on the sink so
+                    // settlement marks storage Unavailable instead of claiming completeness.
+                    match capture.lock() {
+                        Ok(mut handle) => {
+                            let tool_stream = match stream {
+                                sigil_kernel::ExecutionOutputStream::Stdout => {
+                                    sigil_kernel::ToolOutputStreamV1::Stdout
+                                }
+                                sigil_kernel::ExecutionOutputStream::Stderr => {
+                                    sigil_kernel::ToolOutputStreamV1::Stderr
+                                }
+                                sigil_kernel::ExecutionOutputStream::Combined => {
+                                    sigil_kernel::ToolOutputStreamV1::Combined
+                                }
+                            };
+                            if let Err(error) =
+                                handle.sink.write_stream(tool_stream, &read_buffer[..read])
+                            {
+                                handle.sink.mark_process_write_failed();
+                                reader_failed = true;
+                                let _ = alert_tx.try_send(OutputAlert::ReaderFailed {
+                                    stream,
+                                    reason: bounded_reader_error(&std::io::Error::other(error)),
+                                });
                             }
-                            sigil_kernel::ExecutionOutputStream::Stderr => {
-                                sigil_kernel::ToolOutputStreamV1::Stderr
-                            }
-                            sigil_kernel::ExecutionOutputStream::Combined => {
-                                sigil_kernel::ToolOutputStreamV1::Combined
-                            }
-                        };
-                        let _ = handle.sink.write_stream(tool_stream, &read_buffer[..read]);
+                        }
+                        Err(_) => {
+                            reader_failed = true;
+                        }
                     }
                 }
                 if !limit_reported

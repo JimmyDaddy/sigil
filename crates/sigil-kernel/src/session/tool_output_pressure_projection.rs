@@ -6,9 +6,10 @@ use serde_json::json;
 
 use super::{
     ActiveProjectionFrontier, ControlEntry, JsonlSessionStore, ProjectionCursor, SessionLogEntry,
-    SessionStreamRecord, ToolArtifactAvailability, ToolArtifactBindingV1, ToolArtifactCompleteness,
-    ToolArtifactGcRootsV1, ToolArtifactRefV1, ToolExecutionStatus, ToolModelViewV1,
-    ToolPreviewKind, ToolResultFactsV1, session_entry_from_stored_event,
+    SessionStreamRecord, ToolArtifactAvailability, ToolArtifactAvailabilityStateV1,
+    ToolArtifactBindingV1, ToolArtifactCompleteness, ToolArtifactGcRootsV1, ToolArtifactRefV1,
+    ToolExecutionStatus, ToolModelViewV1, ToolPreviewKind, ToolResultFactsV1,
+    session_entry_from_stored_event,
 };
 use crate::{
     DurableEventType, EventId, MutationCommitted, MutationPrepared, MutationSubject, StoredEvent,
@@ -191,6 +192,9 @@ pub struct ToolOutputPressureSnapshotV1 {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub archived_artifact_bindings: BTreeMap<String, ToolOutputArchivedArtifactBindingV1>,
     pub items: Vec<ToolOutputPressureItemV1>,
+    /// RFC-0062 9.4: append-only availability states reduced by the projection.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub availability_states: BTreeMap<String, ToolArtifactAvailabilityStateV1>,
 }
 
 impl ToolOutputPressureSnapshotV1 {
@@ -255,7 +259,7 @@ impl ToolOutputPressureSnapshotV1 {
     pub fn artifact_source_bindings(&self) -> Result<Vec<ToolOutputArchivedArtifactBindingV1>> {
         let mut bindings = Vec::new();
         let mut seen = BTreeSet::new();
-        for binding in self
+        for mut binding in self
             .items
             .iter()
             .filter_map(|item| artifact_binding_from_item(item, false))
@@ -264,6 +268,14 @@ impl ToolOutputPressureSnapshotV1 {
             if bindings.len() == TOOL_OUTPUT_PRESSURE_HARD_MAX_RESULTS {
                 bail!("tool-output artifact source bindings reached their hard cap");
             }
+            // RFC-0062 9.4: the append-only availability ledger overrides the initial
+            // descriptor state; a disabled/expired artifact is never admitted for retrieval.
+            if let Some(state) = self
+                .availability_states
+                .get(&binding.artifact_ref.artifact_id)
+            {
+                binding.artifact_availability = availability_from_state(*state);
+            }
             binding.validate()?;
             if !seen.insert(binding.artifact_ref.clone()) {
                 bail!("tool-output artifact source bindings repeat an opaque ref");
@@ -271,6 +283,26 @@ impl ToolOutputPressureSnapshotV1 {
             bindings.push(binding);
         }
         Ok(bindings)
+    }
+}
+
+/// RFC-0062 9.4: current retrieval availability per artifact, reduced from the append-only
+/// ToolArtifactAvailabilityChangedV1 events. Retrieval admission reads this, never the initial
+/// descriptor state alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AvailabilityLedger {
+    states: std::collections::BTreeMap<ToolArtifactRefV1, ToolArtifactAvailabilityStateV1>,
+}
+
+/// RFC-0062 9.4: maps the append-only availability state to the surface availability enum.
+fn availability_from_state(state: ToolArtifactAvailabilityStateV1) -> ToolArtifactAvailability {
+    match state {
+        ToolArtifactAvailabilityStateV1::Available => ToolArtifactAvailability::Available,
+        ToolArtifactAvailabilityStateV1::DisabledPendingDelete
+        | ToolArtifactAvailabilityStateV1::Expired => ToolArtifactAvailability::Expired,
+        ToolArtifactAvailabilityStateV1::Missing => ToolArtifactAvailability::Missing,
+        ToolArtifactAvailabilityStateV1::HashMismatch => ToolArtifactAvailability::HashMismatch,
+        ToolArtifactAvailabilityStateV1::Unavailable => ToolArtifactAvailability::Unavailable,
     }
 }
 
@@ -292,6 +324,7 @@ pub struct ToolOutputPressureProjectionV1 {
     archived_aged_tool_tokens: u64,
     archived_aged_count: u64,
     archived_artifact_bindings: BTreeMap<String, ToolOutputArchivedArtifactBindingV1>,
+    availability_ledger: AvailabilityLedger,
 }
 
 impl Default for ToolOutputPressureProjectionV1 {
@@ -313,6 +346,7 @@ impl Default for ToolOutputPressureProjectionV1 {
             archived_aged_tool_tokens: 0,
             archived_aged_count: 0,
             archived_artifact_bindings: BTreeMap::new(),
+            availability_ledger: AvailabilityLedger::default(),
         }
     }
 }
@@ -494,6 +528,12 @@ impl ToolOutputPressureProjectionV1 {
             archived_aged_tool_tokens: self.archived_aged_tool_tokens,
             archived_aged_count: self.archived_aged_count,
             archived_artifact_bindings: self.archived_artifact_bindings.clone(),
+            availability_states: self
+                .availability_ledger
+                .states
+                .iter()
+                .map(|(reference, state)| (reference.artifact_id.clone(), *state))
+                .collect(),
             items,
         }
     }
@@ -608,6 +648,26 @@ impl ToolOutputPressureProjectionV1 {
                         ..ToolOutputSignalEnrichmentV1::default()
                     },
                 )?;
+            }
+            ControlEntry::ToolArtifactAvailabilityChanged(change) => {
+                change.validate()?;
+                let current = self
+                    .availability_ledger
+                    .states
+                    .get(&change.artifact_ref)
+                    .copied();
+                let expected_previous =
+                    current.unwrap_or(ToolArtifactAvailabilityStateV1::Available);
+                if change.previous != expected_previous {
+                    bail!(
+                        "tool artifact availability transition skipped a state: expected {:?}, got {:?}",
+                        expected_previous,
+                        change.previous
+                    );
+                }
+                self.availability_ledger
+                    .states
+                    .insert(change.artifact_ref.clone(), change.next);
             }
             _ => {}
         }

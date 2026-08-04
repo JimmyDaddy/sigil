@@ -4262,7 +4262,10 @@ async fn spawn_tool_result_error_aborts_unsettled_join_dependencies() -> Result<
     assert!(cancellation_owner.is_quiescent());
     assert!(supervisor_probe.active_profile_ids().is_empty());
     let threads = session.agent_thread_state_projection();
-    assert_eq!(threads.threads.len(), 1);
+    // RFC-0062 11.5 batch settlement: both parallel child results were collected before the
+    // injected settlement failure, so both threads settle with an explicit failed terminal
+    // state and no supervisor profile survives.
+    assert_eq!(threads.threads.len(), 2);
     assert!(
         threads
             .threads

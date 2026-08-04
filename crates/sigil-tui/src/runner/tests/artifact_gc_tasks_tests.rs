@@ -21,6 +21,11 @@ fn gc_task_runs_behind_one_typed_completion_event() -> Result<()> {
     let sessions = temp.path().join("sessions");
     let session_path = sessions.join("session.jsonl");
     let session_store = JsonlSessionStore::new(&session_path)?;
+    session_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        resolved_model_route: None,
+    }))?;
     session_store.append(&SessionLogEntry::Control(ControlEntry::Note {
         kind: "artifact_gc_fixture".to_owned(),
         data: serde_json::Value::Null,

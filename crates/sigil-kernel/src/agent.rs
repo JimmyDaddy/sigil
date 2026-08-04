@@ -110,9 +110,11 @@ use tool_audit::{
 use tool_audit::{
     external_directory_preview, stable_json_hash, stable_text_hash, tool_call_context,
 };
+#[cfg(test)]
+use tool_results::emit_tool_result;
 use tool_results::{
-    agent_tool_result_satisfies_delegation, append_invalid_tool_input_result, emit_tool_result,
-    emit_tool_result_batch, record_and_emit_tool_result, record_tool_run_outcome,
+    agent_tool_result_satisfies_delegation, append_invalid_tool_input_result,
+    emit_tool_result_batch, record_tool_run_outcome,
 };
 
 const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
@@ -2075,7 +2077,6 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_tool_run_outcome(&mut outcome, &result);
                             assistant_batch_results.push((call.clone(), result));
                             continue;
                         }
@@ -2105,7 +2106,6 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_tool_run_outcome(&mut outcome, &result);
                             assistant_batch_results.push((call.clone(), result));
                             continue;
                         }
@@ -2125,7 +2125,6 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_tool_run_outcome(&mut outcome, &result);
                             assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
@@ -2170,7 +2169,6 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_tool_run_outcome(&mut outcome, &result);
                             assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
@@ -2201,7 +2199,6 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_tool_run_outcome(&mut outcome, &result);
                             assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
@@ -2232,6 +2229,7 @@ where
                         transient_context: &mut transient_context,
                         web_task_tree_budget: web_task_tree_budget.clone(),
                         tool_artifact_read_budget: tool_artifact_read_budget.clone(),
+                        assistant_batch_results: &mut assistant_batch_results,
                     };
                     if let Err(error) = process_tool_call(tool_call_context, call, safe_call).await
                     {
@@ -2608,6 +2606,9 @@ struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
     transient_context: &'run mut Vec<ModelMessage>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
     tool_artifact_read_budget: crate::session::ToolArtifactReadBudgetV1,
+    /// RFC-0062 11.2: collected results of the current assistant tool-call batch. Ordinary tool
+    /// executions and their error branches settle here instead of emitting per result.
+    assistant_batch_results: &'run mut Vec<(crate::ToolCall, ToolResult)>,
 }
 
 async fn process_tool_call<H, A>(
@@ -2636,6 +2637,7 @@ where
         transient_context,
         web_task_tree_budget,
         tool_artifact_read_budget,
+        assistant_batch_results,
     } = context;
     let mut explicit_network_approval = false;
     let mut explicit_user_approval = false;
@@ -2810,7 +2812,7 @@ where
                     reason,
                 );
                 attach_tool_call_context(&mut result, &call, &decision.subjects);
-                record_and_emit_tool_result(session, handler, outcome, result)?;
+                assistant_batch_results.push((call.clone(), result));
                 return Ok(());
             }
             ApprovalMode::Ask => {
@@ -2987,7 +2989,7 @@ where
                         reason,
                     );
                     attach_tool_call_context(&mut result, &call, &decision.subjects);
-                    record_and_emit_tool_result(session, handler, outcome, result)?;
+                    assistant_batch_results.push((call.clone(), result));
                     return Ok(());
                 }
                 let approval_is_explicit_network_user_action = approval_is_explicit_user_action
@@ -3051,7 +3053,7 @@ where
                                 format!("tool execution denied by user: {reason}"),
                             );
                             attach_tool_call_context(&mut result, &call, &decision.subjects);
-                            record_and_emit_tool_result(session, handler, outcome, result)?;
+                            assistant_batch_results.push((call.clone(), result));
                             return Ok(());
                         }
                         explicit_user_approval = approval_is_explicit_user_action;
@@ -3117,7 +3119,7 @@ where
                                 reason,
                             );
                             attach_tool_call_context(&mut result, &call, &decision.subjects);
-                            record_and_emit_tool_result(session, handler, outcome, result)?;
+                            assistant_batch_results.push((call.clone(), result));
                             return Ok(());
                         }
                         let mut approved_call = call.clone();
@@ -3210,7 +3212,7 @@ where
                                 &approved_call,
                                 &approved_decision.subjects,
                             );
-                            record_and_emit_tool_result(session, handler, outcome, result)?;
+                            assistant_batch_results.push((call.clone(), result));
                             return Ok(());
                         }
                         execution_permission_plan = Some(approved_plan);
@@ -3269,7 +3271,7 @@ where
                             format!("tool execution denied by user: {reason}"),
                         );
                         attach_tool_call_context(&mut result, &call, &decision.subjects);
-                        record_and_emit_tool_result(session, handler, outcome, result)?;
+                        assistant_batch_results.push((call.clone(), result));
                         return Ok(());
                     }
                     ToolApproval::Expired { reason } => {
@@ -3285,6 +3287,7 @@ where
                             ToolApprovalTerminalStatusV2::Expired,
                             ToolErrorKind::Timeout,
                             reason,
+                            assistant_batch_results,
                         )?;
                         return Ok(());
                     }
@@ -3301,6 +3304,7 @@ where
                             ToolApprovalTerminalStatusV2::Cancelled,
                             ToolErrorKind::Interrupted,
                             reason,
+                            assistant_batch_results,
                         )?;
                         return Ok(());
                     }
@@ -3317,6 +3321,7 @@ where
                             ToolApprovalTerminalStatusV2::Stale,
                             ToolErrorKind::ApprovalDenied,
                             reason,
+                            assistant_batch_results,
                         )?;
                         return Ok(());
                     }
@@ -3351,7 +3356,7 @@ where
                 let mut result =
                     ToolResult::error(call.id.clone(), call.name.clone(), error_kind, reason);
                 attach_tool_call_context(&mut result, &call, &decision.subjects);
-                record_and_emit_tool_result(session, handler, outcome, result)?;
+                assistant_batch_results.push((call.clone(), result));
                 return Ok(());
             }
         }
@@ -3406,6 +3411,7 @@ where
             transient_context,
             web_task_tree_budget,
             tool_artifact_read_budget,
+            assistant_batch_results,
         },
         authorized,
     )
@@ -3417,7 +3423,7 @@ where
 fn append_tool_approval_route_terminal<H: EventHandler>(
     session: &mut Session,
     handler: &mut H,
-    outcome: &mut AgentRunOutcome,
+    _outcome: &mut AgentRunOutcome,
     call: &ToolCall,
     decision: &crate::PermissionDecision,
     approval_identity: &ApprovalRequestIdentityV2,
@@ -3426,6 +3432,7 @@ fn append_tool_approval_route_terminal<H: EventHandler>(
     terminal_status: ToolApprovalTerminalStatusV2,
     error_kind: ToolErrorKind,
     reason: String,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<()> {
     append_tool_approval_audit(
         session,
@@ -3452,7 +3459,8 @@ fn append_tool_approval_route_terminal<H: EventHandler>(
         format!("tool approval did not complete: {reason}"),
     );
     attach_tool_call_context(&mut result, call, &decision.subjects);
-    record_and_emit_tool_result(session, handler, outcome, result)
+    assistant_batch_results.push((call.clone(), result));
+    Ok(())
 }
 
 async fn execute_authorized_tool_call<H, A>(
@@ -3480,6 +3488,7 @@ where
         transient_context,
         web_task_tree_budget,
         tool_artifact_read_budget,
+        assistant_batch_results,
     } = context;
     let AuthorizedToolCall {
         call,
@@ -3521,7 +3530,7 @@ where
                 "tool permission subjects or trust zones changed after authorization; approval must be repeated",
             );
             attach_tool_call_context(&mut result, &call, &execution_subjects);
-            record_and_emit_tool_result(session, handler, outcome, result)?;
+            assistant_batch_results.push((call.clone(), result));
             return Ok(());
         }
         let current = if prepared_tool_call.is_some() {
@@ -3537,7 +3546,7 @@ where
                 "tool permission plan changed after authorization; approval must be repeated",
             );
             attach_tool_call_context(&mut result, &call, &execution_subjects);
-            record_and_emit_tool_result(session, handler, outcome, result)?;
+            assistant_batch_results.push((call.clone(), result));
             return Ok(());
         }
         Some(current)
@@ -3719,7 +3728,7 @@ where
         *satisfied_agent_tool_calls = (*satisfied_agent_tool_calls).saturating_add(1);
     }
     let tool_transient_context = std::mem::take(&mut result.transient_context);
-    emit_tool_result(session, handler, result)?;
+    assistant_batch_results.push((call.clone(), result));
     transient_context.extend(tool_transient_context);
     Ok(())
 }
