@@ -1301,14 +1301,14 @@ impl ExecutionConfig {
 /// RFC-0062 8/9.1: harness-owned capture handle bound to one process execution. Created before
 /// spawn by the tool layer; the backend tees stdout/stderr chunks into the sink while keeping the
 /// observed resource meter independent. The sink is never serialized.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct ExecutionCaptureHandle {
     pub sink: crate::session::ToolArtifactCaptureSink,
     pub config: crate::session::ProcessStreamCaptureConfigV1,
 }
 
 /// RFC-0062 8/9.3: capture evidence returned with the execution receipt for terminal settlement.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct ExecutionCaptureOutcome {
     pub sink: crate::session::ToolArtifactCaptureSink,
     pub source: crate::session::ToolSourceCompletenessV1,
@@ -1317,7 +1317,7 @@ pub struct ExecutionCaptureOutcome {
 }
 
 /// One non-interactive process execution request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecutionRequest {
     pub program: String,
@@ -1363,7 +1363,7 @@ impl ExecutionRequest {
 }
 
 /// Result captured by an execution backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecutionReceipt {
     pub backend: ExecutionBackendKind,

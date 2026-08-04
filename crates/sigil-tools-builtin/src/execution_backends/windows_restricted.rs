@@ -69,6 +69,7 @@ pub(crate) async fn windows_restricted_launch_probe(
     let outcome = supervise_execution_child(
         SupervisedExecutionChild::WindowsRestricted(child),
         request,
+        None,
         OutputCollectionLimits::execution(),
         PreflightReaderFault::None,
         None,

@@ -3619,56 +3619,6 @@ impl Drop for ToolArtifactCaptureSink {
     }
 }
 
-impl Clone for ToolArtifactCaptureSink {
-    fn clone(&self) -> Self {
-        let mut process_write_failed = self.process_write_failed;
-        let process = self.process.as_ref().map(|state| ProcessCaptureState {
-            config: state.config,
-            stdout_staging: state.stdout_staging.as_ref().and_then(|file| {
-                match file.try_clone() {
-                    Ok(clone) => Some(clone),
-                    Err(_) => {
-                        // RFC-0062 16.2: a failed staging-handle clone must never be silently
-                        // dropped; settlement reports storage Unavailable for the whole capture.
-                        process_write_failed = true;
-                        None
-                    }
-                }
-            }),
-            stderr_staging: state
-                .stderr_staging
-                .as_ref()
-                .and_then(|file| match file.try_clone() {
-                    Ok(clone) => Some(clone),
-                    Err(_) => {
-                        process_write_failed = true;
-                        None
-                    }
-                }),
-            stdout_staging_path: state.stdout_staging_path.clone(),
-            stderr_staging_path: state.stderr_staging_path.clone(),
-            stdout_bytes: state.stdout_bytes,
-            stderr_bytes: state.stderr_bytes,
-            stdout_truncated: state.stdout_truncated,
-            stderr_truncated: state.stderr_truncated,
-            staged_bytes: state.staged_bytes,
-        });
-        Self {
-            store: self.store.clone(),
-            tool_call_id: self.tool_call_id.clone(),
-            tool_name: self.tool_name.clone(),
-            media_type: self.media_type.clone(),
-            encoding: self.encoding,
-            sensitivity: self.sensitivity,
-            head: self.head.clone(),
-            tail: self.tail.clone(),
-            observed_bytes: self.observed_bytes,
-            process_write_failed,
-            process,
-        }
-    }
-}
-
 impl PartialEq for ToolArtifactCaptureSink {
     fn eq(&self, other: &Self) -> bool {
         self.tool_call_id == other.tool_call_id
@@ -3745,6 +3695,15 @@ impl ToolArtifactCaptureSink {
             return Err(error).with_context(|| {
                 format!("failed to unlink staged capture {}", stderr_path.display())
             });
+        }
+        // RFC-0062 16.2: on Windows the staging directory inherits the parent DACL unless we
+        // apply the shared private-permission contract; delete-on-close removes the entry when
+        // the last handle closes, and this explicit DACL keeps the on-disk window owner-only.
+        #[cfg(windows)]
+        {
+            crate::secure_private_path_permissions(&staging_dir)?;
+            crate::secure_private_path_permissions(&stdout_path)?;
+            crate::secure_private_path_permissions(&stderr_path)?;
         }
         sink.process = Some(ProcessCaptureState {
             config,
@@ -4557,6 +4516,7 @@ fn create_private_file(path: &Path) -> Result<File> {
 }
 
 /// Owner-only read+write staging file used by harness-owned process capture.
+#[cfg(unix)]
 fn open_read_write_private_file(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -4574,40 +4534,24 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
 fn open_read_write_private_file(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
-        // RFC-0062 16.2: Windows delete-on-close. The OS removes the directory entry when the
-        // last handle closes, so crash / TerminateProcess / power loss cannot leave
-        // policy-unredacted raw bytes in a .part file. FILE_SHARE_DELETE is required for
-        // FILE_FLAG_DELETE_ON_CLOSE to behave correctly.
-        use std::os::windows::ffi::OsStrExt as _;
-        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        // RFC-0062 16.2: Windows delete-on-close via OpenOptionsExt. The OS removes the
+        // directory entry when the last handle closes, so crash / TerminateProcess cannot leave
+        // policy-unredacted raw bytes in a .part file; FILE_SHARE_DELETE is required for
+        // FILE_FLAG_DELETE_ON_CLOSE to behave correctly. The OS does not guarantee deletion
+        // after sudden power loss, so grace GC remains the cross-platform fallback.
+        use std::os::windows::fs::OpenOptionsExt as _;
         use windows_sys::Win32::Storage::FileSystem::{
-            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
+            FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
         };
-        let wide = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let handle = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
-                0,
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            bail!(
-                "failed to create delete-on-close private tool artifact {}",
-                path.display()
-            );
-        }
-        // SAFETY: CreateFileW returned a valid handle with delete-on-close semantics.
-        return Ok(unsafe { std::fs::File::from_raw_handle(handle as _) });
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE)
+            .open(path)
+            .with_context(|| format!("failed to create private tool artifact {}", path.display()))
     }
     #[cfg(not(windows))]
     {

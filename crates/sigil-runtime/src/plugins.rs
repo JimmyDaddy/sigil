@@ -208,7 +208,7 @@ impl PluginHookExecutionRequest {
 }
 
 /// Result of one hook command execution plus durable control entries the caller should append.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PluginHookExecutionOutcome {
     pub started: PluginHookExecutionStartedEntry,
     pub finished: PluginHookExecutionFinishedEntry,

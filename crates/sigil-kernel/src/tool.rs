@@ -958,7 +958,7 @@ pub struct ToolProgressEvent {
 }
 
 /// Normalized tool execution result returned to the agent loop and UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolResult {
     pub call_id: String,
@@ -990,6 +990,26 @@ pub struct ToolResult {
 pub(crate) enum PreCapturedToolArtifact {
     Published(Box<ToolArtifactDescriptorV1>),
     Unavailable { observed_bytes: u64 },
+}
+
+impl Clone for ToolResult {
+    fn clone(&self) -> Self {
+        Self {
+            call_id: self.call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            content: self.content.clone(),
+            status: self.status.clone(),
+            metadata: self.metadata.clone(),
+            transient_context: self.transient_context.clone(),
+            control_entries: self.control_entries.clone(),
+            url_capability_registrations: self.url_capability_registrations.clone(),
+            external_sources: self.external_sources.clone(),
+            pre_captured_artifact: self.pre_captured_artifact.clone(),
+            // RFC-0062 8: capture ownership is single; clones never carry the harness capture.
+            capture_outcome: None,
+            durable_v3_projection: self.durable_v3_projection.clone(),
+        }
+    }
 }
 
 impl ToolResult {
