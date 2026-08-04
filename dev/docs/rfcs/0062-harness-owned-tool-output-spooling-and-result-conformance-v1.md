@@ -57,7 +57,10 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   DisabledPendingDelete 状态安全拒绝读取兜底）；retrieval budget 仍为 per-root-run 累计而非
   per-model-turn；Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
   （delete-on-close 不保证断电删除，grace GC 为兜底；本机为 macOS，Windows 行为仅通过
-  x86_64-pc-windows-gnu 交叉编译验证，未做实机测试）。
+  x86_64-pc-windows-gnu 交叉编译验证，未做实机测试）；Windows staging 目录在创建任何文件
+  前即设置 owner-only DACL（文件继承后逐文件校验），share_mode 仅保留 FILE_SHARE_DELETE；
+  对应集成测试 `windows_staging_is_owner_only_before_unredacted_bytes_are_written` 仅随
+  Windows CI 运行。
 
 创建日期：2026-08-03
 

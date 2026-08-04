@@ -3668,6 +3668,12 @@ impl ToolArtifactCaptureSink {
         self.store.ensure_root_dir()?;
         let staging_dir = self.store.root.join("staging");
         create_private_dir(&staging_dir)?;
+        // RFC-0062 16.2: on Windows the directory must be protected BEFORE any file is created,
+        // otherwise a wide parent ACL lets other principals open the staging files while they
+        // still contain policy-unredacted bytes and keep the handle past the later DACL update.
+        // Files then inherit this owner-only DACL at creation; per-file verification follows.
+        #[cfg(windows)]
+        crate::secure_private_path_permissions(&staging_dir)?;
         let stdout_path = staging_dir.join(format!("{}.stdout.part", Uuid::new_v4().simple()));
         let stderr_path = staging_dir.join(format!("{}.stderr.part", Uuid::new_v4().simple()));
         let stdout_staging = open_read_write_private_file(&stdout_path)?;
@@ -3696,12 +3702,11 @@ impl ToolArtifactCaptureSink {
                 format!("failed to unlink staged capture {}", stderr_path.display())
             });
         }
-        // RFC-0062 16.2: on Windows the staging directory inherits the parent DACL unless we
-        // apply the shared private-permission contract; delete-on-close removes the entry when
-        // the last handle closes, and this explicit DACL keeps the on-disk window owner-only.
+        // RFC-0062 16.2: per-file DACL verification on Windows. The directory was protected
+        // before creation so files inherit the owner-only ACL; this verifies each file and
+        // covers the case where inheritance was not applied.
         #[cfg(windows)]
         {
-            crate::secure_private_path_permissions(&staging_dir)?;
             crate::secure_private_path_permissions(&stdout_path)?;
             crate::secure_private_path_permissions(&stderr_path)?;
         }
@@ -4548,7 +4553,7 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
             .read(true)
             .write(true)
             .create_new(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .share_mode(FILE_SHARE_DELETE)
             .custom_flags(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE)
             .open(path)
             .with_context(|| format!("failed to create private tool artifact {}", path.display()))

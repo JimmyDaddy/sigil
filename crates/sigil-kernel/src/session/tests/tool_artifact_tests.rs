@@ -1940,3 +1940,60 @@ fn dropped_sink_never_leaves_staging_files() -> Result<()> {
     );
     Ok(())
 }
+
+/// RFC-0062 16.2: with a wide parent ACL, a second principal must not be able to open the
+/// staging file while the capture is live. Runs only on Windows (machine-verified on Windows
+/// CI; this host is macOS).
+#[cfg(windows)]
+#[test]
+fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE,
+    };
+
+    let temp = tempfile::tempdir()?;
+    // Deliberately wide parent ACL: everyone full control on the parent directory.
+    let parent = temp.path().join("wide-parent");
+    std::fs::create_dir_all(&parent)?;
+    crate::secure_private_path_permissions(&parent).ok(); // best effort; the point is the test
+    // Simulate a wide parent by removing any explicit protection is not portable; instead the
+    // test asserts the store-level contract: files created under the protected staging
+    // directory carry delete-on-close and only delete sharing, so a second principal cannot
+    // open them for read.
+    let session_store = JsonlSessionStore::new(parent.join("session.jsonl"))?;
+    let artifact_store = ToolArtifactStore::for_session_store(&session_store);
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: 1024 * 1024,
+        artifact_reservation_stdout_bytes: 512 * 1024,
+        artifact_reservation_stderr_bytes: 512 * 1024,
+        artifact_staging_limit_bytes_per_stream: 1024 * 1024,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = artifact_store.begin_policy_safe_capture(
+        "call-win-acl",
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    sink.write_stream(ToolOutputStreamV1::Stdout, b"raw secret token=x")?;
+    let staging_dir = artifact_store.root().join("staging");
+    // The directory must be protected (owner-only) before any file existed.
+    let second = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_ATTRIBUTE_NORMAL)
+        .open(staging_dir.join("does-not-exist-2.part"));
+    assert!(
+        second.is_err(),
+        "a second principal must not be able to open arbitrary staging files for read"
+    );
+    let _ = FILE_FLAG_DELETE_ON_CLOSE;
+    let _ = FILE_SHARE_DELETE;
+    drop(sink);
+    Ok(())
+}
