@@ -563,6 +563,51 @@ impl Session {
         Ok(())
     }
 
+    /// RFC-0062 9.4: appends one generation-guarded availability transition. The expected
+    /// generation is the caller's responsibility; helper scans are available on the caller side.
+    pub fn append_artifact_availability_transition(
+        &mut self,
+        artifact_ref: &ToolArtifactRefV1,
+        expected_generation: u64,
+        previous: ToolArtifactAvailabilityStateV1,
+        next: ToolArtifactAvailabilityStateV1,
+        reason: ToolArtifactAvailabilityReasonV1,
+        changed_at_ms: u64,
+    ) -> Result<()> {
+        let change = ToolArtifactAvailabilityChangedV1 {
+            schema_version: TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+            artifact_ref: artifact_ref.clone(),
+            expected_generation,
+            generation: expected_generation.saturating_add(1),
+            previous,
+            next,
+            reason,
+            changed_at_ms,
+        };
+        change.validate()?;
+        self.append_control(ControlEntry::ToolArtifactAvailabilityChanged(change))
+    }
+
+    /// RFC-0062 9.4: resolves the current availability generation for one artifact from the
+    /// durable availability transitions already in this session (0 when none exist).
+    pub fn artifact_availability_generation(&self, artifact_ref: &ToolArtifactRefV1) -> u64 {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                if let SessionLogEntry::Control(ControlEntry::ToolArtifactAvailabilityChanged(
+                    change,
+                )) = entry
+                    && change.artifact_ref == *artifact_ref
+                {
+                    Some(change.generation)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0)
+    }
+
     pub fn append_control(&mut self, control: ControlEntry) -> Result<()> {
         self.append(SessionLogEntry::Control(control))
     }

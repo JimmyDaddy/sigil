@@ -21,13 +21,18 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   GenerateContent 同批 function responses 合并为单一 user Content；OpenAI/DeepSeek exact call_id
   验证；MCP stdio `isError` → 结构化 tool error（保留 actionable content）。
 - R62.5 部分：`ToolArtifactAvailabilityChangedV1` 已接入 ControlEntry（generation guard、状态机、
-  durable append、TUI audit 渲染）；**GC durable-disable-before-delete 与 active-reader lease 集成、
-  scratch quota/TTL、availability projection reducer 尚未落地**。
+  durable append、TUI audit 渲染）；runtime `garbage_collect_session_artifacts` 已按
+  durable-disable-before-delete 顺序 append `Available -> DisabledPendingDelete`（GC 前）与
+  `DisabledPendingDelete -> Expired`（GC 后），generation 由 session 中既有事件派生，并有
+  `artifact_gc_appends_durable_disable_before_delete_and_expired_after` 集成测试；
+  **active-reader lease 集成、scratch quota/TTL、availability projection reducer 尚未落地**。
 - R62.6 部分：TUI/HTTP/Desktop 已随 V3 cutover 消费同一 typed descriptor；**共享 DTO 的
   completeness/truncation reason 显式字段与 OpenAPI 同步尚未落地**。
 - R62.7 部分：V2 rejection、10 MiB 完整捕获、Anthropic/Gemini fixtures、availability 状态机、
-  per-batch 预算、128-result floor 测试已过；**PTY ordering、dual-stream cap 确定性、secret 跨 chunk
-  e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、paid provider smoke 未执行**。
+  per-batch 预算、128-result floor 测试已过；新增 `process_capture_canonical_hash_is_identical_across_chunk_schedulings`
+  （dual-stream cap 确定性）与 `process_capture_redacts_secrets_that_span_chunk_boundaries`
+  （secret 跨 chunk）；**PTY ordering e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、
+  paid provider smoke 未执行**。
 - 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5400 passed）、
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。

@@ -1431,3 +1431,71 @@ fn retention_preview_excludes_a_session_with_an_active_writer_lease() -> Result<
     drop(active_store);
     Ok(())
 }
+
+#[test]
+fn artifact_gc_appends_durable_disable_before_delete_and_expired_after() -> Result<()> {
+    // RFC-0062 9.4: the lifecycle GC writes generation-guarded availability transitions around
+    // the tombstone so no crash window advertises a retrievable artifact whose body is gone.
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-disable.jsonl");
+    finalized_session(&source, "disable-before-delete")?;
+    let source_ref = sigil_kernel::SessionRef::new_relative("session-disable.jsonl")?;
+    let source_session_id = JsonlSessionStore::read_event_records(&source)?
+        .first()
+        .context("session identity")?
+        .session_id()
+        .to_owned();
+    let store = sigil_kernel::ToolArtifactStore::for_session_path(&source);
+    let orphan = store.capture_text(
+        "call-gc-disable",
+        "shell",
+        "grace expired orphan",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 1);
+    assert_eq!(report.tombstoned_refs.len(), 1);
+    assert_eq!(report.tombstoned_refs[0], orphan.artifact_ref);
+
+    let records = JsonlSessionStore::read_event_records(&source)?;
+    let entries = records
+        .iter()
+        .map(|record| record.session_log_entry())
+        .collect::<Result<Vec<_>>>()?;
+    let transitions = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Some(sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::ToolArtifactAvailabilityChanged(change),
+            )) => Some(change),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(transitions.len(), 2, "disable then expired");
+    assert_eq!(transitions[0].generation, 1);
+    assert_eq!(
+        transitions[0].previous,
+        sigil_kernel::ToolArtifactAvailabilityStateV1::Available
+    );
+    assert_eq!(
+        transitions[0].next,
+        sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete
+    );
+    assert_eq!(transitions[1].generation, 2);
+    assert_eq!(
+        transitions[1].next,
+        sigil_kernel::ToolArtifactAvailabilityStateV1::Expired
+    );
+    assert!(store.resolve(&orphan.artifact_ref).is_err());
+    Ok(())
+}

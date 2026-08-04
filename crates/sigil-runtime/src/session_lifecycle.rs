@@ -18,7 +18,7 @@ use sigil_kernel::session::ToolArtifactDescriptorV1;
 use sigil_kernel::{
     AssistantMessageKind, ControlEntry, ConversationForkOutput, ConversationForkProjection,
     ConversationForked, ConversationTurnForkRequest, DurableEventType, ExternalProvenanceEntry,
-    JsonlSessionStore, MessageRole, ModelMessage, RootConfig, SessionLogEntry, SessionRef,
+    JsonlSessionStore, MessageRole, ModelMessage, RootConfig, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, ToolArtifactBindingV1, ToolArtifactGcReportV1, ToolArtifactGcRootsV1,
     ToolArtifactStore, fork_conversation_at_turn, safe_persistence_text,
 };
@@ -883,6 +883,7 @@ impl LocalSessionLifecycleService {
     ) -> Result<ToolArtifactGcReportV1> {
         let _maintenance = self.acquire_maintenance_lease()?;
         let store = self.resolve_artifact_store_without_jsonl(session_ref, expected_session_id)?;
+        let session_log_path = store.session_log_path().to_path_buf();
         if self.is_session_pinned(session_ref, expected_session_id)? {
             roots.explicit_holds.extend(
                 store
@@ -891,11 +892,53 @@ impl LocalSessionLifecycleService {
                     .map(|entry| entry.descriptor.artifact_ref),
             );
         }
+        // RFC-0062 9.4 durable-disable-before-delete: append generation-guarded
+        // Available -> DisabledPendingDelete transitions BEFORE the body is moved to trash, and
+        // DisabledPendingDelete -> Expired AFTER, so no crash window ever advertises a
+        // retrievable artifact whose body is gone.
+        let expiry = match JsonlSessionStore::new(&session_log_path)
+            .map(|jsonl| Session::load_from_store("session", "model", jsonl))
+        {
+            Ok(Ok(mut session)) => {
+                let disabled = store.grace_expired_artifact_refs(
+                    &roots,
+                    now_unix_ms,
+                    sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
+                )?;
+                for artifact_ref in &disabled {
+                    let generation = session.artifact_availability_generation(artifact_ref);
+                    let _appended = session.append_artifact_availability_transition(
+                        artifact_ref,
+                        generation,
+                        sigil_kernel::ToolArtifactAvailabilityStateV1::Available,
+                        sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                        sigil_kernel::ToolArtifactAvailabilityReasonV1::GcDisable,
+                        now_unix_ms,
+                    );
+                }
+                Some(session)
+            }
+            Err(_error) => None,
+            _ => None,
+        };
         let report = store.garbage_collect(
             &roots,
             now_unix_ms,
             sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
         )?;
+        if let Some(mut session) = expiry {
+            for artifact_ref in &report.tombstoned_refs {
+                let generation = session.artifact_availability_generation(artifact_ref);
+                session.append_artifact_availability_transition(
+                    artifact_ref,
+                    generation,
+                    sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                    sigil_kernel::ToolArtifactAvailabilityStateV1::Expired,
+                    sigil_kernel::ToolArtifactAvailabilityReasonV1::GcExpired,
+                    now_unix_ms,
+                )?;
+            }
+        }
         let operation_id = format!("session-artifact-gc:{}", uuid::Uuid::new_v4());
         self.lifecycle_journal().append(
             &operation_id,

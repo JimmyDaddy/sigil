@@ -2284,6 +2284,10 @@ pub struct ToolArtifactGcReportV1 {
     pub tombstoned_staging_files: usize,
     pub tombstoned_bytes: u64,
     pub skipped_active_reads: usize,
+    /// RFC-0062 9.4: artifacts actually moved to trash; callers append the durable
+    /// DisabledPendingDelete -> Expired availability transitions for these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstoned_refs: Vec<ToolArtifactRefV1>,
 }
 
 /// Outcome of unlinking artifact-GC trash after a second grace boundary.
@@ -2317,6 +2321,20 @@ impl ToolArtifactStore {
     #[must_use]
     pub fn session_scope_id_hash(&self) -> &str {
         &self.session_scope_id_hash
+    }
+
+    /// Path of the session JSONL this artifact store belongs to. The artifact root lives under
+    /// `<session-dir>/<stem>/artifacts`, so the JSONL is `<session-dir>/<stem>.jsonl`.
+    #[must_use]
+    pub fn session_log_path(&self) -> std::path::PathBuf {
+        let stem_dir = self.root.parent();
+        let session_dir = stem_dir.and_then(|dir| dir.parent());
+        match (session_dir, stem_dir.and_then(|dir| dir.file_name())) {
+            (Some(session_dir), Some(stem)) => {
+                session_dir.join(format!("{}.jsonl", stem.to_string_lossy()))
+            }
+            _ => self.root.join("session.jsonl"),
+        }
     }
 
     #[must_use]
@@ -2666,6 +2684,34 @@ impl ToolArtifactStore {
     ///
     /// Returns an error for invalid roots, a grace shorter than 24 hours, unsafe store entries, or
     /// a failed tombstone move.
+    /// RFC-0062 9.4: returns the artifacts whose manifests are unreferenced and past the grace
+    /// period, so callers can append durable `Available -> DisabledPendingDelete` transitions
+    /// BEFORE the body is deleted. Pure computation; never mutates the store.
+    pub fn grace_expired_artifact_refs(
+        &self,
+        roots: &ToolArtifactGcRootsV1,
+        now_unix_ms: u64,
+        orphan_grace_ms: u64,
+    ) -> Result<Vec<ToolArtifactRefV1>> {
+        roots.validate()?;
+        if orphan_grace_ms < TOOL_ARTIFACT_ORPHAN_GRACE_MS {
+            bail!("tool artifact orphan grace must be at least 24 hours");
+        }
+        let inventory = self.manifest_inventory()?;
+        let mut expired = Vec::new();
+        for entry in &inventory {
+            let descriptor = &entry.descriptor;
+            let protected = roots.contains(&descriptor.artifact_ref)
+                || descriptor.retention_class == ToolArtifactRetentionClass::Pinned;
+            let grace_elapsed =
+                now_unix_ms.saturating_sub(entry.manifest_modified_at_unix_ms) >= orphan_grace_ms;
+            if !protected && grace_elapsed {
+                expired.push(descriptor.artifact_ref.clone());
+            }
+        }
+        Ok(expired)
+    }
+
     pub fn garbage_collect(
         &self,
         roots: &ToolArtifactGcRootsV1,
@@ -2705,6 +2751,7 @@ impl ToolArtifactStore {
         create_private_dir(&trash_staging)?;
 
         let mut tombstoned_manifests = 0usize;
+        let mut tombstoned_refs = Vec::new();
         let mut skipped_active_reads = 0usize;
         for entry in candidates {
             let artifact_ref = &entry.descriptor.artifact_ref;
@@ -2747,6 +2794,7 @@ impl ToolArtifactStore {
                 })?;
             }
             tombstoned_manifests = tombstoned_manifests.saturating_add(1);
+            tombstoned_refs.push(entry.descriptor.artifact_ref.clone());
         }
         sync_dir(&self.root.join("refs"))?;
         sync_dir(&trash_refs)?;
@@ -2820,6 +2868,7 @@ impl ToolArtifactStore {
             tombstoned_staging_files,
             tombstoned_bytes,
             skipped_active_reads,
+            tombstoned_refs,
         })
     }
 

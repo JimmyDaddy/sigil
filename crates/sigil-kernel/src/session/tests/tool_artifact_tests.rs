@@ -1580,3 +1580,102 @@ fn availability_change_events_are_generation_guarded_and_durable() -> Result<()>
     assert!(illegal.validate().is_err());
     Ok(())
 }
+
+#[test]
+fn process_capture_canonical_hash_is_identical_across_chunk_schedulings() -> Result<()> {
+    // RFC-0062 9.2/18: the canonical stdout-then-stderr artifact hash and segment layout must be
+    // identical regardless of reader scheduling and chunk sizes.
+    let stdout = b"stdout line one\nstdout line two\n";
+    let stderr = b"stderr warning\nstderr error detail\n";
+    let mut digests = std::collections::BTreeSet::new();
+    for chunk in [1usize, 3, 7, 64, 1024] {
+        let (_temp, store) = store_fixture()?;
+        let config = ProcessStreamCaptureConfigV1 {
+            stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+            preview_limit_bytes_per_stream: 64 * 1024,
+            artifact_payload_limit_bytes_combined: TOOL_ARTIFACT_MAX_BYTES as u64,
+            artifact_reservation_stdout_bytes: TOOL_ARTIFACT_MAX_BYTES as u64 / 2,
+            artifact_reservation_stderr_bytes: TOOL_ARTIFACT_MAX_BYTES as u64 / 2,
+            artifact_staging_limit_bytes_per_stream: TOOL_ARTIFACT_MAX_BYTES as u64,
+            observed_limit_bytes_combined: 128 * 1024 * 1024,
+        };
+        let sink = store.begin_policy_safe_capture(
+            "call-dual",
+            "shell",
+            "text/plain; charset=utf-8",
+            ToolArtifactEncoding::Utf8,
+            ToolArtifactSensitivity::Ordinary,
+        );
+        let mut sink = sink.begin_process_capture(config)?;
+        for chunk in stdout.chunks(chunk) {
+            sink.write_stream(ToolOutputStreamV1::Stdout, chunk)?;
+        }
+        for chunk in stderr.chunks(chunk) {
+            sink.write_stream(ToolOutputStreamV1::Stderr, chunk)?;
+        }
+        let (descriptor, segments, completeness) = sink.finish_process_capture(
+            (stdout.len() + stderr.len()) as u64,
+            0,
+            ToolSourceCompletenessV1::Complete,
+        )?;
+        assert_eq!(
+            descriptor.observed_bytes,
+            (stdout.len() + stderr.len()) as u64
+        );
+        assert_eq!(descriptor.persisted_bytes, descriptor.observed_bytes);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].stream, ToolOutputStreamV1::Stdout);
+        assert_eq!(segments[0].artifact_offset, 0);
+        assert_eq!(segments[0].persisted_bytes, stdout.len() as u64);
+        assert_eq!(segments[1].stream, ToolOutputStreamV1::Stderr);
+        assert_eq!(segments[1].artifact_offset, stdout.len() as u64);
+        assert_eq!(segments[1].persisted_bytes, stderr.len() as u64);
+        assert_eq!(completeness.storage, ToolStorageCompletenessV1::Complete);
+        let body = store.read_all(&descriptor)?;
+        let expected = [stdout.as_slice(), stderr.as_slice()].concat();
+        assert_eq!(body, expected, "canonical body must be stdout then stderr");
+        digests.insert(descriptor.content_sha256.clone());
+    }
+    assert_eq!(
+        digests.len(),
+        1,
+        "identical stream bytes must produce one canonical hash across chunk schedulings"
+    );
+    Ok(())
+}
+
+#[test]
+fn process_capture_redacts_secrets_that_span_chunk_boundaries() -> Result<()> {
+    // RFC-0062 10.2: policy redaction runs on the canonical merged bytes, so a secret split
+    // across chunk boundaries is still removed deterministically.
+    let (_temp, store) = store_fixture()?;
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: TOOL_ARTIFACT_MAX_BYTES as u64,
+        artifact_reservation_stdout_bytes: TOOL_ARTIFACT_MAX_BYTES as u64 / 2,
+        artifact_reservation_stderr_bytes: TOOL_ARTIFACT_MAX_BYTES as u64 / 2,
+        artifact_staging_limit_bytes_per_stream: TOOL_ARTIFACT_MAX_BYTES as u64,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = store.begin_policy_safe_capture(
+        "call-secret",
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    // "token=" and "SUPER-SECRET-123" land in separate chunks.
+    sink.write_stream(ToolOutputStreamV1::Stdout, b"prefix token=")?;
+    sink.write_stream(ToolOutputStreamV1::Stdout, b"SUPER-SECRET-123 suffix")?;
+    let (descriptor, _, completeness) =
+        sink.finish_process_capture(31, 0, ToolSourceCompletenessV1::Complete)?;
+    let body = String::from_utf8_lossy(&store.read_all(&descriptor)?).into_owned();
+    assert!(
+        !body.contains("SUPER-SECRET-123"),
+        "secret split across chunks must be redacted"
+    );
+    assert_eq!(completeness.policy, ToolPolicyCompletenessV1::Redacted);
+    Ok(())
+}
