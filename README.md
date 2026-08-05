@@ -56,7 +56,7 @@ Quick Setup opens when configuration is missing or invalid. No values are reused
 
 Prefer a native app? The [GitHub prerelease](https://github.com/JimmyDaddy/sigil/releases) provides signed and Apple-notarized macOS DMGs for Apple Silicon and Intel. See [Installation](docs/en/installation.md) for the exact asset names and update path.
 
-A release may enable automatic Task routing and proactive read-only Explore agents for a new installation only when it ships an exact-route qualification manifest for its own binary. Other routes, releases without that sidecar, and every existing configuration keep the conservative `manual + explicit_request_only` behavior. This changes orchestration only; it never grants file, shell, network, MCP, external-directory, or merge permission. See [Advanced Configuration](docs/en/advanced-configuration.md#task-planning).
+Automatic Task routing is the default: ordinary input is first routed through a host-owned decision (Chat / PlanReview / Task) on the review-first baseline, and only an accepted plan can create a durable Task. A release may additionally enable direct Task execution and proactive read-only Explore agents for a new installation only when it ships an exact-route qualification manifest for its own binary; other routes and releases without that sidecar stay on the review-first baseline. Explicit `routing_policy = "manual"` is the coarse rollback and keeps chat-first behavior. This changes orchestration only; it never grants file, shell, network, MCP, external-directory, or merge permission. `sigil doctor` reports the three automatic-orchestration facts. See [Advanced Configuration](docs/en/advanced-configuration.md#task-planning).
 
 ## Go deeper
 

@@ -4,6 +4,17 @@
 
 创建日期：2026-07-01
 
+### 2026-08-04 successor amendment
+
+[RFC-0063 Automatic Plan Review and Default AI Orchestration V1](0063-automatic-plan-review-and-default-ai-orchestration-v1.md)
+是本 RFC 的后续修订。RFC-0018 继续拥有 Plan artifact、用户 decision、scoped permission grant
+与 Plan-to-Task promotion；RFC-0063 只扩展 Plan 的 source：除了显式 `/plan`，普通 conversation
+还可以通过 host-bound automatic `ConversationRouteDecision(PlanReview)` 进入同一
+`PlanReviewCoordinator` 和同一组 RFC-0018 durable records，并把 typed `submit_plan_draft`
+作为新 Plan review lifecycle 的 model-to-host control channel。本文关于 fenced
+`sigil-plan-v2` 作为 model-to-host control 的表述由 RFC-0063 修正为 canonical rendering 与
+导出格式。
+
 基线：
 
 - Roadmap: [Sigil Capability Roadmap v1.0 / Frozen](../sigil-capability-roadmap.md)

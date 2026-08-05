@@ -1006,11 +1006,35 @@ Desktop、TUI、CLI 与 HTTP streaming 都消费同一套事件语义，而不�
 
 ## 9. Planner / Executor / Subagent 协作模型
 
-Planner / executor / subagent 协作已经作为跨表面的共享 task flow 落地。Durable task 在 TUI 中的显式入口是 `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则 blocked，不能把 routing 文本当作用户回答。默认 `manual` 仍保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Cancelled`；cleanup、join 或最终 binding 不确定时只能追加 `Interrupted`。普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。兼容默认值仍保持 `manual`，是否切换只由 qualified real-model evidence 与 rollout decision 决定。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
+Planner / executor / subagent 协作已经作为跨表面的共享 task flow 落地。Durable task 在 TUI 中的显式入口是 `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则 blocked，不能把 routing 文本当作用户回答。默认 `auto` 时普通输入走三路自动路由（Chat / PlanReview / Task），显式 `manual` 保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Cancelled`；cleanup、join 或最终 binding 不确定时只能追加 `Interrupted`。普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。release 默认值为 `auto`（review-first 基线），只有 qualified real-model evidence 与 rollout manifest 精确匹配才允许 `DirectTask`。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
 
 自动 routing 的 negative decision 还必须通过 route-fingerprinted direct-execution
 continuation contract 进入 ordinary turn：恢复 ordinary tools 后执行原始请求，不能只复述
 routing decision 或宣布将要行动。该过渡由 typed decision 驱动，不扫描用户 prompt 关键词。
+
+RFC-0063 把 conversation 语义路由扩展为 Chat / PlanReview / Task 三路。每次 durable route
+decision 都绑定 route contract fingerprint（routing contract、exact tool surface、capability
+与 host route facts），自动 capability 由 host 证据决定，模型不能自封：无精确 rollout
+qualification 时只能得到 ReviewFirst，只有 qualified orchestration manifest 精确匹配 provider、
+model、endpoint、build 与 task defaults 才允许 DirectTask；kill switch 或 provider 不支持
+streaming tool calls 时整体 Unsupported。PlanReview 是完整 durable lifecycle（Started →
+DraftReady / CompletedWithoutDraft / Failed / Interrupted / Cancelled）：模型通过 typed
+`submit_plan_draft`（schema v2）提交 plan draft，host strict-validate 后 append
+`PlanDraftCreated`，只读 research 与 draft 提交都在 child session 内；`/plan` 与自动 review
+共享同一个 PlanReviewCoordinator。plan decision（Run / Save / Revise / Reject）绑定 exact plan
+id/hash，Run 直接走 RFC-0018 的 `TaskCreatedFromPlan` 前缀，不重放 planner；Revise 启动新一轮
+attempt。公开投影只暴露 bounded plan review surface（plan id/hash、status、summary、counts、
+risk、allowed actions、source、stale），不暴露 prompt、路径、ref 或 authority。HTTP
+`POST /sessions/{id}/plan-decision` 与 Desktop `desktop_plan_decision` IPC 复用同一 typed
+command receipt 的幂等语义；React plan card 与 TUI pending plan card 消费同一投影。
+
+三路 eval corpus（`dev/evals/model-fixtures/orchestration-v1`，rfc-0063-orchestration-v1）冻结为
+20 Chat / 15 PlanReview / 15 DirectTask，report schema v2 的 gate 按类推导
+Chat→Task FP（<=5%）、PlanReview→Task premature（=0）、DirectTask miss（<=10%）与
+ReviewFirst baseline 的 over-route / miss（<=10%）；durable route decision 只从
+`ConversationRouteDecisionRecorded` 计数，assistant prose 不参与 gate 证据。route-local
+hard-invariant kill switch 把 DirectTask 降级到 ReviewFirst（保留可审阅的 plan review
+handoff），只有 plan lifecycle 自身 invariant 才降级到 Unsupported/Manual。
 
 2026-07-23 的 O5a 实现后，ordinary-chat natural-language delegation 仍未稳定绑定
 `AgentDelegationRequirement`（不得用关键词推断），因此 ordinary ingress delegation hard gate

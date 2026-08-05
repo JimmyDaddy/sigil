@@ -94,8 +94,7 @@ provider 模板、凭据来源、模型发现与排障见[模型服务指南](pr
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
 | `[task].enabled` | `true` | 开启任务规划。 |
-| `[task].routing_policy` | `"manual"` | 普通对话路由策略：`manual` 或由 coordinator 接管的 `auto`；不会授予工具权限。 |
-| `[task].default_mode` | `"chat"` | 输入框的默认工作模式。 |
+| `[task].routing_policy` | `"auto"` | 普通对话路由策略：`manual`（chat-first，仅保留显式 `/plan` 与 `/task`）或由 coordinator 接管的 `auto`（`Chat` / `PlanReview` / `Task` 三路 decision）；不会授予工具权限。 |
 | `[task].max_plan_steps` | `12` | 单个计划最多包含多少步。 |
 | `[task].max_replans` | `2` | 最多允许重新规划多少次。 |
 | `[task].max_subagents` | `8` | 最多同时运行多少个子智能体。 |

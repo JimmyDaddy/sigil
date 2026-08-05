@@ -71,15 +71,18 @@ Shell 选择和终端行为见[终端兼容性](terminal-compatibility.md)；可
 
 ## Task Rollout 与默认值
 
-除非用户显式修改，否则当前 schema 默认使用
-`routing_policy = "manual"` 和 `multi_agent_mode = "explicit_request_only"`。
-只有在缺少配置、安装的 binary 同时携带 qualified rollout manifest，并且所选 provider、
-model、官方 endpoint family、task config 与 build 全部精确匹配时，Quick Setup 才可能选择
-`auto + proactive`。
+当前 schema 默认使用
+`routing_policy = "auto"` 和 `multi_agent_mode = "explicit_request_only"`。
+普通输入因此默认在 review-first 基线上运行 Chat / PlanReview / Task 自动路由；
+显式 `manual` 保持 chat-first。只有在缺少配置、安装的 binary 同时携带 qualified
+rollout manifest，并且所选 provider、model、官方 endpoint family、task config 与 build
+全部精确匹配时，Quick Setup 才保存 `auto + proactive`。
 
-Sigil 不会重写不兼容的配置。manifest 缺失、损坏、过期或 route 不匹配时同样保持保守值。
-使用 `sigil doctor` 检查当前 release qualification。把两个字段恢复为默认值就是 rollout 的
-coarse rollback；它不会删除 durable Task 或 agent history。
+Sigil 不会重写不兼容的配置。manifest 缺失、损坏、过期或 route 不匹配时保持
+review-first 基线。使用 `sigil doctor` 检查当前 release qualification，包括 direct task
+execution 是 qualified、review-first fallback 还是 unavailable。设置
+`routing_policy = "manual"` 就是 rollout 的 coarse rollback；它不会删除 durable Task 或
+agent history。
 
 ## 设置异常时使用 Doctor
 

@@ -82,9 +82,10 @@ TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显�
 
 任务界面会显示步骤、当前状态和子智能体的工作；需要你检查时，还会显示验证卡片。按 `Alt-V` 可以直接聚焦。恢复会话只会还原已保存的任务状态，不会自动继续执行。
 
-新安装的 qualified release 可能在 Quick Setup 中显示 `auto / proactive`。这个选择与 release
-中携带的精确 provider route 和 binary build 绑定；已有配置不会改变。运行 `sigil doctor`
-可以确认当前配置是否匹配 release qualification。要关闭自动 handoff 和 proactive spawn，
+release 默认值是 `auto / explicit_request_only`：普通输入在 review-first 基线上自动路由
+（先自动计划审查，再进入 durable Task）。新安装的 qualified release 还可能在 Quick Setup
+与 `sigil doctor` 中显示 direct task execution；该 qualification 与 release 携带的精确
+provider route 和 binary build 绑定；已有配置不会改变。要关闭自动路由和 proactive spawn，
 同时保留已有 Task history，请设置 `routing_policy = "manual"` 和
 `multi_agent_mode = "explicit_request_only"`。
 

@@ -8,6 +8,13 @@
 
 ## 尚未发布 - main
 
+- 自动 Task 路由现在是默认行为：普通输入先在 review-first 基线上运行一次由 host 拥有的
+  Chat / PlanReview / Task 决策，只有被接受的计划才能创建 durable Task。直接任务执行需要
+  exact-route qualification manifest；显式 `routing_policy = "manual"` 是 coarse rollback。
+  `sigil doctor` 会报告三项自动编排事实。
+- Plan review 现在是完整一等 lifecycle：`/plan` 与自动 review 共享同一 typed plan draft、
+  同一 pending plan card（Run / Save / Revise / Reject）与同一 HTTP/Desktop/TUI decision
+  command；reconnect 与 reload 会恢复 pending plan。
 - 工作区指令记忆与需审批的持久记忆现在默认启用；可分别设置 `[memory].enabled = false` 或
   `[memory].writable = false` 退出对应能力。
 - 直接运行 `sigil` 现在会创建 fresh session，不再自动打开最近会话。显式恢复会在安全 endpoint

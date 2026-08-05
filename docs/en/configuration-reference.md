@@ -97,8 +97,7 @@ Color-token groups are surfaces, borders, text, accents, selection/buttons, stat
 | Section / field | Default | Purpose |
 | --- | --- | --- |
 | `[task].enabled` | `true` | Enables task planning. |
-| `[task].routing_policy` | `"manual"` | Ordinary conversation routing: `manual` or coordinator-owned `auto`; never grants tool permission. |
-| `[task].default_mode` | `"chat"` | Default composer behavior. |
+| `[task].routing_policy` | `"auto"` | Ordinary conversation routing: `manual` (chat-first, explicit `/plan` and `/task` only) or coordinator-owned `auto` (Chat / PlanReview / Task decisions); never grants tool permission. |
 | `[task].max_plan_steps` | `12` | Plan-step limit. |
 | `[task].max_replans` | `2` | Replanning limit. |
 | `[task].max_subagents` | `8` | Active child-agent limit. |

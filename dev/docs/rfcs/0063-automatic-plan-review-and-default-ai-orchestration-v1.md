@@ -1,6 +1,6 @@
 # RFC-0063 Automatic Plan Review and Default AI Orchestration V1
 
-状态：proposed / design complete / implementation deferred
+状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5；修复后需复核，real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
 
 创建日期：2026-08-03
 
@@ -872,6 +872,21 @@ card 恢复。
 验收：Desktop/TUI 同一 session 的 plan status/action/stale/task link 一致；renderer 不持有 authority 或 private
 path。
 
+R63.5 完成状态：
+
+- HTTP `POST /sessions/{id}/plan-decision`（Run/Save/Revise/Reject）已落地，typed command receipt 幂等
+  （replay 返回同一 command id + `replayed`），real `sigil serve` contract 测试覆盖 display plan_review
+  投影、decision 路由、replay 与未授权 401；
+- public `PlanReview` 投影暴露 bounded plan id/hash、status、summary、counts、risk、allowed actions、
+  source、stale；plan hash 是 content digest 而非 authority，decision 必须绑定 exact id/hash；
+- `sigil-desktop` typed client（`plan_decision` + display 校验）与 Tauri allowlist
+  `desktop_plan_decision`、generated ACL manifest、React `PlanCard`（Run/Save/Revise/Reject、stale/failure
+  状态）已落地；OpenAPI snapshot 与 generated TypeScript 无 drift；
+- 桌面 E2E fixture/feature/steps 已迁移到 ReviewFirst 流（`request_plan_review` → `submit_plan_draft` →
+  plan card → Run/Save）；本机 wdio 运行在 webview DOM 层失败（driver attach 后 ~80ms DOM 消失，早于任何
+  RFC-0063 代码路径），同一二进制手动启动时 backend + SSE + approval 全链路验证通过，判定为 harness 层
+  问题而非实现回归；release pipeline 的 current-source Desktop E2E 需在 CI 复验。
+
 ### R63.6 — Default, rollout, Doctor and configuration
 
 主要范围：
@@ -886,6 +901,22 @@ path。
 验收：fresh/missing-field current config 默认为 Auto；explicit Manual 不变；unqualified route 使用 ReviewFirst；
 qualified route允许 DirectTask。
 
+R63.6 完成状态：
+
+- `TaskRoutingPolicy::default()` 已切换为 `Auto`；fresh/missing-field config 默认
+  `auto + explicit_request_only`（review-first 基线），explicit `manual` 语义不变；
+- route-local hard-invariant kill switch 按 RFC 降级顺序落地：`DirectTask -> ReviewFirst`，
+  保留安全的自动 plan review handoff，proactive spawn 同时降回 explicit authority；
+  `direct_task_blocked` 是 capability tier 的唯一 gate，未引入第二套 authority；
+- Doctor 输出 RFC 12.3 的三项事实（automatic routing / automatic plan review /
+  direct task execution），detail 含 route digest 与 remediation；TUI `/doctor` 与 Desktop
+  Doctor 复用同一 report；
+- Desktop Quick Setup catalog 新增 `orchestration_rollout` summary，与 TUI setup summary、
+  README、configuration reference、advanced-configuration、user-guide（en/zh-CN）共用同一
+  默认事实；`default_mode` 无残留 schema 引用；
+- gates：kernel 1460 / runtime 1007 / http 203 / desktop 63 / tui 1593 全绿；
+  clippy -D warnings、fmt、desktop contract drift、renderer 276 tests 全绿。
+
 ### R63.7 — Evaluation and release closure
 
 主要范围：
@@ -898,6 +929,187 @@ qualified route允许 DirectTask。
 - 中英文用户文档、changelog、core technical solution 与 release rule。
 
 验收：第 12 节门槛全部满足后，才将 RFC 状态改为 implemented。
+
+R63.7 完成状态：
+
+- `OrchestrationEvalCaseClass` 三路化为 `Chat | PlanReview | DirectTask`，report schema v2；
+  observation 记录 durable three-way route decision 计数，gate 推导 Chat→Task FP（<=5%）、
+  PlanReview→Task premature（=0）、DirectTask miss（<=10%）、ReviewFirst baseline 的
+  Chat→PlanReview over-route 与 required-PlanReview miss（<=10%），以及 majority-misroute /
+  duplicate-repetition / hard-invariant 检查；
+- `dev/evals/model-fixtures/orchestration-v1` 冻结为 20 Chat / 15 PlanReview / 15 DirectTask
+  （rfc-0063-orchestration-v1），包含 delivery-intent 成对回归（收尾批次的中英文与无
+  `提交/commit/task/plan` 语义等价表达、只分析不修改）、adversarial case（多文件单 outcome、
+  单文件高影响迁移、明确拒绝执行、明确直接执行、workspace instruction review-first）；
+  route-contract derivation 校验完整 corpus 计数与单一 corpus version；
+- route-local kill switch 混沌路径有测试覆盖：qualified route 先 DirectTask，hard invariant
+  落地后降级 ReviewFirst 且保留 plan review binding（`direct_task_blocked` 单一 gate）；
+- routing microturn 的 latency/input/output tokens/cache/cost 由 model-eval usage 记录
+  （microturn 是 run 的第一个 provider request，随 `ModelEvalReportRecordV3` 逐请求统计）；
+  TUI PTY / 真实 `sigil serve` contract / CLI process tests 迁移到新默认（Auto + typed routing
+  decision）并通过；Desktop Gherkin E2E 已迁移到 ReviewFirst 流，本机 wdio 在 webview DOM
+  层失败（harness 层，早于任何 RFC-0063 代码路径），release pipeline 需复验；
+- changelog（en/zh-CN）、README、configuration/advanced-configuration/user-guide、
+  core technical solution 与 Doctor 文档已同步。
+
+## 13.1 Post-implementation audit fixes
+
+Release-validation-pending 状态下完成的全量审计修复（2026-08-04）：
+
+- P1：PlanReview 只读边界由 host 强制执行——`build_plan_review_tool_registry` 用硬编码只读
+  scope 与可配置 planner allowlist 求交并附加 mutation deny list；`run_plan_review` 强制
+  `PermissionMode::ReadOnly`；TUI/application 两个调用点全部切换。测试覆盖“planner 配置了
+  write_file/bash 仍零暴露”。
+- P1：草稿绑定 workspace snapshot——`PlanReviewRunRequest.workspace_snapshot_id` 由
+  prepare/revision 路径用 `plan_handoff_workspace_snapshot_id` 生成并写入 draft；
+  `create_task_from_plan` 在 snapshot 未变时 direct-promote（task_plan_version=1），变化时
+  降级 compatibility planner 并持久化 stale_reason；display `plan_review.stale` 从
+  draft binding 与当前 snapshot 真实推导（`conversation_display_page(_from_records)` 新增
+  current snapshot 参数，HTTP driver 传入解析后的 workspace root）。
+- P1：TUI 使用真实 provider capability——两处 `provider_supports_routing_tools: true` 替换为
+  `agent.provider_capabilities().supports_tool_stream` / `provider_capabilities.supports_tool_stream`；
+  不支持 tool stream 的 provider（如 Gemini）不再进入自动 routing。
+- P1：RFC 状态降级为 `implementation-complete / release-validation-pending`；real-model
+  campaign 与 current-source Desktop E2E 通过前不得标记 implemented。
+- P2：Cancelled/Failed 终止路径写入 durable attempt——新增
+  `PlanReviewCoordinator::close_plan_review_run`，TUI 与 application 两个终止分支都调用，
+  不再残留 Started 后被 recovery 猜测成 Interrupted；`UserCancelled`/`RunFailed` 原因持久化。
+- P2：`plan_review` 定向测试封闭——`application_plan_review_continuation...` 用 EnvScope 固定
+  占位 `SIGIL_API_KEY`，`env -u SIGIL_API_KEY cargo test -p sigil-runtime plan_review` 全绿。
+
+第二轮审计修复（2026-08-04，live recheck 后）：
+
+- P1：Desktop/HTTP `Revise` 现在真实执行新 PlanReview——runtime 新增
+  `execute_plan_review_revision`，HTTP driver 在 `plan_decision(Revise)` 后 spawn
+  `HttpPlanReviewRevisionEventHandler` 运行 read-only revision 并提交新 draft。修复过程中发现并
+  修正 kernel 投影两处 latent bug：同 attempt 的合法 Started→terminal 迁移不再误报 conflict
+  （`legal_same_attempt_transition`），`latest_active_attempt` 跳过已有 terminal 记录的 attempt。
+- P1（revision 跨进程恢复语义）：`Started` 记录的所有权从 prepare 移到 run executor——
+  `prepare_plan_review_revision` 只持久化 `RevisionRequested` decision，
+  `PlanReviewCoordinator::ensure_attempt_started` 由 `execute_plan_review_revision` 与 TUI
+  `run_prepared_plan_review` 在 run 前写入。原实现把 `Started` 持久化在 plan_decision 调用里，
+  executor 重新加载 session 时 recovery 会把尚未运行的 attempt 误判为 crashed run 并关闭成
+  `Interrupted`，导致 revision 的 DraftReady 提交 conflict（
+  `execute_plan_review_revision_runs_the_new_attempt_and_commits_the_draft` 端到端测试覆盖）。
+- P1：TUI revision 路径切换 fail-closed registry——`build_plan_review_tool_registry` 同时用于
+  automatic 与 revision 两个调用点。
+- P1：HTTP display 与 plan decision 统一 workspace root——driver 的 plan 相关请求全部经
+  `resolve_workspace_root` 解析 `config.workspace.root`。
+- P1：TUI pending plan 增加 stale 投影——`PendingPlanApproval` 携带 base
+  `workspace_snapshot_id`/`stale`/`stale_reason`，由 `plan_handoff_stale_reason` 真实推导；
+  stale 时 Run/Save 被阻断并显示原因（live panel 警告行 + footer 缩略提示），Revise/Reject 保留
+  作为恢复/退出路径（与 Desktop 的差异有意为之并在 UI 提示中呈现；runtime fail-closed 校验仍
+  是最终护栏）。
+- P2：终止 closure 覆盖全部返回路径——`run_plan_review(...).await?` 的 Err 路径在三个 executor
+  （runtime continuation、`execute_plan_review_revision`、TUI `run_prepared_plan_review`）都先
+  `close_plan_review_run_if_open`（attempt 已 terminal 或从未 Started 时为 no-op）再返回原错误，
+  closure 自身失败时两个错误都透出；TUI 不再静默丢弃 close 错误；新增
+  `PlanReviewRunOutcome::Interrupted`，`AgentRunDisposition::Interrupted` 关闭为
+  `Interrupted/RunInterrupted` 而不是 Failed。
+- P2：`SIGIL_API_KEY` EnvScope 加全局 `test_env::lock()`，环境变更与其他读凭据测试串行化。
+
+## 13.2 Validation ledger（两轮审计修复后）
+
+2026-08-04/2026-08-05 全量验证记录（worktree `worktree-rfc-0063-implementation`，无 stage/commit）：
+
+| Gate | 命令 | 结果 |
+| --- | --- | --- |
+| format | `cargo fmt --all --check` | pass |
+| workspace check | `cargo check --workspace` | pass |
+| workspace tests | `cargo test --workspace` | pass，0 failed（kernel 1460、runtime 1011、TUI 1594、HTTP 237、desktop/tauri、sigil 全绿） |
+| clippy | `cargo clippy --all-targets -- -D warnings` | pass |
+| canonical full tier | `./scripts/check-touched.sh --tier full` | pass（exit 0：fmt + check + test + clippy） |
+| Desktop | `pnpm --dir apps/desktop check` | pass（仅 rolldown chunk-size warning） |
+| docs | `./scripts/check-docs.sh` | pass（修复两处 changelog 内部术语 "durable projection"） |
+| hermetic targeted | `env -u SIGIL_API_KEY cargo test -p sigil-runtime --lib plan_review` | 14 passed，0 failed |
+| revision e2e | `execute_plan_review_revision_runs_the_new_attempt_and_commits_the_draft` | pass（本地 SSE fixture 端到端） |
+| TUI stale | `stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject` 等 | pass |
+| kernel projection | `cargo test -p sigil-kernel --lib` | 1460 passed，0 failed |
+
+第三轮审计修复后复验（2026-08-05）：
+
+| Gate | 命令 | 结果 |
+| --- | --- | --- |
+| workspace tests | `cargo test --workspace` | 5434 passed，0 failed |
+| clippy | `cargo clippy --all-targets -- -D warnings` | pass |
+| canonical full tier | `./scripts/check-touched.sh --tier full` | pass（exit 0） |
+| Desktop | `pnpm --dir apps/desktop check` + `pnpm vitest run` | pass（276/276） |
+| docs | `./scripts/check-docs.sh` | pass |
+| TUI revision lifecycle | `plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft` | pass |
+| runtime finalizer | provider-construction 失败 / draft-commit conflict 回归 | 均 pass，attempt 以 `Failed/RunFailed` 终止 |
+| HTTP production E2E | `production_plan_review_revision_runs_supervised_and_publishes_terminal_event` | pass（生产 driver + SSE：terminal event + stream close + foreground slot 释放） |
+
+另修复：`child_logical_run_id` 从 `plan-review:{uuid}:{uuid}` 改为 `plan-review-{uuid}-{uuid}`，
+因为 HTTP SSE cursor 以 `:` 分隔组件，冒号会导致事件发布失败（生产 driver E2E 暴露）。
+
+仍属 `implementation-in-progress`：real-model campaign、Desktop Gherkin E2E（本机 wdio
+webview DOM harness 失败，早于 RFC-0063 代码路径）、PTY 验收脚本与 three-way eval 门槛的
+release 复验未在本机完成，按 §15 acceptance criteria 与 §12.2 门槛执行。
+
+## 13.3 Third audit fixes（2026-08-05）
+
+第三轮审计（3 项 P1、1 项 P2）及修复：
+
+- P1：TUI Revise 改为受监督的 ActiveRun——revision 不再丢弃 Session 与 JoinHandle：走
+  `RunTaskResult` 通道归还 session、注册 `state.run.active`（cancel/shutdown 拥有它）、
+  emit `PlanRunStarted`，成功经 `PlanRunFinished` 由 worker_bridge 从 durable projection 重建
+  新草稿卡片；`WorkerMessage::PlanRevised` 变体删除。新增 worker 生命周期 e2e：
+  `plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft`。
+- P1：HTTP Revise 改为受监督的 owned run——revision 持有 session attachment 全程（并发 mutation
+  串行化）、注册 `active_runs`（wait_for_idle/cancel/shutdown 拥有它）、cancel_sender 接
+  cancellation 命令、完成后用 `publish_next_run_event_and_close_stream` 补发显式 terminal
+  public event（RunFinished/RunCancelled/RunFailed）并移出 `active_runs`；
+  `HttpPlanDecisionCommandReceipt` 新增 `revision_run_id` 让客户端按 run identity 订阅；
+  OpenAPI 与 desktop contract 同步。
+- P1：Desktop stale plan 保留恢复入口——按 action 禁用：stale 只禁用 Run/Save，Revise（基于
+  当前 workspace 重新规划）与 Reject（退出）保持可用，与 TUI 语义一致；`submitPlanDecision`
+  守卫同步；stale notice 文案说明恢复路径；`App.test.tsx` 更新为 per-action 断言。
+- P2：Started 之后的全部错误路径统一 finalizer——`execute_plan_review_revision` 把 provider
+  构造、tool 注册、run 与 durable outcome commit 包进单一错误 finalizer，任何 `?` 失败都先
+  `close_plan_review_run_if_open(Failed)` 再透出错误（closure 自身失败时两个错误都可见）；
+  新增 provider-construction 失败与 draft-commit conflict 两个回归测试，均断言 attempt 以
+  `Failed/RunFailed` 终止而不是残留 Started。
+
+## 13.4 Fourth audit fix（2026-08-05）
+
+- P2：HTTP Revise 的 spawn 前注册改为可回滚事务——先注册 `active_runs`（加锁失败与重复
+  run id 检测在任何注册之前失败，无副作用），最后才绑定 registry foreground slot；bind 失败
+  时用 `release_owned_revision_run` 回滚 active-run 注册。原实现先绑 slot 再注册 active_runs，
+  若加锁失败或发现重复 run id 直接返回，slot 永久占用：没有 active run 可取消/清理，后续
+  mutation 被 `SessionForegroundRunActive` 拒绝，且 `RevisionRequested` 已持久化无法重试。
+  回归测试 `production_revision_duplicate_registration_never_blocks_the_session`：预置重复
+  run id → Revise 被拒绝 → 断言 session 仍可 `reserve_durable_session_mutation`、预置 entry
+  未被误删。
+- P3（评审建议，非阻塞）：bind 失败的回滚改为专用 `rollback_revision_run_registration`（只移除
+  run-map entry 并唤醒等待者），不再复用 `release_owned_revision_run` 的通用“已拥有 slot”释放
+  语义（bind 未成功就不应 unbind）。定向测试
+  `production_revision_bind_failure_rolls_back_only_the_run_registration`：预置其他 run 占用
+  slot → spawn 拒绝 → 断言 run-map 已回滚、预置 slot owner 未被误释放（mutation 仍被
+  OTHER run 阻断）。
+
+## 13.5 Fifth audit fixes（2026-08-05）
+
+- P1：Desktop `Revise` 成功响应端到端携带 `revision_run_id`——`sigil-desktop` 的
+  `DesktopPlanDecisionCommandReceipt`（strict `deny_unknown_fields`）、Tauri IPC
+  `DesktopPlanDecisionSummary`、React `PlanDecisionSummary` 全部声明可选字段并投影；
+  `ConversationPanel` 消费它（Revise 成功后通知 "plan revision started"）。
+  契约测试 `plan_decision_revise_accepts_the_supervised_revision_run_identity`：真实 HTTP
+  成功 JSON（含 `revision_run_id`）→ `DesktopClient::plan_decision` 解码成功；交互测试断言
+  非空 run identity 触发的通知。
+- P1：public projection 表达无草稿 attempt——`PublicPlanReview`/`HttpPlanReview`/
+  `DesktopPlanReview`/Tauri/React 的 draft-specific 字段（plan_hash/summary/counts）全部
+  变为可选；`PlanReviewDisplayProjection::into_public` 先投影 attempt status，draft 详情仅在有
+  draft 时输出，`Started`/`Failed`/`Interrupted`/`Cancelled`/`CompletedWithoutDraft` 不再从
+  display 消失，reload/reconnect 可恢复 Planning 与无草稿终态；`DraftReady` 保持既有
+  actions/stale 语义。测试：runtime display 投影（Started→Failed→Cancelled 无 draft 均可见、
+  无 actions）、desktop client decode/validate（含 draft-less JSON）、openapi/contract 同步。
+- P2：spawn 被拒后旧 plan 可恢复——新增 kernel `PlanDecision::RevisionFailed`；driver 在
+  `RevisionRequested` 已持久化而 spawn 注册失败时调用
+  `application_record_revision_failure` 追加 durable `RevisionFailed` fact；
+  `prepare_plan_review_revision` 允许在 `RevisionFailed` 后重试同一 retry-stable revision
+  identity，`record_plan_decision` 允许在 `RevisionFailed` 后执行 Run/Save/Reject。
+  `production_revision_duplicate_registration_never_blocks_the_session` 扩展：断言 durable
+  `RevisionFailed` 已持久化、原 plan 的 Save 决策成功（plan 决策恢复路径，而非仅 slot 可用）。
 
 ## 14. Validation plan
 

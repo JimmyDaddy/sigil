@@ -13,8 +13,7 @@ Use these settings only after the normal setup works. Change one area at a time 
 ```toml
 [task]
 enabled = true
-routing_policy = "manual"
-default_mode = "chat"
+routing_policy = "auto"
 max_plan_steps = 12
 max_replans = 2
 max_subagents = 8
@@ -25,13 +24,14 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-The values above are the current schema defaults.
-Quick Setup for a missing configuration may instead save `auto + proactive`
-only when the installed release carries a qualified sidecar whose exact
-provider, model, official endpoint family, task-config digest, and binary build
-all match. Incompatible configurations are rejected. Missing, invalid, stale,
-or non-matching sidecars fail closed to the values shown above. `sigil doctor`
-reports the rollout state.
+The values above are the current schema defaults. `auto` is the release
+default, so a missing-config Quick Setup saves `auto + explicit_request_only`
+on the review-first baseline. Quick Setup saves `auto + proactive` only when
+the installed release carries a qualified sidecar whose exact provider, model,
+official endpoint family, task-config digest, and binary build all match.
+Incompatible configurations are rejected. Missing, invalid, stale, or
+non-matching sidecars stay on the review-first baseline. `sigil doctor`
+reports the rollout state and the direct-task tier.
 
 For a coarse rollback, set `routing_policy = "manual"` and
 `multi_agent_mode = "explicit_request_only"`. This disables automatic handoff
@@ -39,7 +39,17 @@ and proactive spawn without deleting durable Task history. A route-local
 zero-tolerance invariant applies the same effective fallback to subsequent
 input for the affected session and build.
 
-`routing_policy` is separate from the composer `default_mode`. The compatibility default is `manual`, so ordinary input stays chat-first. TUI `auto` routing lets the model request a typed handoff from a complex chat turn into the durable planner/executor flow; simple prompts still remain chat, and the handoff never bypasses write, shell, network, or merge approval. Planner, executor, subagent, and final-synthesis transcripts stay in isolated child sessions, while the parent keeps bounded results and one host-committed final answer. Independent shared-read-only Task steps may execute concurrently; `max_parallel_read_steps` bounds that fan-out together with `max_subagents`, while the host commits their terminal results to the parent in stable plan order. Independent `ChangesetOnly` write-subagent steps may also run concurrently, bounded by `max_parallel_changeset_steps` and `max_subagents`. Every member uses the same immutable parent-workspace snapshot, produces a proposal without changing that workspace, and is accepted for review only after the parent revalidates the snapshot. Independent physical `Worktree` writers can also run as a bounded whole batch in supported Git repositories. Sigil freezes the exact clean or safe dirty/untracked baseline, rebinds each child to a separately owned checkout, extracts bounded proposals, and routes them through a deterministic conflict graph. Non-conflicting integration lanes may apply and verify concurrently, but final promotion still requires exact integration review and authoritative parent verification. Direct or effectful writes in the shared parent workspace remain sequential and exclusive. The TUI Task strip and info rail mark every active step, and cancelling the Task closes the whole active batch. Before accepting a plan, the isolated planner may request one host-owned batch of independent read-only Explore probes. `max_planning_research_agents` defaults to `3`, is hard-capped at `4`, and may be set to `0` to disable this planner-only fan-out. The host waits for terminal probe results and resumes the planner automatically; no model polling command is required. The production HTTP driver, including the Desktop-owned `sigil serve` child, shares the same typed Task pause/continue, guidance, integration-review, restart-control, and recovery contracts with the TUI. Use `/plan` for a read-only plan and `/task` for deterministic multi-step execution; a complete `sigil-plan-v2` DAG is promoted directly without replanning. When the model identifies independently meaningful outcomes, the plan may also propose typed intent definitions and bind steps to provider-local aliases. These remain unaccepted suggestions until you accept the Plan card; the host then derives all runtime identities and atomically persists the accepted Intent plan with the bound Task plan. The conservative agent mode uses child agents only when you or workspace instructions request delegation. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
+`routing_policy` is a three-way semantic admission policy. The current schema
+default is `auto`, so ordinary input first runs an independent routing-only
+decision turn; the model can type one decision between `Chat`, `PlanReview`,
+and `Task` (the exact decision set depends on the effective route capability).
+A `PlanReview` decision runs a read-only plan review and waits for your
+decision; only an accepted plan can create a durable Task. A `Task` decision
+enters the durable planner/executor flow directly; simple prompts still remain
+chat, and routing never bypasses write, shell, network, or merge approval.
+Setting `routing_policy = "manual"` disables automatic routing for ordinary
+input while `/plan` and `/task` remain available as explicit entries.
+Planner, executor, subagent, and final-synthesis transcripts stay in isolated child sessions, while the parent keeps bounded results and one host-committed final answer. Independent shared-read-only Task steps may execute concurrently; `max_parallel_read_steps` bounds that fan-out together with `max_subagents`, while the host commits their terminal results to the parent in stable plan order. Independent `ChangesetOnly` write-subagent steps may also run concurrently, bounded by `max_parallel_changeset_steps` and `max_subagents`. Every member uses the same immutable parent-workspace snapshot, produces a proposal without changing that workspace, and is accepted for review only after the parent revalidates the snapshot. Independent physical `Worktree` writers can also run as a bounded whole batch in supported Git repositories. Sigil freezes the exact clean or safe dirty/untracked baseline, rebinds each child to a separately owned checkout, extracts bounded proposals, and routes them through a deterministic conflict graph. Non-conflicting integration lanes may apply and verify concurrently, but final promotion still requires exact integration review and authoritative parent verification. Direct or effectful writes in the shared parent workspace remain sequential and exclusive. The TUI Task strip and info rail mark every active step, and cancelling the Task closes the whole active batch. Before accepting a plan, the isolated planner may request one host-owned batch of independent read-only Explore probes. `max_planning_research_agents` defaults to `3`, is hard-capped at `4`, and may be set to `0` to disable this planner-only fan-out. The host waits for terminal probe results and resumes the planner automatically; no model polling command is required. The production HTTP driver, including the Desktop-owned `sigil serve` child, shares the same typed Task pause/continue, guidance, integration-review, restart-control, and recovery contracts with the TUI. Use `/plan` for a read-only plan and `/task` for deterministic multi-step execution; a complete `sigil-plan-v2` DAG is promoted directly without replanning. When the model identifies independently meaningful outcomes, the plan may also propose typed intent definitions and bind steps to provider-local aliases. These remain unaccepted suggestions until you accept the Plan card; the host then derives all runtime identities and atomically persists the accepted Intent plan with the bound Task plan. The conservative agent mode uses child agents only when you or workspace instructions request delegation. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
 
 ## Verification
 

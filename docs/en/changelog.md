@@ -8,6 +8,14 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+- Automatic Task routing is now the default: ordinary input first runs a host-owned
+  Chat / PlanReview / Task decision on the review-first baseline, and only an accepted plan can
+  create a durable Task. Direct task execution requires an exact-route qualification manifest;
+  explicit `routing_policy = "manual"` is the coarse rollback. `sigil doctor` reports the three
+  automatic-orchestration facts.
+- The plan review surface is now a first-class lifecycle: `/plan` and automatic review share the
+  same typed plan draft, the same pending plan card (Run / Save / Revise / Reject), and the same
+  HTTP/Desktop/TUI decision commands. Reconnect and reload restore a pending plan.
 - Workspace instruction memory and approval-gated durable memory are now enabled by default. Set
   `[memory].enabled = false` or `[memory].writable = false` to opt out of either capability.
 - Plain `sigil` launches now start a fresh session instead of reopening the most recent conversation.

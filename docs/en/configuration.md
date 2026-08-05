@@ -75,16 +75,19 @@ Retention limits are applied only through an explicit preview and confirmation u
 ## Task Rollout And Defaults
 
 The current schema defaults to
-`routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"`
-unless you explicitly changed them. A missing-config Quick Setup may select
-`auto + proactive` only when the installed binary is accompanied by a qualified
-rollout manifest and the selected provider, model, official endpoint family,
-task config, and build all match its exact route.
+`routing_policy = "auto"` and `multi_agent_mode = "explicit_request_only"`.
+Ordinary input therefore runs the automatic Chat / PlanReview / Task route
+decision on the review-first baseline; explicit `manual` keeps chat-first
+behavior. Quick Setup saves `auto + proactive` only when the installed binary
+is accompanied by a qualified rollout manifest and the selected provider,
+model, official endpoint family, task config, and build all match its exact
+route.
 
 Sigil never rewrites an incompatible config. A missing, malformed, stale, or non-matching
-manifest also stays conservative. Use `sigil doctor` to inspect the effective release
-qualification. Restoring the two default values is the coarse rollout rollback; it does not
-delete durable Task or agent history.
+manifest stays on the review-first baseline. Use `sigil doctor` to inspect the effective
+release qualification, including whether direct task execution is qualified, on the
+review-first fallback, or unavailable. Setting `routing_policy = "manual"` is the coarse
+rollout rollback; it does not delete durable Task or agent history.
 
 ## Use Doctor When Setup Looks Wrong
 

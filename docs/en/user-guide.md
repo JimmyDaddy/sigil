@@ -78,16 +78,18 @@ When enabled, search and fetch activity shows where data is going. Search result
 
 ## Planned Tasks
 
-Use `/plan` for a read-only plan and accept the Plan ready card only when you want execution to begin. Use `/task` when you already want Sigil to split and run multi-step work. Ordinary chat stays chat-first; it does not continue an unfinished task by itself.
+Use `/plan` for a read-only plan and accept the Plan ready card only when you want execution to begin. Use `/task` when you already want Sigil to split and run multi-step work. With the default `routing_policy = "auto"`, task-worthy ordinary input is first routed through an automatic plan review; chat never continues an unfinished task by itself.
 
 The task view shows steps, current status, child-agent work, and a Verification card when a check is needed. `Alt-V` focuses the card. Restoring a session shows the saved task state but never continues it automatically.
 
-A newly installed qualified release may show `auto / proactive` in Quick Setup.
-That choice is bound to the exact provider route and binary build shipped with
-the release. Existing configurations stay unchanged. Run `sigil doctor` to see
-whether the configured route matches the release qualification. To turn off
-automatic handoff and proactive spawning without deleting Task history, set
-`routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"`.
+The release default is `auto / explicit_request_only`: ordinary input is routed
+on the review-first baseline (automatic plan review before any durable Task).
+A newly installed qualified release may additionally show direct task execution
+in Quick Setup and `sigil doctor`. That qualification is bound to the exact
+provider route and binary build shipped with the release. Existing
+configurations stay unchanged. To turn off automatic routing and proactive
+spawning without deleting Task history, set `routing_policy = "manual"` and
+`multi_agent_mode = "explicit_request_only"`.
 
 ## Approvals and File Changes
 

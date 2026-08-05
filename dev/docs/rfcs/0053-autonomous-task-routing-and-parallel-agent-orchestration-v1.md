@@ -4,6 +4,19 @@
 
 创建日期：2026-07-22
 
+### 2026-08-04 successor amendment
+
+[RFC-0063 Automatic Plan Review and Default AI Orchestration V1](0063-automatic-plan-review-and-default-ai-orchestration-v1.md)
+是本 RFC 的后续修订，对其做两项 amendment：
+
+1. ordinary conversation route 从 `Chat | Task` 扩展为 `Chat | PlanReview | Task`；
+2. rollout 从 `Manual` fail-closed 默认改为 `Auto + ReviewFirst` 默认，只有 DirectTask 和
+   proactive agent 继续要求 exact-route qualification；route-local kill switch 的降级顺序改为
+   `DirectTask -> ReviewFirst -> Unsupported/Manual`。
+
+RFC-0053 继续拥有 DirectTask、Planner/Executor/Subagent orchestration、parallel participant、
+recovery、integration 与唯一 parent final；`[task].default_mode` 已从 current schema 移除。
+
 ### 2026-07-31 current-only cutover
 
 当前实现只接受当前 Task/Plan/Agent durable schema 和当前 routing 配置。本文后续关于旧
