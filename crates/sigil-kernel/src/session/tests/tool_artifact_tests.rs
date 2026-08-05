@@ -1951,10 +1951,10 @@ fn dropped_sink_never_leaves_staging_files() -> Result<()> {
 #[cfg(windows)]
 #[test]
 fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result<()> {
-    use std::io::ErrorKind;
     use std::os::windows::fs::OpenOptionsExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    use windows_sys::Win32::{
+        Foundation::ERROR_SHARING_VIOLATION,
+        Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ},
     };
 
     let temp = tempfile::tempdir()?;
@@ -1968,8 +1968,8 @@ fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result
             Authorization::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
-            DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SetFileSecurityW,
         };
         let wide = std::ffi::OsStr::new("D:(A;;FA;;;WD)")
             .encode_wide()
@@ -1993,9 +1993,7 @@ fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result
                     .chain(std::iter::once(0))
                     .collect::<Vec<_>>()
                     .as_ptr(),
-                OWNER_SECURITY_INFORMATION
-                    | DACL_SECURITY_INFORMATION
-                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 descriptor,
             );
             assert_ne!(applied, 0, "wide parent DACL apply failed");
@@ -2026,37 +2024,51 @@ fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result
         ToolArtifactSensitivity::Ordinary,
     );
     let mut sink = sink.begin_process_capture(config)?;
-    sink.write_stream(ToolOutputStreamV1::Stdout, b"raw secret token=x")?;
 
     let staging_dir = artifact_store.root().join("staging");
     assert!(
         crate::private_path_permissions_are_restricted(&staging_dir)?,
         "staging directory must be protected before files are created"
     );
-    // Find the live stdout staging file (delete-on-close means it exists until finalize).
-    let part = std::fs::read_dir(&staging_dir)?
+    // Both pipe files must already be protected before any unredacted byte is written.
+    let part_files = std::fs::read_dir(&staging_dir)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .find(|path| path.extension().and_then(|e| e.to_str()) == Some("part"))
-        .expect("a live staging file must exist");
-    assert!(
-        crate::private_path_permissions_are_restricted(&part)?,
-        "live staging file must be DACL-restricted"
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("part"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        part_files.len(),
+        2,
+        "stdout and stderr staging files must exist before capture writes"
     );
+    for part in &part_files {
+        assert!(
+            crate::private_path_permissions_are_restricted(part)?,
+            "live staging file must be DACL-restricted: {}",
+            part.display()
+        );
+    }
+    let stdout_part = part_files
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".stdout.part"))
+        })
+        .expect("stdout staging file must exist");
+
+    sink.write_stream(ToolOutputStreamV1::Stdout, b"raw secret token=x")?;
     // A second read-open must fail with sharing violation: only FILE_SHARE_DELETE is granted.
     let second = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_ATTRIBUTE_NORMAL)
-        .open(&part);
+        .open(&stdout_part);
     let error = second.expect_err("second read-open must be denied");
     assert_eq!(
-        error.kind(),
-        ErrorKind::PermissionDenied,
+        error.raw_os_error(),
+        Some(ERROR_SHARING_VIOLATION as i32),
         "expected sharing violation, got {error:?}"
     );
-    let _ = FILE_FLAG_DELETE_ON_CLOSE;
-    let _ = FILE_SHARE_DELETE;
     drop(sink);
     Ok(())
 }
