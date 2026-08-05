@@ -47,15 +47,17 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   （dual-stream cap 确定性）与 `process_capture_redacts_secrets_that_span_chunk_boundaries`
   （secret 跨 chunk）已过；**PTY ordering e2e、MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、
   paid provider smoke 未执行**。
-- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5411 passed）、
+- RFC-0059 §10.3 read budget 偏差已修复：retrieval budget 由 per-root-run 累计改为 per-model-turn，
+  root run 每个 model turn 起点重置 8 次/64 KiB 计数；delegate/orchestrator 子 agent 继承剩余计数、
+  不能自行重置（`without_turn_reset`）；dedupe ledger 跨 turn 保留、按 epoch 生效。
+- 全量 gate：`cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace`（5414 passed）、
   `cargo check --workspace --target x86_64-pc-windows-gnu`（Windows target 交叉编译通过）、
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
 - 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
   跨流 secret 拆分不参与脱敏（只按流内整体检测）；GC 物理删除后、Expired append 前崩溃时，ledger
   可能停在 DisabledPendingDelete（需 journal 化 tombstone 计划才能自动补 Expired，当前由
-  DisabledPendingDelete 状态安全拒绝读取兜底）；retrieval budget 仍为 per-root-run 累计而非
-  per-model-turn；Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
+  DisabledPendingDelete 状态安全拒绝读取兜底）；Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
   （delete-on-close 不保证断电删除，grace GC 为兜底；本机为 macOS，Windows 行为仅通过
   x86_64-pc-windows-gnu 交叉编译验证，未做实机测试）；Windows staging 目录在创建任何文件
   前即设置 owner-only DACL（文件继承后逐文件校验），share_mode 仅保留 FILE_SHARE_DELETE；

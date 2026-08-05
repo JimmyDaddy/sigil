@@ -1654,6 +1654,8 @@ where
 
         let mut model_turns = 0usize;
         loop {
+            // RFC-0059 §10.3: per-model-turn window; no-op for delegated children.
+            tool_artifact_read_budget.reset_turn();
             if cancellation
                 .as_ref()
                 .is_some_and(RunCancellationHandle::is_cancel_requested)
@@ -3652,7 +3654,10 @@ where
                 delegate.set_agent_delegation_run_context(agent_delegation_run_context);
                 delegate.set_agent_tool_authorization(Some(&call), explicit_user_approval);
                 delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
-                delegate.set_tool_artifact_read_budget(Some(tool_artifact_read_budget.clone()));
+                // Children inherit the remaining counters and must not reset them per turn.
+                delegate.set_tool_artifact_read_budget(Some(
+                    tool_artifact_read_budget.without_turn_reset(),
+                ));
                 let result = delegate
                     .handle_agent_tool_call(session, &call, options, handler, approval_handler)
                     .await;

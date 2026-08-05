@@ -44,12 +44,15 @@ where
     }
 
     /// Binds all planner, executor and child runs to one root artifact-read budget.
+    ///
+    /// Orchestrator children always inherit the remaining budget: they must not reset the
+    /// per-model-turn window themselves, per RFC-0059 §10.3.
     #[must_use]
     pub fn with_tool_artifact_read_budget(
         mut self,
         budget: crate::ToolArtifactReadBudgetV1,
     ) -> Self {
-        self.tool_artifact_read_budget = Some(budget);
+        self.tool_artifact_read_budget = Some(budget.without_turn_reset());
         self
     }
 

@@ -2187,10 +2187,24 @@ struct ToolArtifactReadBudgetState {
     delivered_pages: std::collections::BTreeMap<String, (String, ToolArtifactPageV1)>,
 }
 
-/// Root-owned per-turn retrieval budget shared by cloned and parallel tool contexts.
-#[derive(Debug, Clone, Default)]
+/// Root-owned retrieval budget reset at each model-turn boundary and shared by cloned and
+/// parallel tool contexts. Delegated children inherit the remaining counters but cannot reset
+/// them at their own model-turn boundaries.
+#[derive(Debug, Clone)]
 pub struct ToolArtifactReadBudgetV1 {
     state: Arc<Mutex<ToolArtifactReadBudgetState>>,
+    /// True for the root-owned budget: read counters reset at every model-turn start.
+    /// Delegated children inherit `false` so they draw from the remaining budget only.
+    turn_reset: bool,
+}
+
+impl Default for ToolArtifactReadBudgetV1 {
+    fn default() -> Self {
+        Self {
+            state: Arc::default(),
+            turn_reset: true,
+        }
+    }
 }
 
 impl ToolArtifactReadBudgetV1 {
@@ -2280,6 +2294,27 @@ impl ToolArtifactReadBudgetV1 {
             .bytes
             .saturating_sub(reserved_bytes.saturating_sub(actual_bytes));
         result
+    }
+
+    /// Returns a delegated-child view of this budget: it shares the same counters and dedupe
+    /// ledger, but `reset_turn` is a no-op so the child cannot refresh its own window.
+    #[must_use]
+    pub fn without_turn_reset(&self) -> ToolArtifactReadBudgetV1 {
+        ToolArtifactReadBudgetV1 {
+            state: Arc::clone(&self.state),
+            turn_reset: false,
+        }
+    }
+
+    /// Resets the read/byte counters at a model-turn boundary. No-op for delegated children.
+    pub fn reset_turn(&self) {
+        if !self.turn_reset {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.reads = 0;
+            state.bytes = 0;
+        }
     }
 
     #[must_use]

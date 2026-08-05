@@ -978,6 +978,152 @@ fn per_turn_budget_is_shared_and_counts_attempts() -> Result<()> {
 }
 
 #[test]
+fn root_budget_turn_reset_restores_the_window() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-reset",
+        "shell",
+        "0123456789",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let budget = ToolArtifactReadBudgetV1::default();
+    for offset in 0..TOOL_ARTIFACT_READS_PER_TURN {
+        budget.read_page(
+            &store,
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::ByteSlice {
+                offset: offset as u64,
+                limit: 1,
+            },
+        )?;
+    }
+    assert!(
+        budget
+            .read_page(
+                &store,
+                &descriptor.artifact_ref,
+                ToolArtifactSelectorV1::ByteSlice {
+                    offset: 0,
+                    limit: 1,
+                },
+            )
+            .is_err()
+    );
+    budget.reset_turn();
+    assert_eq!(budget.usage(), (0, 0));
+    budget.read_page(
+        &store,
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::ByteSlice {
+            offset: 0,
+            limit: 1,
+        },
+    )?;
+    assert_eq!(budget.usage(), (1, 1));
+    Ok(())
+}
+
+#[test]
+fn delegated_child_budget_cannot_reset_shared_window() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-child",
+        "shell",
+        "0123456789",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let root = ToolArtifactReadBudgetV1::default();
+    for offset in 0..3 {
+        root.read_page(
+            &store,
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::ByteSlice {
+                offset: offset as u64,
+                limit: 1,
+            },
+        )?;
+    }
+    let child = root.without_turn_reset();
+    child.reset_turn();
+    assert_eq!(
+        child.usage(),
+        (3, 3),
+        "delegated children must inherit the remaining counters without reset"
+    );
+    child.read_page(
+        &store,
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::ByteSlice {
+            offset: 3,
+            limit: 1,
+        },
+    )?;
+    assert_eq!(
+        root.usage(),
+        (4, 4),
+        "root and child must share one counter window"
+    );
+    Ok(())
+}
+
+#[test]
+fn dedupe_ledger_survives_turn_reset_while_counters_reset() -> Result<()> {
+    let (_temp, store) = store_fixture()?;
+    let descriptor = store.capture_text(
+        "call-dedupe",
+        "shell",
+        "0123456789",
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let budget = ToolArtifactReadBudgetV1::default();
+    let selector = ToolArtifactSelectorV1::ByteSlice {
+        offset: 0,
+        limit: 1,
+    };
+    let first = budget.read_page_for_call(
+        &store,
+        &descriptor.artifact_ref,
+        selector.clone(),
+        "call-a",
+        "epoch:1",
+    )?;
+    assert_eq!(first.deduplicated_from_call_id, None);
+    assert_eq!(budget.usage(), (1, 1));
+    budget.reset_turn();
+    assert_eq!(budget.usage(), (0, 0));
+    let repeat = budget.read_page_for_call(
+        &store,
+        &descriptor.artifact_ref,
+        selector.clone(),
+        "call-b",
+        "epoch:1",
+    )?;
+    assert_eq!(
+        repeat.deduplicated_from_call_id.as_deref(),
+        Some("call-a"),
+        "the dedupe ledger must survive a turn reset within the same epoch"
+    );
+    assert_eq!(
+        budget.usage(),
+        (0, 0),
+        "a deduplicated delivery must not consume the new turn window"
+    );
+    budget.read_page_for_call(
+        &store,
+        &descriptor.artifact_ref,
+        selector,
+        "call-c",
+        "epoch:2",
+    )?;
+    assert_eq!(
+        budget.usage(),
+        (1, 1),
+        "an epoch rotation is a new page identity and consumes the window"
+    );
+    Ok(())
+}
+
+#[test]
 fn read_receipt_event_is_body_free_and_recovery_critical() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
