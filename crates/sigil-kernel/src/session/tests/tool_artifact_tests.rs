@@ -1941,26 +1941,72 @@ fn dropped_sink_never_leaves_staging_files() -> Result<()> {
     Ok(())
 }
 
-/// RFC-0062 16.2: with a wide parent ACL, a second principal must not be able to open the
-/// staging file while the capture is live. Runs only on Windows (machine-verified on Windows
-/// CI; this host is macOS).
+/// RFC-0062 16.2 (Windows CI only): staging files must carry the protected owner-only DACL
+/// and delete-only sharing. Verifies three independent properties against REAL staging paths:
+/// (1) the staging directory is DACL-restricted BEFORE any file exists; (2) an explicit
+/// wide parent (everyone-full-control SDDL) is narrowed by the capture's own protection; (3) a
+/// second read-open of a live staging file fails with ERROR_SHARING_VIOLATION because only
+/// FILE_SHARE_DELETE is granted. Different-SID second-principal access is NOT claimed here;
+/// it requires a helper process under another account and is out of scope for this unit test.
 #[cfg(windows)]
 #[test]
 fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result<()> {
+    use std::io::ErrorKind;
     use std::os::windows::fs::OpenOptionsExt as _;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE,
+        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ,
     };
 
     let temp = tempfile::tempdir()?;
-    // Deliberately wide parent ACL: everyone full control on the parent directory.
     let parent = temp.path().join("wide-parent");
     std::fs::create_dir_all(&parent)?;
-    crate::secure_private_path_permissions(&parent).ok(); // best effort; the point is the test
-    // Simulate a wide parent by removing any explicit protection is not portable; instead the
-    // test asserts the store-level contract: files created under the protected staging
-    // directory carry delete-on-close and only delete sharing, so a second principal cannot
-    // open them for read.
+    // Explicitly wide parent: everyone full control via SDDL, no error swallowing.
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+        };
+        let wide = std::ffi::OsStr::new("D:(A;;FA;;;WD)")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "SDDL conversion failed");
+        unsafe {
+            let applied = SetFileSecurityW(
+                parent
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>()
+                    .as_ptr(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            );
+            assert_ne!(applied, 0, "wide parent DACL apply failed");
+            LocalFree(descriptor as _);
+        }
+    }
+    assert!(
+        !crate::private_path_permissions_are_restricted(&parent)?,
+        "the fixture parent must be wide for this test to prove anything"
+    );
+
     let session_store = JsonlSessionStore::new(parent.join("session.jsonl"))?;
     let artifact_store = ToolArtifactStore::for_session_store(&session_store);
     let config = ProcessStreamCaptureConfigV1 {
@@ -1981,16 +2027,33 @@ fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result
     );
     let mut sink = sink.begin_process_capture(config)?;
     sink.write_stream(ToolOutputStreamV1::Stdout, b"raw secret token=x")?;
+
     let staging_dir = artifact_store.root().join("staging");
-    // The directory must be protected (owner-only) before any file existed.
+    assert!(
+        crate::private_path_permissions_are_restricted(&staging_dir)?,
+        "staging directory must be protected before files are created"
+    );
+    // Find the live stdout staging file (delete-on-close means it exists until finalize).
+    let part = std::fs::read_dir(&staging_dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|e| e.to_str()) == Some("part"))
+        .expect("a live staging file must exist");
+    assert!(
+        crate::private_path_permissions_are_restricted(&part)?,
+        "live staging file must be DACL-restricted"
+    );
+    // A second read-open must fail with sharing violation: only FILE_SHARE_DELETE is granted.
     let second = std::fs::OpenOptions::new()
         .read(true)
-        .share_mode(0)
+        .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_ATTRIBUTE_NORMAL)
-        .open(staging_dir.join("does-not-exist-2.part"));
-    assert!(
-        second.is_err(),
-        "a second principal must not be able to open arbitrary staging files for read"
+        .open(&part);
+    let error = second.expect_err("second read-open must be denied");
+    assert_eq!(
+        error.kind(),
+        ErrorKind::PermissionDenied,
+        "expected sharing violation, got {error:?}"
     );
     let _ = FILE_FLAG_DELETE_ON_CLOSE;
     let _ = FILE_SHARE_DELETE;

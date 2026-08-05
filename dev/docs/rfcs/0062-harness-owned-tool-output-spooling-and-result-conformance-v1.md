@@ -59,8 +59,10 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   （delete-on-close 不保证断电删除，grace GC 为兜底；本机为 macOS，Windows 行为仅通过
   x86_64-pc-windows-gnu 交叉编译验证，未做实机测试）；Windows staging 目录在创建任何文件
   前即设置 owner-only DACL（文件继承后逐文件校验），share_mode 仅保留 FILE_SHARE_DELETE；
-  对应集成测试 `windows_staging_is_owner_only_before_unredacted_bytes_are_written` 仅随
-  Windows CI 运行。
+  Windows CI 集成测试 `windows_staging_is_owner_only_before_unredacted_bytes_are_written`
+  对真实 staging 路径断言：显式宽松父 ACL（everyone full control SDDL）被收窄、
+  staging 目录与 live 文件均为 protected DACL、第二 read-open 以 sharing violation 拒绝；
+  不同 SID 的第二 principal 未声称（需跨账号 helper process，超出单测范围）。
 
 创建日期：2026-08-03
 

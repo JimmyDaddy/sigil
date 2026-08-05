@@ -4546,8 +4546,7 @@ fn open_read_write_private_file(path: &Path) -> Result<File> {
         // after sudden power loss, so grace GC remains the cross-platform fallback.
         use std::os::windows::fs::OpenOptionsExt as _;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
+            FILE_ATTRIBUTE_NORMAL, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE,
         };
         OpenOptions::new()
             .read(true)
