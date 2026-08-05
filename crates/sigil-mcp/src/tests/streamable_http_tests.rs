@@ -1393,7 +1393,13 @@ while True:
 
     // Descriptor equivalence: same wire payload yields the same parsed tool surface.
     assert_eq!(spec.description, "echoes text");
-    assert_eq!(spec.description, http_tool.description.as_deref().expect("fixture description"));
+    assert_eq!(
+        spec.description,
+        http_tool
+            .description
+            .as_deref()
+            .expect("fixture description")
+    );
     assert_eq!(
         spec.input_schema, http_tool.input_schema,
         "input schema must parse identically over stdio and streamable HTTP"
