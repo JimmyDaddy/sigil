@@ -47,8 +47,10 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   （dual-stream cap 确定性）与 `process_capture_redacts_secrets_that_span_chunk_boundaries`
   （secret 跨 chunk）已过；PTY ordering e2e 已过（`terminal_process_manager_pty_preserves_single_stream_byte_order`：
   真实 PTY 上 100 组交错 stdout/stderr printf + tail，断言合并流与 stdout artifact 与程序写入字节序完全一致、
-  CRLF 行尾由行规程如实保留、stderr artifact 为空）；**MCP stdio/HTTP 等价 fixture、Desktop real-binary acceptance、
-  paid provider smoke 未执行**。
+  CRLF 行尾由行规程如实保留、stderr artifact 为空）；MCP stdio/HTTP 等价 fixture 已过
+  （`stdio_and_streamable_http_transports_parse_identical_mcp_semantics`：同一 canonical 会话分别经
+  python3 stdio server 与 scripted streamable HTTP fixture，断言工具描述（name/description/inputSchema）
+  与成功/错误调用语义逐字段一致）；**Desktop real-binary acceptance、paid provider smoke 未执行**。
 - RFC-0059 §10.3 read budget 偏差已修复：retrieval budget 由 per-root-run 累计改为 per-model-turn，
   root run 每个 model turn 起点重置 8 次/64 KiB 计数；delegate/orchestrator 子 agent 继承剩余计数、
   不能自行重置（`without_turn_reset`）；dedupe ledger 跨 turn 保留、按 epoch 生效。

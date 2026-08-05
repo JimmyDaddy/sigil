@@ -1257,3 +1257,190 @@ async fn streamable_http_get_404_clears_live_session() {
         McpStreamableHttpLifecycle::Disconnected
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_and_streamable_http_transports_parse_identical_mcp_semantics() -> anyhow::Result<()>
+{
+    use sigil_kernel::{
+        McpServerConfig, McpServerStartup, McpServerTransportConfig, McpServerTrustPolicy,
+        ToolCall, ToolContext, ToolRegistry, ToolResult, ToolResultStatus,
+    };
+
+    let temp = tempfile::tempdir()?;
+    // One canonical conversation, served verbatim by both transports.
+    let initialize = initialize_json(1, LATEST_PROTOCOL_VERSION, true);
+    let tools_list = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "echo",
+                "description": "echoes text",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                }
+            }]
+        }
+    })
+    .to_string();
+    let call_ok = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "content": [{ "type": "text", "text": "hi" }],
+            "structuredContent": { "echoed": "hi" },
+            "isError": false
+        }
+    })
+    .to_string();
+    let call_err = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {
+            "content": [{ "type": "text", "text": "boom" }],
+            "isError": true
+        }
+    })
+    .to_string();
+
+    // Streamable HTTP side: scripted fixture answering the same conversation.
+    let (http_client, _server) = connect_fixture(
+        vec![
+            FixtureResponse::json(200, initialize.clone())
+                .with_header("Mcp-Session-Id", "session-equiv"),
+            FixtureResponse::empty(202),
+            FixtureResponse::json(200, tools_list.clone()),
+            FixtureResponse::json(200, call_ok.clone()),
+            FixtureResponse::json(200, call_err.clone()),
+        ],
+        McpRemoteClientCapabilities::empty(),
+    )
+    .await;
+    let http_tools = http_client.list_tools().await?;
+    assert_eq!(http_tools.len(), 1, "fixture must expose exactly one tool");
+    let http_tool = &http_tools[0];
+    assert_eq!(http_tool.name, "echo");
+    assert_eq!(http_tool.description.as_deref(), Some("echoes text"));
+
+    // Stdio side: a python3 server answering the same canonical messages.
+    let script = temp.path().join("equiv_server.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, sys
+INITIALIZE = json.loads({initialize:?})
+TOOLS_LIST = json.loads({tools_list:?})
+CALL_OK = json.loads({call_ok:?})
+CALL_ERR = json.loads({call_err:?})
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
+def write_message(obj):
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
+    sys.stdout.buffer.flush()
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        INITIALIZE["id"] = message["id"]
+        write_message(INITIALIZE)
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message(TOOLS_LIST)
+    elif method == "tools/call":
+        arguments = message.get("params", {{}}).get("arguments", {{}})
+        if arguments.get("text") == "boom":
+            write_message(CALL_ERR)
+        else:
+            write_message(CALL_OK)
+"#,
+            initialize = initialize,
+            tools_list = tools_list,
+            call_ok = call_ok,
+            call_err = call_err,
+        ),
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    crate::register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "equiv".to_owned(),
+            transport: McpServerTransportConfig::Stdio {
+                command: "python3".to_owned(),
+                args: vec![script.to_string_lossy().into_owned()],
+                inherit_env: Vec::new(),
+            },
+            startup_timeout_secs: 15,
+            required: true,
+            startup: McpServerStartup::Eager,
+            trust: McpServerTrustPolicy::default(),
+        }],
+    )
+    .await?;
+    let spec = registry
+        .spec_for("mcp__equiv__echo")
+        .expect("stdio fixture must register the echo tool");
+
+    // Descriptor equivalence: same wire payload yields the same parsed tool surface.
+    assert_eq!(spec.description, "echoes text");
+    assert_eq!(spec.description, http_tool.description.as_deref().expect("fixture description"));
+    assert_eq!(
+        spec.input_schema, http_tool.input_schema,
+        "input schema must parse identically over stdio and streamable HTTP"
+    );
+
+    let stdio_ok: ToolResult = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 15),
+            ToolCall {
+                id: "call-hi".to_owned(),
+                name: "mcp__equiv__echo".to_owned(),
+                args_json: json!({ "text": "hi" }).to_string(),
+            },
+        )
+        .await?;
+    let stdio_err: ToolResult = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 15),
+            ToolCall {
+                id: "call-boom".to_owned(),
+                name: "mcp__equiv__echo".to_owned(),
+                args_json: json!({ "text": "boom" }).to_string(),
+            },
+        )
+        .await?;
+
+    // Success call equivalence: both classify as success with the same text content.
+    let http_ok = http_client
+        .call_tool(http_tool, json!({ "text": "hi" }), None, &|| true)
+        .await?;
+    assert!(matches!(stdio_ok.status, ToolResultStatus::Ok));
+    assert!(stdio_ok.content.contains("hi"), "{}", stdio_ok.content);
+    assert!(!http_ok.is_error);
+    assert_eq!(http_ok.content[0], json!({ "type": "text", "text": "hi" }));
+    assert_eq!(http_ok.structured_content, Some(json!({ "echoed": "hi" })));
+
+    // Error call equivalence: result-level isError is a tool error over both transports.
+    let http_err = http_client
+        .call_tool(http_tool, json!({ "text": "boom" }), None, &|| true)
+        .await?;
+    assert!(matches!(stdio_err.status, ToolResultStatus::Error(_)));
+    assert!(stdio_err.content.contains("boom"), "{}", stdio_err.content);
+    assert!(http_err.is_error);
+    assert_eq!(
+        http_err.content[0],
+        json!({ "type": "text", "text": "boom" })
+    );
+
+    Ok(())
+}
