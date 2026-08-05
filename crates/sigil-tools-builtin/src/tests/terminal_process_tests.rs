@@ -1401,6 +1401,71 @@ async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_a
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
+async fn terminal_process_manager_pty_preserves_single_stream_byte_order() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let command = [
+        "i=0",
+        "while [ $i -lt 100 ]; do",
+        "  printf 'out-%03d\\n' \"$i\"",
+        "  printf 'err-%03d\\n' \"$i\" >&2",
+        "  i=$((i+1))",
+        "done",
+        "printf 'tail\\n'",
+    ]
+    .join("\n");
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-pty-order")?),
+                command,
+                cwd: None,
+                shell: Some(shell),
+                env: Default::default(),
+            },
+            None,
+        )
+        .await?;
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+    assert!(
+        matches!(
+            final_entry.status,
+            TerminalTaskStatus::Exited { exit_code: Some(0) }
+        ),
+        "PTY ordering command must exit cleanly: {final_entry:?}"
+    );
+    // The PTY line discipline translates newlines to CRLF (ONLCR), so the single
+    // ordered stream carries the exact program write order with CRLF line endings.
+    let mut expected = String::new();
+    for index in 0..100 {
+        expected.push_str(&format!("out-{index:03}\r\nerr-{index:03}\r\n"));
+    }
+    expected.push_str("tail\r\n");
+    assert_eq!(final_entry.output_total_bytes, expected.len() as u64);
+    let artifacts = manager.artifacts_for(&entry.handle.task_id)?;
+    assert_eq!(
+        std::fs::read_to_string(artifacts.absolute_output)?,
+        expected,
+        "the PTY is one ordered stream: stdout/stderr bytes must keep their write order"
+    );
+    assert_eq!(
+        std::fs::read_to_string(artifacts.absolute_stdout)?,
+        expected,
+        "the PTY stdout artifact must be the same single ordered stream"
+    );
+    assert_eq!(
+        std::fs::read_to_string(artifacts.absolute_stderr)?,
+        "",
+        "PTY mode must not split bytes into a separate stderr artifact"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
 async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;
