@@ -69,6 +69,11 @@ description = "Allows the main local window to resolve one exact server-guarded 
 commands.allow = ["desktop_resolve_approval"]
 
 [[permission]]
+identifier = "allow-desktop-plan-decision"
+description = "Allows the main local window to submit one hash-bound Run, Save, Revise, or Reject decision for a draft plan."
+commands.allow = ["desktop_plan_decision"]
+
+[[permission]]
 identifier = "allow-desktop-verification"
 description = "Allows the main local window to inspect and rerun one exact server-projected verification check."
 commands.allow = ["desktop_verification", "desktop_rerun_verification"]

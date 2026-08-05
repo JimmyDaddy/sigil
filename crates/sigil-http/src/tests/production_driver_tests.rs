@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use sigil_kernel::{
     AgentRole, AssistantMessageKind, CandidateCheck, CheckCommand, CheckDiscoverySource,
     CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, EvidenceScope,
-    JsonlSessionStore, NetworkEffect, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction,
-    RunStatus, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry,
-    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval,
+    JsonlSessionStore, NetworkEffect, PlanDraftCreatedEntry, ReadinessEvaluatedEntry,
+    ReadinessEvaluation, RequiredAction, RunStatus, SessionLogEntry, SessionRef, TaskId,
+    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval,
     ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
     ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore,
     ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta,
@@ -21,16 +21,17 @@ use sigil_kernel::{
     VerificationProductAction, VerificationVerdict, VisibleCompletionState,
     build_workspace_snapshot, stable_workspace_id,
 };
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
 use crate::{
-    HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
+    HttpCommandEnvelope, HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
     HttpConversationQueueCommandRequest, HttpConversationQueueDriverCommand,
     HttpConversationQueueDriverError, HttpConversationQueueItemKind,
     HttpConversationQueuePromptMaterial, HttpDurableEgressDisclosureJournal,
-    HttpDurableProtocolJournal, HttpForegroundRunOwner, HttpPermissionMode, HttpRunStartRequest,
-    HttpRunStatus, HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionSnapshot,
-    HttpTaskContinuationRequest,
+    HttpDurableProtocolJournal, HttpForegroundRunOwner, HttpPermissionMode, HttpPlanDecisionAction,
+    HttpPlanDecisionRequest, HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest,
+    HttpSessionOpenRequest, HttpSessionSnapshot, HttpTaskContinuationRequest,
 };
 
 #[test]
@@ -3650,4 +3651,610 @@ async fn production_task_pause_returns_only_after_supervisor_acknowledges_activa
         .join()
         .expect("Task pause caller should join")
         .expect("acknowledged Task pause should succeed");
+}
+
+/// Seeds a durable session log with a committed typed draft bound to the current workspace
+/// snapshot and returns the plan review id.
+fn seed_revision_session(
+    config_path: &std::path::Path,
+    temp: &tempfile::TempDir,
+    session: &HttpSessionSnapshot,
+) -> sigil_kernel::PlanReviewId {
+    let root_config = sigil_kernel::RootConfig::load(config_path).expect("config should load");
+    let workspace_root = sigil_kernel::resolve_workspace_root(config_path, temp.path(), ".");
+    let store = JsonlSessionStore::new(&session.session_log_path).expect("session store");
+    let (provider_name, route) = production_test_model_route(temp);
+    let mut session_log =
+        sigil_kernel::Session::new_with_route(provider_name, route).with_store(store);
+    session_log
+        .ensure_identity_entry()
+        .expect("durable session identity should append");
+    let mut user_message = sigil_kernel::ModelMessage::user("design the coordinator migration");
+    user_message.id = "message-1".to_owned();
+    session_log
+        .append_user_message(user_message)
+        .expect("user message should append");
+    let source = sigil_kernel::ConversationTurnRef::new(
+        session_log.session_scope_id(),
+        "message-1",
+        "run-1",
+    )
+    .expect("turn ref should build");
+    let decision = sigil_kernel::ConversationRouteDecisionRecordedEntry {
+        decision_id: sigil_kernel::ConversationRouteDecisionId::new("decision-revision")
+            .expect("decision id"),
+        source_turn: source.clone(),
+        route: sigil_kernel::ConversationRoute::PlanReview,
+        reason_codes: vec![sigil_kernel::ConversationRouteReason::ArchitecturalTradeoff],
+        configured_policy: sigil_kernel::TaskRoutingPolicy::Auto,
+        effective_capability: sigil_kernel::AutomaticRouteCapability::ReviewFirst,
+        policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
+        route_contract_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        decided_at_ms: 1,
+    };
+    let review_id = sigil_kernel::plan_review_id_for_source(&source);
+    let decision_id = decision.decision_id.clone();
+    session_log
+        .append_control(sigil_kernel::ControlEntry::ConversationRouteDecisionRecorded(decision))
+        .expect("route decision should append");
+    let action = sigil_kernel::StartPlanReviewAction {
+        decision_id,
+        plan_review_id: review_id.clone(),
+        plan_id: sigil_kernel::plan_review_plan_id_for_attempt(
+            &review_id,
+            &sigil_kernel::plan_review_attempt_id_for_review(&review_id),
+        ),
+        source_turn: source,
+    };
+    let request = sigil_runtime::PlanReviewCoordinator::prepare_automatic_plan_review(
+        &mut session_log,
+        &action,
+        None,
+        100,
+    )
+    .expect("automatic plan review should prepare");
+    let draft = PlanDraftCreatedEntry {
+        plan_id: request.plan_id.clone(),
+        schema_version: 2,
+        source: sigil_kernel::PlanSourceRef::default(),
+        plan_hash: "sha256:draft".to_owned(),
+        summary: "Migrate the coordinator".to_owned(),
+        inline_text: None,
+        steps: vec![sigil_kernel::PlanDraftStep {
+            step_id: "migrate_1".to_owned(),
+            title: "Migrate coordinator".to_owned(),
+            display_name: None,
+            detail: None,
+            role: Some(sigil_kernel::AgentRole::Executor),
+            depends_on: Vec::new(),
+            intent_aliases: Vec::new(),
+            mode: Some(sigil_kernel::TaskStepMode::Write),
+            isolation: Some(sigil_kernel::TaskIsolationMode::SequentialWorkspaceWrite),
+            target_paths: vec!["src/coordinator.rs".to_owned()],
+            suggested_checks: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+        }],
+        intent_proposal: None,
+        target_paths: vec!["src/coordinator.rs".to_owned()],
+        suggested_checks: Vec::new(),
+        risk: None,
+        notes: Vec::new(),
+        workspace_snapshot_id: Some(
+            sigil_runtime::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+                .expect("workspace snapshot should build")
+                .expect("workspace snapshot id"),
+        ),
+        created_at_ms: 110,
+    };
+    sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
+        &mut session_log,
+        &draft,
+        &request,
+        120,
+    )
+    .expect("seed draft should commit");
+    drop(session_log);
+    review_id
+}
+
+#[tokio::test]
+async fn production_revision_duplicate_registration_never_blocks_the_session() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should create");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[task]
+routing_policy = "auto"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:9"
+credential = { source = "none" }
+"#,
+    )
+    .expect("revision config should write");
+
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-revision-dup.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-revision-dup.json"),
+            16,
+        )
+        .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands-revision-dup.json"), 32)
+            .expect("command store should initialize"),
+    );
+    let registry = driver
+        .build_registry(command_store)
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+    let review_id = seed_revision_session(&config_path, &temp, &session);
+
+    // Pre-register the revision's deterministic child run id so spawn must reject the duplicate
+    // AFTER `application_plan_decision` persisted the RevisionRequested decision.
+    let attempt_1 = sigil_kernel::plan_review_attempt_id_for_review(&review_id);
+    let attempt_2 = sigil_kernel::plan_review_attempt_id_for_revision(&review_id, &attempt_1);
+    let revision_run_id = format!("plan-review-{}-{}", review_id.as_str(), attempt_2.as_str());
+    driver
+        .active_runs
+        .lock()
+        .expect("active-run state should not be poisoned")
+        .insert(
+            revision_run_id.clone(),
+            Arc::new(HttpProductionActiveRun {
+                session_id: session.id.clone(),
+                broker: Arc::new(HttpApprovalBroker::default()),
+                cancel_sender: mpsc::unbounded_channel().0,
+            }),
+        );
+
+    let error = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-dup-1",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_1)
+                        .as_str()
+                        .to_owned(),
+                    expected_plan_hash: "sha256:draft".to_owned(),
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect_err("duplicate revision run id must be rejected before registration");
+    assert!(
+        error.to_string().contains("already active"),
+        "rejection must name the duplicate run: {error}"
+    );
+
+    // The session is NOT blocked: the foreground slot was never claimed, so later durable
+    // mutations remain possible despite the persisted RevisionRequested decision.
+    drop(
+        registry
+            .reserve_durable_session_mutation(&session.durable_session_scope_id)
+            .expect("session must remain mutable after a rejected revision registration"),
+    );
+
+    // The pre-existing owned run entry is untouched; rollback only removes what this call added.
+    assert!(
+        driver
+            .active_runs
+            .lock()
+            .expect("active-run state should not be poisoned")
+            .contains_key(&revision_run_id)
+    );
+
+    // The durable `RevisionFailed` fact makes the failure recoverable: reloading the session
+    // shows the failure instead of an unrecoverable `RevisionRequested` orphan.
+    let store = JsonlSessionStore::new(&session.session_log_path).expect("reload store");
+    let reloaded = sigil_kernel::Session::load_from_store("local-test", "gpt-4.1", store)
+        .expect("revision session should reload");
+    let original_plan_id = sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_1);
+    let plan_projection = reloaded.plan_artifact_projection();
+    let decision = plan_projection
+        .latest_decision(&original_plan_id)
+        .expect("durable revision failure decision");
+    assert_eq!(
+        decision.decision,
+        sigil_kernel::PlanDecision::RevisionFailed,
+        "the rejected revision must record a durable RevisionFailed fact"
+    );
+
+    // The original plan stays actionable: Save succeeds after the durable failure, proving the
+    // plan decision recovery path rather than only the session slot.
+    let save_receipt = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-recovery-1",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: original_plan_id.as_str().to_owned(),
+                    expected_plan_hash: "sha256:draft".to_owned(),
+                    action: HttpPlanDecisionAction::Save,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Save must succeed after a durable revision failure");
+    assert_eq!(save_receipt.action, HttpPlanDecisionAction::Save);
+}
+
+#[tokio::test]
+async fn production_revision_bind_failure_rolls_back_only_the_run_registration() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should create");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[task]
+routing_policy = "auto"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:9"
+credential = { source = "none" }
+"#,
+    )
+    .expect("revision config should write");
+    let root_config = sigil_kernel::RootConfig::load(&config_path).expect("config should load");
+    let workspace_root = sigil_kernel::resolve_workspace_root(&config_path, temp.path(), ".");
+
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-revision-bind.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-revision-bind.json"),
+            16,
+        )
+        .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands-revision-bind.json"), 32)
+            .expect("command store should initialize"),
+    );
+    let registry = driver
+        .build_registry(command_store)
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+
+    // A different run already owns the session foreground slot: bind must fail after the
+    // active-run registration succeeded, exercising the rollback path.
+    registry
+        .bind_supervised_session_run(&session.id, "other-foreground-run")
+        .expect("pre-existing foreground slot should be claimable");
+    let mut log = sigil_kernel::Session::new("local-test", "gpt-4.1");
+    let request = sigil_runtime::PlanReviewCoordinator::prepare_explicit_plan_review(
+        &mut log,
+        "revise the plan",
+        "run-1",
+        None,
+        1,
+    )
+    .expect("explicit revision request should prepare");
+    let run_id = request.child_logical_run_id();
+
+    let error = driver
+        .spawn_plan_review_revision(&session, &root_config, &workspace_root, request)
+        .expect_err("bind must fail while another run owns the foreground slot");
+    assert!(
+        error.to_string().contains("foreground"),
+        "bind failure must name the slot conflict: {error}"
+    );
+
+    // The run-map entry this call inserted was rolled back...
+    assert!(
+        !driver
+            .active_runs
+            .lock()
+            .expect("active-run state should not be poisoned")
+            .contains_key(&run_id),
+        "partial registration must be rolled back from active_runs"
+    );
+    // ...and the pre-existing slot owner is untouched: durable mutations remain blocked by the
+    // OTHER run, not by a half-registered revision.
+    let blocked = match registry.reserve_durable_session_mutation(&session.durable_session_scope_id)
+    {
+        Ok(_) => panic!("the other run must still own the foreground slot"),
+        Err(error) => error,
+    };
+    assert!(
+        blocked.to_string().contains("foreground"),
+        "the pre-existing slot owner must still block mutations: {blocked}"
+    );
+}
+
+#[tokio::test]
+async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_event() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should create");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir(&sessions).expect("session directory should create");
+
+    // Local chat-completions fixture answering the revision plan review with a typed draft.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fixture listener should bind");
+    let address = listener.local_addr().expect("fixture address");
+    let fixture = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buffer = vec![0; 16384];
+            let read = socket.read(&mut buffer).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let body = if request.contains("\"submit_plan_draft\"") {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised coordinator migration\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+            } else {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"revised\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+            };
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+    });
+
+    let base_url = format!("http://{address}");
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "local-test"
+model = "gpt-4.1"
+tool_timeout_secs = 5
+
+[task]
+routing_policy = "auto"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "{base_url}"
+credential = {{ source = "none" }}
+"#
+        ),
+    )
+    .expect("revision config should write");
+
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-revision.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures-revision.json"), 16)
+            .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands-revision.json"), 32)
+            .expect("command store should initialize"),
+    );
+    let registry = driver
+        .build_registry(command_store)
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+    let mut subscriber = event_bus.subscribe();
+
+    let review_id = seed_revision_session(&config_path, &temp, &session);
+
+    // Revise through the registry: the driver runs a supervised revision, publishes an explicit
+    // terminal event, closes the SSE stream, and releases the session foreground slot.
+    let receipt = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "revision-command-1",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(
+                        &review_id,
+                        &sigil_kernel::plan_review_attempt_id_for_review(&review_id),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    expected_plan_hash: "sha256:draft".to_owned(),
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Revise decision should be accepted");
+    assert_eq!(receipt.action, HttpPlanDecisionAction::Revise);
+    let revision_run_id = receipt
+        .revision_run_id
+        .expect("Revise receipt must expose the revision run identity");
+
+    // The supervised revision owns the session foreground slot while it runs.
+    assert!(
+        registry
+            .reserve_durable_session_mutation(&session.durable_session_scope_id)
+            .is_err(),
+        "concurrent durable mutations must be blocked while the revision runs"
+    );
+
+    // The run publishes a terminal event and closes the SSE stream for its run identity.
+    let (terminal_event, closed) = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut terminal = None;
+        let mut closed = None;
+        loop {
+            match subscriber.recv_run_stream().await.expect("live event") {
+                crate::sse::HttpRunStreamReceive::Event(event) => {
+                    if event.run_event.run_id == revision_run_id
+                        && matches!(
+                            &event.run_event.event,
+                            PublicRunEventKind::RunFinished { .. }
+                        )
+                    {
+                        terminal = Some(event);
+                    }
+                }
+                crate::sse::HttpRunStreamReceive::StreamClosed { session_id, run_id }
+                    if run_id == revision_run_id =>
+                {
+                    closed = Some((session_id, run_id));
+                }
+                crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
+            }
+            if terminal.is_some() && closed.is_some() {
+                break (terminal, closed);
+            }
+        }
+    })
+    .await
+    .expect("revision should publish a terminal event and close its stream");
+    let (terminal, (closed_session, closed_run)) = terminal_event
+        .zip(closed)
+        .expect("revision terminal event and stream close");
+    assert!(matches!(
+        terminal.run_event.event,
+        PublicRunEventKind::RunFinished { .. }
+    ));
+    assert_eq!(closed_session, session.durable_session_scope_id);
+    assert_eq!(closed_run, revision_run_id);
+
+    // The durable session now carries the revised draft and the DraftReady attempt.
+    let store = JsonlSessionStore::new(&session.session_log_path).expect("reload store");
+    let reloaded = sigil_kernel::Session::load_from_store("local-test", "gpt-4.1", store)
+        .expect("revision session should reload");
+    let projection = sigil_kernel::PlanReviewProjection::from_entries(reloaded.entries());
+    assert!(!projection.has_conflicts());
+    assert_eq!(
+        projection
+            .latest_attempt(&review_id)
+            .map(|attempt| attempt.status)
+            .expect("revision attempt"),
+        sigil_kernel::PlanReviewAttemptStatus::DraftReady
+    );
+    assert!(
+        reloaded
+            .plan_artifact_projection()
+            .plans
+            .values()
+            .any(|draft| draft.summary == "Revised coordinator migration")
+    );
+
+    // Ownership is released: the run leaves active_runs and the foreground slot is free.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            {
+                let runs = driver
+                    .active_runs
+                    .lock()
+                    .expect("active-run state should not be poisoned");
+                if runs.is_empty() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("revision should release itself from active_runs");
+    let _mutation = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("foreground slot must be released after the revision");
+    fixture.abort();
 }

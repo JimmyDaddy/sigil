@@ -1,0 +1,1 @@
+Weigh the trade-offs of replacing the parser's allocation strategy before any implementation; return the design decision.

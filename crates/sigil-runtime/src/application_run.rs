@@ -22,10 +22,9 @@ use sigil_kernel::{
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
     RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest,
     TaskRunStatus, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
-    WorkspaceTrust, continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
-    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
-    task_routing_system_prompt_contract_material, verification_product_view,
-    workspace_trust_from_entries,
+    WorkspaceTrust, conversation_route_routing_contract_material, rerun_task_verification_check,
+    resolve_workspace_root, route_surface_tool_specs, safe_persistence_text,
+    verification_product_view, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -1676,6 +1675,7 @@ impl std::error::Error for ApplicationCancellationRequestError {
 pub struct ApplicationRunExecution {
     kind: ApplicationRunExecutionKind,
     task_execution: Option<ApplicationTaskExecutionRuntime>,
+    plan_review_runtime: Option<ApplicationPlanReviewRuntime>,
     session: Session,
     options: AgentRunOptions,
     session_id: String,
@@ -1713,6 +1713,14 @@ struct ApplicationTaskExecutionRuntime {
     agent_supervisor: crate::AgentSupervisor,
     role_provider_builder:
         Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
+}
+
+/// Runtime facts used to execute a read-only plan review after an automatic route decision.
+struct ApplicationPlanReviewRuntime {
+    options: AgentRunOptions,
+    agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
+    tool_registry: sigil_kernel::ToolRegistry,
+    workspace_snapshot_id: Option<String>,
 }
 
 enum ApplicationRunExecutionKind {
@@ -1878,10 +1886,19 @@ impl ApplicationRunExecution {
         };
         let run = match run {
             Ok(agent_output) => {
-                continue_application_task_handoff(
+                let output = continue_application_task_handoff(
                     &mut self.session,
                     agent_output,
                     self.task_execution.take(),
+                    &mut bridge,
+                    approval_handler,
+                    &self.cancellation_handle,
+                )
+                .await?;
+                continue_application_plan_review(
+                    &mut self.session,
+                    output,
+                    self.plan_review_runtime.take(),
                     &mut bridge,
                     approval_handler,
                     &self.cancellation_handle,
@@ -2048,6 +2065,172 @@ where
     )
     .await?;
     application_task_terminal_output(session, &action.task_id, status, output)
+}
+
+async fn continue_application_plan_review<H, A>(
+    session: &mut Session,
+    output: AgentRunOutput,
+    plan_review_runtime: Option<ApplicationPlanReviewRuntime>,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: &RunCancellationHandle,
+) -> Result<AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let AgentRunDisposition::StartPlanReview(action) = output.disposition.clone() else {
+        return Ok(output);
+    };
+    let Some(runtime) = plan_review_runtime else {
+        return Ok(output);
+    };
+    let ApplicationPlanReviewRuntime {
+        options,
+        agent,
+        tool_registry,
+        workspace_snapshot_id,
+    } = runtime;
+    let request = crate::PlanReviewCoordinator::prepare_automatic_plan_review(
+        session,
+        &action,
+        workspace_snapshot_id,
+        current_unix_time_ms(),
+    )?;
+    let outcome = match crate::PlanReviewCoordinator::run_plan_review(
+        session,
+        &request,
+        agent.as_ref(),
+        options,
+        tool_registry,
+        handler,
+        approval_handler,
+        cancellation_handle.clone(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::Failed(
+                    "plan review run failed before an outcome".to_owned(),
+                ),
+                current_unix_time_ms(),
+            );
+            if let Err(close_error) = close {
+                bail!(
+                    "plan review run failed ({error:#}) and its terminal closure also failed ({close_error:#})"
+                );
+            }
+            return Err(error);
+        }
+    };
+    match outcome {
+        crate::PlanReviewRunOutcome::DraftReady { draft } => {
+            crate::PlanReviewCoordinator::commit_draft_from_child(
+                session,
+                &draft,
+                &request,
+                current_unix_time_ms(),
+            )?;
+            Ok(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: format!("Plan ready: {}", draft.summary),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::FinalAnswer,
+            })
+        }
+        crate::PlanReviewRunOutcome::CompletedWithoutDraft => {
+            crate::PlanReviewCoordinator::complete_without_draft(
+                session,
+                &request,
+                current_unix_time_ms(),
+            )?;
+            Ok(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text:
+                        "Plan review closed without a draft; no task was created. Send a more specific request or use /plan with explicit steps."
+                            .to_owned(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::FinalAnswer,
+            })
+        }
+        crate::PlanReviewRunOutcome::Cancelled => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::Cancelled,
+                current_unix_time_ms(),
+            )?;
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the plan review terminal-state race");
+            }
+            Ok::<AgentRunOutput, anyhow::Error>(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::Interrupted,
+            })
+        }
+        crate::PlanReviewRunOutcome::Interrupted(reason) => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::Interrupted(reason.clone()),
+                current_unix_time_ms(),
+            )?;
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the plan review interruption terminal-state race");
+            }
+            Ok::<AgentRunOutput, anyhow::Error>(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::Interrupted,
+            })
+        }
+        crate::PlanReviewRunOutcome::Failed(error) => {
+            crate::PlanReviewCoordinator::close_plan_review_run(
+                session,
+                &request,
+                &crate::PlanReviewRunOutcome::Failed(error.clone()),
+                current_unix_time_ms(),
+            )?;
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the plan review failure terminal-state race");
+            }
+            Ok::<AgentRunOutput, anyhow::Error>(AgentRunOutput {
+                result: sigil_kernel::AgentRunResult {
+                    final_text: String::new(),
+                    tool_calls: output.result.tool_calls,
+                    final_message_id: None,
+                },
+                outcome: output.outcome,
+                disposition: AgentRunDisposition::Blocked,
+            })
+            .context(format!("plan review failed: {error}"))
+        }
+    }
 }
 
 struct ApplicationTaskFinalAnswer {
@@ -2474,10 +2657,17 @@ async fn prepare_application_run_internal(
             },
         );
     let conversation_coordinator = crate::ConversationCoordinator::new(
-        task_execution.is_some(),
+        root_config.task.enabled,
         root_config.task.routing_policy,
     )
-    .with_orchestration_route_guard(orchestration_route_guard);
+    .with_orchestration_route_guard(orchestration_route_guard)
+    .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+        provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
+        // DirectTask additionally requires an attached task executor; without one the route
+        // stays at the ReviewFirst baseline so plan review remains usable.
+        route_qualified: crate::route_qualification_evidence(&root_config)
+            && task_execution.is_some(),
+    });
     if queued_first_request.is_none() && agent_invocation.is_none() {
         conversation_coordinator
             .enforce_orchestration_route_kill_switch(&mut session, current_unix_time_ms())
@@ -2497,13 +2687,10 @@ async fn prepare_application_run_internal(
         if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
             let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
             exact_user_message.id = durable_user_message_id.clone();
-            let automatic_routing =
-                conversation_coordinator.routes_conversation_automatically(&session);
+            let route_capability = conversation_coordinator.resolve_route_capability(&session);
+            let automatic_routing = route_capability.routes_automatically();
             let tool_specs = if automatic_routing {
-                vec![
-                    request_task_planning_tool_spec(),
-                    continue_without_task_planning_tool_spec(),
-                ]
+                route_surface_tool_specs(route_capability)
             } else {
                 registry.specs()
             };
@@ -2511,7 +2698,7 @@ async fn prepare_application_run_internal(
             if automatic_routing {
                 transient_messages.insert(
                     0,
-                    ModelMessage::system(task_routing_system_prompt_contract_material()),
+                    ModelMessage::system(conversation_route_routing_contract_material()),
                 );
             }
             let request = session
@@ -2568,7 +2755,8 @@ async fn prepare_application_run_internal(
             crate::AgentBudgetPolicy::from_root_config(&root_config),
             provider.capabilities().clone(),
         );
-        let mut runtime = crate::AgentToolRuntime::new(supervisor, root_config.clone(), registry);
+        let mut runtime =
+            crate::AgentToolRuntime::new(supervisor, root_config.clone(), registry.clone());
         sigil_kernel::AgentToolDelegate::set_run_cancellation(
             &mut runtime,
             Some(cancellation_handle.clone()),
@@ -2580,12 +2768,29 @@ async fn prepare_application_run_internal(
         }
     } else {
         ApplicationRunExecutionKind::Main {
-            agent: Box::new(Agent::new(provider, registry)),
+            agent: Box::new(Agent::new(provider, registry.clone())),
             input: Box::new(input),
         }
     };
     let prepared = PreparedApplicationRun {
         execution: ApplicationRunExecution {
+            plan_review_runtime: Some(ApplicationPlanReviewRuntime {
+                options: options.clone(),
+                workspace_snapshot_id: crate::plan_handoff_workspace_snapshot_id(
+                    &root_config,
+                    &workspace_root,
+                )
+                .ok()
+                .flatten(),
+                agent: Box::new(Agent::new(
+                    crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+                        .await
+                        .map_err(ApplicationRunPrepareError::provider_unavailable)?,
+                    crate::build_plan_review_tool_registry(&registry, &root_config).into_registry(),
+                )),
+                tool_registry: crate::build_plan_review_tool_registry(&registry, &root_config)
+                    .into_registry(),
+            }),
             kind,
             task_execution,
             session,
@@ -4688,6 +4893,145 @@ fn application_task_run_status_label(status: TaskRunStatus) -> &'static str {
     }
 }
 
+/// Executes one prepared plan review revision on an application-surface session.
+///
+/// HTTP/Desktop use this so `Revise` actually runs the new read-only plan review instead of
+/// leaving a dangling `Started` attempt. The run is fail-closed: only the frozen read-only tool
+/// surface is exposed and the permission mode is read-only; every terminal outcome (draft
+/// committed, no-draft closure, cancelled, failed) is written durably through
+/// [`PlanReviewCoordinator::close_plan_review_run`].
+pub async fn execute_plan_review_revision<H>(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    session_log_path: &Path,
+    request: &crate::PlanReviewRunRequest,
+    handler: &mut H,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> Result<crate::PlanReviewRunOutcome>
+where
+    H: ApplicationRunEventHandler + Send,
+{
+    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
+    let (_, fallback_route) =
+        crate::provider_connections::resolve_default_model_route(root_config)?;
+    let mut session =
+        crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+            root_config,
+            &fallback_route,
+            store,
+            None,
+            None,
+            None,
+        )?;
+    let model_ref = session
+        .resolved_model_route()
+        .map(|route| route.model_ref.clone())
+        .unwrap_or_else(|| fallback_route.model_ref.clone());
+    crate::PlanReviewCoordinator::ensure_attempt_started(
+        &mut session,
+        request,
+        current_unix_time_ms(),
+    )?;
+    let cancellation_handle = cancellation.unwrap_or_else(|| RunCancellationOwner::new().handle());
+    let outcome = (async {
+        let provider = crate::build_provider_for_model_ref_async(root_config, &model_ref).await?;
+        let mut base_registry = sigil_kernel::ToolRegistry::new();
+        sigil_tools_builtin::register_builtin_tools(&mut base_registry);
+        crate::register_agent_tools(&mut base_registry, root_config)?;
+        let tool_registry =
+            crate::build_plan_review_tool_registry(&base_registry, root_config).into_registry();
+        let options = crate::build_run_options(
+            root_config,
+            workspace_root.to_path_buf(),
+            sigil_kernel::InteractionMode::Headless,
+        );
+        let agent = sigil_kernel::Agent::new(provider, base_registry);
+        let mut bridge = PublicApplicationEventBridge::new(
+            ApplicationRunEventSequence::new(
+                session.session_scope_id().to_owned(),
+                request.child_logical_run_id(),
+            ),
+            handler,
+        );
+        let outcome = match crate::PlanReviewCoordinator::run_plan_review(
+            &session,
+            request,
+            &agent,
+            options,
+            tool_registry,
+            &mut bridge,
+            &mut sigil_kernel::AutoApproveHandler,
+            cancellation_handle,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
+                    &mut session,
+                    request,
+                    &crate::PlanReviewRunOutcome::Failed(
+                        "plan review run failed before an outcome".to_owned(),
+                    ),
+                    current_unix_time_ms(),
+                );
+                if let Err(close_error) = close {
+                    bail!(
+                        "plan review run failed ({error:#}) and its terminal closure also failed ({close_error:#})"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        match &outcome {
+            crate::PlanReviewRunOutcome::DraftReady { draft } => {
+                crate::PlanReviewCoordinator::commit_draft_from_child(
+                    &mut session,
+                    draft,
+                    request,
+                    current_unix_time_ms(),
+                )?;
+            }
+            crate::PlanReviewRunOutcome::CompletedWithoutDraft => {
+                crate::PlanReviewCoordinator::complete_without_draft(
+                    &mut session,
+                    request,
+                    current_unix_time_ms(),
+                )?;
+            }
+            crate::PlanReviewRunOutcome::Cancelled
+            | crate::PlanReviewRunOutcome::Interrupted(_)
+            | crate::PlanReviewRunOutcome::Failed(_) => {
+                crate::PlanReviewCoordinator::close_plan_review_run(
+                    &mut session,
+                    request,
+                    &outcome,
+                    current_unix_time_ms(),
+                )?;
+            }
+        }
+        Ok(outcome)
+    })
+    .await
+    .map_err(|error| {
+        let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
+            &mut session,
+            request,
+            &crate::PlanReviewRunOutcome::Failed(
+                "plan review revision failed after the attempt started".to_owned(),
+            ),
+            current_unix_time_ms(),
+        );
+        match close {
+            Ok(()) => error,
+            Err(close_error) => anyhow::anyhow!(
+                "plan review revision failed ({error:#}) and its terminal closure also failed ({close_error:#})"
+            ),
+        }
+    })?;
+    Ok(outcome)
+}
+
 struct PublicApplicationEventBridge<'a, H> {
     events: ApplicationRunEventSequence,
     task_events: PublicTaskEventProjector,
@@ -4783,6 +5127,19 @@ fn application_terminal_projection(
             PublicRunEventKind::RunFailed {
                 error: "run requested a durable task handoff, but this application surface has not attached the task executor"
                     .to_owned(),
+            },
+        ),
+        AgentRunDisposition::StartPlanReview(_) => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "run requested a plan review, but this application surface has not attached the plan review coordinator"
+                    .to_owned(),
+            },
+        ),
+        AgentRunDisposition::PlanReviewDraftSubmitted(_) => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "plan review draft submitted outside an attached plan review coordinator".to_owned(),
             },
         ),
         AgentRunDisposition::TaskPlanAccepted => (

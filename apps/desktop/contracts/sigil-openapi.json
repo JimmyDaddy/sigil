@@ -2250,6 +2250,16 @@
               "null"
             ]
           },
+          "plan_review": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlanReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "request_scope": {
             "maxLength": 512,
             "type": "string"
@@ -4501,6 +4511,242 @@
           "danger-full-access"
         ],
         "type": "string"
+      },
+      "PlanDecisionCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "command_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "correlation_id": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_stream_sequence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PlanDecisionRequest"
+          },
+          "protocol_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "client_id",
+          "session_id",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "PlanDecisionCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "run",
+              "save",
+              "revise",
+              "reject"
+            ],
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "plan_hash": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "replayed": {
+            "type": "boolean"
+          },
+          "revision_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "command_id",
+          "client_id",
+          "session_id",
+          "plan_id",
+          "plan_hash",
+          "action",
+          "replayed"
+        ],
+        "type": "object"
+      },
+      "PlanDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "run",
+              "save",
+              "revise",
+              "reject"
+            ],
+            "type": "string"
+          },
+          "expected_plan_hash": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "permission_grant": {
+            "oneOf": [
+              {
+                "enum": [
+                  "ask",
+                  "workspace_edits"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan_id": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id",
+          "expected_plan_hash",
+          "action"
+        ],
+        "type": "object"
+      },
+      "PlanReview": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_actions": {
+            "items": {
+              "enum": [
+                "run",
+                "save",
+                "revise",
+                "reject"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "plan_hash": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "risk": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "enum": [
+              "explicit_plan_command",
+              "automatic_conversation_route"
+            ],
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "started",
+              "draft_ready",
+              "completed_without_draft",
+              "failed",
+              "interrupted",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "step_count": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "suggested_check_count": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "summary": {
+            "maxLength": 512,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_path_count": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "plan_id",
+          "status",
+          "allowed_actions",
+          "source",
+          "stale"
+        ],
+        "type": "object"
       },
       "ProtocolEvent": {
         "additionalProperties": false,
@@ -9589,6 +9835,56 @@
           }
         },
         "summary": "Reopen a durable workspace session as a local handle"
+      }
+    },
+    "/sessions/{id}/plan-decision": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanDecisionCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanDecisionCommandReceipt"
+                }
+              }
+            },
+            "description": "Plan decision command receipt"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Apply one exact typed plan decision (Run, Save, Revise, Reject)"
       }
     },
     "/sessions/{session_id}": {

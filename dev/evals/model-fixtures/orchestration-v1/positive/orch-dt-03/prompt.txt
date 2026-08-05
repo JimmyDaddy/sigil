@@ -1,0 +1,1 @@
+执行并收尾当前工作区所有待定变更：parser 归一化与 formatter 方括号输出，验证 cargo test 通过。

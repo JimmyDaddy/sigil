@@ -241,6 +241,8 @@ fn protocol_provisional_id(
                 message_id: message.id.clone(),
             })
         }
+        PublicRunEventKind::ConversationRouteChanged { .. }
+        | PublicRunEventKind::PlanReviewChanged { .. } => None,
         PublicRunEventKind::ToolCallStarted { call }
         | PublicRunEventKind::ToolCallCompleted { call }
         | PublicRunEventKind::ApprovalRequested { call, .. } => {
@@ -407,6 +409,22 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
             *handoff_id = safe_persistence_text(handoff_id);
             *status = safe_persistence_text(status);
             *task_id = task_id.as_deref().map(safe_persistence_text);
+        }
+        PublicRunEventKind::ConversationRouteChanged {
+            decision_id,
+            status,
+            ..
+        } => {
+            *decision_id = safe_persistence_text(decision_id);
+            *status = safe_persistence_text(status);
+        }
+        PublicRunEventKind::PlanReviewChanged {
+            plan_review_id,
+            plan_id,
+            ..
+        } => {
+            *plan_review_id = safe_persistence_text(plan_review_id);
+            *plan_id = safe_persistence_text(plan_id);
         }
         PublicRunEventKind::TaskPhaseChanged {
             task_id, status, ..
@@ -1441,6 +1459,8 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
         | PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
         | PublicRunEventKind::TaskRoutingChanged { .. }
+        | PublicRunEventKind::ConversationRouteChanged { .. }
+        | PublicRunEventKind::PlanReviewChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }

@@ -1346,6 +1346,8 @@ pub(crate) struct DesktopConversationDisplayPage {
     pub(crate) live_provisional_anchor: Option<DesktopConversationLiveProvisionalAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) task_control: Option<DesktopConversationTaskControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_review: Option<DesktopPlanReview>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1887,6 +1889,105 @@ pub(crate) struct DesktopApprovalDecisionSummary {
     pub(crate) route_state: &'static str,
     pub(crate) registry_revision: u64,
     pub(crate) replayed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopPlanDecisionInput {
+    pub(crate) session_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) expected_plan_hash: String,
+    pub(crate) action: DesktopPlanDecisionActionInput,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopPlanDecisionActionInput {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopPlanDecisionSummary {
+    pub(crate) command_id: String,
+    pub(crate) client_id: String,
+    pub(crate) session_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) plan_hash: String,
+    pub(crate) action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revision_run_id: Option<String>,
+    pub(crate) replayed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopPlanReview {
+    pub(crate) plan_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_hash: Option<String>,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) step_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) target_path_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) suggested_check_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) risk: Option<String>,
+    pub(crate) allowed_actions: Vec<&'static str>,
+    pub(crate) source: &'static str,
+    pub(crate) stale: bool,
+}
+
+impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
+    fn from(value: sigil_desktop::DesktopPlanReview) -> Self {
+        Self {
+            plan_id: value.plan_id,
+            plan_hash: value.plan_hash,
+            status: match value.status {
+                sigil_desktop::DesktopPlanReviewStatus::Started => "started",
+                sigil_desktop::DesktopPlanReviewStatus::DraftReady => "draft_ready",
+                sigil_desktop::DesktopPlanReviewStatus::CompletedWithoutDraft => {
+                    "completed_without_draft"
+                }
+                sigil_desktop::DesktopPlanReviewStatus::Failed => "failed",
+                sigil_desktop::DesktopPlanReviewStatus::Interrupted => "interrupted",
+                sigil_desktop::DesktopPlanReviewStatus::Cancelled => "cancelled",
+            },
+            summary: value.summary,
+            step_count: value.step_count,
+            target_path_count: value.target_path_count,
+            suggested_check_count: value.suggested_check_count,
+            risk: value.risk,
+            allowed_actions: value
+                .allowed_actions
+                .into_iter()
+                .map(|action| match action {
+                    sigil_desktop::DesktopPlanAction::Run => "run",
+                    sigil_desktop::DesktopPlanAction::Save => "save",
+                    sigil_desktop::DesktopPlanAction::Revise => "revise",
+                    sigil_desktop::DesktopPlanAction::Reject => "reject",
+                })
+                .collect(),
+            source: match value.source {
+                sigil_desktop::DesktopPlanReviewSource::ExplicitPlanCommand => {
+                    "explicit_plan_command"
+                }
+                sigil_desktop::DesktopPlanReviewSource::AutomaticConversationRoute => {
+                    "automatic_conversation_route"
+                }
+            },
+            stale: value.stale,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2725,6 +2826,7 @@ impl From<NativeConversationDisplayPage> for DesktopConversationDisplayPage {
                 }
             }),
             task_control: value.task_control.map(Into::into),
+            plan_review: value.plan_review.map(Into::into),
         }
     }
 }

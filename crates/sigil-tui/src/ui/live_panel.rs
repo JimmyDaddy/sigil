@@ -285,20 +285,24 @@ fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval) -> u16 {
     let detail_rows =
         usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
     let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
+    let stale_rows = usize::from(plan.stale);
     LIVE_PLAN_APPROVAL_BASE_ROWS
         + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT) as u16
         + u16::try_from(overflow_rows).unwrap_or(0)
         + u16::try_from(detail_rows).unwrap_or(0)
+        + u16::try_from(stale_rows).unwrap_or(0)
 }
 
 fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel) -> u16 {
     let detail_rows =
         usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
     let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
+    let stale_rows = usize::from(plan.stale);
     LIVE_PLAN_APPROVAL_BASE_ROWS
         + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT) as u16
         + u16::try_from(overflow_rows).unwrap_or(0)
         + u16::try_from(detail_rows).unwrap_or(0)
+        + u16::try_from(stale_rows).unwrap_or(0)
 }
 
 fn render_live_status_band(
@@ -689,15 +693,44 @@ fn render_plan_approval_lines(
             Style::default().fg(palette.text_secondary).bg(bg),
         )]));
     }
+    if plan.stale {
+        let reason = plan.stale_reason.as_deref().unwrap_or("plan may be stale");
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Stale",
+                Style::default()
+                    .fg(palette.status_error)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {reason}"),
+                Style::default().fg(palette.text_secondary).bg(bg),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("r", Style::default().fg(palette.text_primary).bg(bg)),
+            Span::styled(
+                " revise  Esc",
+                Style::default().fg(palette.text_secondary).bg(bg),
+            ),
+            Span::styled(" reject", Style::default().fg(palette.text_primary).bg(bg)),
+        ]));
+        return lines;
+    }
     lines.push(Line::from(vec![
         Span::styled("Enter", Style::default().fg(palette.text_primary).bg(bg)),
+        Span::styled(" run", Style::default().fg(palette.text_secondary).bg(bg)),
+        Span::styled("  s", Style::default().fg(palette.text_primary).bg(bg)),
+        Span::styled(" save", Style::default().fg(palette.text_secondary).bg(bg)),
+        Span::styled("  r", Style::default().fg(palette.text_primary).bg(bg)),
         Span::styled(
-            " create and run task",
+            " revise",
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
         Span::styled("  Esc", Style::default().fg(palette.text_primary).bg(bg)),
         Span::styled(
-            " discard",
+            " reject",
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ]));

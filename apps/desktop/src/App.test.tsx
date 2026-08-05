@@ -476,6 +476,15 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       permissionMode: "manual",
       streamSequence: 2,
     }),
+    planDecision: async (_workspaceId, sessionId, planId, _planHash, action) => ({
+      commandId: "plan-decision-command-test",
+      clientId: "desktop-test",
+      sessionId,
+      planId,
+      planHash: `sha256:${"a".repeat(64)}`,
+      action,
+      replayed: false,
+    }),
     resolveApproval: async (_workspaceId, sessionId, runId, approval, decision) => ({
       commandId: "approval-command-test",
       clientId: "desktop-test",
@@ -1135,6 +1144,12 @@ describe("desktop workspace and history shell", () => {
       }],
       suggestedModel: "deepseek-v4-flash",
       manualEntryAllowed: false,
+      orchestrationRollout: {
+        status: "route_not_qualified",
+        routingPolicy: "auto",
+        multiAgentMode: "explicit_request_only",
+        reason: "this release has no qualified orchestration route manifest",
+      },
     }));
     const saveProviderSetup = vi.fn(async () => ({
       defaultModel: { connectionId: "deepseek-1", modelId: "deepseek-v4-flash" },
@@ -1180,6 +1195,9 @@ describe("desktop workspace and history shell", () => {
     await user.type(screen.getByLabelText("API key"), "secret-canary");
     await user.click(screen.getByRole("button", { name: "Continue to models" }));
     expect(await screen.findByRole("radio", { name: /DeepSeek V4 Flash/ })).toBeTruthy();
+    expect(screen.getByText("Automatic routing: auto")).toBeTruthy();
+    expect(screen.getByText("Direct task execution: review first fallback")).toBeTruthy();
+    expect(screen.getByText("this release has no qualified orchestration route manifest")).toBeTruthy();
     expect(screen.getByLabelText("Context window").getAttribute("placeholder")).toBe("1000000");
     await user.type(screen.getByLabelText("Context window"), "262144");
     await user.click(screen.getByRole("button", { name: "Save and continue" }));
@@ -5539,6 +5557,148 @@ describe("desktop workspace and history shell", () => {
       { taskId: "task-pause-1", planVersion: 7 },
     ));
     expect(cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("renders the durable plan review card and submits the hash-bound Run decision", async () => {
+    const user = userEvent.setup();
+    const planHash = `sha256:${"d".repeat(64)}`;
+    let displayCalls = 0;
+    const planDecision = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      planId: string,
+      expectedPlanHash: string,
+      action: string,
+    ) => ({
+      commandId: "plan-decision-command-1",
+      clientId: "desktop-test",
+      sessionId,
+      planId,
+      planHash: expectedPlanHash,
+      action: action as "run",
+      replayed: false,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      display: async () => {
+        displayCalls += 1;
+        return {
+          schemaVersion: 1,
+          requestScope: "http-session-new",
+          throughSessionStreamSequence: "9",
+          totalItems: "0",
+          items: [],
+          hasMore: false,
+          gapFacts: [],
+          planReview: displayCalls === 1 ? {
+            planId: "plan-review-1",
+            planHash,
+            status: "draft_ready" as const,
+            summary: "Refactor the workspace snapshot binding",
+            stepCount: 3,
+            targetPathCount: 2,
+            suggestedCheckCount: 1,
+            risk: "touches the recovery path",
+            allowedActions: ["run", "save", "revise", "reject"] as const,
+            source: "automatic_conversation_route" as const,
+            stale: false,
+          } : undefined,
+        };
+      },
+      planDecision,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+
+    expect(await screen.findByText("Refactor the workspace snapshot binding")).toBeTruthy();
+    expect(screen.getByText("plan-review-1")).toBeTruthy();
+    expect(screen.getByText(/sha256:ddddd/)).toBeTruthy();
+    expect(screen.getByText("Automatic plan review")).toBeTruthy();
+    const runButton = screen.getByRole("button", { name: "Run plan" });
+    expect(runButton.hasAttribute("disabled")).toBe(false);
+    await user.click(runButton);
+
+    await waitFor(() => expect(planDecision).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "plan-review-1",
+      planHash,
+      "run",
+    ));
+    await waitFor(() => expect(screen.queryByText("Refactor the workspace snapshot binding")).toBeNull());
+  });
+
+  it("disables run and save but keeps revise and reject for a stale draft", async () => {
+    const user = userEvent.setup();
+    const planDecision = vi.fn(async () => ({
+      commandId: "plan-decision-stale",
+      clientId: "desktop-test",
+      sessionId: "http-session-new",
+      planId: "plan-review-stale",
+      planHash: `sha256:${"e".repeat(64)}`,
+      action: "revise" as const,
+      revisionRunId: "plan-review-revise-run-1",
+      replayed: false,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      display: async () => ({
+        schemaVersion: 1,
+        requestScope: "http-session-new",
+        throughSessionStreamSequence: "9",
+        totalItems: "0",
+        items: [],
+        hasMore: false,
+        gapFacts: [],
+        planReview: {
+          planId: "plan-review-stale",
+          planHash: `sha256:${"e".repeat(64)}`,
+          status: "draft_ready" as const,
+          summary: "Stale plan draft",
+          stepCount: 1,
+          targetPathCount: 0,
+          suggestedCheckCount: 0,
+          allowedActions: ["run", "save", "revise", "reject"] as const,
+          source: "explicit_plan_command" as const,
+          stale: true,
+        },
+      }),
+      planDecision,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+
+    expect(await screen.findByText("Stale plan draft")).toBeTruthy();
+    expect(screen.getByText("Explicit /plan")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Run plan" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    expect(
+      screen.getByText(/workspace changed since it was created\. Revise it to re-plan/),
+    ).toBeTruthy();
+    const reviseButton = screen.getByRole("button", { name: "Revise" });
+    expect(reviseButton.hasAttribute("disabled")).toBe(false);
+    await user.click(reviseButton);
+    expect(planDecision).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "plan-review-stale",
+      `sha256:${"e".repeat(64)}`,
+      "revise",
+    );
+    expect(await screen.findByText(/Plan revision started/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reject" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("stops a persistent terminal task with its exact run and generation binding", async () => {

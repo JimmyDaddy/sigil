@@ -109,6 +109,7 @@ pub mod mcp_oauth_flow;
 pub mod mcp_oauth_http;
 pub mod model_eval;
 pub mod paths;
+pub mod plan_review_coordinator;
 pub mod plugins;
 pub mod portable_compaction;
 pub mod product_view;
@@ -180,7 +181,9 @@ pub use context_window::{
     resolve_context_window_tokens, resolve_context_window_tokens_with_override,
     resolve_model_context_window_tokens,
 };
-pub use conversation_coordinator::{ConversationCoordinator, ConversationSourceTurn};
+pub use conversation_coordinator::{
+    ConversationCoordinator, ConversationSourceTurn, RouteCapabilityEvidence,
+};
 pub use egress_ordering::{
     ActiveHostedEgress, ActiveQueryEgress, AuthorizedHostedEgress, AuthorizedQueryEgress,
     AuthorizedTransportEgress, EgressOrderingCoordinator, EgressOrderingError,
@@ -210,7 +213,7 @@ pub use orchestration_rollout::{
     load_orchestration_eval_report_manifest, load_orchestration_rollout_manifest,
     new_install_orchestration_rollout_decision,
     new_install_orchestration_rollout_decision_for_config, orchestration_task_config_digest,
-    write_orchestration_rollout_manifest,
+    route_qualification_evidence, write_orchestration_rollout_manifest,
 };
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,
@@ -221,6 +224,13 @@ pub use paths::{
     DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV,
     SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform, resolve_sigil_paths,
     resolve_sigil_paths_with_env, workspace_id_for_root,
+};
+pub use plan_review_coordinator::{
+    ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
+    CreateTaskFromPlanRequest, CreatedTaskFromPlan, PlanDecisionCommand, PlanReviewCoordinator,
+    PlanReviewRunOutcome, PlanReviewRunRequest, RejectPlanRequest, RejectedPlan,
+    application_plan_decision, application_record_revision_failure,
+    plan_handoff_workspace_snapshot_id,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
@@ -401,8 +411,9 @@ pub use provider_factory::{
     secret_redactor_for_root_config,
 };
 pub use run_options::{
-    build_plan_prompt_tool_registry, build_role_run_options, build_role_skill_tool_registry,
-    build_role_tool_registry, build_run_options, build_skill_tool_registry,
+    build_plan_prompt_tool_registry, build_plan_review_tool_registry, build_role_run_options,
+    build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
+    build_skill_tool_registry,
 };
 
 use run_options::canonical_workspace_root;
@@ -416,6 +427,10 @@ use mcp_registry::{
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/plan_review_coordinator_tests.rs"]
+mod plan_review_coordinator_tests;
 
 #[cfg(test)]
 #[path = "tests/model_eval_tests.rs"]

@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     HttpApprovalCommandReceipt, HttpConversationQueueCommandReceipt,
     HttpConversationRecoveryCommandReceipt, HttpIntentDropCommandReceipt,
-    HttpRunCancelCommandReceipt, HttpRunStartCommandReceipt,
+    HttpPlanDecisionCommandReceipt, HttpRunCancelCommandReceipt, HttpRunStartCommandReceipt,
     HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskPauseCommandReceipt,
     HttpTerminalTaskCancelCommandReceipt, HttpVerificationRerunCommandReceipt,
     durable_io::{acquire_exclusive_lease, atomic_replace, canonical_durable_path, read_bounded},
@@ -286,6 +286,7 @@ pub(crate) enum HttpStoredCommandCompletion {
     Approval(HttpApprovalCommandReceipt),
     Verification(Box<HttpVerificationRerunCommandReceipt>),
     Integration(Box<HttpTaskIntegrationAcceptanceCommandReceipt>),
+    PlanDecision(HttpPlanDecisionCommandReceipt),
     IntentDrop(Box<HttpIntentDropCommandReceipt>),
     Queue(Box<HttpConversationQueueCommandReceipt>),
     Recovery(Box<HttpConversationRecoveryCommandReceipt>),
@@ -446,6 +447,13 @@ fn validate_completion(
         }
         HttpStoredCommandCompletion::Integration(receipt) => {
             identity.kind == "integration"
+                && receipt.command_id == identity.key.command_id
+                && receipt.client_id == identity.key.client_id
+                && receipt.session_id == identity.key.session_id
+                && !receipt.replayed
+        }
+        HttpStoredCommandCompletion::PlanDecision(receipt) => {
+            identity.kind == "plan_decision"
                 && receipt.command_id == identity.key.command_id
                 && receipt.client_id == identity.key.client_id
                 && receipt.session_id == identity.key.session_id

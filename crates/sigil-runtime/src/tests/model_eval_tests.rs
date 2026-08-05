@@ -16,11 +16,11 @@ use sigil_kernel::{
     TaskId, TaskParticipantAttemptId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
     ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationVerdict,
     changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
+    conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
     runtime_context_v1_system_prompt_contract_material,
     task_participant_finalization_prompt_contract_material,
-    task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
-    write_file_with_mutation,
+    task_participant_system_prompt_contract_material, write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -244,7 +244,7 @@ anthropic_base_url = "https://api.deepseek.com/anthropic"
     let mut expected_routing_material = b"sigil-orchestration-routing-prompt-v1\0".to_vec();
     expected_routing_material.extend(
         serde_json::to_vec(&serde_json::json!({
-            "system_prompt": task_routing_system_prompt_contract_material(),
+            "system_prompt": conversation_route_routing_contract_material(),
             "direct_conversation_continuation": direct_conversation_continuation_prompt_contract_material(),
             "tools": [
                 request_task_planning_tool_spec(),
@@ -323,8 +323,9 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
     fixture_paths.sort();
 
     let mut ids = BTreeSet::new();
-    let mut negative = 0;
-    let mut positive = 0;
+    let mut chat = 0;
+    let mut plan_review = 0;
+    let mut direct_task = 0;
     for path in fixture_paths {
         let fixture = load_model_eval_fixture(&path).expect("load orchestration fixture");
         assert!(ids.insert(fixture.manifest.id.clone()));
@@ -358,16 +359,18 @@ fn committed_orchestration_corpus_has_frozen_route_classes_and_valid_hashes() {
             .manifest
             .orchestration
             .expect("orchestration metadata");
-        assert_eq!(orchestration.corpus_version, "rfc-0053-orchestration-v1");
+        assert_eq!(orchestration.corpus_version, "rfc-0063-orchestration-v1");
         match orchestration.case_class {
-            sigil_kernel::OrchestrationEvalCaseClass::Negative => negative += 1,
-            sigil_kernel::OrchestrationEvalCaseClass::Positive => positive += 1,
+            sigil_kernel::OrchestrationEvalCaseClass::Chat => chat += 1,
+            sigil_kernel::OrchestrationEvalCaseClass::PlanReview => plan_review += 1,
+            sigil_kernel::OrchestrationEvalCaseClass::DirectTask => direct_task += 1,
         }
     }
 
-    assert_eq!(negative, 20);
-    assert_eq!(positive, 10);
-    assert_eq!(ids.len(), 30);
+    assert_eq!(chat, 20);
+    assert_eq!(plan_review, 15);
+    assert_eq!(direct_task, 15);
+    assert_eq!(ids.len(), 50);
 }
 
 #[test]
@@ -602,8 +605,8 @@ fn orchestration_fixture_classification_is_manifest_owned_and_enables_auto_routi
         r#"
 
 [orchestration]
-case_class = "positive"
-corpus_version = "rfc-0053-v1"
+case_class = "plan_review"
+corpus_version = "rfc-0063-v1"
 "#,
     );
     fs::write(&manifest_path, manifest).expect("write orchestration manifest");
@@ -627,7 +630,7 @@ corpus_version = "rfc-0053-v1"
             .as_ref()
             .expect("orchestration metadata")
             .case_class,
-        sigil_kernel::OrchestrationEvalCaseClass::Positive
+        sigil_kernel::OrchestrationEvalCaseClass::PlanReview
     );
     assert_eq!(
         materialized
@@ -635,7 +638,7 @@ corpus_version = "rfc-0053-v1"
             .as_ref()
             .expect("orchestration metadata")
             .corpus_version,
-        "rfc-0053-v1"
+        "rfc-0063-v1"
     );
     assert!(config.task.enabled);
     assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
@@ -829,8 +832,8 @@ fn orchestration_campaign_attaches_the_production_task_executor() {
             r#"
 
 [orchestration]
-case_class = "positive"
-corpus_version = "rfc-0053-v1"
+case_class = "plan_review"
+corpus_version = "rfc-0063-v1"
 "#,
         );
         fs::write(&manifest_path, manifest).expect("write orchestration manifest");
@@ -919,9 +922,12 @@ corpus_version = "rfc-0053-v1"
         );
         let requests = requests.lock().expect("requests lock");
         assert_eq!(requests.len(), 2);
-        assert!(requests[0].contains(r#""name":"request_task_planning""#));
+        // Custom eval endpoints are never release-qualified, so the automatic route stays at the
+        // ReviewFirst baseline: no direct task decision is exposed.
+        assert!(requests[0].contains(r#""name":"request_plan_review""#));
         assert!(requests[0].contains(r#""name":"continue_without_task_planning""#));
-        assert!(!requests[1].contains(r#""name":"request_task_planning""#));
+        assert!(!requests[0].contains(r#""name":"request_task_planning""#));
+        assert!(!requests[1].contains(r#""name":"request_plan_review""#));
     });
 }
 

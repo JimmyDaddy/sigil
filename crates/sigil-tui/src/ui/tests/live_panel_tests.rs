@@ -436,6 +436,8 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
             suggested_checks: vec!["cargo test".to_owned()],
             target_path_count: 2,
             suggested_check_count: 1,
+            stale: false,
+            stale_reason: None,
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("plan body")],
@@ -459,11 +461,12 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
     assert!(rendered.contains("1 check"));
     assert!(rendered.contains("inspect and edit"));
     assert!(rendered.contains("Enter"));
-    assert!(rendered.contains("create and run task"));
+    assert!(rendered.contains("run"));
+    assert!(rendered.contains("save"));
+    assert!(rendered.contains("revise"));
     assert!(!rendered.contains("scoped edits"));
     assert!(!rendered.contains("Shift-Enter"));
-    assert!(!rendered.contains("revise"));
-    assert!(rendered.contains("Esc discard"));
+    assert!(rendered.contains("Esc reject"));
     Ok(())
 }
 

@@ -11,6 +11,7 @@ pub mod config;
 pub mod context_engine;
 pub mod conversation_fork;
 pub mod conversation_queue;
+pub mod conversation_route;
 pub mod conversation_run;
 pub mod egress;
 pub mod eval;
@@ -62,9 +63,10 @@ pub use agent::{
     Agent, AgentDelegationRequirement, AgentHostedTurn, AgentHostedTurnPreparer,
     AgentRunDisposition, AgentRunInput, AgentRunInputPreparer, AgentRunOptions, AgentRunOutcome,
     AgentRunOutput, AgentRunPurpose, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
-    ConversationPurposeContext, FinalAnswerContext, StartDurableTaskAction, TaskParticipantContext,
-    TaskPlannerContext, TaskSynthesisContext, durable_tool_execution_entry,
-    projected_agent_run_readiness,
+    ConversationPurposeContext, FinalAnswerContext, PlanReviewDraftSubmittedAction,
+    PlanReviewPurposeContext, StartDurableTaskAction, StartPlanReviewAction,
+    TaskParticipantContext, TaskPlannerContext, TaskSynthesisContext, durable_tool_execution_entry,
+    projected_agent_run_readiness, route_surface_tool_specs,
 };
 pub use agent_thread::{
     AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentArtifactRef, AgentBatchId,
@@ -151,7 +153,7 @@ pub use config::{
     MultiAgentMode, MutationArtifactRetentionConfig, RoleModelConfig, RootConfig,
     SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SessionConfig, SessionRetentionConfig, SkillConfig,
-    StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode, TaskRoutingPolicy,
+    StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskRoutingPolicy,
     TerminalKeyboardEnhancement, TerminalNotificationConfig, TerminalNotificationMethod,
     ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WebBundledSearchConfig,
     WebConfig, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchMcpConfig, WebSearchRoute,
@@ -196,6 +198,26 @@ pub use conversation_queue::{
     MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS, TaskGuidancePromotedEntry,
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
+pub use conversation_route::{
+    AutomaticRouteCapability, CONVERSATION_ROUTE_DECISION_DOMAIN, ConversationRoute,
+    ConversationRouteDecisionId, ConversationRouteDecisionProjection,
+    ConversationRouteDecisionProjectionEntry, ConversationRouteDecisionRecordedEntry,
+    ConversationRouteReason, MAX_PLAN_REVIEW_REASON_CODES, PLAN_REVIEW_ATTEMPT_ID_DOMAIN,
+    PLAN_REVIEW_CHILD_SESSION_DOMAIN, PLAN_REVIEW_ID_DOMAIN, PLAN_REVIEW_PLAN_ID_DOMAIN,
+    PLAN_REVIEW_ROUTING_POLICY_DOMAIN, PlanReviewAttemptEntry, PlanReviewAttemptId,
+    PlanReviewAttemptStatus, PlanReviewDraftContext, PlanReviewHandoffBinding, PlanReviewId,
+    PlanReviewProjection, PlanReviewProjectionEntry, PlanReviewSource, PlanReviewTerminalReason,
+    REQUEST_PLAN_REVIEW_TOOL_NAME, SUBMIT_PLAN_DRAFT_TOOL_NAME,
+    conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
+    conversation_route_routing_contract_material,
+    direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
+    plan_review_attempt_id_for_revision, plan_review_child_session_ref,
+    plan_review_id_for_explicit_command, plan_review_id_for_source,
+    plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
+    plan_review_policy_snapshot_hash, plan_review_reason_codes,
+    plan_review_system_prompt_contract_material, reconcile_plan_review_attempts,
+    request_plan_review_tool_spec, submit_plan_draft_tool_spec,
+};
 pub use conversation_run::{
     CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION, ConversationRunFinalizedEntryV1,
     ConversationRunLifecycleRecordV1, ConversationRunLifecycleRecorder,
@@ -223,11 +245,15 @@ pub use eval::{
     MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalAssertionResultV3, ModelEvalCostConfidence,
     ModelEvalExecutionStatus, ModelEvalReportArtifactsV3, ModelEvalReportCampaignV3,
     ModelEvalReportManifestV3, ModelEvalReportRecordV3, ModelEvalTrendBucketV3,
-    ModelEvalTrendEligibility, ModelEvalUsage, ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM,
-    ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM, ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES,
-    ORCHESTRATION_EVAL_MIN_POSITIVE_CASES, ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE,
-    ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION, OrchestrationEvalCaseClass,
-    OrchestrationEvalIdentityV1, OrchestrationEvalObservationV1,
+    ModelEvalTrendEligibility, ModelEvalUsage,
+    ORCHESTRATION_EVAL_MAX_CHAT_TO_PLAN_REVIEW_OVERROUTE_PPM,
+    ORCHESTRATION_EVAL_MAX_CHAT_TO_TASK_FP_RATE_PPM,
+    ORCHESTRATION_EVAL_MAX_DIRECT_TASK_MISS_RATE_PPM,
+    ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_MISS_RATE_PPM,
+    ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_TO_TASK_RATE_PPM, ORCHESTRATION_EVAL_MIN_CHAT_CASES,
+    ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES, ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES,
+    ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE, ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION,
+    OrchestrationEvalCaseClass, OrchestrationEvalIdentityV1, OrchestrationEvalObservationV1,
     OrchestrationEvalReportArtifactsV1, OrchestrationEvalReportCampaignV1,
     OrchestrationEvalReportManifestV1, OrchestrationEvalReportRecordV1,
     OrchestrationEvalRouteGateV1, OrchestrationEvalRouteIdentityV1, OrchestrationEvalRouteStatus,
@@ -432,7 +458,7 @@ pub use plan::{
     PlanDraftCreatedEntry, PlanDraftStep, PlanId, PlanPermissionGrantedEntry, PlanSourceRef,
     PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping, TaskCreatedFromPlanEntry,
     plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
-    task_id_from_plan_draft, task_plan_from_plan_draft,
+    submit_plan_draft_entry, task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,
@@ -492,7 +518,11 @@ pub use provider_timeout::{
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
     timeout_provider_request, timeout_provider_stream_next,
 };
-pub use public_task_event::{PublicTaskEventProjector, PublicTaskPhase, PublicTaskPlanStep};
+pub use public_task_event::{
+    PublicConversationPhase, PublicConversationRoute, PublicPlanAction, PublicPlanReview,
+    PublicPlanReviewSource, PublicPlanReviewStatus, PublicTaskEventProjector, PublicTaskPhase,
+    PublicTaskPlanStep,
+};
 pub use resume::{
     JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
     ResumeJobStateProjection, StepLeaseEntry, StepLeaseHeartbeatEntry, StepLeaseStatus,
@@ -676,10 +706,8 @@ pub use task_handoff::{
     REQUEST_TASK_PLANNING_TOOL_NAME, TaskAdmissionReason, TaskAdmissionTrigger,
     TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection, TaskHandoffProjectionEntry,
     TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskPlanningHandoffBinding,
-    continue_without_task_planning_tool_spec,
-    direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
-    task_planning_reason_codes, task_routing_system_prompt_contract_material,
-    validate_continue_without_task_planning_call,
+    continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
+    task_planning_reason_codes, validate_continue_without_task_planning_call,
 };
 pub use task_memory::{
     AttemptRef, BranchId, CommandReceiptId, FileChangeRef, ModelAssistedMemoryDecision,

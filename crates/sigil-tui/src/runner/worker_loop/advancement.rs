@@ -1955,6 +1955,7 @@ where
             RunTaskPayload::Chat {
                 result: Ok(run_result),
                 plan_mode,
+                plan_review,
                 queue_id,
                 agent_result_continuation_thread_ids,
                 ..
@@ -1978,6 +1979,7 @@ where
                     );
                 }
                 if plan_mode
+                    && !plan_review
                     && let Err(error) = append_plan_draft(
                         root_config,
                         workspace_root,
@@ -1996,7 +1998,7 @@ where
                     .as_ref()
                     .map(|session| session.entries().to_vec())
                     .unwrap_or_default();
-                let message = if plan_mode {
+                let message = if plan_mode || plan_review {
                     WorkerMessage::PlanRunFinished {
                         result: run_result,
                         entries,
@@ -2032,6 +2034,7 @@ where
             RunTaskPayload::Chat {
                 result: Err(error),
                 plan_mode,
+                plan_review: _,
                 queue_id,
                 provider_logical_run_id,
                 agent_result_continuation_thread_ids,

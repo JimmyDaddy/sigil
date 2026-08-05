@@ -61,6 +61,9 @@ keyboard_enhancement = "off"
 mouse_capture = false
 osc52_clipboard = false
 
+[task]
+routing_policy = "manual"
+
 [connections.deepseek-test]
 label = "DeepSeek test"
 provider = "deepseek"
@@ -339,6 +342,7 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
     let server_responded = Arc::clone(&responded);
     let generated = Arc::new(AtomicBool::new(false));
     let server_generated = Arc::clone(&generated);
+    let mut chat_request_count = 0_u32;
     let server = thread::spawn(move || -> Result<()> {
         let deadline = Instant::now() + PROCESS_TIMEOUT;
         loop {
@@ -358,7 +362,7 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
             stream.set_read_timeout(Some(PROCESS_TIMEOUT))?;
             let request = read_http_request(&mut stream)?;
             let request = String::from_utf8_lossy(&request);
-            if request.starts_with("GET /v1/models ") {
+            if request.starts_with("GET /v1/models") {
                 let body = r#"{"error":"model discovery is not implemented"}"#;
                 write!(
                     stream,
@@ -370,20 +374,31 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
                 continue;
             }
             assert!(
-                request.starts_with("POST /v1/chat/completions "),
+                request.starts_with("POST /v1/chat/completions"),
                 "unexpected provider request: {request}"
             );
-            let body = concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"FIRST-RUN-CANARY\"},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: [DONE]\n\n"
-            );
+            // The setup-written config now defaults to `auto`, so ordinary input first runs the
+            // routing-only microturn. Answer the first chat-completion request with the typed
+            // negative decision, then serve ordinary turns with the canary.
+            chat_request_count += 1;
+            let body = if chat_request_count == 1 {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"routing-1\",\"type\":\"function\",\"function\":{\"name\":\"continue_without_task_planning\",\"arguments\":\"{\\\"reason\\\":\\\"does_not_meet_task_planning_criteria\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+            } else {
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"FIRST-RUN-CANARY\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )
+            };
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )?;
             stream.flush()?;
-            if request.contains("reply with the first-run canary") {
+            if chat_request_count >= 2 && request.contains("reply with the first-run canary") {
                 server_generated.store(true, Ordering::Release);
                 return Ok(());
             }

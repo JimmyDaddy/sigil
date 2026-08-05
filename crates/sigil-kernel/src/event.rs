@@ -179,6 +179,8 @@ durable_event_types! {
     PlanDraftCreated => ("plan_draft_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanDecisionRecorded => ("plan_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanPermissionGranted => ("plan_permission_granted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ConversationRouteDecisionRecorded => ("conversation_route_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanReviewAttempt => ("plan_review_attempt", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskCreatedFromPlan => ("task_created_from_plan", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MutationPrepared => ("mutation_prepared", RecoveryCritical, Critical, DirectJson, "mutation_prepared"),
     MutationCommitted => ("mutation_committed", RecoveryCritical, Critical, DirectJson, "mutation_committed"),
@@ -1381,6 +1383,16 @@ pub enum PublicRunEventKind {
         status: String,
         task_id: Option<String>,
     },
+    ConversationRouteChanged {
+        decision_id: String,
+        route: crate::PublicConversationRoute,
+        status: String,
+    },
+    PlanReviewChanged {
+        plan_review_id: String,
+        plan_id: String,
+        status: crate::PublicPlanReviewStatus,
+    },
     TaskPhaseChanged {
         task_id: Option<String>,
         phase: crate::PublicTaskPhase,
@@ -1670,6 +1682,10 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::PlanDraftCreated(_) => "plan_draft_created",
         ControlEntry::PlanDecisionRecorded(_) => "plan_decision_recorded",
         ControlEntry::PlanPermissionGranted(_) => "plan_permission_granted",
+        ControlEntry::ConversationRouteDecisionRecorded(_) => {
+            "conversation_route_decision_recorded"
+        }
+        ControlEntry::PlanReviewAttempt(_) => "plan_review_attempt",
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
         ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",
         ControlEntry::TaskHandoffResolved(_) => "task_handoff_resolved",

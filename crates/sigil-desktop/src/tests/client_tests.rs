@@ -563,6 +563,124 @@ fn conversation_display_rejects_noncanonical_decimal_text() {
 }
 
 #[test]
+fn plan_review_surface_validates_bounded_typed_decisions() {
+    let base = serde_json::json!({
+        "schema_version": 1,
+        "request_scope": "http-session-1",
+        "through_session_stream_sequence": "12",
+        "total_items": "0",
+        "items": [],
+        "has_more": false,
+        "gap_facts": [],
+        "plan_review": {
+            "plan_id": "plan-review-1",
+            "plan_hash": format!("sha256:{}", "a".repeat(64)),
+            "status": "draft_ready",
+            "summary": "Refactor the workspace snapshot binding",
+            "step_count": 3,
+            "target_path_count": 2,
+            "suggested_check_count": 1,
+            "risk": "touches the recovery path",
+            "allowed_actions": ["run", "save", "revise", "reject"],
+            "source": "automatic_conversation_route",
+            "stale": false
+        }
+    });
+    let page: crate::DesktopConversationDisplayPage =
+        serde_json::from_value(base.clone()).expect("draft-ready plan review should decode");
+    validate_conversation_display_page(&page, "http-session-1")
+        .expect("draft-ready plan review should validate");
+
+    let mut non_draft = page.clone();
+    let non_draft_review = non_draft.plan_review.as_mut().expect("plan review present");
+    non_draft_review.status = crate::DesktopPlanReviewStatus::Started;
+    non_draft_review.allowed_actions = Vec::new();
+    validate_conversation_display_page(&non_draft, "http-session-1").expect(
+        "a Started attempt with draft details should still validate (status projects first)",
+    );
+
+    let mut partial_actions = page.clone();
+    partial_actions
+        .plan_review
+        .as_mut()
+        .expect("plan review present")
+        .allowed_actions = vec![crate::DesktopPlanAction::Run];
+    assert!(matches!(
+        validate_conversation_display_page(&partial_actions, "http-session-1"),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
+    let mut bad_hash = page.clone();
+    bad_hash
+        .plan_review
+        .as_mut()
+        .expect("plan review present")
+        .plan_hash = Some("not-a-hash".to_owned());
+    assert!(matches!(
+        validate_conversation_display_page(&bad_hash, "http-session-1"),
+        Err(DesktopClientError::InvalidResponse)
+    ));
+
+    let mut stale = page;
+    stale
+        .plan_review
+        .as_mut()
+        .expect("plan review present")
+        .stale = true;
+    validate_conversation_display_page(&stale, "http-session-1")
+        .expect("stale draft-ready plan review should still validate");
+
+    let mut undecided = serde_json::json!({
+        "schema_version": 1,
+        "request_scope": "http-session-1",
+        "through_session_stream_sequence": "13",
+        "total_items": "0",
+        "items": [],
+        "has_more": false,
+        "gap_facts": []
+    });
+    undecided["plan_review"] = serde_json::json!({
+        "plan_id": "plan-review-2",
+        "plan_hash": format!("sha256:{}", "b".repeat(64)),
+        "status": "started",
+        "summary": "Review in progress without a draft",
+        "step_count": 0,
+        "target_path_count": 0,
+        "suggested_check_count": 0,
+        "allowed_actions": [],
+        "source": "explicit_plan_command",
+        "stale": false
+    });
+    let page: crate::DesktopConversationDisplayPage =
+        serde_json::from_value(undecided).expect("non-draft plan review should decode");
+    validate_conversation_display_page(&page, "http-session-1")
+        .expect("non-draft plan review with no actions should validate");
+
+    // A durable attempt without any draft fields must decode and validate: the status projects
+    // first and draft-specific details are absent, which is the reload/reconnect shape.
+    let draft_less = serde_json::json!({
+        "schema_version": 1,
+        "request_scope": "http-session-1",
+        "through_session_stream_sequence": "14",
+        "total_items": "0",
+        "items": [],
+        "has_more": false,
+        "gap_facts": [],
+        "plan_review": {
+            "plan_id": "plan-review-3",
+            "status": "cancelled",
+            "allowed_actions": [],
+            "source": "automatic_conversation_route",
+            "stale": false
+        }
+    });
+    let page: crate::DesktopConversationDisplayPage =
+        serde_json::from_value(draft_less).expect("draft-less plan review should decode");
+    validate_conversation_display_page(&page, "http-session-1")
+        .expect("draft-less terminal plan review should validate");
+}
+
+#[test]
 fn tool_artifact_page_decodes_only_bounded_path_free_contract() {
     assert!(valid_tool_artifact_continuation(
         &crate::DesktopToolArtifactSelector::LinePage {
@@ -1194,6 +1312,75 @@ fn provider_connection_inventory_decodes_only_the_secret_free_native_contract() 
         inventory.connections[0].credential_source,
         crate::DesktopProviderCredentialSource::Stored
     );
+}
+
+#[tokio::test]
+async fn plan_decision_revise_accepts_the_supervised_revision_run_identity() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("loopback listener should expose its address");
+    let plan_hash = format!("sha256:{}", "d".repeat(64));
+    let server_plan_hash = plan_hash.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("request should connect");
+        let mut buffer = vec![0_u8; 8_192];
+        let read = stream.read(&mut buffer).await.expect("request should read");
+        assert!(read > 0, "request closed before it completed");
+        let request_text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+        let request_body = request_text
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("request should carry a JSON body");
+        let request_json: serde_json::Value =
+            serde_json::from_str(request_body).expect("request body should be JSON");
+        let response_body = serde_json::json!({
+            "command_id": request_json["command_id"],
+            "client_id": request_json["client_id"],
+            "session_id": "desktop-session-1",
+            "plan_id": "plan-review-1",
+            "plan_hash": server_plan_hash,
+            "action": "revise",
+            "task_id": null,
+            "revision_run_id": "plan-review-abc-123",
+            "replayed": false
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("response should write");
+    });
+
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token should generate")),
+    );
+    let receipt = client
+        .plan_decision(
+            "desktop-session-1",
+            "plan-review-1",
+            &plan_hash,
+            crate::DesktopPlanDecisionAction::Revise,
+        )
+        .await
+        .expect("the HTTP Revise success response must decode through the strict DTO");
+    assert_eq!(receipt.action, crate::DesktopPlanDecisionAction::Revise);
+    assert_eq!(
+        receipt.revision_run_id.as_deref(),
+        Some("plan-review-abc-123"),
+        "the supervised revision run identity must cross the native trust boundary"
+    );
+    server.await.expect("server task should complete");
 }
 
 #[tokio::test]

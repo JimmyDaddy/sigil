@@ -3,20 +3,45 @@ use std::collections::BTreeSet;
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentRunInput, AgentRunPurpose, ControlEntry, ConversationPurposeContext, ConversationTurnRef,
-    MessageRole, ModelMessage, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
+    AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ControlEntry,
+    ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
+    PlanReviewHandoffBinding, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
     TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry,
     TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
     TaskPlanStatus, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
     TaskStepEntry, TaskStepStatus, WriteLeaseReleaseStatus, WriteLeaseReleased,
-    durable_task_cancellation_requested, reconcile_task_final_answer_prefix, safe_persistence_text,
-    task_planner_logical_run_id,
+    conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
+    conversation_route_routing_contract_material, durable_task_cancellation_requested,
+    plan_review_attempt_id_for_review, plan_review_id_for_source, plan_review_plan_id_for_attempt,
+    plan_review_policy_snapshot_hash, reconcile_task_final_answer_prefix, route_surface_tool_specs,
+    safe_persistence_text, task_planner_logical_run_id,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
 const TASK_ID_DOMAIN: &str = "sigil-task-v1";
 const TASK_ROUTING_POLICY_DOMAIN: &str = "sigil-task-routing-policy-v1";
 const EXPLICIT_TASK_POLICY_DOMAIN: &str = "sigil-explicit-task-policy-v1";
+
+/// Host-owned evidence used to derive the automatic route capability tier.
+///
+/// The model cannot modify this evidence. `provider_supports_routing_tools` reflects the
+/// effective provider/tool capability; `route_qualified` reflects exact-route qualification
+/// evidence from the release manifest. The default is the RFC-0063 baseline: routing enabled at
+/// `ReviewFirst`, never `DirectTask` without exact qualification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteCapabilityEvidence {
+    pub provider_supports_routing_tools: bool,
+    pub route_qualified: bool,
+}
+
+impl Default for RouteCapabilityEvidence {
+    fn default() -> Self {
+        Self {
+            provider_supports_routing_tools: true,
+            route_qualified: false,
+        }
+    }
+}
 
 /// Explicit source binding for already-persisted direct or queued user input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,12 +50,13 @@ pub struct ConversationSourceTurn {
     pub objective: String,
 }
 
-/// Runtime-owned admission service for one conversation-to-task transition.
+/// Runtime-owned admission service for one conversation-to-route transition.
 #[derive(Debug, Clone)]
 pub struct ConversationCoordinator {
     task_enabled: bool,
     routing_policy: TaskRoutingPolicy,
     orchestration_route_guard: Option<crate::OrchestrationRouteGuard>,
+    route_capability_evidence: RouteCapabilityEvidence,
 }
 
 impl ConversationCoordinator {
@@ -40,6 +66,7 @@ impl ConversationCoordinator {
             task_enabled,
             routing_policy,
             orchestration_route_guard: None,
+            route_capability_evidence: RouteCapabilityEvidence::default(),
         }
     }
 
@@ -49,6 +76,14 @@ impl ConversationCoordinator {
         orchestration_route_guard: crate::OrchestrationRouteGuard,
     ) -> Self {
         self.orchestration_route_guard = Some(orchestration_route_guard);
+        self
+    }
+
+    /// Binds the exact provider/tool and release-qualification evidence used to derive the
+    /// automatic route capability tier.
+    #[must_use]
+    pub fn with_route_capability_evidence(mut self, evidence: RouteCapabilityEvidence) -> Self {
+        self.route_capability_evidence = evidence;
         self
     }
 
@@ -68,25 +103,92 @@ impl ConversationCoordinator {
         guard.enforce(session, now_ms)
     }
 
-    pub(crate) fn routes_conversation_automatically(&self, session: &Session) -> bool {
-        self.task_enabled
-            && self.orchestration_route_guard.as_ref().map_or(
-                self.routing_policy == TaskRoutingPolicy::Auto,
-                |guard| {
-                    guard.effective_policy(session, self.routing_policy) == TaskRoutingPolicy::Auto
-                },
-            )
+    /// Returns the effective automatic route capability for the current session.
+    ///
+    /// `Manual` configuration, a disabled task mode, or a provider that cannot stream tool calls
+    /// all resolve to `Unsupported`. Without exact-route qualification evidence the capability
+    /// resolves to `ReviewFirst`, never `DirectTask`. A route-local kill switch (hard invariant)
+    /// degrades `DirectTask` to the `ReviewFirst` baseline but keeps the safe, reviewable
+    /// automatic plan review handoff.
+    #[must_use]
+    pub fn resolve_route_capability(&self, session: &Session) -> AutomaticRouteCapability {
+        if !self.task_enabled {
+            return AutomaticRouteCapability::Unsupported;
+        }
+        if self.effective_routing_policy(session) != TaskRoutingPolicy::Auto {
+            return AutomaticRouteCapability::Unsupported;
+        }
+        if !self
+            .route_capability_evidence
+            .provider_supports_routing_tools
+        {
+            return AutomaticRouteCapability::Unsupported;
+        }
+        if self.route_capability_evidence.route_qualified
+            && !self
+                .orchestration_route_guard
+                .as_ref()
+                .is_some_and(|guard| guard.direct_task_blocked(session))
+        {
+            AutomaticRouteCapability::DirectTask
+        } else {
+            AutomaticRouteCapability::ReviewFirst
+        }
     }
 
-    /// Binds a root conversation run to its exact user turn and optional automatic handoff.
+    fn effective_routing_policy(&self, session: &Session) -> TaskRoutingPolicy {
+        self.orchestration_route_guard
+            .as_ref()
+            .map_or(self.routing_policy, |guard| {
+                guard.effective_policy(session, self.routing_policy)
+            })
+    }
+
+    /// Computes the deterministic route-contract fingerprint for one capability tier.
     ///
-    /// The model only receives `request_task_planning` when task routing is enabled and set to
-    /// `Auto`. Stable identities and the safe objective are frozen before provider dispatch.
+    /// The fingerprint binds the routing contract, the exact tool surface, the effective
+    /// capability, and host route facts (provider/model/build/route fingerprint), and is recorded
+    /// with every durable route decision.
+    fn route_contract_fingerprint(
+        &self,
+        session: &Session,
+        capability: AutomaticRouteCapability,
+    ) -> String {
+        let host_facts = self
+            .orchestration_route_guard
+            .as_ref()
+            .map(|guard| {
+                vec![
+                    ("provider", session.provider_name()),
+                    ("model", session.model_name()),
+                    ("build", guard.sigil_build()),
+                    ("route", guard.route_fingerprint()),
+                ]
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    ("provider", session.provider_name()),
+                    ("model", session.model_name()),
+                ]
+            });
+        conversation_route_contract_fingerprint(
+            conversation_route_routing_contract_material(),
+            &route_surface_tool_specs(capability),
+            capability,
+            &host_facts,
+        )
+    }
+
+    /// Binds a root conversation run to its exact user turn and optional automatic route.
+    ///
+    /// The model only receives typed routing decision tools when the effective capability routes
+    /// automatically. Stable identities and the safe objective are frozen before provider
+    /// dispatch.
     ///
     /// # Errors
     ///
     /// Returns an error when source identity is missing, the source conflicts with durable state,
-    /// or existing handoff facts disagree with the deterministic binding.
+    /// or existing handoff/route facts disagree with the deterministic binding.
     #[allow(clippy::too_many_arguments)]
     pub fn bind_conversation_input(
         &self,
@@ -113,18 +215,37 @@ impl ConversationCoordinator {
             source.message_id,
             root_logical_run_id.clone(),
         )?;
-        let effective_policy = if self.routes_conversation_automatically(session) {
+        let capability = self.resolve_route_capability(session);
+        let routes_automatically = capability.routes_automatically();
+        let effective_policy = if routes_automatically {
             TaskRoutingPolicy::Auto
         } else {
             TaskRoutingPolicy::Manual
         };
-        let task_handoff = if effective_policy == TaskRoutingPolicy::Auto {
+        let route_contract_fingerprint = if routes_automatically {
+            Some(self.route_contract_fingerprint(session, capability))
+        } else {
+            None
+        };
+        let task_handoff = if capability.allows_direct_task() {
             Some(self.binding_for_source(
                 session,
                 source_turn.clone(),
                 parent_session_ref,
+                source.objective.clone(),
+                now_ms,
+                route_contract_fingerprint.clone().unwrap_or_default(),
+            )?)
+        } else {
+            None
+        };
+        let plan_review = if routes_automatically {
+            Some(self.plan_review_binding_for_source(
+                session,
+                source_turn.clone(),
                 source.objective,
                 now_ms,
+                route_contract_fingerprint.unwrap_or_default(),
             )?)
         } else {
             None
@@ -136,7 +257,9 @@ impl ConversationCoordinator {
                     root_run_id: root_logical_run_id,
                     source_turn,
                     routing_policy: effective_policy,
+                    route_capability: capability,
                     task_handoff,
+                    plan_review,
                 },
             ))))
     }
@@ -446,6 +569,7 @@ impl ConversationCoordinator {
         parent_session_ref: SessionRef,
         objective: String,
         now_ms: u64,
+        route_contract_fingerprint: String,
     ) -> Result<TaskPlanningHandoffBinding> {
         let expected_handoff_id = handoff_id_for_source(&source_turn)?;
         let expected_task_id = task_id_for_handoff(&expected_handoff_id)?;
@@ -472,12 +596,54 @@ impl ConversationCoordinator {
             parent_session_ref,
             objective,
             policy_snapshot_hash: automatic_policy_snapshot_hash(),
+            route_contract_fingerprint,
             requested_at_ms: existing
                 .and_then(|state| state.request.as_ref())
                 .map_or(now_ms, |request| request.requested_at_ms),
             decided_at_ms: existing
                 .and_then(|state| state.resolution.as_ref())
                 .map_or(now_ms, |resolution| resolution.decided_at_ms),
+        })
+    }
+
+    /// Builds the host-bound PlanReview handoff identity for one source turn.
+    ///
+    /// All identities derive deterministically from the exact source turn with distinct domain
+    /// separators, so retries and crash recovery never mint a second conflicting decision.
+    fn plan_review_binding_for_source(
+        &self,
+        session: &Session,
+        source_turn: ConversationTurnRef,
+        objective: String,
+        now_ms: u64,
+        route_contract_fingerprint: String,
+    ) -> Result<PlanReviewHandoffBinding> {
+        let decision_id = conversation_route_decision_id_for_source(&source_turn);
+        let plan_review_id = plan_review_id_for_source(&source_turn);
+        let attempt_id = plan_review_attempt_id_for_review(&plan_review_id);
+        let plan_id = plan_review_plan_id_for_attempt(&plan_review_id, &attempt_id);
+        let projection =
+            sigil_kernel::ConversationRouteDecisionProjection::from_entries(session.entries());
+        if projection.has_conflicts() {
+            bail!("conversation route decision projection contains conflicting durable facts");
+        }
+        if let Some(existing) = projection.decision_id_for_source(&source_turn)
+            && existing != &decision_id
+        {
+            bail!("source turn is bound to a different route decision");
+        }
+        let existing = projection.decision(&decision_id);
+        Ok(PlanReviewHandoffBinding {
+            decision_id,
+            plan_review_id,
+            attempt_id,
+            plan_id,
+            source_turn,
+            objective,
+            policy_snapshot_hash: plan_review_policy_snapshot_hash(),
+            route_contract_fingerprint,
+            requested_at_ms: existing.map_or(now_ms, |decision| decision.decided_at_ms),
+            decided_at_ms: existing.map_or(now_ms, |decision| decision.decided_at_ms),
         })
     }
 }

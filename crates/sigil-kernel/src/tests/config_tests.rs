@@ -18,7 +18,7 @@ use crate::{
     DEFAULT_SESSION_RETENTION_MAX_SESSIONS, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
     ExecutionSandboxProfile, McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig,
-    StorageRoot, TaskConfig, TaskMode, TaskRoutingPolicy, WorkspaceConfig,
+    StorageRoot, TaskConfig, TaskRoutingPolicy, WorkspaceConfig,
 };
 
 #[test]
@@ -1079,7 +1079,6 @@ model = "deepseek-v4-flash"
     );
     assert!(config.appearance.info_rail);
     assert!(config.appearance.colors.is_empty());
-    assert_eq!(config.task.default_mode, TaskMode::Chat);
 }
 
 #[test]
@@ -1365,7 +1364,6 @@ model = "deepseek-v4-pro"
 
 [task]
 routing_policy = "auto"
-default_mode = "plan"
 max_plan_steps = 8
 max_parallel_read_steps = 2
 max_parallel_changeset_steps = 3
@@ -1383,13 +1381,11 @@ prefixes = ["code_intel_"]
 
     let config: RootConfig = toml::from_str(raw).expect("task config should parse");
 
-    assert_eq!(TaskConfig::default().default_mode, TaskMode::Chat);
     assert_eq!(
         TaskConfig::default().routing_policy,
-        TaskRoutingPolicy::Manual
+        TaskRoutingPolicy::Auto
     );
     assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
-    assert_eq!(config.task.default_mode, TaskMode::Plan);
     assert_eq!(config.task.multi_agent_mode, MultiAgentMode::Proactive);
     assert_eq!(config.task.max_plan_steps, 8);
     assert_eq!(TaskConfig::default().max_parallel_read_steps, 4);
@@ -1465,8 +1461,6 @@ fn task_config_role_config_and_mode_labels_are_stable() {
             .as_deref(),
         Some("subagent-write-model")
     );
-    assert_eq!(TaskMode::Chat.as_str(), "chat");
-    assert_eq!(TaskMode::Plan.as_str(), "plan");
     assert_eq!(TaskRoutingPolicy::Manual.as_str(), "manual");
     assert_eq!(TaskRoutingPolicy::Auto.as_str(), "auto");
     assert_eq!(MultiAgentMode::None.as_str(), "none");
@@ -1478,7 +1472,7 @@ fn task_config_role_config_and_mode_labels_are_stable() {
 }
 
 #[test]
-fn task_routing_policy_uses_manual_default_when_missing() {
+fn task_routing_policy_uses_auto_default_when_missing() {
     let raw = r#"
 config_version = 2
 
@@ -1487,13 +1481,11 @@ connection = "deepseek"
 model = "deepseek-v4-pro"
 
 [task]
-default_mode = "plan"
 "#;
 
     let config: RootConfig = toml::from_str(raw).expect("task config should parse");
 
-    assert_eq!(config.task.default_mode, TaskMode::Plan);
-    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
 }
 
 #[test]

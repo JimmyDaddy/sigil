@@ -41,7 +41,8 @@ use crate::{
         HttpConversationRecoveryCommandAction, HttpConversationRecoveryCommandReceipt,
         HttpConversationRecoveryView, HttpForegroundRunOwner, HttpIntentDropCommandReceipt,
         HttpIntentDropPreview, HttpIntentDropPreviewRequest, HttpIntentDropRequest,
-        HttpIntentStackView, HttpPendingApproval, HttpPermissionMode, HttpReasoningEffort,
+        HttpIntentStackView, HttpPendingApproval, HttpPermissionMode,
+        HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpReasoningEffort,
         HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
         HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
         HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
@@ -571,6 +572,49 @@ impl HttpSessionRunRegistry {
             durable_session_id: durable_session_id.to_owned(),
             released: false,
         })
+    }
+
+    /// Claims the session foreground slot for a supervised background run (plan review revision).
+    ///
+    /// The slot blocks concurrent durable mutations, queued commands, and new foreground runs for
+    /// the whole revision, mirroring the reservation a foreground run holds while it executes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is missing or already owns a foreground run.
+    pub(crate) fn bind_supervised_session_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<(), HttpRegistryError> {
+        let mut state = self.lock_state();
+        state.ensure_accepting_commands()?;
+        let session = state.sessions.get_mut(session_id).ok_or_else(|| {
+            HttpRegistryError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            }
+        })?;
+        if let Some(existing) = session.foreground_run_id.as_ref() {
+            return Err(HttpRegistryError::SessionForegroundRunActive {
+                session_id: session_id.to_owned(),
+                run_id: existing.clone(),
+            });
+        }
+        session.foreground_run_id = Some(run_id.to_owned());
+        session.foreground_owner_generation = session.foreground_owner_generation.saturating_add(1);
+        Ok(())
+    }
+
+    /// Releases the session foreground slot claimed by a supervised background run.
+    pub(crate) fn unbind_supervised_session_run(&self, session_id: &str, run_id: &str) {
+        let mut state = self.lock_state();
+        if let Some(session) = state.sessions.get_mut(session_id)
+            && session.foreground_run_id.as_deref() == Some(run_id)
+        {
+            session.foreground_run_id = None;
+            session.foreground_owner_generation =
+                session.foreground_owner_generation.saturating_add(1);
+        }
     }
 
     pub(crate) fn acquire_durable_session_mutation_attachment(
@@ -2496,6 +2540,74 @@ impl HttpSessionRunRegistry {
     ///
     /// The command is generation- and session-bound. Retrying after a confirmed terminal owner
     /// state returns that same bounded state and does not execute another side effect.
+    /// Applies one exact typed plan decision idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for protocol/key conflicts, a stale plan, conflicting durable facts, or an
+    /// unavailable session.
+    pub fn plan_decision_command(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpPlanDecisionRequest>,
+    ) -> Result<HttpPlanDecisionCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id.clone(),
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        let request = HttpReservedCommand::plan_decision(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_plan_decision(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = (|| -> Result<HttpPlanDecisionCommandReceipt, HttpRegistryError> {
+            let session = self.get_session(session_id)?;
+            let guard = self.reserve_durable_session_mutation(&session.durable_session_scope_id)?;
+            let receipt = catch_unwind(AssertUnwindSafe(|| {
+                self.driver.plan_decision(&session, &command.payload)
+            }))
+            .map_err(|_| HttpRegistryError::DriverPanicked {
+                operation: "Plan decision",
+                run_id: session_id.to_owned(),
+            })?
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "Plan decision",
+                run_id: session_id.to_owned(),
+                message: error.message,
+            })?;
+            guard.finish(false);
+            let mut receipt = receipt;
+            receipt.command_id = command.command_id.clone();
+            receipt.client_id = command.client_id.clone();
+            receipt.session_id = command.session_id.clone();
+            receipt.replayed = false;
+            Ok(receipt)
+        })();
+        match result {
+            Ok(receipt) => {
+                completion.complete(HttpCommandCompletion::PlanDecision(Box::new(Ok(
+                    receipt.clone()
+                ))))?;
+                Ok(receipt)
+            }
+            Err(error) => {
+                completion.complete(HttpCommandCompletion::PlanDecision(Box::new(Err(
+                    error.clone()
+                ))))?;
+                Err(error)
+            }
+        }
+    }
+
     pub fn cancel_terminal_task_command(
         &self,
         run_id: &str,
@@ -3305,6 +3417,7 @@ enum HttpCommandKind {
     Approval,
     Verification,
     Integration,
+    PlanDecision,
     IntentDrop,
     Queue,
     Recovery,
@@ -3320,6 +3433,7 @@ impl HttpCommandKind {
             Self::Approval => b"approval",
             Self::Verification => b"verification",
             Self::Integration => b"integration",
+            Self::PlanDecision => b"plan-decision",
             Self::IntentDrop => b"intent_drop",
             Self::Queue => b"queue",
             Self::Recovery => b"recovery",
@@ -3335,6 +3449,7 @@ impl HttpCommandKind {
             Self::Approval => "approval",
             Self::Verification => "verification",
             Self::Integration => "integration",
+            Self::PlanDecision => "plan_decision",
             Self::IntentDrop => "intent_drop",
             Self::Queue => "queue",
             Self::Recovery => "recovery",
@@ -3397,6 +3512,13 @@ impl HttpReservedCommand {
         command: &HttpCommandEnvelope<HttpTaskIntegrationReviewRequest>,
     ) -> Result<Self, HttpRegistryError> {
         Self::new(HttpCommandKind::Integration, &[path_session_id], command)
+    }
+
+    fn plan_decision(
+        path_session_id: &str,
+        command: &HttpCommandEnvelope<HttpPlanDecisionRequest>,
+    ) -> Result<Self, HttpRegistryError> {
+        Self::new(HttpCommandKind::PlanDecision, &[path_session_id], command)
     }
 
     fn intent_drop(
@@ -3473,6 +3595,7 @@ enum HttpCommandCompletion {
     Approval(Result<HttpApprovalCommandReceipt, HttpRegistryError>),
     Verification(Box<Result<HttpVerificationRerunCommandReceipt, HttpRegistryError>>),
     Integration(Box<Result<HttpTaskIntegrationAcceptanceCommandReceipt, HttpRegistryError>>),
+    PlanDecision(Box<Result<HttpPlanDecisionCommandReceipt, HttpRegistryError>>),
     IntentDrop(Box<Result<HttpIntentDropCommandReceipt, HttpRegistryError>>),
     Queue(Box<Result<HttpConversationQueueCommandReceipt, HttpRegistryError>>),
     Recovery(Box<Result<HttpConversationRecoveryCommandReceipt, HttpRegistryError>>),
@@ -3598,6 +3721,7 @@ impl HttpCommandCompletion {
             | Self::IntentDrop(_)
             | Self::Queue(_)
             | Self::Recovery(_)
+            | Self::PlanDecision(_)
             | Self::Aborted => HttpStoredCommandCompletion::Aborted,
         }
     }
@@ -3616,6 +3740,9 @@ impl HttpCommandCompletion {
             }
             HttpStoredCommandCompletion::Integration(receipt) => {
                 Self::Integration(Box::new(Ok(*receipt)))
+            }
+            HttpStoredCommandCompletion::PlanDecision(receipt) => {
+                Self::PlanDecision(Box::new(Ok(receipt)))
             }
             HttpStoredCommandCompletion::IntentDrop(receipt) => {
                 Self::IntentDrop(Box::new(Ok(*receipt)))
@@ -3833,6 +3960,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3851,6 +3979,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3869,6 +3998,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3889,6 +4019,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3907,6 +4038,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3927,7 +4059,18 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
+        }
+    }
+
+    fn wait_for_plan_decision(&self) -> Result<HttpPlanDecisionCommandReceipt, HttpRegistryError> {
+        match self.wait() {
+            HttpCommandCompletion::PlanDecision(receipt) => match *receipt {
+                Ok(receipt) => Ok(receipt.replayed()),
+                Err(error) => Err(error),
+            },
+            _ => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
 
@@ -3947,6 +4090,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3965,6 +4109,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::Queue(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -3983,6 +4128,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Recovery(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }
@@ -4003,6 +4149,7 @@ impl HttpCommandReservation {
             | HttpCommandCompletion::Integration(_)
             | HttpCommandCompletion::IntentDrop(_)
             | HttpCommandCompletion::Queue(_)
+            | HttpCommandCompletion::PlanDecision(_)
             | HttpCommandCompletion::Aborted => Err(HttpRegistryError::CommandExecutionAborted),
         }
     }

@@ -1,0 +1,1 @@
+执行跨层变更：parser 小写归一化 + formatter 输出格式，最终 render_record 必须输出 [mixed-42]。

@@ -47,6 +47,7 @@ fn result_record_has_one_stable_terminal_payload() {
         final_text: "done".to_owned(),
         route_transition: None,
         session_log_path: "/tmp/session-1.jsonl".to_owned(),
+        plan_review: None,
     });
 
     let encoded = serde_json::to_string(&record).expect("machine result should serialize");

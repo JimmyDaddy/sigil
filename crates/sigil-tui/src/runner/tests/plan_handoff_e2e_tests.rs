@@ -20,8 +20,9 @@ use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
         PlannedProvider, StreamPlan, planned_role_provider_builder,
-        planned_role_provider_builder_with_stream_start_signal, spawn_test_worker,
-        spawn_test_worker_with_role_provider_builder, test_root_config, wait_for_session_entry,
+        planned_role_provider_builder_with_stream_start_signal, routed_test_root_config,
+        spawn_test_worker, spawn_test_worker_with_role_provider_builder, test_root_config,
+        wait_for_session_entry,
     },
 };
 
@@ -69,7 +70,7 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-auto-task-handoff-e2e.jsonl");
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let handoff_args = r#"{"reason_codes":["cross_layer","long_verification"]}"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
@@ -200,7 +201,7 @@ fn automatic_handoff_task_can_pause_and_resume_on_its_inherited_run_scope() -> R
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-auto-task-pause-resume-e2e.jsonl");
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let handoff_args = r#"{"reason_codes":["cross_layer","long_verification"]}"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
@@ -608,7 +609,7 @@ fn auto_handoff_preflight_failure_persists_and_projects_failed_task_state() -> R
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-auto-task-preflight-failure.jsonl");
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let handoff_args = r#"{"reason_codes":["cross_layer"]}"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
@@ -665,7 +666,7 @@ fn ordinary_simple_chat_in_auto_mode_remains_a_chat_without_task_admission() -> 
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-auto-simple-chat-e2e.jsonl");
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let direct_args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
     let provider = PlannedProvider::new(vec![
@@ -744,6 +745,10 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
     )?;
     let input = AgentRunInput::user("recover this cross-layer task");
     let bound = sigil_runtime::ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        })
         .bind_conversation_input(
             &session,
             input,
@@ -788,7 +793,7 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
     ))?;
     drop(session);
 
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let task_plan_args = r#"{
         "plan_version": 1,
@@ -953,7 +958,7 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-planner-discovery-e2e.jsonl");
-    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
     root_config.task.max_planning_research_agents = 2;
     root_config.task.max_subagents = 4;
@@ -1310,4 +1315,319 @@ fn control_entry_debug(entries: &[SessionLogEntry]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" -> ")
+}
+
+#[test]
+fn ordinary_chat_plan_review_route_commits_typed_draft_and_surfaces_plan_ready() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-auto-plan-review-e2e.jsonl");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let review_args = r#"{"reason_codes":["architectural_tradeoff","scope_uncertain"]}"#;
+    let draft_args = r#"{
+        "schema_version": 2,
+        "summary": "Migrate the coordinator",
+        "steps": [{
+            "step_id": "migrate_1",
+            "title": "Migrate coordinator",
+            "role": "executor",
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": ["src/coordinator.rs"]
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "review-call".to_owned(),
+                name: sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "review-call".to_owned(),
+                delta: review_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "review-call".to_owned(),
+                name: sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                args_json: review_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "draft-call".to_owned(),
+                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "draft-call".to_owned(),
+                delta: draft_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "draft-call".to_owned(),
+                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                args_json: draft_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "design the coordinator migration before touching anything".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::PlanRunFinished { .. })
+    })?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(
+                    decision
+                )) if decision.route == sigil_kernel::ConversationRoute::PlanReview
+            ))
+            .count(),
+        1,
+        "routing microturn records exactly one PlanReview decision"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanDraftCreated(_))
+            ))
+            .count(),
+        1,
+        "plan review commits exactly one typed draft"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                    if attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+            ))
+            .count(),
+        1,
+        "plan review attempt reaches DraftReady"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::User(_)))
+            .count(),
+        1,
+        "the original user turn is written exactly once"
+    );
+    assert!(
+        entries.iter().all(|entry| !matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
+        )),
+        "plan review must not create a task handoff"
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-revise-plan-e2e.jsonl");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let review_args = r#"{"reason_codes":["architectural_tradeoff"]}"#;
+    let draft_1_args = r#"{
+        "schema_version": 2,
+        "summary": "Migrate the coordinator",
+        "steps": [{
+            "step_id": "migrate_1",
+            "title": "Migrate coordinator",
+            "role": "executor",
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": ["src/coordinator.rs"]
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    let draft_2_args = r#"{
+        "schema_version": 2,
+        "summary": "Revised coordinator migration",
+        "steps": [{
+            "step_id": "migrate_2",
+            "title": "Revise migration",
+            "role": "executor",
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": ["src/coordinator.rs"]
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "review-call".to_owned(),
+                name: sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "review-call".to_owned(),
+                delta: review_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "review-call".to_owned(),
+                name: sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                args_json: review_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "draft-call".to_owned(),
+                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "draft-call".to_owned(),
+                delta: draft_1_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "draft-call".to_owned(),
+                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                args_json: draft_1_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "revision-draft-call".to_owned(),
+                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "revision-draft-call".to_owned(),
+                delta: draft_2_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "revision-draft-call".to_owned(),
+                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                args_json: draft_2_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "design the coordinator migration before touching anything".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::PlanRunFinished { .. })
+    })?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let draft_1 = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)) => Some(draft.clone()),
+            _ => None,
+        })
+        .expect("first plan review must commit a typed draft");
+    assert_eq!(draft_1.summary, "Migrate the coordinator");
+
+    // Revise runs a supervised second plan review: the worker owns the run, restores the
+    // session, and surfaces the new draft through PlanRunFinished like any plan review.
+    worker.send(WorkerCommand::RevisePlan {
+        plan_id: draft_1.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft_1.plan_hash.clone(),
+    })?;
+    let started = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::PlanRunStarted { .. })
+    })?;
+    let WorkerMessage::PlanRunStarted { prompt } = started else {
+        unreachable!("recv_until only returns PlanRunStarted");
+    };
+    assert!(prompt.contains("plan review"));
+    let revised = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::PlanRunFinished { .. })
+    })?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = revised else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let drafts = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)) => Some(draft.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(drafts.len(), 2, "the restored session carries both drafts");
+    assert!(
+        drafts
+            .iter()
+            .any(|draft| draft.summary == "Revised coordinator migration"),
+        "the revision draft is committed into the returned session"
+    );
+    assert!(
+        drafts
+            .iter()
+            .any(|draft| draft.summary == "Migrate the coordinator"),
+        "the original draft is preserved in the returned session"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision))
+                    if decision.decision == sigil_kernel::PlanDecision::RevisionRequested
+            ))
+            .count(),
+        1,
+        "the RevisionRequested decision is durable in the returned session"
+    );
+    let revised_draft_plan_id = drafts
+        .iter()
+        .find(|draft| draft.summary == "Revised coordinator migration")
+        .map(|draft| draft.plan_id.as_str())
+        .unwrap_or("");
+    assert!(
+        entries.iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                    && attempt.plan_id.as_str() == revised_draft_plan_id
+        )),
+        "the revision attempt terminates as DraftReady in the returned session"
+    );
+    worker.shutdown()?;
+    Ok(())
 }

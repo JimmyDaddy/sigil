@@ -73,6 +73,9 @@ pub enum MachineRunStatus {
     Failed,
     /// Cooperative cancellation reached the run boundary.
     Cancelled,
+    /// An automatic or explicit plan review committed a draft; execution waits for a typed plan
+    /// decision and nothing was auto-accepted or executed.
+    AwaitingPlanDecision,
 }
 
 /// Stable terminal result returned by JSON and JSONL output modes.
@@ -92,6 +95,26 @@ pub struct MachineRunResult {
     pub route_transition: Option<PublicSessionRouteTransitionView>,
     /// Durable V2 JSONL session log path.
     pub session_log_path: String,
+    /// Bounded pending plan artifact when the run terminated awaiting a plan decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review: Option<MachinePlanReviewArtifact>,
+}
+
+/// Bounded plan artifact emitted by headless runs that stop at a pending plan decision.
+///
+/// Deliberately excludes prompt, transcript, paths, refs, and authority. The plan id/hash bind
+/// the exact typed plan decision command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MachinePlanReviewArtifact {
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub summary: String,
+    pub step_count: usize,
+    pub target_path_count: usize,
+    pub suggested_check_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
 }
 
 /// Stable error classes exposed to machine consumers.
@@ -187,6 +210,8 @@ pub enum MachineExitCode {
     InvalidInput = 2,
     /// Cooperative cancellation reached the process boundary.
     Cancelled = 130,
+    /// The run stopped at a pending plan decision; no execution happened.
+    AwaitingPlanDecision = 3,
 }
 
 impl MachineExitCode {
@@ -203,6 +228,7 @@ impl MachineExitCode {
             MachineRunStatus::Succeeded => Self::Success,
             MachineRunStatus::Failed => Self::ExecutionFailed,
             MachineRunStatus::Cancelled => Self::Cancelled,
+            MachineRunStatus::AwaitingPlanDecision => Self::AwaitingPlanDecision,
         }
     }
 

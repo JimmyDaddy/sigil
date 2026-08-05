@@ -624,6 +624,9 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
         .with_task_role_provider_builder(Arc::new(QueueTaskRoleProviderBuilder));
 
+    let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&fixture.config_path)?)?;
+    let _rollout_guard =
+        crate::tests::rollout_manifest_test_support::qualified_rollout_manifest_guard(&root_config);
     let (prepared, assembly) = prepare_application_run_with_exact_first_request(
         run_request,
         &services,
@@ -640,6 +643,7 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
         vec![
+            sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
             sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
             sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
         ]
@@ -649,7 +653,7 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
         .iter()
         .position(|message| {
             message.content.as_deref()
-                == Some(sigil_kernel::task_routing_system_prompt_contract_material())
+                == Some(sigil_kernel::conversation_route_routing_contract_material())
         })
         .expect("frozen request contains the routing-only system contract");
     let exact_user_index = request

@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ControlEntry, IntegrationPlan, PublicRunEventKind, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry,
-    TaskPlanStatus, TaskRunStatus, TaskStepSpec, TaskStepStatus,
+    ControlEntry, IntegrationPlan, PlanReviewAttemptStatus, PublicRunEventKind,
+    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskPlanEntry, TaskPlanStatus, TaskRunStatus, TaskStepSpec,
+    TaskStepStatus,
 };
 
 /// Stable public task phase shared by TUI, HTTP, and desktop adapters.
@@ -18,6 +19,142 @@ pub enum PublicTaskPhase {
     Integration,
     Synthesis,
     Terminal,
+}
+
+/// Stable public conversation phase projected from the durable route/plan/task lifecycle.
+///
+/// Adapters derive UI phases from this projection; neither the model nor the renderer owns it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicConversationPhase {
+    Routing,
+    Chat,
+    Planning,
+    AwaitingPlanDecision,
+    Task,
+    Terminal,
+}
+
+impl PublicConversationPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Routing => "routing",
+            Self::Chat => "chat",
+            Self::Planning => "planning",
+            Self::AwaitingPlanDecision => "awaiting_plan_decision",
+            Self::Task => "task",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+/// Stable public route decision shared by TUI, HTTP, and desktop adapters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicConversationRoute {
+    Chat,
+    PlanReview,
+    Task,
+}
+
+impl From<crate::ConversationRoute> for PublicConversationRoute {
+    fn from(route: crate::ConversationRoute) -> Self {
+        match route {
+            crate::ConversationRoute::Chat => Self::Chat,
+            crate::ConversationRoute::PlanReview => Self::PlanReview,
+            crate::ConversationRoute::Task => Self::Task,
+        }
+    }
+}
+
+/// Stable public plan review status projected from the durable attempt lifecycle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicPlanReviewStatus {
+    Started,
+    DraftReady,
+    CompletedWithoutDraft,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+impl From<PlanReviewAttemptStatus> for PublicPlanReviewStatus {
+    fn from(status: PlanReviewAttemptStatus) -> Self {
+        match status {
+            PlanReviewAttemptStatus::Started => Self::Started,
+            PlanReviewAttemptStatus::DraftReady => Self::DraftReady,
+            PlanReviewAttemptStatus::CompletedWithoutDraft => Self::CompletedWithoutDraft,
+            PlanReviewAttemptStatus::Failed => Self::Failed,
+            PlanReviewAttemptStatus::Interrupted => Self::Interrupted,
+            PlanReviewAttemptStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Typed user action offered by a public plan review surface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicPlanAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+impl PublicPlanAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Save => "save",
+            Self::Revise => "revise",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+/// Public source of one plan review lifecycle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicPlanReviewSource {
+    ExplicitPlanCommand,
+    AutomaticConversationRoute,
+}
+
+impl From<crate::PlanReviewSource> for PublicPlanReviewSource {
+    fn from(source: crate::PlanReviewSource) -> Self {
+        match source {
+            crate::PlanReviewSource::ExplicitPlanCommand => Self::ExplicitPlanCommand,
+            crate::PlanReviewSource::AutomaticConversationRoute => Self::AutomaticConversationRoute,
+        }
+    }
+}
+
+/// Bounded public plan review projection with no prompt, transcript, path, ref, or authority.
+///
+/// Draft-specific fields (`plan_hash`, `summary`, counts) are present only when the latest
+/// attempt committed a typed draft; the status always projects, so a durable attempt without a
+/// draft (Planning, failed, interrupted, cancelled) stays visible across reloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PublicPlanReview {
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    pub status: PublicPlanReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_check_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub allowed_actions: Vec<PublicPlanAction>,
+    pub source: PublicPlanReviewSource,
+    pub stale: bool,
 }
 
 /// Bounded public plan-step DTO with no prompt, transcript, path, ref, or mutation authority.
@@ -66,6 +203,7 @@ pub struct PublicTaskEventProjector {
     integration_plans: BTreeMap<String, PublicIntegrationPlanContext>,
     step_attempts:
         BTreeMap<(String, u32, String), (TaskParticipantAttemptId, TaskParticipantAttemptStatus)>,
+    plan_reviews: BTreeMap<crate::PlanReviewId, crate::PlanId>,
 }
 
 impl PublicTaskEventProjector {
@@ -73,6 +211,22 @@ impl PublicTaskEventProjector {
     #[must_use]
     pub fn project_control(&mut self, control: &ControlEntry) -> Vec<PublicRunEventKind> {
         match control {
+            ControlEntry::ConversationRouteDecisionRecorded(entry) => {
+                vec![PublicRunEventKind::ConversationRouteChanged {
+                    decision_id: entry.decision_id.as_str().to_owned(),
+                    route: entry.route.into(),
+                    status: "decided".to_owned(),
+                }]
+            }
+            ControlEntry::PlanReviewAttempt(entry) => {
+                self.plan_reviews
+                    .insert(entry.plan_review_id.clone(), entry.plan_id.clone());
+                vec![PublicRunEventKind::PlanReviewChanged {
+                    plan_review_id: entry.plan_review_id.as_str().to_owned(),
+                    plan_id: entry.plan_id.as_str().to_owned(),
+                    status: entry.status.into(),
+                }]
+            }
             ControlEntry::TaskHandoffRequested(entry) => vec![
                 PublicRunEventKind::TaskRoutingChanged {
                     handoff_id: entry.handoff_id.as_str().to_owned(),

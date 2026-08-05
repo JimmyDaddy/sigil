@@ -22,15 +22,16 @@ use std::os::unix::fs::symlink;
 use crate::session::SessionWriterFault;
 use crate::{
     AgentRole, AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode,
-    AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, CompactionConfig, CompletionRequest, ControlEntry,
-    ConversationInputQueueId, ConversationPurposeContext, ConversationTurnRef, DurableEventType,
+    AssistantMessageKind, AutoApproveHandler, AutomaticRouteCapability, BackgroundTaskHandle,
+    BackgroundTaskStatus, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, CompactionConfig,
+    CompletionRequest, ControlEntry, ConversationInputQueueId, ConversationPurposeContext,
+    ConversationRoute, ConversationRouteReason, ConversationTurnRef, DurableEventType,
     EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel,
     ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
     MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
     PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
-    PlanPermissionGrantedEntry, PreparedToolExecution, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    PlanPermissionGrantedEntry, PlanReviewHandoffBinding, PreparedToolExecution, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
     ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent,
@@ -48,10 +49,12 @@ use crate::{
     ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
     ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
     VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    continue_without_task_planning_tool_spec,
-    direct_conversation_continuation_prompt_contract_material, plan_text_hash,
-    request_task_planning_tool_spec, task_participant_finalization_prompt_contract_material,
-    task_participant_system_prompt_contract_material, task_routing_system_prompt_contract_material,
+    conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
+    direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
+    plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
+    plan_text_hash, route_surface_tool_specs,
+    task_participant_finalization_prompt_contract_material,
+    task_participant_system_prompt_contract_material,
 };
 
 use super::{
@@ -60,7 +63,30 @@ use super::{
     TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, emit_tool_result,
 };
 
+/// Host-shaped plan review binding for routing tests; identity is derived from the source turn.
+fn test_plan_review_handoff_binding(
+    source_turn: &ConversationTurnRef,
+    objective: &str,
+) -> PlanReviewHandoffBinding {
+    let plan_review_id = plan_review_id_for_source(source_turn);
+    let attempt_id = plan_review_attempt_id_for_review(&plan_review_id);
+    let plan_id = plan_review_plan_id_for_attempt(&plan_review_id, &attempt_id);
+    PlanReviewHandoffBinding {
+        decision_id: conversation_route_decision_id_for_source(source_turn),
+        plan_review_id,
+        attempt_id,
+        plan_id,
+        source_turn: source_turn.clone(),
+        objective: objective.to_owned(),
+        policy_snapshot_hash: plan_review_policy_snapshot_hash(),
+        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
+        requested_at_ms: 42,
+        decided_at_ms: 43,
+    }
+}
+
 #[test]
+
 fn emitting_small_tool_results_keeps_later_model_previews_visible() -> Result<()> {
     let mut session = Session::new("test", "model");
     let mut handler = RecordingEventHandler::default();
@@ -337,6 +363,102 @@ struct CapturingTextProvider {
 
 struct CapturingRoutingProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+struct PlanReviewRoutingProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+struct ChatDecisionRoutingProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl Provider for PlanReviewRoutingProvider {
+    fn name(&self) -> &str {
+        "mock-plan-review-routing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        let args = r#"{"reason_codes":["architectural_tradeoff","scope_uncertain"]}"#;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-plan-review-1".to_owned(),
+                name: crate::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-plan-review-1".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-plan-review-1".to_owned(),
+                name: crate::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ChatDecisionRoutingProvider {
+    fn name(&self) -> &str {
+        "mock-chat-decision-routing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let is_routing_microturn = request
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::REQUEST_PLAN_REVIEW_TOOL_NAME);
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        if is_routing_microturn {
+            let args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-chat-decision".to_owned(),
+                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-chat-decision".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-chat-decision".to_owned(),
+                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "queue promotion is a durable CAS promotion".to_owned(),
+            )),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
 }
 
 struct LateTaskHandoffProvider {
@@ -5342,6 +5464,8 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
                     root_run_id: logical_run_id.to_owned(),
                     source_turn: source_turn.clone(),
                     routing_policy: TaskRoutingPolicy::Auto,
+                    route_capability: AutomaticRouteCapability::DirectTask,
+                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
                     task_handoff: Some(TaskPlanningHandoffBinding {
                         handoff_id: TaskHandoffId::new("handoff-semantic-routing")?,
                         task_id: TaskId::new("task-semantic-routing")?,
@@ -5349,6 +5473,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
                         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
                         objective: prompt.to_owned(),
                         policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
                         requested_at_ms: 42,
                         decided_at_ms: 43,
                     }),
@@ -5385,7 +5510,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
         .messages
         .iter()
         .position(|message| {
-            message.content.as_deref() == Some(task_routing_system_prompt_contract_material())
+            message.content.as_deref() == Some(conversation_route_routing_contract_material())
         })
         .expect("automatic routing request should include the semantic routing policy");
     let user_index = request
@@ -5394,12 +5519,18 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
         .position(|message| message.content.as_deref() == Some(prompt))
         .expect("request should include the user turn");
     assert!(routing_index < user_index);
-    assert_eq!(request.tools.len(), 2);
+    assert_eq!(request.tools.len(), 3);
     assert!(
         request
             .tools
             .iter()
             .any(|tool| tool.name == REQUEST_TASK_PLANNING_TOOL_NAME)
+    );
+    assert!(
+        request
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::REQUEST_PLAN_REVIEW_TOOL_NAME)
     );
     assert!(
         request
@@ -5457,16 +5588,13 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
     let request = session.build_pre_turn_candidate_request(
         root.path(),
         &options.memory_config,
-        vec![
-            request_task_planning_tool_spec(),
-            continue_without_task_planning_tool_spec(),
-        ],
+        route_surface_tool_specs(AutomaticRouteCapability::DirectTask),
         None,
         options.reasoning_effort.clone(),
         None,
         None,
         &[
-            ModelMessage::system(task_routing_system_prompt_contract_material()),
+            ModelMessage::system(conversation_route_routing_contract_material()),
             exact_user,
         ],
         RuntimeContextCandidates::default(),
@@ -5487,6 +5615,8 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
                 root_run_id: logical_run_id.to_owned(),
                 source_turn: source_turn.clone(),
                 routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::DirectTask,
+                plan_review: Some(test_plan_review_handoff_binding(&source_turn, safe_prompt)),
                 task_handoff: Some(TaskPlanningHandoffBinding {
                     handoff_id: TaskHandoffId::new("handoff-frozen-routing")?,
                     task_id: TaskId::new("task-frozen-routing")?,
@@ -5494,6 +5624,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
                     parent_session_ref: SessionRef::new_relative("session.jsonl")?,
                     objective: safe_prompt.to_owned(),
                     policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                    route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
                     requested_at_ms: 42,
                     decided_at_ms: 43,
                 }),
@@ -5526,6 +5657,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
         vec![
+            crate::REQUEST_PLAN_REVIEW_TOOL_NAME,
             REQUEST_TASK_PLANNING_TOOL_NAME,
             CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
         ]
@@ -5571,6 +5703,8 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
                 root_run_id: logical_run_id.to_owned(),
                 source_turn: source_turn.clone(),
                 routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::DirectTask,
+                plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
                 task_handoff: Some(TaskPlanningHandoffBinding {
                     handoff_id: TaskHandoffId::new("handoff-invalid-frozen-routing")?,
                     task_id: TaskId::new("task-invalid-frozen-routing")?,
@@ -5578,6 +5712,7 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
                     parent_session_ref: SessionRef::new_relative("session.jsonl")?,
                     objective: prompt.to_owned(),
                     policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                    route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
                     requested_at_ms: 42,
                     decided_at_ms: 43,
                 }),
@@ -5607,7 +5742,7 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
         .await
         .expect_err("ordinary frozen request must not bypass routing-only materialization");
 
-    assert!(error.to_string().contains("automatic task routing"));
+    assert!(error.to_string().contains("automatic routing"));
     assert!(
         captured
             .lock()
@@ -5856,6 +5991,8 @@ async fn automatic_task_routing_blocks_after_two_untyped_decisions() -> Result<(
                     root_run_id: logical_run_id.to_owned(),
                     source_turn: source_turn.clone(),
                     routing_policy: TaskRoutingPolicy::Auto,
+                    route_capability: AutomaticRouteCapability::DirectTask,
+                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
                     task_handoff: Some(TaskPlanningHandoffBinding {
                         handoff_id: TaskHandoffId::new("handoff-untyped-routing")?,
                         task_id: TaskId::new("task-untyped-routing")?,
@@ -5863,6 +6000,7 @@ async fn automatic_task_routing_blocks_after_two_untyped_decisions() -> Result<(
                         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
                         objective: prompt.to_owned(),
                         policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
                         requested_at_ms: 42,
                         decided_at_ms: 43,
                     }),
@@ -5951,6 +6089,8 @@ async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() 
                     root_run_id: logical_run_id.to_owned(),
                     source_turn: source_turn.clone(),
                     routing_policy: TaskRoutingPolicy::Auto,
+                    route_capability: AutomaticRouteCapability::DirectTask,
+                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
                     task_handoff: Some(TaskPlanningHandoffBinding {
                         handoff_id: TaskHandoffId::new("handoff-late-routing")?,
                         task_id: TaskId::new("task-late-routing")?,
@@ -5958,6 +6098,7 @@ async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() 
                         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
                         objective: prompt.to_owned(),
                         policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
                         requested_at_ms: 42,
                         decided_at_ms: 43,
                     }),
@@ -6041,6 +6182,8 @@ async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Resu
                     root_run_id: logical_run_id.to_owned(),
                     source_turn,
                     routing_policy: TaskRoutingPolicy::Manual,
+                    route_capability: AutomaticRouteCapability::Unsupported,
+                    plan_review: None,
                     task_handoff: None,
                 },
             )));
@@ -6071,7 +6214,7 @@ async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Resu
         .expect("captured requests lock should not be poisoned");
     assert_eq!(requests.len(), 1);
     assert!(requests[0].messages.iter().all(|message| {
-        message.content.as_deref() != Some(task_routing_system_prompt_contract_material())
+        message.content.as_deref() != Some(conversation_route_routing_contract_material())
     }));
     assert!(
         requests[0]
@@ -6114,6 +6257,8 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
                 root_run_id: logical_run_id.to_owned(),
                 source_turn: source_turn.clone(),
                 routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::DirectTask,
+                plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
                 task_handoff: Some(TaskPlanningHandoffBinding {
                     handoff_id: handoff_id.clone(),
                     task_id: task_id.clone(),
@@ -6121,6 +6266,7 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
                     parent_session_ref: SessionRef::new_relative("session.jsonl")?,
                     objective: prompt.to_owned(),
                     policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                    route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
                     requested_at_ms: 42,
                     decided_at_ms: 43,
                 }),
@@ -6326,6 +6472,269 @@ struct GuidanceDecisionProvider {
     decision: GuidanceDecision,
     observed_tools: Arc<Mutex<Vec<String>>>,
 }
+
+#[tokio::test]
+async fn automatic_routing_plan_review_decision_records_route_and_starts_review() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        PlanReviewRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-plan-review-routing", "mock-model");
+    let prompt = "propose how to restructure the coordinator before implementing";
+    let logical_run_id = "plan-review-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
+    let expected_review_id = plan_review_binding.plan_review_id.clone();
+    let expected_message_id = plan_review_binding.source_turn.message_id.clone();
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn,
+                routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::DirectTask,
+                plan_review: Some(plan_review_binding),
+                task_handoff: None,
+            },
+        )))
+        .with_cancellation(cancellation_owner.handle());
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(3),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let AgentRunDisposition::StartPlanReview(action) = output.disposition else {
+        panic!(
+            "expected StartPlanReview disposition, got {:?}",
+            output.disposition
+        );
+    };
+    assert_eq!(action.plan_review_id, expected_review_id);
+    assert_eq!(action.source_turn.message_id, expected_message_id);
+
+    let decisions = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(decision)) => {
+                Some(decision.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].route, ConversationRoute::PlanReview);
+    assert_eq!(
+        decisions[0].reason_codes,
+        vec![
+            ConversationRouteReason::ArchitecturalTradeoff,
+            ConversationRouteReason::ScopeUncertain
+        ]
+    );
+    assert_eq!(
+        decisions[0].effective_capability,
+        AutomaticRouteCapability::ReviewFirst
+    );
+    assert!(session.entries().iter().all(|entry| !matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
+    )));
+    let captured_requests = captured.lock().expect("capture lock");
+    assert_eq!(captured_requests.len(), 1);
+    assert_eq!(captured_requests[0].tools.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_first_capability_hides_the_direct_task_decision() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        PlanReviewRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-review-first-routing", "mock-model");
+    let prompt = "design the migration path first";
+    let logical_run_id = "review-first-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn,
+                routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::ReviewFirst,
+                plan_review: Some(plan_review_binding),
+                task_handoff: None,
+            },
+        )))
+        .with_cancellation(cancellation_owner.handle());
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(3),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+    assert!(matches!(
+        output.disposition,
+        AgentRunDisposition::StartPlanReview(_)
+    ));
+    let captured_requests = captured.lock().expect("capture lock");
+    let tool_names = captured_requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_names,
+        vec![
+            crate::REQUEST_PLAN_REVIEW_TOOL_NAME,
+            CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_decision_records_route_decision_without_effect_authority() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        ChatDecisionRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-chat-routing", "mock-model");
+    let prompt = "explain how the queue promotion works";
+    let logical_run_id = "chat-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
+    let cancellation_owner = RunCancellationOwner::new();
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn,
+                routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::ReviewFirst,
+                plan_review: Some(plan_review_binding),
+                task_handoff: None,
+            },
+        )))
+        .with_cancellation(cancellation_owner.handle());
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(3),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+    assert!(matches!(
+        output.disposition,
+        AgentRunDisposition::FinalAnswer
+    ));
+    let decisions = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(decision)) => {
+                Some(decision.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].route, ConversationRoute::Chat);
+    assert!(decisions[0].reason_codes.is_empty());
+    assert!(session.entries().iter().all(|entry| !matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
+    )));
+    let captured_requests = captured.lock().expect("capture lock");
+    assert_eq!(captured_requests.len(), 2);
+    Ok(())
+}
+
 struct TaskHandoffProvider;
 struct TaskHandoffSideEffectTool {
     executions: Arc<AtomicUsize>,

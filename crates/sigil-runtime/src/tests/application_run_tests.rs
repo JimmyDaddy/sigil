@@ -20,13 +20,14 @@ use sigil_kernel::{
     ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
     ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
-    SessionRef, StartDurableTaskAction, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
-    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess,
-    ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
-    ToolResultRecordedV3, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
+    SessionRef, StartDurableTaskAction, StartPlanReviewAction, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskHandoffId, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry,
+    TaskPlanStatus, TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool,
+    ToolAccess, ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolResultRecordedV2, ToolSpec, UsageStats,
+    conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
@@ -2363,8 +2364,15 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     let Some(AgentRunPurpose::Conversation(context)) = input.purpose.as_ref() else {
         panic!("ordinary application request must carry conversation purpose");
     };
-    assert_eq!(context.routing_policy, TaskRoutingPolicy::Manual);
+    // Without an attached task executor the route stays at the ReviewFirst baseline: plan
+    // review remains usable, but the direct task decision is never exposed.
+    assert_eq!(context.routing_policy, TaskRoutingPolicy::Auto);
+    assert_eq!(
+        context.route_capability,
+        sigil_kernel::AutomaticRouteCapability::ReviewFirst
+    );
     assert!(context.task_handoff.is_none());
+    assert!(context.plan_review.is_some());
     Ok(())
 }
 
@@ -2404,6 +2412,9 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
         .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
 
+    let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    let _rollout_guard =
+        crate::tests::rollout_manifest_test_support::qualified_rollout_manifest_guard(&root_config);
     let prepared = prepare_application_run(request, &services).await?;
 
     assert!(services.task_executor_attached());
@@ -3356,5 +3367,198 @@ async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal(
         events.0.last().map(|event| &event.event),
         Some(PublicRunEventKind::RunFailed { .. })
     ));
+    Ok(())
+}
+
+struct PlanReviewDraftProvider;
+
+#[async_trait]
+impl Provider for PlanReviewDraftProvider {
+    fn name(&self) -> &str {
+        "plan-review-draft"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        application_task_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME)
+        {
+            let args = r#"{
+                "schema_version": 2,
+                "summary": "Migrate the coordinator",
+                "steps": [{
+                    "step_id": "migrate_1",
+                    "title": "Migrate coordinator",
+                    "role": "executor",
+                    "mode": "write",
+                    "isolation": "sequential_workspace_write",
+                    "target_paths": ["src/coordinator.rs"]
+                }],
+                "target_paths": ["src/coordinator.rs"],
+                "suggested_checks": ["cargo test"]
+            }"#;
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "plan-draft-call".to_owned(),
+                    name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "plan-draft-call".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "plan-draft-call".to_owned(),
+                    name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("plan review ready".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn application_plan_review_continuation_commits_typed_draft_and_waits_for_decision()
+-> Result<()> {
+    // The DeepSeek provider construction requires the credential environment variable; pin a
+    // placeholder so the targeted test is hermetic and does not depend on the developer machine.
+    // The global lock serializes environment mutation against other tests reading credentials.
+    let _environment_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "deepseek-default"
+model = "deepseek-v4-flash"
+
+[task]
+routing_policy = "auto"
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#,
+    )?;
+    let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    let _rollout_guard =
+        crate::tests::rollout_manifest_test_support::qualified_rollout_manifest_guard(&root_config);
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "design the coordinator migration",
+        "run-application-plan-review",
+    );
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let prepared = prepare_application_run(request, &services).await?;
+    let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
+        panic!("ordinary application request must prepare the main agent");
+    };
+    let Some(AgentRunPurpose::Conversation(context)) = input.purpose.as_ref() else {
+        panic!("conversation purpose expected");
+    };
+    let plan_review_binding = context.plan_review.clone().expect("plan review binding");
+    let source_turn = context.source_turn.clone();
+    drop(prepared);
+
+    // Simulate the routing microturn outcome: the model requests a plan review.
+    let agent_output = AgentRunOutput {
+        result: sigil_kernel::AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: sigil_kernel::AgentRunOutcome::default(),
+        disposition: AgentRunDisposition::StartPlanReview(StartPlanReviewAction {
+            decision_id: plan_review_binding.decision_id.clone(),
+            plan_review_id: plan_review_binding.plan_review_id.clone(),
+            plan_id: plan_review_binding.plan_id.clone(),
+            source_turn: source_turn.clone(),
+        }),
+    };
+    let mut session = Session::new("application-plan-review", "planned-model");
+    let mut message = ModelMessage::user("design the coordinator migration");
+    message.id = source_turn.message_id.clone();
+    session.append_user_message(message)?;
+    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
+        sigil_kernel::ConversationRouteDecisionRecordedEntry {
+            decision_id: plan_review_binding.decision_id.clone(),
+            source_turn,
+            route: sigil_kernel::ConversationRoute::PlanReview,
+            reason_codes: vec![sigil_kernel::ConversationRouteReason::ScopeUncertain],
+            configured_policy: TaskRoutingPolicy::Auto,
+            effective_capability: sigil_kernel::AutomaticRouteCapability::ReviewFirst,
+            policy_snapshot_hash: plan_review_binding.policy_snapshot_hash.clone(),
+            route_contract_fingerprint: plan_review_binding.route_contract_fingerprint.clone(),
+            decided_at_ms: 42,
+        },
+    ))?;
+    let options = crate::build_run_options(
+        &root_config,
+        temp.path().to_path_buf(),
+        sigil_kernel::InteractionMode::Headless,
+    );
+    let runtime = super::ApplicationPlanReviewRuntime {
+        options,
+        agent: Box::new(sigil_kernel::Agent::new(
+            Box::new(PlanReviewDraftProvider),
+            sigil_kernel::ToolRegistry::new(),
+        )),
+        tool_registry: sigil_kernel::ToolRegistry::new(),
+        workspace_snapshot_id: None,
+    };
+    let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
+    let mut handler = sigil_kernel::NoopEventHandler;
+    let mut approval_handler = sigil_kernel::AutoApproveHandler;
+    let output = super::continue_application_plan_review(
+        &mut session,
+        agent_output,
+        Some(runtime),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_owner.handle(),
+    )
+    .await?;
+    assert!(matches!(
+        output.disposition,
+        AgentRunDisposition::FinalAnswer
+    ));
+    assert!(output.result.final_text.contains("Plan ready"));
+    let plan_projection = session.plan_artifact_projection();
+    let draft = plan_projection
+        .plans
+        .get(&plan_review_binding.plan_id)
+        .expect("draft committed to parent");
+    assert_eq!(draft.summary, "Migrate the coordinator");
+    let review_projection = sigil_kernel::PlanReviewProjection::from_entries(session.entries());
+    let attempt = review_projection
+        .latest_attempt(&plan_review_binding.plan_review_id)
+        .expect("attempt");
+    assert_eq!(
+        attempt.status,
+        sigil_kernel::PlanReviewAttemptStatus::DraftReady
+    );
     Ok(())
 }

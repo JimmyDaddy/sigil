@@ -1050,15 +1050,16 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
 "#,
         sigil_kernel::PlanSourceRef::default(),
         1,
-        None,
+        Some("snapshot-1".to_owned()),
     )?
     .expect("structured plan should create draft");
-    plan_app.set_pending_plan_approval_from_draft(&draft);
+    plan_app.set_pending_plan_approval_from_draft(&draft, Some("snapshot-1"));
     let plan_view = UiViewModel::from_app(&plan_app);
-    assert!(plan_view.footer.hints.contains("Enter create and run task"));
-    assert!(plan_view.footer.hints.contains("Esc discard"));
+    assert!(plan_view.footer.hints.contains("Enter run"));
+    assert!(plan_view.footer.hints.contains("s save"));
+    assert!(plan_view.footer.hints.contains("r revise"));
+    assert!(plan_view.footer.hints.contains("Esc reject"));
     assert!(!plan_view.footer.hints.contains("S scoped edits"));
-    assert!(!plan_view.footer.hints.contains("R revise"));
     let live_view = LivePanelViewModel::from_app(&plan_app, 4);
     let approval = live_view
         .plan_approval
@@ -1067,6 +1068,26 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     assert_eq!(approval.steps, vec!["Inspect README.md"]);
     assert_eq!(approval.target_path_count, 1);
     assert_eq!(approval.suggested_check_count, 0);
+    assert!(!approval.stale);
+
+    let mut stale_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    stale_app.set_pending_plan_approval_from_draft(&draft, Some("different-snapshot"));
+    let stale_view = UiViewModel::from_app(&stale_app);
+    assert!(!stale_view.footer.hints.contains("Enter run"));
+    assert!(!stale_view.footer.hints.contains("s save"));
+    assert!(stale_view.footer.hints.contains("r revise"));
+    assert!(stale_view.footer.hints.contains("Esc reject"));
+    let stale_live = LivePanelViewModel::from_app(&stale_app, 4);
+    let stale_approval = stale_live
+        .plan_approval
+        .expect("stale pending plan approval should project");
+    assert!(stale_approval.stale);
+    assert!(
+        stale_approval
+            .stale_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("stale"))
+    );
 
     let mut mention_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     mention_app.handle_key_event(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE))?;

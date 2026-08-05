@@ -344,6 +344,17 @@ export function ProviderSetup({
               {t("changeConnection")}
             </Button>
           </div>
+          {catalog.orchestrationRollout === undefined ? null : (
+            <div className="provider-orchestration-summary" aria-label={t("orchestrationRolloutSummary")}>
+              <span>{t("orchestrationAutomaticRouting", {
+                policy: formatMachineLabel(catalog.orchestrationRollout.routingPolicy),
+              })}</span>
+              <span>{t("orchestrationDirectTask", {
+                tier: formatMachineLabel(rolloutDirectTaskTier(catalog.orchestrationRollout.status)),
+              })}</span>
+              <small>{catalog.orchestrationRollout.reason}</small>
+            </div>
+          )}
           <fieldset className="provider-model-list">
             <legend>{t("chooseModel")}</legend>
             {catalog.models.map((model) => (
@@ -492,6 +503,20 @@ function staleCatalogView(catalog: ProviderSetupCatalog): ProviderSetupCatalog {
     })),
     manualEntryAllowed: true,
   };
+}
+
+function rolloutDirectTaskTier(status: string): string {
+  switch (status) {
+    case "qualified": return "qualified";
+    case "route_not_qualified": return "review_first_fallback";
+    case "manifest_unavailable":
+    case "manifest_invalid": return "review_first_fallback";
+    default: return "unavailable";
+  }
+}
+
+function formatMachineLabel(value: string): string {
+  return value.replace(/_/g, " ");
 }
 
 function providerCatalogStateLabel(

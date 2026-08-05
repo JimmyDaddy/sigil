@@ -1,0 +1,1 @@
+Assess the workspace and propose how to sequence these changes into reviewable batches. Do not edit or commit anything.

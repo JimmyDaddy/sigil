@@ -112,6 +112,53 @@ pub fn build_plan_prompt_tool_registry(
     registry.scoped(role_tool_scope(root_config, AgentRole::Planner).union(&agent_tool_scope()))
 }
 
+/// Hardcoded fail-closed read-only scope for automatic and explicit plan review runs.
+///
+/// The host owns plan acceptance authority: a plan review run must never expose a mutation tool,
+/// even when the planner role allowlist grants one. The effective scope is the intersection of the
+/// frozen read-only surface with whatever the configured planner allowlist admits, so configured
+/// write tools are dropped instead of being trusted to a prompt.
+pub fn build_plan_review_tool_registry(
+    registry: &ToolRegistry,
+    root_config: &RootConfig,
+) -> ScopedToolRegistry {
+    let read_only =
+        read_only_role_tool_scope().intersection(&role_tool_scope(root_config, AgentRole::Planner));
+    registry.scoped_with_denies(read_only, plan_review_deny_scope())
+}
+
+/// Frozen mutation families denied from every plan review run regardless of allowlist content.
+fn plan_review_deny_scope() -> ToolRegistryScope {
+    ToolRegistryScope::from_names_and_prefixes(
+        [
+            "bash",
+            "shell",
+            "write_file",
+            "edit_file",
+            "delete_file",
+            "apply_patch",
+            "apply_changeset",
+            "terminal_start",
+            "terminal_input",
+            "terminal_stop",
+            "web_fetch",
+            "web_search",
+            "mcp_call",
+        ],
+        [
+            "write_",
+            "edit_",
+            "delete_",
+            "terminal_",
+            "mcp_",
+            "web_",
+            "changeset_",
+            "patch_",
+            "exec_",
+        ],
+    )
+}
+
 /// Builds the current agent registry further constrained by a loaded skill descriptor.
 pub fn build_skill_tool_registry(
     registry: &ToolRegistry,

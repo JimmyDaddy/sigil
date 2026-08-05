@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
@@ -492,21 +492,26 @@ fn orchestration_eval_manifest(
                 system_prompt_digest: "sha256:system-prompt".to_owned(),
                 tool_profile_contract_digest: "sha256:tool-profile".to_owned(),
                 task_config_digest: "sha256:task-config".to_owned(),
-                corpus_version: "rfc-0053-orchestration-v1".to_owned(),
+                corpus_version: "rfc-0063-orchestration-v1".to_owned(),
                 corpus_digest: "sha256:corpus".to_owned(),
                 sigil_commit: "test-commit".to_owned(),
                 sigil_build: "test-build".to_owned(),
             },
             identity_digest: "sha256:route".to_owned(),
             status,
-            negative_cases: 20,
-            positive_cases: 10,
-            eligible_negative_cases: 20,
-            eligible_positive_cases: 10,
-            provider_admitted_repetitions: 30,
-            completed_repetitions: 30,
-            false_positive_rate_ppm: Some(0),
-            positive_miss_rate_ppm: Some(0),
+            chat_cases: 20,
+            plan_review_cases: 15,
+            direct_task_cases: 15,
+            eligible_chat_cases: 20,
+            eligible_plan_review_cases: 15,
+            eligible_direct_task_cases: 15,
+            provider_admitted_repetitions: 50,
+            completed_repetitions: 50,
+            chat_to_task_false_positive_rate_ppm: Some(0),
+            plan_review_to_task_premature_rate_ppm: Some(0),
+            direct_task_miss_rate_ppm: Some(0),
+            chat_to_plan_review_overroute_rate_ppm: Some(0),
+            plan_review_miss_rate_ppm: Some(0),
             cases_with_majority_misroute: 0,
             cases_with_duplicate_repetition_identity: 0,
             hard_invariant_violations: 0,
@@ -2052,6 +2057,199 @@ strict_tools_mode = "auto"
     Ok(())
 }
 
+#[tokio::test]
+async fn plan_decision_command_applies_typed_hash_bound_action_and_rejects_replay() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let config_path = workspace.join("sigil.toml");
+    write_application_run_test_config(&config_path, "http://127.0.0.1:1")?;
+    let session_path = workspace.join("session.jsonl");
+    let draft = session_with_pending_plan_draft(&session_path)?;
+
+    // A committed draft without a decision is projected as the bounded awaiting artifact.
+    let pending =
+        super::pending_plan_review_artifact(session_path.to_str().expect("session path"))?
+            .expect("pending draft must be projected");
+    assert_eq!(pending.plan_id, draft.plan_id);
+    assert_eq!(pending.plan_hash, draft.plan_hash);
+    assert_eq!(pending.summary, "Migrate the coordinator");
+    assert_eq!(pending.step_count, 1);
+
+    // Reject is hash-bound and returns a receipt without executing anything.
+    let output = run_plan_decision(&config_path, &workspace, &session_path, &draft, "reject")?;
+    assert_eq!(output["command"], "plan_decision");
+    assert_eq!(output["action"], "reject");
+    assert_eq!(output["plan_id"], draft.plan_id);
+    assert!(output["task_id"].is_null());
+
+    // The same decision cannot be applied twice against the durable facts.
+    let result = run_plan_decision(&config_path, &workspace, &session_path, &draft, "save");
+    assert!(
+        result.is_err(),
+        "a second decision must be rejected as a durable conflict"
+    );
+
+    // A rejected plan is no longer pending.
+    let pending =
+        super::pending_plan_review_artifact(session_path.to_str().expect("session path"))?;
+    assert!(pending.is_none(), "rejected plan must not remain pending");
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_decision_run_creates_the_durable_task_prefix() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let config_path = workspace.join("sigil.toml");
+    write_application_run_test_config(&config_path, "http://127.0.0.1:1")?;
+    let session_path = workspace.join("session.jsonl");
+    let draft = session_with_pending_plan_draft(&session_path)?;
+
+    let output = run_plan_decision(&config_path, &workspace, &session_path, &draft, "run")?;
+    assert_eq!(output["action"], "run");
+    let task_id = output["task_id"]
+        .as_str()
+        .expect("Run decision must return the created task id");
+    assert!(!task_id.is_empty());
+    Ok(())
+}
+
+struct PendingPlanDraft {
+    plan_id: String,
+    plan_hash: String,
+}
+
+fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<PendingPlanDraft> {
+    use sigil_kernel::{
+        ControlEntry, ConversationRoute, ConversationRouteDecisionId,
+        ConversationRouteDecisionRecordedEntry, ConversationRouteReason, ConversationTurnRef,
+        ModelMessage, PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus,
+        SessionRef, submit_plan_draft_entry,
+    };
+    // Initialize the session through the production route-resume path so the durable stream
+    // carries the required identity and route trust records.
+    let config_path = session_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("sigil.toml");
+    let root_config = sigil_kernel::RootConfig::load(&config_path)?;
+    let (_, fallback_route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)?;
+    let store = sigil_kernel::JsonlSessionStore::new(session_path)?;
+    let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+        &root_config,
+        &fallback_route,
+        store,
+        None,
+        None,
+        None,
+    )?;
+    let source = ConversationTurnRef::new(session.session_scope_id(), "message-1", "run-1")?;
+    session.append_user_message(ModelMessage::user(
+        "design the migration before touching anything",
+    ))?;
+    let review_id = sigil_kernel::plan_review_id_for_source(&source);
+    let decision = ConversationRouteDecisionRecordedEntry {
+        decision_id: ConversationRouteDecisionId::new(format!("decision-{}", review_id.as_str()))?,
+        source_turn: source.clone(),
+        route: ConversationRoute::PlanReview,
+        reason_codes: vec![ConversationRouteReason::RouteReviewRequired],
+        configured_policy: sigil_kernel::TaskRoutingPolicy::Auto,
+        effective_capability: sigil_kernel::AutomaticRouteCapability::ReviewFirst,
+        policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
+        route_contract_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        decided_at_ms: 1,
+    };
+    let decision_id = decision.decision_id.clone();
+    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(decision))?;
+    let attempt_id = PlanReviewAttemptId::new(format!("attempt-{}", review_id.as_str()))?;
+    let attempt = PlanReviewAttemptEntry {
+        plan_review_id: review_id.clone(),
+        attempt_id: attempt_id.clone(),
+        plan_id: sigil_kernel::PlanId::new("plan_draft_pending")?,
+        source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
+        source_turn: source.clone(),
+        route_decision_id: Some(decision_id.clone()),
+        child_session_ref: SessionRef::new_relative("child.jsonl")?,
+        status: PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: 1,
+    };
+    session.append_control(ControlEntry::PlanReviewAttempt(attempt))?;
+    let draft_args = r#"{
+        "schema_version": 2,
+        "summary": "Migrate the coordinator",
+        "steps": [{
+            "step_id": "migrate_1",
+            "title": "Migrate coordinator",
+            "role": "executor",
+            "mode": "write",
+            "isolation": "sequential_workspace_write",
+            "target_paths": ["src/coordinator.rs"]
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    let draft = submit_plan_draft_entry(
+        draft_args,
+        sigil_kernel::PlanId::new("plan_draft_pending")?,
+        sigil_kernel::PlanSourceRef {
+            source_turn: Some(source.clone()),
+            route_decision_id: Some(decision_id.clone()),
+            plan_review_id: Some(review_id.clone()),
+            ..sigil_kernel::PlanSourceRef::default()
+        },
+        1,
+        None,
+    )?
+    .expect("draft must be valid");
+    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    let ready = PlanReviewAttemptEntry {
+        plan_review_id: review_id,
+        attempt_id,
+        plan_id: draft.plan_id.clone(),
+        source: sigil_kernel::PlanReviewSource::AutomaticConversationRoute,
+        source_turn: source,
+        route_decision_id: None,
+        child_session_ref: SessionRef::new_relative("child.jsonl")?,
+        status: PlanReviewAttemptStatus::DraftReady,
+        terminal_reason: None,
+        recorded_at_ms: 2,
+    };
+    session.append_control(ControlEntry::PlanReviewAttempt(ready))?;
+    Ok(PendingPlanDraft {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        plan_hash: draft.plan_hash,
+    })
+}
+
+fn run_plan_decision(
+    config_path: &std::path::Path,
+    workspace: &std::path::Path,
+    session_path: &std::path::Path,
+    draft: &PendingPlanDraft,
+    action: &str,
+) -> Result<serde_json::Value> {
+    let action = match action {
+        "run" => super::PlanDecisionAction::Run,
+        "save" => super::PlanDecisionAction::Save,
+        "revise" => super::PlanDecisionAction::Revise,
+        "reject" => super::PlanDecisionAction::Reject,
+        _ => bail!("unknown test action"),
+    };
+    let rendered = futures::executor::block_on(super::plan_decision_command(
+        config_path,
+        workspace,
+        session_path,
+        &draft.plan_id,
+        &draft.plan_hash,
+        action,
+    ))?;
+    Ok(serde_json::from_str(&rendered).expect("plan decision receipt should be JSON"))
+}
+
 fn write_application_run_test_config(path: &std::path::Path, base_url: &str) -> Result<()> {
     let workspace = path
         .parent()
@@ -2075,6 +2273,9 @@ tool_timeout_secs = 5
 
 [model_request]
 request_timeout_secs = 5
+
+[task]
+routing_policy = "manual"
 
 [connections.local-test]
 label = "Local test"

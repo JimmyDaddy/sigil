@@ -228,6 +228,10 @@ pub fn write_isolated_model_eval_config(
     if fixture.orchestration.is_some() {
         config.task =
             crate::orchestration_rollout::orchestration_rollout_task_candidate(&config.task);
+    } else {
+        // Deterministic eval runs must never auto-route: an unqualified fresh config now defaults
+        // to `Auto`, so pin the isolated policy explicitly.
+        config.task.routing_policy = sigil_kernel::TaskRoutingPolicy::Manual;
     }
     config.web.enabled = false;
     config.web.network_mode = NetworkPolicy::Deny;
@@ -600,8 +604,9 @@ fn orchestration_corpus_digest(fixtures: &[LoadedModelEvalFixture]) -> String {
         identity.extend_from_slice(orchestration.corpus_version.as_bytes());
         identity.push(0);
         identity.extend_from_slice(match orchestration.case_class {
-            sigil_kernel::OrchestrationEvalCaseClass::Negative => b"negative",
-            sigil_kernel::OrchestrationEvalCaseClass::Positive => b"positive",
+            sigil_kernel::OrchestrationEvalCaseClass::Chat => b"chat",
+            sigil_kernel::OrchestrationEvalCaseClass::PlanReview => b"plan_review",
+            sigil_kernel::OrchestrationEvalCaseClass::DirectTask => b"direct_task",
         });
         identity.push(0);
     }

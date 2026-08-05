@@ -15,14 +15,15 @@ use sigil_desktop::{
     DesktopCompactionReview as NativeCompactionReview, DesktopConversationDisplayQuery,
     DesktopConversationQueueCommandRequest, DesktopConversationQueueGeneration,
     DesktopConversationRecoveryCommandAction, DesktopLaunchError, DesktopLaunchRequest,
-    DesktopRunCancelRequest, DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
-    DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
-    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
-    DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
-    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopStartupFailure,
-    DesktopTaskContinuationRequest, DesktopTimelineTerminalTask, DesktopToolArtifactReadRequest,
-    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptQuery,
-    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopPlanDecisionAction, DesktopRunCancelRequest, DesktopRunStartRequest,
+    DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchItem,
+    DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
+    DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
+    DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
+    DesktopStartupFailure, DesktopTaskContinuationRequest, DesktopTimelineTerminalTask,
+    DesktopToolArtifactReadRequest, DesktopToolArtifactSelector as NativeToolArtifactSelector,
+    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -44,6 +45,7 @@ use crate::{
         DesktopConversationRecoveryCommandReceipt, DesktopConversationRecoveryView,
         DesktopExternalUrlInput, DesktopIntentDropExecutionSummary, DesktopIntentDropInput,
         DesktopIntentDropPreviewInput, DesktopIntentDropPreviewSummary, DesktopIntentStackSummary,
+        DesktopPlanDecisionActionInput, DesktopPlanDecisionInput, DesktopPlanDecisionSummary,
         DesktopProviderConnectionInventorySummary, DesktopProviderDefaultModelSaveInput,
         DesktopProviderDefaultModelSaveSummary, DesktopProviderSetupCatalogInput,
         DesktopProviderSetupCatalogSummary, DesktopProviderSetupSaveInput,
@@ -1292,6 +1294,59 @@ pub(crate) async fn desktop_pause_task(
         .await
         .map(|receipt| receipt.run.into())
         .map_err(project_client_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_plan_decision(
+    workspace_id: String,
+    input: DesktopPlanDecisionInput,
+    state: State<'_, DesktopAppState>,
+) -> Result<DesktopPlanDecisionSummary, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&input.session_id)?;
+    validate_session_id(&input.plan_id)?;
+    if input.expected_plan_hash.is_empty() {
+        return Err(DesktopCommandError::new(
+            "invalid_plan_decision",
+            "The plan decision binding is invalid.",
+        ));
+    }
+    let client = state
+        .manager
+        .lock()
+        .await
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    let receipt = client
+        .plan_decision(
+            &input.session_id,
+            &input.plan_id,
+            &input.expected_plan_hash,
+            match input.action {
+                DesktopPlanDecisionActionInput::Run => DesktopPlanDecisionAction::Run,
+                DesktopPlanDecisionActionInput::Save => DesktopPlanDecisionAction::Save,
+                DesktopPlanDecisionActionInput::Revise => DesktopPlanDecisionAction::Revise,
+                DesktopPlanDecisionActionInput::Reject => DesktopPlanDecisionAction::Reject,
+            },
+        )
+        .await
+        .map_err(project_client_error)?;
+    Ok(DesktopPlanDecisionSummary {
+        command_id: receipt.command_id,
+        client_id: receipt.client_id,
+        session_id: receipt.session_id,
+        plan_id: receipt.plan_id,
+        plan_hash: receipt.plan_hash,
+        action: match input.action {
+            DesktopPlanDecisionActionInput::Run => "run",
+            DesktopPlanDecisionActionInput::Save => "save",
+            DesktopPlanDecisionActionInput::Revise => "revise",
+            DesktopPlanDecisionActionInput::Reject => "reject",
+        },
+        task_id: receipt.task_id,
+        revision_run_id: receipt.revision_run_id,
+        replayed: receipt.replayed,
+    })
 }
 
 #[tauri::command]

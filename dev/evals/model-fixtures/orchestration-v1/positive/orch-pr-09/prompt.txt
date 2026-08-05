@@ -1,0 +1,1 @@
+Map the multi-file impact of lowercase normalization and present a review plan; do not execute.

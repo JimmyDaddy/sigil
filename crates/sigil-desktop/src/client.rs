@@ -745,6 +745,51 @@ impl DesktopHttpClient {
         Ok(receipt)
     }
 
+    /// Applies one exact typed plan decision and returns its idempotent receipt.
+    pub async fn plan_decision(
+        &self,
+        session_id: &str,
+        plan_id: &str,
+        expected_plan_hash: &str,
+        action: crate::DesktopPlanDecisionAction,
+    ) -> Result<crate::DesktopPlanDecisionCommandReceipt, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        validate_stream_identity(plan_id)?;
+        if expected_plan_hash.is_empty() {
+            return Err(DesktopClientError::InvalidRoute);
+        }
+        let command = self.command(
+            session_id,
+            None,
+            crate::DesktopPlanDecisionRequest {
+                plan_id: plan_id.to_owned(),
+                expected_plan_hash: expected_plan_hash.to_owned(),
+                action,
+            },
+        );
+        let command_id = command.command_id.clone();
+        let client_id = command.client_id.clone();
+        let mut receipt: crate::DesktopPlanDecisionCommandReceipt = self
+            .post_json(
+                self.route(["sessions", session_id, "plan-decision"])?,
+                &command,
+                StatusCode::OK,
+            )
+            .await?;
+        if receipt.command_id != command_id
+            || receipt.client_id != client_id
+            || receipt.session_id != session_id
+            || receipt.plan_id != plan_id
+            || receipt.plan_hash != expected_plan_hash
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        receipt.command_id = command_id;
+        receipt.client_id = client_id;
+        receipt.session_id = session_id.to_owned();
+        Ok(receipt)
+    }
+
     /// Resolves one pending approval using the exact durable guard material.
     pub async fn resolve_approval(
         &self,
@@ -1560,6 +1605,42 @@ fn validate_conversation_display_page(
             {
                 return Err(DesktopClientError::InvalidResponse);
             }
+        }
+    }
+    if let Some(plan_review) = page.plan_review.as_ref() {
+        validate_task_control_label(&plan_review.plan_id)?;
+        if let Some(summary) = plan_review.summary.as_deref() {
+            validate_task_control_label(summary)?;
+        }
+        if let Some(plan_hash) = plan_review.plan_hash.as_deref()
+            && !valid_tool_artifact_hash(plan_hash)
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if let Some(risk) = plan_review.risk.as_deref() {
+            validate_task_control_label(risk)?;
+        }
+        if matches!(
+            plan_review.status,
+            crate::DesktopPlanReviewStatus::DraftReady
+        ) && (plan_review.plan_hash.is_none()
+            || plan_review.summary.is_none()
+            || plan_review.allowed_actions
+                != [
+                    crate::DesktopPlanAction::Run,
+                    crate::DesktopPlanAction::Save,
+                    crate::DesktopPlanAction::Revise,
+                    crate::DesktopPlanAction::Reject,
+                ])
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if !matches!(
+            plan_review.status,
+            crate::DesktopPlanReviewStatus::DraftReady
+        ) && !plan_review.allowed_actions.is_empty()
+        {
+            return Err(DesktopClientError::InvalidResponse);
         }
     }
     let Some(task) = page.task_control.as_ref() else {

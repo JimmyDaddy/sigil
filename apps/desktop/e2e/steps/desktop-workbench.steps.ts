@@ -538,15 +538,7 @@ When("I invoke Desktop plan mode", async () => {
   await browser.keys("Enter");
 });
 
-Then("the supervised plan agent executes with durable profile evidence", async () => {
-  const timeline = await $(".timeline");
-  await timeline.waitUntil(
-    async () => (await timeline.getText()).includes(desktopProviderCanaries.planRun),
-    {
-      timeout: 30_000,
-      timeoutMsg: "Desktop plan mode did not execute the supervised plan agent",
-    },
-  );
+Then("the supervised plan agent drafts a durable plan", async () => {
   await browser.waitUntil(
     async () => durableEvidenceContains('"profile_id":"plan"'),
     {
@@ -554,6 +546,52 @@ Then("the supervised plan agent executes with durable profile evidence", async (
       timeoutMsg: "Desktop plan mode did not persist the plan profile binding",
     },
   );
+});
+
+Then("the automatic plan review drafts a durable plan", async () => {
+  const timeline = await $(".timeline");
+  await timeline.waitUntil(
+    async () => (await timeline.getText()).includes(desktopProviderCanaries.planDraftSummary),
+    {
+      timeout: 30_000,
+      timeoutMsg: "Desktop automatic plan review did not commit a draft plan",
+    },
+  );
+});
+
+Then("the draft plan becomes ready on the Desktop plan card", async () => {
+  const card = await $(".plan-card");
+  await card.waitForDisplayed({ timeout: 15_000 });
+  await browser.waitUntil(
+    async () => (await card.getText()).includes(desktopProviderCanaries.planDraftSummary),
+    {
+      timeout: 10_000,
+      timeoutMsg: "Desktop did not render the ready draft plan card",
+    },
+  );
+});
+
+When("I save the reviewed plan from Desktop", async () => {
+  const saveButton = await $(".plan-card button=Save");
+  await saveButton.waitForClickable({ timeout: 10_000 });
+  await saveButton.click();
+});
+
+Then("the plan card closes without creating a Task", async () => {
+  await $(".plan-card").waitForDisplayed({ timeout: 10_000, reverse: true });
+  await browser.waitUntil(
+    async () => !durableControls("task_step").some((control) => control.status === "started"),
+    {
+      timeout: 10_000,
+      timeoutMsg: "Saving the reviewed plan unexpectedly created a Task",
+    },
+  );
+});
+
+When("I run the reviewed plan from Desktop", async () => {
+  const runButton = await $(".plan-card button=Run plan");
+  await runButton.waitForClickable({ timeout: 10_000 });
+  await runButton.click();
 });
 
 When("I request automatic multi-Agent execution", async () => {
@@ -580,8 +618,8 @@ Then("Desktop completes one durable task with two overlapping read Agents", asyn
         (control) => control.status === "completed",
       );
       return completedSteps.length >= 2
-        && events.includes("task_handoff_requested")
-        && events.includes("task_plan");
+        && events.includes("task_plan")
+        && events.includes("plan_decision_recorded");
     },
     {
       timeout: 10_000,
@@ -598,8 +636,8 @@ Then("Desktop completes one durable task with two overlapping read Agents", asyn
     };
   });
   assert.equal(evidence.maxConcurrentReads, 2, "Desktop read Agents did not overlap");
-  assert.equal(evidence.requestCounts.auto_conversation, 1);
-  assert.equal(evidence.requestCounts.auto_planner, 1);
+  assert.equal(evidence.requestCounts.plan_review_request, 1);
+  assert.equal(evidence.requestCounts.plan_draft, 1);
   assert.equal(evidence.requestCounts.auto_synthesis, 1);
   for (const stepId of desktopProviderCanaries.autoReadStepIds) {
     assert.equal(evidence.requestCounts[`auto_read:${stepId}`], 1);

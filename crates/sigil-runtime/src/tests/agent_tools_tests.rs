@@ -1786,6 +1786,8 @@ fn ordinary_conversation_input(
                 source_turn,
                 routing_policy: TaskRoutingPolicy::Manual,
                 task_handoff: None,
+                route_capability: sigil_kernel::AutomaticRouteCapability::Unsupported,
+                plan_review: None,
             },
         )))
         .with_cancellation(cancellation_owner.handle()))

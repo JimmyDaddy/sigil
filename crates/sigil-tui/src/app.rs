@@ -282,6 +282,9 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) suggested_checks: Vec<String>,
     pub(crate) target_path_count: usize,
     pub(crate) suggested_check_count: usize,
+    pub(crate) workspace_snapshot_id: Option<String>,
+    pub(crate) stale: bool,
+    pub(crate) stale_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +406,14 @@ pub enum AppAction {
         permission_grant: Option<PlanApprovalPermission>,
     },
     RejectPlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
+    SavePlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
+    RevisePlan {
         plan_id: String,
         expected_plan_hash: String,
     },

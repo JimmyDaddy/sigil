@@ -456,6 +456,15 @@ fn intent_stack_actions_map_to_bounded_worker_commands() {
 #[test]
 fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let base_snapshot = app
+        .config_snapshot
+        .as_ref()
+        .and_then(|root_config| {
+            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &app.workspace_root)
+                .ok()
+                .flatten()
+        })
+        .expect("test workspace snapshot");
     let draft = sigil_kernel::plan_draft_created_entry(
         &structured_plan_text(
             "Inspect and edit README.md",
@@ -464,7 +473,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         ),
         sigil_kernel::PlanSourceRef::default(),
         1,
-        None,
+        Some(base_snapshot),
     )?
     .expect("non-empty plan should create draft");
 
@@ -526,13 +535,13 @@ fn plan_ready_bare_letters_stay_composer_input() -> Result<()> {
         Some("snapshot-1".to_owned()),
     )?
     .expect("non-empty plan should create draft");
-    app.set_pending_plan_approval_from_draft(&draft);
+    app.set_pending_plan_approval_from_draft(&draft, None);
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
 
     assert!(action.is_none());
     assert!(app.pending_plan_approval().is_some());
-    assert_eq!(app.composer.input, "s");
+    assert_eq!(app.composer.input, "x");
     assert_eq!(app.last_notice(), None);
     Ok(())
 }
@@ -572,7 +581,7 @@ fn pending_durable_plan_discard_requests_worker_rejection() -> Result<()> {
         Some("snapshot-1".to_owned()),
     )?
     .expect("non-empty plan should create draft");
-    app.set_pending_plan_approval_from_draft(&draft);
+    app.set_pending_plan_approval_from_draft(&draft, None);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
@@ -625,7 +634,7 @@ fn plan_rejected_message_syncs_session_and_clears_pending_surface() -> Result<()
         Some("snapshot-1".to_owned()),
     )?
     .expect("non-empty plan should create draft");
-    app.set_pending_plan_approval_from_draft(&draft);
+    app.set_pending_plan_approval_from_draft(&draft, None);
     let entry = sigil_kernel::PlanDecisionRecordedEntry {
         plan_id: draft.plan_id.clone(),
         plan_hash: draft.plan_hash.clone(),
@@ -4172,5 +4181,82 @@ fn shell_tool_result_refreshes_visible_workspace_git_status() -> Result<()> {
     assert_eq!(status.branch, "main");
     assert_eq!(status.changed_entries, 1);
     assert_eq!(status.untracked_entries, 1);
+    Ok(())
+}
+
+#[test]
+fn pending_plan_save_key_emits_save_plan_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft, Some("snapshot-1"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    assert!(matches!(action, Some(AppAction::SavePlan { .. })));
+    Ok(())
+}
+
+#[test]
+fn pending_plan_revise_key_emits_revise_plan_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft, None);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    assert!(matches!(action, Some(AppAction::RevisePlan { .. })));
+    Ok(())
+}
+
+#[test]
+fn stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("base-snapshot".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft, Some("current-snapshot"));
+
+    let pending = app.pending_plan_approval().expect("pending plan");
+    assert!(pending.stale);
+    assert_eq!(
+        pending.workspace_snapshot_id.as_deref(),
+        Some("base-snapshot")
+    );
+    let reason = pending.stale_reason.clone().expect("stale reason");
+    assert!(
+        reason.contains("stale"),
+        "reason must mention staleness: {reason}"
+    );
+
+    let run = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(run.is_none(), "stale plan must not run");
+    assert!(
+        app.pending_plan_approval().is_some(),
+        "stale plan stays pending"
+    );
+    assert_eq!(app.last_notice(), Some(reason.as_str()));
+
+    let save = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    assert!(save.is_none(), "stale plan must not save");
+
+    let revise = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    assert!(matches!(revise, Some(AppAction::RevisePlan { .. })));
+
+    let reject = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(matches!(reject, Some(AppAction::RejectPlan { .. })));
     Ok(())
 }

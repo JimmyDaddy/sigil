@@ -33,6 +33,23 @@ const AUTO_PLAN_ARGS = JSON.stringify({
     isolation: "shared_read_only",
   })),
 });
+const PLAN_REVIEW_REQUEST_ARGS = JSON.stringify({
+  reason_codes: ["parallel_research", "multi_stage_change"],
+});
+const PLAN_REVIEW_DRAFT_SUMMARY = "DESKTOP_E2E_PLAN_DRAFT";
+const planReviewDraftArgs = (summary: string) => JSON.stringify({
+  schema_version: 2,
+  summary,
+  steps: AUTO_READ_STEP_IDS.map((stepId) => ({
+    step_id: stepId,
+    title: `Inspect ${stepId.replace("desktop_inspect_", "")}`,
+    role: "subagent_read",
+    mode: "read",
+    isolation: "shared_read_only",
+  })),
+  target_paths: [],
+  suggested_checks: [],
+});
 
 interface ChatMessage {
   readonly role?: string;
@@ -109,6 +126,26 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       ) {
         recordRequest("title");
         sendText(response, TITLE_CANARY);
+      } else if (
+        toolNames.has("request_plan_review")
+        && typeof lastUserText === "string"
+        && lastUserText.includes(AUTO_ORCHESTRATION_PROMPT)
+      ) {
+        recordRequest("plan_review_request");
+        sendNamedToolCall(
+          response,
+          "desktop-auto-plan-review",
+          "request_plan_review",
+          PLAN_REVIEW_REQUEST_ARGS,
+        );
+      } else if (toolNames.has("submit_plan_draft")) {
+        recordRequest("plan_draft");
+        sendNamedToolCall(
+          response,
+          "desktop-auto-plan-draft",
+          "submit_plan_draft",
+          planReviewDraftArgs(PLAN_REVIEW_DRAFT_SUMMARY),
+        );
       } else if (
         toolNames.has("request_task_planning")
         && typeof lastUserText === "string"
@@ -315,6 +352,7 @@ export const desktopProviderCanaries = {
   autoOrchestrationFinal: AUTO_ORCHESTRATION_FINAL_CANARY,
   autoOrchestrationPrompt: AUTO_ORCHESTRATION_PROMPT,
   autoReadStepIds: AUTO_READ_STEP_IDS,
+  planDraftSummary: PLAN_REVIEW_DRAFT_SUMMARY,
   planRun: PLAN_RUN_CANARY,
   queuedPrompt: QUEUED_PROMPT,
   queuedRun: QUEUED_RUN_CANARY,

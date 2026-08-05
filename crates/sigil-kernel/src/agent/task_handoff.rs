@@ -125,6 +125,8 @@ where
         bail!("source turn is already bound to a different task handoff");
     }
 
+    append_task_route_decision(session, handler, binding)?;
+
     let existing = projection.handoffs.get(&binding.handoff_id);
     let latest_bound_scope = session
         .entries()
@@ -222,6 +224,58 @@ where
         task_id: binding.task_id.clone(),
         source_turn: binding.source_turn.clone(),
     }))
+}
+
+fn append_task_route_decision<H>(
+    session: &mut Session,
+    handler: &mut H,
+    binding: &TaskPlanningHandoffBinding,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    use crate::conversation_route::{
+        AutomaticRouteCapability, ConversationRoute, ConversationRouteDecisionProjection,
+        ConversationRouteDecisionRecordedEntry, conversation_route_decision_id_for_source,
+    };
+    let projection = ConversationRouteDecisionProjection::from_entries(session.entries());
+    if projection.has_conflicts() {
+        bail!("conversation route decision projection contains conflicting durable facts");
+    }
+    let decision_id = conversation_route_decision_id_for_source(&binding.source_turn);
+    if let Some(existing) = projection.decision_id_for_source(&binding.source_turn)
+        && existing != &decision_id
+    {
+        bail!("source turn is already bound to a different route decision");
+    }
+    let entry = ConversationRouteDecisionRecordedEntry {
+        decision_id,
+        source_turn: binding.source_turn.clone(),
+        route: ConversationRoute::Task,
+        // Task decision reasons stay typed in TaskHandoffRequestedEntry.reason_codes; the route
+        // decision's bounded reason enum is plan-review-specific.
+        reason_codes: Vec::new(),
+        configured_policy: crate::TaskRoutingPolicy::Auto,
+        effective_capability: AutomaticRouteCapability::DirectTask,
+        policy_snapshot_hash: binding.policy_snapshot_hash.clone(),
+        route_contract_fingerprint: binding.route_contract_fingerprint.clone(),
+        decided_at_ms: binding.decided_at_ms,
+    };
+    match projection.decision(&entry.decision_id) {
+        None => append_control(
+            session,
+            handler,
+            ControlEntry::ConversationRouteDecisionRecorded(entry),
+        )?,
+        Some(previous) if previous == &entry => {}
+        Some(_) => {
+            bail!(
+                "route decision {} has conflicting durable facts",
+                entry.decision_id.as_str()
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn append_tool_ignored_after_task_handoff<H>(

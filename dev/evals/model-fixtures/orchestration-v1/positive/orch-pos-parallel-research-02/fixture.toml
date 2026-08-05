@@ -9,8 +9,8 @@ expected_terminal = ["completed"]
 expected_verification = ["passed"]
 
 [orchestration]
-case_class = "positive"
-corpus_version = "rfc-0053-orchestration-v1"
+case_class = "plan_review"
+corpus_version = "rfc-0063-orchestration-v1"
 
 [[assertions]]
 id = "acceptance-1"

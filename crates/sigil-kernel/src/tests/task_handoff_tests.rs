@@ -4,7 +4,7 @@ use crate::{
     CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationTurnRef, SessionLogEntry,
     TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId,
     TaskHandoffProjection, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, ToolCall,
-    continue_without_task_planning_tool_spec, task_routing_system_prompt_contract_material,
+    continue_without_task_planning_tool_spec, conversation_route_routing_contract_material,
     validate_continue_without_task_planning_call,
 };
 
@@ -50,18 +50,18 @@ fn handoff_identifiers_and_source_turns_validate_shape() {
 
 #[test]
 fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
-    let prompt = task_routing_system_prompt_contract_material();
+    let prompt = conversation_route_routing_contract_material();
     assert!(prompt.contains("Classify the requested outcome by its meaning, not by keywords"));
-    assert!(prompt.contains("Call exactly one of the two routing tools"));
+    assert!(prompt.contains("Call exactly one of the routing tools advertised in this request"));
     assert!(prompt.contains("Call request_task_planning"));
     assert!(prompt.contains("Call continue_without_task_planning"));
-    assert!(prompt.contains("Do not inspect files, run commands, edit code"));
+    assert!(prompt.contains("Do not produce free text in this routing microturn"));
     assert!(prompt.contains("small single-file edit"));
     assert!(prompt.contains("one narrow read-only query about a single concern"));
     assert!(prompt.contains("Multiple files alone do not require planning"));
     assert!(prompt.contains("one linear call-flow trace"));
     assert!(prompt.contains("independently useful requested outcomes"));
-    assert!(prompt.contains("could each produce a useful standalone result"));
+    assert!(prompt.contains("independently useful requested outcomes"));
 }
 
 #[test]

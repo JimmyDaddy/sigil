@@ -81,12 +81,27 @@ impl OrchestrationRouteGuard {
         Ok(Some(disabled))
     }
 
+    /// Returns the effective routing policy under a route-local kill switch.
+    ///
+    /// A route-local hard invariant disables the `DirectTask` tier and proactive spawn but keeps
+    /// the safe, reviewable `ReviewFirst` handoff: automatic routing therefore stays `Auto`.
+    /// Only an explicit `manual` configuration degrades routing itself.
     #[must_use]
     pub fn effective_policy(
         &self,
-        session: &Session,
+        _session: &Session,
         configured_policy: TaskRoutingPolicy,
     ) -> TaskRoutingPolicy {
+        configured_policy
+    }
+
+    /// Returns true when the exact route must not run `DirectTask`.
+    ///
+    /// The route is blocked when it was disabled by a hard invariant or when a preflight
+    /// observation already contains a zero-tolerance invariant. The caller degrades
+    /// `DirectTask` to the `ReviewFirst` baseline instead of closing automatic routing.
+    #[must_use]
+    pub fn direct_task_blocked(&self, session: &Session) -> bool {
         let disablements = session.orchestration_route_disablement_projection();
         let exact_route_disabled =
             disablements.is_disabled(&self.route_fingerprint, &self.sigil_build);
@@ -96,16 +111,10 @@ impl OrchestrationRouteGuard {
                 SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
             )
         });
-        if configured_policy == TaskRoutingPolicy::Auto
-            && (exact_route_disabled
-                || (!any_route_disabled
-                    && first_orchestration_hard_invariant(&orchestration_observation(session))
-                        .is_some()))
-        {
-            TaskRoutingPolicy::Manual
-        } else {
-            configured_policy
-        }
+        exact_route_disabled
+            || (!any_route_disabled
+                && first_orchestration_hard_invariant(&orchestration_observation(session))
+                    .is_some())
     }
 
     /// Returns the effective multi-agent mode after applying the route-local kill switch.
@@ -159,6 +168,17 @@ pub fn orchestration_observation(session: &Session) -> OrchestrationEvalObservat
             continue;
         };
         match control {
+            ControlEntry::ConversationRouteDecisionRecorded(decision) => match decision.route {
+                sigil_kernel::ConversationRoute::Chat => {
+                    increment(&mut observation.chat_route_decisions);
+                }
+                sigil_kernel::ConversationRoute::PlanReview => {
+                    increment(&mut observation.plan_review_route_decisions);
+                }
+                sigil_kernel::ConversationRoute::Task => {
+                    increment(&mut observation.task_route_decisions);
+                }
+            },
             ControlEntry::TaskHandoffRequested(request) => {
                 let duplicate_id = !requested_handoffs.insert(request.handoff_id.clone());
                 let duplicate_source = requested_source_turns

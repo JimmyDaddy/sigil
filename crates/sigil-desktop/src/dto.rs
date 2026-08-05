@@ -208,6 +208,20 @@ pub struct DesktopProviderSetupCatalog {
     #[serde(default)]
     pub suggested_model: Option<String>,
     pub manual_entry_allowed: bool,
+    #[serde(default)]
+    pub orchestration_rollout: Option<DesktopOrchestrationRolloutSummary>,
+}
+
+/// Secret-free automatic-orchestration summary shown by setup and settings surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopOrchestrationRolloutSummary {
+    pub status: String,
+    pub routing_policy: String,
+    pub multi_agent_mode: String,
+    #[serde(default)]
+    pub route_identity_digest: Option<String>,
+    pub reason: String,
 }
 
 /// Secret-bearing atomic setup request admitted only by the native desktop boundary.
@@ -931,6 +945,8 @@ pub struct DesktopConversationDisplayPage {
     pub live_provisional_anchor: Option<DesktopConversationLiveProvisionalAnchor>,
     #[serde(default)]
     pub task_control: Option<DesktopConversationTaskControl>,
+    #[serde(default)]
+    pub plan_review: Option<DesktopPlanReview>,
 }
 
 /// Bounded query for one canonical conversation display page.
@@ -2582,4 +2598,94 @@ pub(crate) struct DesktopErrorBody {
     pub message: String,
     #[serde(default)]
     pub route_recovery: Option<DesktopSessionRouteRecoveryView>,
+}
+
+/// Typed plan decision request crossing the native trust boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanDecisionRequest {
+    pub plan_id: String,
+    pub expected_plan_hash: String,
+    pub action: DesktopPlanDecisionAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanDecisionAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+/// Idempotent receipt for one typed plan decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanDecisionCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub action: DesktopPlanDecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Run identity of the supervised revision plan review started by a `Revise` action, so the
+    /// renderer can track the child run's lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_run_id: Option<String>,
+    pub replayed: bool,
+}
+
+/// Bounded plan review surface crossing the native trust boundary.
+///
+/// Draft-specific fields are present only when the latest attempt committed a typed draft; the
+/// status always projects so a durable attempt without a draft stays visible across reloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanReview {
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    pub status: DesktopPlanReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_check_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub allowed_actions: Vec<DesktopPlanAction>,
+    pub source: DesktopPlanReviewSource,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanReviewStatus {
+    Started,
+    DraftReady,
+    CompletedWithoutDraft,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPlanReviewSource {
+    ExplicitPlanCommand,
+    AutomaticConversationRoute,
 }

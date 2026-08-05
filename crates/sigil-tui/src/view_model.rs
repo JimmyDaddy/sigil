@@ -973,7 +973,13 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Ctrl-C copy selection · Esc clear selection");
     }
     if app.pending_plan_approval().is_some() {
-        return format!("{agent} · Enter create and run task · Esc discard");
+        if app
+            .pending_plan_approval()
+            .is_some_and(|pending| pending.stale)
+        {
+            return format!("{agent} · plan stale · r revise · Esc reject");
+        }
+        return format!("{agent} · Enter run · s save · r revise · Esc reject");
     }
     if let Some(pending) = &app.approval.pending {
         if !pending.actions_available() {
@@ -1127,6 +1133,8 @@ pub(crate) struct PlanApprovalViewModel {
     pub suggested_checks: Vec<String>,
     pub target_path_count: usize,
     pub suggested_check_count: usize,
+    pub stale: bool,
+    pub stale_reason: Option<String>,
 }
 
 impl PlanApprovalViewModel {
@@ -1138,6 +1146,8 @@ impl PlanApprovalViewModel {
             suggested_checks: pending.suggested_checks.clone(),
             target_path_count: pending.target_path_count,
             suggested_check_count: pending.suggested_check_count,
+            stale: pending.stale,
+            stale_reason: pending.stale_reason.clone(),
         }
     }
 }

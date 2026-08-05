@@ -726,6 +726,15 @@ export function createCatalogWorkbenchBridge(
       permissionMode: "manual",
       streamSequence: 5,
     }),
+    planDecision: async (_workspaceId, sessionId, planId, _planHash, action) => ({
+      commandId: "workbench-plan-decision-command",
+      clientId: "desktop-workbench",
+      sessionId,
+      planId,
+      planHash: `sha256:${"a".repeat(64)}`,
+      action,
+      replayed: false,
+    }),
     resolveApproval: async (_workspaceId, sessionId, runId, request, decision) => ({
       commandId: "workbench-approval-command",
       clientId: "desktop-workbench",

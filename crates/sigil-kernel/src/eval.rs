@@ -620,13 +620,22 @@ pub struct ModelEvalReportArtifactsV3 {
     pub manifest_path: PathBuf,
 }
 
-/// Current machine-readable schema for RFC-0053 orchestration campaign reports.
-pub const ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION: u16 = 1;
-pub const ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES: usize = 20;
-pub const ORCHESTRATION_EVAL_MIN_POSITIVE_CASES: usize = 10;
+/// Current machine-readable schema for RFC-0063 three-way orchestration campaign reports.
+pub const ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION: u16 = 2;
+pub const ORCHESTRATION_EVAL_MIN_CHAT_CASES: usize = 20;
+pub const ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES: usize = 15;
+pub const ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES: usize = 15;
 pub const ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE: usize = 3;
-pub const ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM: u32 = 50_000;
-pub const ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM: u32 = 100_000;
+/// Chat -> Task false positive rate must not exceed 5%.
+pub const ORCHESTRATION_EVAL_MAX_CHAT_TO_TASK_FP_RATE_PPM: u32 = 50_000;
+/// PlanReview -> Task premature execution must be exactly zero.
+pub const ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_TO_TASK_RATE_PPM: u32 = 0;
+/// DirectTask miss rate must not exceed 10%.
+pub const ORCHESTRATION_EVAL_MAX_DIRECT_TASK_MISS_RATE_PPM: u32 = 100_000;
+/// ReviewFirst baseline: Chat -> PlanReview over-route must not exceed 10%.
+pub const ORCHESTRATION_EVAL_MAX_CHAT_TO_PLAN_REVIEW_OVERROUTE_PPM: u32 = 100_000;
+/// ReviewFirst baseline: required PlanReview miss must not exceed 10%.
+pub const ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_MISS_RATE_PPM: u32 = 100_000;
 
 /// Exact provider route and product-contract identity eligible for one rollout decision.
 ///
@@ -701,12 +710,13 @@ pub struct OrchestrationEvalIdentityV1 {
     pub repetition_seed: u64,
 }
 
-/// Expected routing class for one RFC-0053 corpus case.
+/// Expected routing class for one RFC-0063 three-way corpus case.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationEvalCaseClass {
-    Negative,
-    Positive,
+    Chat,
+    PlanReview,
+    DirectTask,
 }
 
 /// Typed orchestration observations; assistant prose is never used as gate evidence.
@@ -714,6 +724,10 @@ pub enum OrchestrationEvalCaseClass {
 #[serde(rename_all = "snake_case")]
 pub struct OrchestrationEvalObservationV1 {
     pub automatic_task_created: bool,
+    /// Durable three-way route decisions observed for the source turn.
+    pub chat_route_decisions: u32,
+    pub plan_review_route_decisions: u32,
+    pub task_route_decisions: u32,
     pub duplicate_handoffs: u32,
     pub duplicate_spawns: u32,
     pub duplicate_continuations: u32,
@@ -765,16 +779,29 @@ pub struct OrchestrationEvalRouteGateV1 {
     pub identity: OrchestrationEvalRouteIdentityV1,
     pub identity_digest: String,
     pub status: OrchestrationEvalRouteStatus,
-    pub negative_cases: usize,
-    pub positive_cases: usize,
-    pub eligible_negative_cases: usize,
-    pub eligible_positive_cases: usize,
+    pub chat_cases: usize,
+    pub plan_review_cases: usize,
+    pub direct_task_cases: usize,
+    pub eligible_chat_cases: usize,
+    pub eligible_plan_review_cases: usize,
+    pub eligible_direct_task_cases: usize,
     pub provider_admitted_repetitions: usize,
     pub completed_repetitions: usize,
+    /// Chat -> Task false positive rate; must not exceed 5%.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub false_positive_rate_ppm: Option<u32>,
+    pub chat_to_task_false_positive_rate_ppm: Option<u32>,
+    /// PlanReview -> Task premature execution rate; must be exactly zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub positive_miss_rate_ppm: Option<u32>,
+    pub plan_review_to_task_premature_rate_ppm: Option<u32>,
+    /// DirectTask miss rate; must not exceed 10%.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_task_miss_rate_ppm: Option<u32>,
+    /// ReviewFirst baseline: Chat -> PlanReview over-route rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_to_plan_review_overroute_rate_ppm: Option<u32>,
+    /// ReviewFirst baseline: required PlanReview miss rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review_miss_rate_ppm: Option<u32>,
     pub cases_with_majority_misroute: usize,
     pub cases_with_duplicate_repetition_identity: usize,
     pub hard_invariant_violations: u64,
@@ -1123,18 +1150,24 @@ fn orchestration_eval_route_gate(
             .push(record);
     }
 
-    let negative_cases = cases
+    let chat_cases = cases
         .keys()
-        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::Negative)
+        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::Chat)
         .count();
-    let positive_cases = cases
+    let plan_review_cases = cases
         .keys()
-        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::Positive)
+        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::PlanReview)
         .count();
-    let eligible_negative_cases =
-        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::Negative);
-    let eligible_positive_cases =
-        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::Positive);
+    let direct_task_cases = cases
+        .keys()
+        .filter(|(class, _)| *class == OrchestrationEvalCaseClass::DirectTask)
+        .count();
+    let eligible_chat_cases =
+        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::Chat);
+    let eligible_plan_review_cases =
+        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::PlanReview);
+    let eligible_direct_task_cases =
+        eligible_orchestration_case_count(&cases, OrchestrationEvalCaseClass::DirectTask);
     let provider_admitted_repetitions = records
         .iter()
         .filter(|record| record.model_eval.execution_status.provider_admitted())
@@ -1146,27 +1179,45 @@ fn orchestration_eval_route_gate(
         .collect::<Vec<_>>();
     let completed_repetitions = completed_records.len();
 
-    let negative_completed = completed_records
-        .iter()
-        .filter(|record| record.case_class == OrchestrationEvalCaseClass::Negative)
-        .copied()
-        .collect::<Vec<_>>();
-    let false_positives = negative_completed
-        .iter()
-        .filter(|record| record.observation.automatic_task_created)
-        .count();
-    let false_positive_rate_ppm = rate_ppm(false_positives, negative_completed.len());
+    let completed_for_class = |class: OrchestrationEvalCaseClass| {
+        completed_records
+            .iter()
+            .filter(|record| record.case_class == class)
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    let chat_completed = completed_for_class(OrchestrationEvalCaseClass::Chat);
+    let plan_review_completed = completed_for_class(OrchestrationEvalCaseClass::PlanReview);
+    let direct_task_completed = completed_for_class(OrchestrationEvalCaseClass::DirectTask);
 
-    let positive_completed = completed_records
+    let chat_to_task_false_positives = chat_completed
         .iter()
-        .filter(|record| record.case_class == OrchestrationEvalCaseClass::Positive)
-        .copied()
-        .collect::<Vec<_>>();
-    let positive_misses = positive_completed
-        .iter()
-        .filter(|record| !record.observation.automatic_task_created)
+        .filter(|record| actual_route(record) == Some(OrchestrationEvalCaseClass::DirectTask))
         .count();
-    let positive_miss_rate_ppm = rate_ppm(positive_misses, positive_completed.len());
+    let chat_to_task_false_positive_rate_ppm =
+        rate_ppm(chat_to_task_false_positives, chat_completed.len());
+    let chat_to_plan_review_overroutes = chat_completed
+        .iter()
+        .filter(|record| actual_route(record) == Some(OrchestrationEvalCaseClass::PlanReview))
+        .count();
+    let chat_to_plan_review_overroute_rate_ppm =
+        rate_ppm(chat_to_plan_review_overroutes, chat_completed.len());
+    let plan_review_to_task_prematures = plan_review_completed
+        .iter()
+        .filter(|record| actual_route(record) == Some(OrchestrationEvalCaseClass::DirectTask))
+        .count();
+    let plan_review_to_task_premature_rate_ppm =
+        rate_ppm(plan_review_to_task_prematures, plan_review_completed.len());
+    let plan_review_misses = plan_review_completed
+        .iter()
+        .filter(|record| actual_route(record) == Some(OrchestrationEvalCaseClass::Chat))
+        .count();
+    let plan_review_miss_rate_ppm = rate_ppm(plan_review_misses, plan_review_completed.len());
+    let direct_task_misses = direct_task_completed
+        .iter()
+        .filter(|record| actual_route(record) != Some(OrchestrationEvalCaseClass::DirectTask))
+        .count();
+    let direct_task_miss_rate_ppm = rate_ppm(direct_task_misses, direct_task_completed.len());
 
     let cases_with_majority_misroute = cases
         .iter()
@@ -1179,14 +1230,7 @@ fn orchestration_eval_route_gate(
                 .collect::<Vec<_>>();
             let misrouted = completed
                 .iter()
-                .filter(|record| match class {
-                    OrchestrationEvalCaseClass::Negative => {
-                        record.observation.automatic_task_created
-                    }
-                    OrchestrationEvalCaseClass::Positive => {
-                        !record.observation.automatic_task_created
-                    }
-                })
+                .filter(|record| actual_route(record).is_some_and(|actual| actual != *class))
                 .count();
             !completed.is_empty() && misrouted.saturating_mul(2) > completed.len()
         })
@@ -1201,14 +1245,19 @@ fn orchestration_eval_route_gate(
         .sum();
 
     let mut reasons = Vec::new();
-    if eligible_negative_cases < ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES {
+    if eligible_chat_cases < ORCHESTRATION_EVAL_MIN_CHAT_CASES {
         reasons.push(format!(
-            "requires at least {ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES} negative cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
+            "requires at least {ORCHESTRATION_EVAL_MIN_CHAT_CASES} chat cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
         ));
     }
-    if eligible_positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES {
+    if eligible_plan_review_cases < ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES {
         reasons.push(format!(
-            "requires at least {ORCHESTRATION_EVAL_MIN_POSITIVE_CASES} positive cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
+            "requires at least {ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES} plan-review cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
+        ));
+    }
+    if eligible_direct_task_cases < ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES {
+        reasons.push(format!(
+            "requires at least {ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES} direct-task cases with {ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE} provider-admitted homogeneous repetitions"
         ));
     }
     if completed_repetitions != records.len() {
@@ -1220,15 +1269,30 @@ fn orchestration_eval_route_gate(
     {
         reasons.push("one or more base model-eval acceptance assertions failed".to_owned());
     }
-    if false_positive_rate_ppm
-        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM)
+    if chat_to_task_false_positive_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_CHAT_TO_TASK_FP_RATE_PPM)
     {
-        reasons.push("negative automatic-task false-positive rate exceeds 5%".to_owned());
+        reasons.push("chat-to-task false-positive rate exceeds 5%".to_owned());
     }
-    if positive_miss_rate_ppm
-        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM)
+    if plan_review_to_task_premature_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_TO_TASK_RATE_PPM)
     {
-        reasons.push("positive automatic-task miss rate exceeds 10%".to_owned());
+        reasons.push("plan-review-to-task premature execution is above zero".to_owned());
+    }
+    if direct_task_miss_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_DIRECT_TASK_MISS_RATE_PPM)
+    {
+        reasons.push("direct-task miss rate exceeds 10%".to_owned());
+    }
+    if chat_to_plan_review_overroute_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_CHAT_TO_PLAN_REVIEW_OVERROUTE_PPM)
+    {
+        reasons.push("review-first baseline chat-to-plan-review over-route exceeds 10%".to_owned());
+    }
+    if plan_review_miss_rate_ppm
+        .is_some_and(|rate| rate > ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_MISS_RATE_PPM)
+    {
+        reasons.push("review-first baseline required plan-review miss exceeds 10%".to_owned());
     }
     if cases_with_majority_misroute > 0 {
         reasons.push("a case was misrouted in a majority of repetitions".to_owned());
@@ -1244,8 +1308,9 @@ fn orchestration_eval_route_gate(
     if let Some(reason) = &stale_reason {
         reasons.push(reason.clone());
     }
-    let insufficient = eligible_negative_cases < ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES
-        || eligible_positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES;
+    let insufficient = eligible_chat_cases < ORCHESTRATION_EVAL_MIN_CHAT_CASES
+        || eligible_plan_review_cases < ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES
+        || eligible_direct_task_cases < ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES;
     let status = if stale_reason.is_some() {
         OrchestrationEvalRouteStatus::Stale
     } else if hard_invariant_violations > 0 {
@@ -1265,18 +1330,37 @@ fn orchestration_eval_route_gate(
         identity,
         identity_digest,
         status,
-        negative_cases,
-        positive_cases,
-        eligible_negative_cases,
-        eligible_positive_cases,
+        chat_cases,
+        plan_review_cases,
+        direct_task_cases,
+        eligible_chat_cases,
+        eligible_plan_review_cases,
+        eligible_direct_task_cases,
         provider_admitted_repetitions,
         completed_repetitions,
-        false_positive_rate_ppm,
-        positive_miss_rate_ppm,
+        chat_to_task_false_positive_rate_ppm,
+        plan_review_to_task_premature_rate_ppm,
+        direct_task_miss_rate_ppm,
+        chat_to_plan_review_overroute_rate_ppm,
+        plan_review_miss_rate_ppm,
         cases_with_majority_misroute,
         cases_with_duplicate_repetition_identity,
         hard_invariant_violations,
         reasons,
+    }
+}
+
+/// Actual durable route chosen for one eval record, derived only from typed route decisions.
+fn actual_route(record: &OrchestrationEvalReportRecordV1) -> Option<OrchestrationEvalCaseClass> {
+    let observation = &record.observation;
+    if observation.task_route_decisions > 0 {
+        Some(OrchestrationEvalCaseClass::DirectTask)
+    } else if observation.plan_review_route_decisions > 0 {
+        Some(OrchestrationEvalCaseClass::PlanReview)
+    } else if observation.chat_route_decisions > 0 {
+        Some(OrchestrationEvalCaseClass::Chat)
+    } else {
+        None
     }
 }
 
@@ -1334,15 +1418,18 @@ fn render_orchestration_eval_report_summary(
     summary.push_str(&format!("Campaign: `{}`\n\n", campaign.campaign_id));
     for gate in route_gates {
         summary.push_str(&format!(
-            "- route `{}`: status=`{:?}`, negative={}/{}, positive={}/{}, false_positive_ppm={:?}, positive_miss_ppm={:?}, invariant_violations={}\n",
+            "- route `{}`: status=`{:?}`, chat={}/{}, plan_review={}/{}, direct_task={}/{}, chat_to_task_fp_ppm={:?}, plan_review_to_task_ppm={:?}, direct_task_miss_ppm={:?}, invariant_violations={}\n",
             gate.identity_digest,
             gate.status,
-            gate.eligible_negative_cases,
-            gate.negative_cases,
-            gate.eligible_positive_cases,
-            gate.positive_cases,
-            gate.false_positive_rate_ppm,
-            gate.positive_miss_rate_ppm,
+            gate.eligible_chat_cases,
+            gate.chat_cases,
+            gate.eligible_plan_review_cases,
+            gate.plan_review_cases,
+            gate.eligible_direct_task_cases,
+            gate.direct_task_cases,
+            gate.chat_to_task_false_positive_rate_ppm,
+            gate.plan_review_to_task_premature_rate_ppm,
+            gate.direct_task_miss_rate_ppm,
             gate.hard_invariant_violations
         ));
         for reason in &gate.reasons {

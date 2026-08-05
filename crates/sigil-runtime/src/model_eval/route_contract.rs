@@ -8,14 +8,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sigil_kernel::{
-    AgentRole, ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES, ORCHESTRATION_EVAL_MIN_POSITIVE_CASES,
-    OrchestrationEvalCaseClass, RootConfig, ToolRegistry, ToolRegistryScope, ToolSpec,
-    WorkspaceTrust, changeset_only_child_contract_prompt, continue_without_task_planning_tool_spec,
+    AgentRole, ORCHESTRATION_EVAL_MIN_CHAT_CASES, ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES,
+    ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES, OrchestrationEvalCaseClass, RootConfig, ToolRegistry,
+    ToolRegistryScope, ToolSpec, WorkspaceTrust, changeset_only_child_contract_prompt,
+    continue_without_task_planning_tool_spec, conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
     runtime_context_v1_system_prompt_contract_material,
     task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_plan_update_tool_spec,
-    task_planner_prompt_contract_material, task_routing_system_prompt_contract_material,
+    task_planner_prompt_contract_material,
 };
 use sigil_provider_deepseek::{
     DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT, DEFAULT_DEEPSEEK_V4_FLASH_MODEL,
@@ -129,7 +130,7 @@ pub fn build_model_eval_orchestration_route_contract(
     let routing_prompt_digest = digest_value(
         b"sigil-orchestration-routing-prompt-v1\0",
         &json!({
-            "system_prompt": task_routing_system_prompt_contract_material(),
+            "system_prompt": conversation_route_routing_contract_material(),
             "direct_conversation_continuation": direct_conversation_continuation_prompt_contract_material(),
             "tools": [
                 request_task_planning_tool_spec(),
@@ -217,33 +218,46 @@ fn load_complete_orchestration_corpus(roots: &[PathBuf]) -> Result<Vec<LoadedMod
     {
         bail!("route-contract corpus contains duplicate fixture ids");
     }
-    let negative = fixtures
+    let chat = fixtures
         .iter()
         .filter(|fixture| {
             fixture
                 .manifest
                 .orchestration
                 .as_ref()
-                .is_some_and(|case| case.case_class == OrchestrationEvalCaseClass::Negative)
+                .is_some_and(|case| case.case_class == OrchestrationEvalCaseClass::Chat)
         })
         .count();
-    let positive = fixtures
+    let plan_review = fixtures
         .iter()
         .filter(|fixture| {
             fixture
                 .manifest
                 .orchestration
                 .as_ref()
-                .is_some_and(|case| case.case_class == OrchestrationEvalCaseClass::Positive)
+                .is_some_and(|case| case.case_class == OrchestrationEvalCaseClass::PlanReview)
         })
         .count();
-    if negative != ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES
-        || positive != ORCHESTRATION_EVAL_MIN_POSITIVE_CASES
+    let direct_task = fixtures
+        .iter()
+        .filter(|fixture| {
+            fixture
+                .manifest
+                .orchestration
+                .as_ref()
+                .is_some_and(|case| case.case_class == OrchestrationEvalCaseClass::DirectTask)
+        })
+        .count();
+    if chat != ORCHESTRATION_EVAL_MIN_CHAT_CASES
+        || plan_review != ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES
+        || direct_task != ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES
         || fixtures
             .iter()
             .any(|fixture| fixture.manifest.orchestration.is_none())
     {
-        bail!("route-contract derivation requires the complete frozen orchestration corpus");
+        bail!(
+            "route-contract derivation requires the complete frozen three-way orchestration corpus"
+        );
     }
     let corpus_versions = fixtures
         .iter()

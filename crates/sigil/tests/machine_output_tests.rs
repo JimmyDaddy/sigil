@@ -41,6 +41,9 @@ tool_timeout_secs = 5
 [model_request]
 request_timeout_secs = 5
 
+[task]
+routing_policy = "manual"
+
 [connections.local-test]
 label = "Local test"
 provider = "custom"

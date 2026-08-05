@@ -950,6 +950,36 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{id}/plan-decision": {
+                "post": {
+                    "summary": "Apply one exact typed plan decision (Run, Save, Revise, Reject)",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/PlanDecisionCommand" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Plan decision command receipt",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/PlanDecisionCommandReceipt" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/runs/{run_id}/events": {
                 "get": {
                     "summary": "Replay durable run events then follow live events",
@@ -1819,7 +1849,67 @@ pub fn http_openapi_document() -> Value {
                         "has_more": { "type": "boolean" },
                         "gap_facts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/components/schemas/ConversationDisplayGapFact" } },
                         "live_provisional_anchor": { "oneOf": [{ "$ref": "#/components/schemas/ConversationLiveProvisionalAnchor" }, { "type": "null" }] },
-                        "task_control": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTaskControl" }, { "type": "null" }] }
+                        "task_control": { "oneOf": [{ "$ref": "#/components/schemas/ConversationTaskControl" }, { "type": "null" }] },
+                        "plan_review": { "oneOf": [{ "$ref": "#/components/schemas/PlanReview" }, { "type": "null" }] }
+                    }
+                },
+                "PlanReview": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["plan_id", "status", "allowed_actions", "source", "stale"],
+                    "properties": {
+                        "plan_id": { "type": "string", "maxLength": 128 },
+                        "plan_hash": { "type": ["string", "null"], "maxLength": 128 },
+                        "status": { "type": "string", "enum": ["started", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] },
+                        "summary": { "type": ["string", "null"], "maxLength": 512 },
+                        "step_count": { "type": ["integer", "null"], "minimum": 0 },
+                        "target_path_count": { "type": ["integer", "null"], "minimum": 0 },
+                        "suggested_check_count": { "type": ["integer", "null"], "minimum": 0 },
+                        "risk": { "type": ["string", "null"], "maxLength": 512 },
+                        "allowed_actions": { "type": "array", "items": { "type": "string", "enum": ["run", "save", "revise", "reject"] } },
+                        "source": { "type": "string", "enum": ["explicit_plan_command", "automatic_conversation_route"] },
+                        "stale": { "type": "boolean" }
+                    }
+                },
+                "PlanDecisionCommand": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["protocol_version", "command_id", "client_id", "session_id", "payload"],
+                    "properties": {
+                        "protocol_version": { "type": "integer", "const": 2 },
+                        "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "client_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "session_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "expected_stream_sequence": { "type": ["string", "null"] },
+                        "correlation_id": { "type": ["string", "null"], "maxLength": 128 },
+                        "payload": { "$ref": "#/components/schemas/PlanDecisionRequest" }
+                    }
+                },
+                "PlanDecisionRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["plan_id", "expected_plan_hash", "action"],
+                    "properties": {
+                        "plan_id": { "type": "string", "maxLength": 128 },
+                        "expected_plan_hash": { "type": "string", "maxLength": 128 },
+                        "action": { "type": "string", "enum": ["run", "save", "revise", "reject"] },
+                        "permission_grant": { "oneOf": [{ "type": "string", "enum": ["ask", "workspace_edits"] }, { "type": "null" }] }
+                    }
+                },
+                "PlanDecisionCommandReceipt": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["command_id", "client_id", "session_id", "plan_id", "plan_hash", "action", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "plan_id": { "type": "string" },
+                        "plan_hash": { "type": "string" },
+                        "action": { "type": "string", "enum": ["run", "save", "revise", "reject"] },
+                        "task_id": { "type": ["string", "null"] },
+                        "revision_run_id": { "type": ["string", "null"] },
+                        "replayed": { "type": "boolean" }
                     }
                 },
                 "ToolArtifactSelector": {

@@ -753,6 +753,47 @@ export interface ConversationDisplayPage {
     runSequence: string;
   };
   taskControl?: ConversationTaskControl;
+  planReview?: ConversationPlanReview;
+}
+
+export type PlanReviewStatus =
+  | "started"
+  | "draft_ready"
+  | "completed_without_draft"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+
+export type PlanReviewSource =
+  | "explicit_plan_command"
+  | "automatic_conversation_route";
+
+export type PlanDecisionAction = "run" | "save" | "revise" | "reject";
+
+export interface ConversationPlanReview {
+  planId: string;
+  planHash?: string;
+  status: PlanReviewStatus;
+  summary?: string;
+  stepCount?: number;
+  targetPathCount?: number;
+  suggestedCheckCount?: number;
+  risk?: string;
+  allowedActions: PlanDecisionAction[];
+  source: PlanReviewSource;
+  stale: boolean;
+}
+
+export interface PlanDecisionSummary {
+  commandId: string;
+  clientId: string;
+  sessionId: string;
+  planId: string;
+  planHash: string;
+  action: PlanDecisionAction;
+  taskId?: string;
+  revisionRunId?: string;
+  replayed: boolean;
 }
 
 export interface ConversationTaskPlanStep extends TimelineTaskPlanStep {
@@ -1065,6 +1106,15 @@ export interface ProviderSetupCatalog {
   models: ProviderSetupModel[];
   suggestedModel?: string;
   manualEntryAllowed: boolean;
+  orchestrationRollout?: OrchestrationRolloutSummary;
+}
+
+export interface OrchestrationRolloutSummary {
+  status: string;
+  routingPolicy: string;
+  multiAgentMode: string;
+  routeIdentityDigest?: string;
+  reason: string;
 }
 
 export interface ProviderSetupSaveInput extends ProviderSetupCatalogInput {

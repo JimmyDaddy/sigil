@@ -140,8 +140,8 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
         &SecretRedactor::empty(),
     )?)?;
 
-    let first = conversation_display_page(store.path(), &scope, None, 20)?;
-    let second = conversation_display_page(store.path(), &scope, None, 20)?;
+    let first = conversation_display_page(store.path(), &scope, None, 20, None)?;
+    let second = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert_eq!(first, second);
     assert_eq!(first.items.len(), 5);
     assert!(
@@ -299,7 +299,7 @@ fn user_selected_skill_is_projected_on_its_durable_prompt() -> Result<()> {
         .append_started(&ConversationRunStartedEntryV1::new("run-skill", 10)?)?;
     session.append_user_message(ModelMessage::user("研究唐代长安城"))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 10)?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
     let user = page
         .items
         .iter()
@@ -353,7 +353,7 @@ fn promoted_input_is_the_single_durable_user_display_event() -> Result<()> {
     };
     let promoted = store.append_conversation_input_promoted(promotion)?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 10)?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
     let users = page
         .items
         .iter()
@@ -427,7 +427,7 @@ fn terminal_must_match_the_unique_durable_final_for_its_active_run() -> Result<(
     )?)?;
 
     assert!(
-        conversation_display_page(store.path(), &scope, None, 20)
+        conversation_display_page(store.path(), &scope, None, 20, None)
             .expect_err("succeeded terminal must bind the active run's durable final")
             .to_string()
             .contains("does not match")
@@ -448,7 +448,7 @@ fn terminal_must_match_the_unique_durable_final_for_its_active_run() -> Result<(
         AssistantMessageKind::FinalAnswer,
     ))?;
     assert!(
-        conversation_display_page(store.path(), &scope, None, 20)
+        conversation_display_page(store.path(), &scope, None, 20, None)
             .expect_err("one run cannot project two durable final assistants")
             .to_string()
             .contains("more than one")
@@ -475,7 +475,7 @@ fn approval_phases_form_one_reconciliation_chain() -> Result<()> {
         Some(ToolApprovalUserDecision::Approved),
     )))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     let approvals = page
         .items
         .iter()
@@ -534,7 +534,7 @@ fn unbound_messages_do_not_synthesize_terminal_items() -> Result<()> {
         }),
     )?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert_eq!(page.items.len(), 2);
     assert!(page.items.iter().all(|item| item.run_id.is_none()));
     assert!(
@@ -570,7 +570,7 @@ fn conversation_fork_receipt_projects_as_a_safe_timeline_notice() -> Result<()> 
         serde_json::to_value(fork)?,
     )?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].kind, ConversationDisplayItemKindV1::Notice);
     assert_eq!(page.items[0].status, ConversationDisplayStatusV1::Completed);
@@ -606,7 +606,7 @@ fn production_display_reconciles_declared_artifact_state_with_physical_availabil
         .clone();
     store.append(&SessionLogEntry::ToolResultV3(recorded))?;
 
-    let available = conversation_display_page(store.path(), &scope, None, 10)?;
+    let available = conversation_display_page(store.path(), &scope, None, 10, None)?;
     assert!(matches!(
         &available.items[0].content,
         ConversationDisplayContentV1::Tool {
@@ -621,7 +621,7 @@ fn production_display_reconciles_declared_artifact_state_with_physical_availabil
             .join("refs")
             .join(format!("{}.json", artifact_ref.artifact_id)),
     )?;
-    let missing = conversation_display_page(store.path(), &scope, None, 10)?;
+    let missing = conversation_display_page(store.path(), &scope, None, 10, None)?;
     assert!(matches!(
         &missing.items[0].content,
         ConversationDisplayContentV1::Tool {
@@ -640,7 +640,7 @@ fn cursor_pins_a_fixed_frontier_while_new_history_is_appended() -> Result<()> {
         session.append_user_message(ModelMessage::user(format!("message-{index}")))?;
     }
 
-    let first = conversation_display_page(store.path(), &scope, None, 2)?;
+    let first = conversation_display_page(store.path(), &scope, None, 2, None)?;
     assert_eq!(first.items.len(), 2);
     assert!(first.has_more);
     let cursor = first.next_cursor.clone().expect("older page cursor");
@@ -654,7 +654,7 @@ fn cursor_pins_a_fixed_frontier_while_new_history_is_appended() -> Result<()> {
     forged_payload["before_order"]["subindex"] = json!(99);
     let forged_cursor = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged_payload)?);
     assert!(
-        conversation_display_page(store.path(), &scope, Some(&forged_cursor), 2)
+        conversation_display_page(store.path(), &scope, Some(&forged_cursor), 2, None)
             .expect_err("a re-encoded cursor boundary must not be forgeable")
             .to_string()
             .contains("frontier")
@@ -666,7 +666,7 @@ fn cursor_pins_a_fixed_frontier_while_new_history_is_appended() -> Result<()> {
         .collect::<HashSet<_>>();
 
     session.append_user_message(ModelMessage::user("new-after-frontier"))?;
-    let second = conversation_display_page(store.path(), &scope, Some(&cursor), 2)?;
+    let second = conversation_display_page(store.path(), &scope, Some(&cursor), 2, None)?;
     assert_eq!(
         second.through_session_stream_sequence,
         first.through_session_stream_sequence
@@ -687,17 +687,17 @@ fn cursor_pins_a_fixed_frontier_while_new_history_is_appended() -> Result<()> {
     }));
 
     assert!(matches!(
-        conversation_display_page(store.path(), "another-scope", Some(&cursor), 2),
+        conversation_display_page(store.path(), "another-scope", Some(&cursor), 2, None),
         Err(ConversationDisplayProjectionError::InvalidCursor { .. })
     ));
     let mut tampered = cursor;
     tampered.push('x');
     assert!(matches!(
-        conversation_display_page(store.path(), &scope, Some(&tampered), 2),
+        conversation_display_page(store.path(), &scope, Some(&tampered), 2, None),
         Err(ConversationDisplayProjectionError::InvalidCursor { .. })
     ));
     assert!(matches!(
-        conversation_display_page(store.path(), &scope, Some("e30"), 2),
+        conversation_display_page(store.path(), &scope, Some("e30"), 2, None),
         Err(ConversationDisplayProjectionError::InvalidCursor { .. })
     ));
 
@@ -707,7 +707,8 @@ fn cursor_pins_a_fixed_frontier_while_new_history_is_appended() -> Result<()> {
             &records[..2],
             &scope,
             Some(&first.next_cursor.expect("cursor")),
-            2
+            2,
+            None,
         ),
         Err(ConversationDisplayProjectionError::StaleCursor { .. })
     ));
@@ -724,7 +725,7 @@ fn projection_is_secret_safe_and_bounded_by_item_page_and_limit() -> Result<()> 
     }
     session.append_user_message(ModelMessage::user("token=sk-test-secret"))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 12)?;
+    let page = conversation_display_page(store.path(), &scope, None, 12, None)?;
     assert!(
         page.has_more,
         "page byte budget should preserve an older cursor"
@@ -746,13 +747,14 @@ fn projection_is_secret_safe_and_bounded_by_item_page_and_limit() -> Result<()> 
         }
         assert!(!text.contains("sk-"));
     }
-    assert!(conversation_display_page(store.path(), &scope, None, 0).is_err());
+    assert!(conversation_display_page(store.path(), &scope, None, 0, None).is_err());
     assert!(
         conversation_display_page(
             store.path(),
             &scope,
             None,
             MAX_CONVERSATION_DISPLAY_PAGE_SIZE + 1,
+            None,
         )
         .is_err()
     );
@@ -770,7 +772,7 @@ fn reasoning_is_typed_and_empty_messages_do_not_create_placeholders() -> Result<
     ))?;
     session.append_user_message(ModelMessage::new(MessageRole::User, None))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].kind, ConversationDisplayItemKindV1::Reasoning);
     assert!(matches!(
@@ -799,7 +801,7 @@ fn intent_state_checkpoint_conflict_projects_as_typed_display_reason() -> Result
         serde_json::to_value(conflict)?,
     )?);
 
-    let page = conversation_display_page_from_records(&[record], "scope-1", None, 10)?;
+    let page = conversation_display_page_from_records(&[record], "scope-1", None, 10, None)?;
     assert_eq!(page.items.len(), 1);
     assert!(matches!(
         page.items[0].content,
@@ -824,7 +826,7 @@ fn unknown_critical_lifecycle_and_checksum_tampering_fail_closed() -> Result<()>
         json!({"future": true}),
     )?);
     assert!(
-        conversation_display_page_from_records(&[unknown], "scope-1", None, 10)
+        conversation_display_page_from_records(&[unknown], "scope-1", None, 10, None)
             .expect_err("unknown critical event must fail")
             .to_string()
             .contains("unknown critical")
@@ -839,7 +841,7 @@ fn unknown_critical_lifecycle_and_checksum_tampering_fail_closed() -> Result<()>
         json!({"record": "conversation_run_started_v2"}),
     )?);
     assert!(
-        conversation_display_page_from_records(&[future_lifecycle], "scope-1", None, 10)
+        conversation_display_page_from_records(&[future_lifecycle], "scope-1", None, 10, None)
             .expect_err("future critical lifecycle tag must fail")
             .to_string()
             .contains("unknown critical run lifecycle")
@@ -860,6 +862,7 @@ fn unknown_critical_lifecycle_and_checksum_tampering_fail_closed() -> Result<()>
             "scope-1",
             None,
             10,
+            None,
         )
         .expect_err("tampered checksum must fail")
         .to_string()
@@ -889,6 +892,7 @@ fn role_mismatch_and_overlapping_runs_fail_closed() -> Result<()> {
             "scope-1",
             None,
             10,
+            None,
         )
         .expect_err("role mismatch must fail")
         .to_string()
@@ -920,7 +924,7 @@ fn role_mismatch_and_overlapping_runs_fail_closed() -> Result<()> {
         )?),
     ];
     assert!(
-        conversation_display_page_from_records(&records, "scope-1", None, 10)
+        conversation_display_page_from_records(&records, "scope-1", None, 10, None)
             .expect_err("overlapping runs must fail")
             .to_string()
             .contains("overlapping")
@@ -933,7 +937,7 @@ fn message_content_role_remains_provider_neutral() -> Result<()> {
     let (_temp, store, mut session) = durable_session()?;
     let scope = session.session_scope_id().to_owned();
     session.append_user_message(ModelMessage::user("hello"))?;
-    let page = conversation_display_page(store.path(), &scope, None, 1)?;
+    let page = conversation_display_page(store.path(), &scope, None, 1, None)?;
     assert!(matches!(
         page.items[0].content,
         ConversationDisplayContentV1::Message {
@@ -994,7 +998,7 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
         reason: Some("private pause reason".to_owned()),
     }))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     let task = page
         .task_control
         .as_ref()
@@ -1025,7 +1029,7 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
-    let completed = conversation_display_page(store.path(), &scope, None, 20)?;
+    let completed = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert!(completed.task_control.is_none());
     session.append_control(ControlEntry::TaskStep(TaskStepEntry {
         task_id: TaskId::new("task-restart-control")?,
@@ -1037,7 +1041,7 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
         summary: None,
         reason: None,
     }))?;
-    let late_step = conversation_display_page(store.path(), &scope, None, 20)?;
+    let late_step = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert!(late_step.task_control.is_none());
     Ok(())
 }
@@ -1087,7 +1091,7 @@ fn durable_task_control_truncates_oversized_plan_summary_explicitly() -> Result<
         reason: None,
     }))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     let task = page
         .task_control
         .expect("paused Task control should project");
@@ -1159,12 +1163,93 @@ fn durable_task_control_does_not_carry_step_status_across_plan_versions() -> Res
         reason: None,
     }))?;
 
-    let page = conversation_display_page(store.path(), &scope, None, 20)?;
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
     let task = page
         .task_control
         .expect("paused Task control should project");
     assert_eq!(task.plan_version, Some(2));
     assert_eq!(task.steps[0].title, "Plan 2 step");
     assert!(task.steps[0].status.is_none());
+    Ok(())
+}
+
+#[test]
+fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let source =
+        sigil_kernel::ConversationTurnRef::new(session.session_scope_id(), "message-1", "run-1")?;
+    let review_id = sigil_kernel::plan_review_id_for_source(&source);
+    let attempt_id = sigil_kernel::plan_review_attempt_id_for_review(&review_id);
+    let plan_id = sigil_kernel::plan_review_plan_id_for_attempt(&review_id, &attempt_id);
+    let attempt_entry = |status: sigil_kernel::PlanReviewAttemptStatus,
+                         terminal_reason: Option<sigil_kernel::PlanReviewTerminalReason>,
+                         recorded_at_ms: u64| {
+        sigil_kernel::PlanReviewAttemptEntry {
+            plan_review_id: review_id.clone(),
+            attempt_id: attempt_id.clone(),
+            plan_id: plan_id.clone(),
+            source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+            source_turn: source.clone(),
+            route_decision_id: None,
+            child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
+            status,
+            terminal_reason,
+            recorded_at_ms,
+        }
+    };
+
+    // A durable Started attempt with no committed draft must still project: the status is the
+    // shared Planning lifecycle, draft details are absent, and no actions are offered.
+    session.append_control(ControlEntry::PlanReviewAttempt(attempt_entry(
+        sigil_kernel::PlanReviewAttemptStatus::Started,
+        None,
+        5,
+    )))?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    let started = page
+        .plan_review
+        .expect("a Started attempt must project instead of disappearing");
+    assert_eq!(
+        started.status,
+        sigil_kernel::PublicPlanReviewStatus::Started
+    );
+    assert!(started.summary.is_none(), "no draft means no summary");
+    assert!(started.plan_hash.is_none(), "no draft means no plan hash");
+    assert!(
+        started.allowed_actions.is_empty(),
+        "no draft means no actions"
+    );
+    assert_eq!(started.plan_id, plan_id.as_str());
+
+    // A durable terminal attempt without a draft (failed) also stays visible across reloads.
+    session.append_control(ControlEntry::PlanReviewAttempt(attempt_entry(
+        sigil_kernel::PlanReviewAttemptStatus::Failed,
+        Some(sigil_kernel::PlanReviewTerminalReason::RunFailed),
+        6,
+    )))?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    let failed = page
+        .plan_review
+        .expect("a Failed attempt must project its terminal lifecycle");
+    assert_eq!(failed.status, sigil_kernel::PublicPlanReviewStatus::Failed);
+    assert!(failed.summary.is_none());
+    assert!(failed.allowed_actions.is_empty());
+
+    // A cancelled attempt without a draft projects as cancelled.
+    session.append_control(ControlEntry::PlanReviewAttempt(attempt_entry(
+        sigil_kernel::PlanReviewAttemptStatus::Cancelled,
+        Some(sigil_kernel::PlanReviewTerminalReason::UserCancelled),
+        7,
+    )))?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    let cancelled = page
+        .plan_review
+        .expect("a Cancelled attempt must project its terminal lifecycle");
+    assert_eq!(
+        cancelled.status,
+        sigil_kernel::PublicPlanReviewStatus::Cancelled
+    );
+    assert!(cancelled.allowed_actions.is_empty());
     Ok(())
 }

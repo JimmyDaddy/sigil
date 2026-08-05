@@ -88,13 +88,13 @@ use crate::{
     HttpIntentDropExecution, HttpIntentDropPreview, HttpIntentDropRequest,
     HttpIntentStackDriverError, HttpIntentStackView, HttpLiveEventBus, HttpModelSelectionPolicy,
     HttpPendingApproval, HttpPendingApprovalDisplay, HttpPendingApprovalSubject,
-    HttpPermissionMode, HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunAdmissionError,
-    HttpRunContextView, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
-    HttpRunDriverTerminalTaskCancel, HttpRunSnapshot, HttpRunStartRequest, HttpRunTerminalOutcome,
-    HttpSessionBinding, HttpSessionOpenBindingError, HttpSessionRouteRecoveryCode,
-    HttpSessionRunRegistry, HttpSessionTranscriptMessage, HttpSessionTranscriptPage,
-    HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
+    HttpPermissionMode, HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest,
+    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpRunAdmissionError, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunSnapshot,
+    HttpRunStartRequest, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpSessionRouteRecoveryCode, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
+    HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationReviewRequest,
     HttpTaskIntegrationReviewView, HttpToolArtifactPage, HttpToolArtifactReadDriverError,
     HttpToolArtifactReadRequest, HttpToolOutputShrinkReceipt, HttpTranscriptAssistantKind,
     HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView,
@@ -294,6 +294,29 @@ pub struct HttpProductionRunDriver {
     reconciled_terminal_sessions: Mutex<BTreeSet<String>>,
 }
 
+/// Publishes one plan review revision run's public events to the live event bus.
+///
+/// The revision runs as a supervised owned background run registered in `active_runs`; the
+/// driver publishes an explicit terminal event that closes the SSE stream, and the renderer picks
+/// up the durable draft or terminal attempt through the canonical display projection.
+struct HttpPlanReviewRevisionEventHandler {
+    durable_session_scope_id: String,
+    run_id: String,
+    event_bus: Arc<HttpLiveEventBus>,
+}
+
+impl sigil_runtime::application_run::ApplicationRunEventHandler
+    for HttpPlanReviewRevisionEventHandler
+{
+    fn handle_public_event(&mut self, event: sigil_kernel::PublicRunEvent) -> anyhow::Result<()> {
+        if event.session_id != self.durable_session_scope_id || event.run_id != self.run_id {
+            anyhow::bail!("plan review revision event scope mismatch");
+        }
+        self.event_bus.publish_next_run_event(event)?;
+        Ok(())
+    }
+}
+
 enum PendingHttpCompaction {
     Local(Box<PendingApplicationCompactionPreview>),
     Ready(Box<PendingApplicationCompaction>),
@@ -381,6 +404,233 @@ fn canonical_http_session_path(session_log_path: &Path) -> Result<PathBuf> {
     Ok(JsonlSessionStore::new(session_log_path)?
         .path()
         .to_path_buf())
+}
+
+impl HttpProductionRunDriver {
+    /// Executes one prepared plan review revision as an owned, supervised background run so
+    /// `Revise` runs a real read-only plan review instead of leaving a dangling `Started` attempt.
+    ///
+    /// The revision holds the durable session attachment for its entire duration (concurrent
+    /// mutations are serialized), is registered in `active_runs` (so `wait_for_idle`, cancel and
+    /// shutdown own it), publishes an explicit terminal public event that closes the SSE stream,
+    /// and removes itself from `active_runs` on completion.
+    fn spawn_plan_review_revision(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        root_config: &sigil_kernel::RootConfig,
+        workspace_root: &Path,
+        request: sigil_runtime::PlanReviewRunRequest,
+    ) -> Result<(), HttpRunDriverError> {
+        let session_log_path = PathBuf::from(&session.session_log_path);
+        let durable_session_scope_id = session.durable_session_scope_id.clone();
+        let session_id = session.id.clone();
+        let run_id = request.child_logical_run_id();
+        let attachment = self.acquire_session_attachment(session).map_err(|error| {
+            HttpRunDriverError::new(format!("plan review revision attachment failed: {error}"))
+        })?;
+        let registry = self.attached_registry()?;
+        let (cancel_sender, mut cancel_receiver) = mpsc::unbounded_channel();
+        {
+            let mut runs = self
+                .active_runs
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+            if runs.contains_key(&run_id) {
+                return Err(HttpRunDriverError::new(format!(
+                    "production plan review revision already active: {run_id}"
+                )));
+            }
+            runs.insert(
+                run_id.clone(),
+                Arc::new(HttpProductionActiveRun {
+                    session_id,
+                    broker: Arc::new(HttpApprovalBroker::default()),
+                    cancel_sender,
+                }),
+            );
+        }
+        // The foreground slot is the last pre-spawn registration: a bind failure rolls the
+        // active-run registration back so a half-registered revision can never leave the session
+        // blocked behind a foreground slot no worker owns. The rollback only removes the run-map
+        // entry this call inserted — the slot was never claimed, so no unbind is performed.
+        if let Err(error) = registry.bind_supervised_session_run(&session.id, &run_id) {
+            rollback_revision_run_registration(&self.active_runs, &self.active_runs_ready, &run_id);
+            return Err(HttpRunDriverError::new(error.to_string()));
+        }
+        let event_bus = Arc::clone(&self.event_bus);
+        let root_config = root_config.clone();
+        let workspace_root = workspace_root.to_path_buf();
+        let active_runs = Arc::clone(&self.active_runs);
+        let active_runs_ready = Arc::clone(&self.active_runs_ready);
+        let registry = Arc::downgrade(&registry);
+        let release_session_id = session.id.clone();
+        let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
+        let cancellation_handle = cancellation_owner.handle();
+        let cancellation_timeout = self.options.cancellation_timeout;
+        let runtime = self.runtime.clone();
+        self.runtime.spawn(async move {
+            let _held_session_attachment = attachment;
+            let terminal_event_bus = event_bus.clone();
+            let terminal_session_scope_id = durable_session_scope_id.clone();
+            let terminal_run_id = run_id.clone();
+            let mut run = Box::pin(async move {
+                let mut handler = HttpPlanReviewRevisionEventHandler {
+                    durable_session_scope_id,
+                    run_id,
+                    event_bus,
+                };
+                sigil_runtime::application_run::execute_plan_review_revision(
+                    &root_config,
+                    &workspace_root,
+                    &session_log_path,
+                    &request,
+                    &mut handler,
+                    Some(cancellation_handle),
+                )
+                .await
+            });
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    outcome = &mut run => break outcome,
+                    control = cancel_receiver.recv() => match control {
+                        Some(HttpProductionRunControlCommand::Cancel(cancellation)) => {
+                            cancellation_owner.request_cancel();
+                            let deadline = cancellation_deadline(cancellation_timeout);
+                            let joined = tokio::time::timeout(remaining_until(deadline), &mut run).await;
+                            match joined {
+                                Ok(Ok(outcome)) => {
+                                    let _ = cancellation.acknowledgement.send(Ok(()));
+                                    break Ok(outcome);
+                                }
+                                Ok(Err(error)) => {
+                                    let _ = cancellation.acknowledgement.send(Ok(()));
+                                    break Err(error);
+                                }
+                                Err(_) => {
+                                    let error = HttpRunDriverError::new(
+                                        "plan review revision did not quiesce before the cancellation deadline",
+                                    );
+                                    let _ = cancellation.acknowledgement.send(Err(error.clone()));
+                                    // The run keeps executing detached; ownership cleanup and the
+                                    // terminal event happen only when it actually finishes.
+                                    let active_runs = Arc::clone(&active_runs);
+                                    let active_runs_ready = Arc::clone(&active_runs_ready);
+                                    runtime.spawn(async move {
+                                        let late_outcome = run.await;
+                                        publish_plan_review_revision_terminal(
+                                            &terminal_event_bus,
+                                            &terminal_session_scope_id,
+                                            &terminal_run_id,
+                                            &late_outcome,
+                                        );
+                                        release_owned_revision_run(
+                                            &active_runs,
+                                            &active_runs_ready,
+                                            &registry,
+                                            &release_session_id,
+                                            &terminal_run_id,
+                                        );
+                                    });
+                                    return;
+                                }
+                            }
+                        }
+                        Some(HttpProductionRunControlCommand::Pause(pause)) => {
+                            let _ = pause.acknowledgement.send(Err(HttpRunDriverError::new(
+                                "plan review revision cannot be paused",
+                            )));
+                        }
+                        None => {
+                            break run.await;
+                        }
+                    }
+                }
+            };
+            publish_plan_review_revision_terminal(
+                &terminal_event_bus,
+                &terminal_session_scope_id,
+                &terminal_run_id,
+                &outcome,
+            );
+            release_owned_revision_run(
+                &active_runs,
+                &active_runs_ready,
+                &registry,
+                &release_session_id,
+                &terminal_run_id,
+            );
+        });
+        Ok(())
+    }
+}
+
+/// Publishes the explicit terminal public event for one plan review revision run and closes its
+/// SSE stream so clients observe a definitive terminal instead of a dangling live stream.
+fn publish_plan_review_revision_terminal(
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    outcome: &std::result::Result<sigil_runtime::PlanReviewRunOutcome, anyhow::Error>,
+) {
+    let kind = match outcome {
+        Ok(sigil_runtime::PlanReviewRunOutcome::DraftReady { draft }) => {
+            PublicRunEventKind::RunFinished {
+                final_text: format!("Plan ready: {}", draft.summary),
+            }
+        }
+        Ok(sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft) => {
+            PublicRunEventKind::RunFinished {
+                final_text: "Plan review closed without a draft; no task was created.".to_owned(),
+            }
+        }
+        Ok(sigil_runtime::PlanReviewRunOutcome::Cancelled) => PublicRunEventKind::RunCancelled,
+        Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(error))
+        | Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error)) => PublicRunEventKind::RunFailed {
+            error: error.clone(),
+        },
+        Err(error) => PublicRunEventKind::RunFailed {
+            error: format!("{error:#}"),
+        },
+    };
+    let _ = event_bus.publish_next_run_event_and_close_stream(PublicRunEvent::new(
+        durable_session_scope_id,
+        run_id,
+        1,
+        kind,
+    ));
+}
+
+/// Rolls back a partially registered plan review revision: removes only the run-map entry this
+/// call inserted and wakes idle/shutdown waiters. Unlike [`release_owned_revision_run`], it never
+/// unbinds the registry foreground slot, because the slot was not claimed yet.
+fn rollback_revision_run_registration(
+    active_runs: &Arc<std::sync::Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
+    active_runs_ready: &Arc<Condvar>,
+    run_id: &str,
+) {
+    if let Ok(mut runs) = active_runs.lock() {
+        runs.remove(run_id);
+        active_runs_ready.notify_all();
+    }
+}
+
+/// Removes one owned plan review revision run from `active_runs`, releases its registry
+/// foreground slot, and wakes idle/shutdown waiters.
+fn release_owned_revision_run(
+    active_runs: &Arc<std::sync::Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
+    active_runs_ready: &Arc<Condvar>,
+    registry: &Weak<HttpSessionRunRegistry>,
+    session_id: &str,
+    run_id: &str,
+) {
+    if let Some(registry) = registry.upgrade() {
+        registry.unbind_supervised_session_run(session_id, run_id);
+    }
+    if let Ok(mut runs) = active_runs.lock() {
+        runs.remove(run_id);
+        active_runs_ready.notify_all();
+    }
 }
 
 impl HttpProductionRunDriver {
@@ -1691,11 +1941,24 @@ impl HttpRunDriver for HttpProductionRunDriver {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        let current_workspace_snapshot_id =
+            sigil_kernel::RootConfig::load(&self.options.config_path)
+                .ok()
+                .and_then(|config| {
+                    let workspace_root = sigil_kernel::resolve_workspace_root(
+                        &self.options.config_path,
+                        &self.options.launch_cwd,
+                        &config.workspace.root,
+                    );
+                    sigil_runtime::plan_handoff_workspace_snapshot_id(&config, &workspace_root).ok()
+                })
+                .flatten();
         let page = conversation_display_page(
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
             cursor,
             limit,
+            current_workspace_snapshot_id.as_deref(),
         )
         .map_err(|error| match error {
             ConversationDisplayProjectionError::InvalidCursor { .. } => {
@@ -2690,6 +2953,66 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|error| {
                 HttpRunDriverError::new(format!("Task integration acceptance failed: {error}"))
             })
+    }
+
+    fn plan_decision(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &HttpPlanDecisionRequest,
+    ) -> Result<HttpPlanDecisionCommandReceipt, HttpRunDriverError> {
+        let session_attachment = self
+            .acquire_session_attachment(session)
+            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+        let _attachment = session_attachment;
+        let command: sigil_runtime::ApplicationPlanDecisionCommand = request.clone().into();
+        let root_config =
+            sigil_kernel::RootConfig::load(&self.options.config_path).map_err(|error| {
+                HttpRunDriverError::new(format!("plan decision config failed: {error}"))
+            })?;
+        // Resolve the same workspace root the display projection uses so stale evaluation and
+        // Task promotion bind the identical snapshot.
+        let workspace_root = sigil_kernel::resolve_workspace_root(
+            &self.options.config_path,
+            &self.options.launch_cwd,
+            &root_config.workspace.root,
+        );
+        let receipt = sigil_runtime::application_plan_decision(
+            &root_config,
+            &workspace_root,
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &command,
+        )
+        .map_err(|error| HttpRunDriverError::new(format!("plan decision failed: {error}")))?;
+        let revision_request = receipt.revision_request.clone();
+        let mut http_receipt: HttpPlanDecisionCommandReceipt = receipt.into();
+        http_receipt.session_id = session.durable_session_scope_id.clone();
+        if let Some(revision_request) = revision_request
+            && let Err(error) = self.spawn_plan_review_revision(
+                session,
+                &root_config,
+                &workspace_root,
+                revision_request,
+            )
+        {
+            // `application_plan_decision` already persisted `RevisionRequested`; record a
+            // durable recoverable failure so the original plan remains actionable instead of
+            // being stuck behind a decision that can never complete.
+            if let Err(record_error) = sigil_runtime::application_record_revision_failure(
+                &root_config,
+                Path::new(&session.session_log_path),
+                &session.durable_session_scope_id,
+                &request.plan_id,
+                &request.expected_plan_hash,
+                &format!("revision spawn failed: {error}"),
+            ) {
+                return Err(HttpRunDriverError::new(format!(
+                    "plan review revision spawn failed ({error}) and its durable failure record also failed ({record_error:#})"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(http_receipt)
     }
 
     fn wait_for_idle(&self, timeout: Duration) -> Result<(), HttpRunDriverError> {

@@ -226,6 +226,8 @@ pub enum ControlEntry {
     ChangeSetProposed(ChangeSet),
     ChangeSetApplied(ChangeSetResult),
     TerminalTask(TerminalTaskEntry),
+    ConversationRouteDecisionRecorded(crate::ConversationRouteDecisionRecordedEntry),
+    PlanReviewAttempt(crate::PlanReviewAttemptEntry),
     PlanDraftCreated(PlanDraftCreatedEntry),
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
     PlanPermissionGranted(PlanPermissionGrantedEntry),

@@ -19,6 +19,7 @@ import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { IntentStackInspector } from "./IntentStackInspector";
 import { useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
+import { PlanCard } from "./PlanCard";
 import { TaskControlPanel } from "./TaskControlPanel";
 import { TaskIntegrationInspector } from "./TaskIntegrationInspector";
 import { TerminalTaskCard } from "./TerminalTaskCard";
@@ -34,9 +35,11 @@ import type {
   ConversationQueueView,
   CheckpointRestoreReview,
   CheckpointView,
+  ConversationPlanReview,
   ConversationRecoveryView,
   ConversationTaskControl,
   PermissionMode,
+  PlanDecisionAction,
   ProviderConnectionInventory,
   ProviderModelRef,
   ReasoningEffort,
@@ -195,6 +198,9 @@ export function ConversationPanel({
   const [verificationBusy, setVerificationBusy] = useState(false);
   const [taskControlBusy, setTaskControlBusy] = useState(false);
   const [durableTaskControl, setDurableTaskControl] = useState<ConversationTaskControl>();
+  const [durablePlanReview, setDurablePlanReview] = useState<ConversationPlanReview>();
+  const [planDecisionBusy, setPlanDecisionBusy] = useState(false);
+  const [planDecisionFailure, setPlanDecisionFailure] = useState(false);
   const [taskIntegrationReview, setTaskIntegrationReview] = useState<TaskIntegrationReview>();
   const [taskIntegrationAcceptance, setTaskIntegrationAcceptance] =
     useState<TaskIntegrationAcceptance>();
@@ -421,6 +427,9 @@ export function ConversationPanel({
     setVerification(undefined);
     setTaskControlBusy(false);
     setDurableTaskControl(undefined);
+    setDurablePlanReview(undefined);
+    setPlanDecisionBusy(false);
+    setPlanDecisionFailure(false);
     setTaskIntegrationReview(undefined);
     setTaskIntegrationAcceptance(undefined);
     setTaskIntegrationLoading(false);
@@ -592,6 +601,8 @@ export function ConversationPanel({
               anchor: canonicalPage.liveProvisionalAnchor,
             });
             setDurableTaskControl(canonicalPage.taskControl);
+            setDurablePlanReview(canonicalPage.planReview);
+            setPlanDecisionFailure(false);
             setDisplayError(false);
             return;
           } catch (error) {
@@ -1140,6 +1151,7 @@ export function ConversationPanel({
             anchor: page.liveProvisionalAnchor,
           });
           setDurableTaskControl(page.taskControl);
+          setDurablePlanReview(page.planReview);
           if (canonicalPageCoversTerminal(page, {
             runId: pendingRunId,
             status: observed?.status,
@@ -1670,6 +1682,37 @@ export function ConversationPanel({
     }
   };
 
+  const submitPlanDecision = async (action: PlanDecisionAction) => {
+    const review = durablePlanReview;
+    if (
+      review === undefined
+      || planDecisionBusy
+      || (review.stale && (action === "run" || action === "save"))
+      || review.status !== "draft_ready"
+      || pendingApproval?.approval !== undefined
+    ) return;
+    setPlanDecisionBusy(true);
+    setPlanDecisionFailure(false);
+    try {
+      const summary = await bridge.planDecision(
+        workspaceId,
+        session.id,
+        review.planId,
+        review.planHash!,
+        action,
+      );
+      if (summary.action === "revise" && summary.revisionRunId !== undefined) {
+        notify({ message: t("planRevisionStarted"), tone: "info" });
+      }
+      setDurablePlanReview(undefined);
+      setDisplayReload((value) => value + 1);
+    } catch {
+      setPlanDecisionFailure(true);
+    } finally {
+      setPlanDecisionBusy(false);
+    }
+  };
+
   const acceptTaskIntegration = async () => {
     if (
       taskIntegrationReview === undefined
@@ -2081,6 +2124,17 @@ export function ConversationPanel({
           }}
           onContinue={(guidance) => void continueTask(taskProjection.taskId, guidance)}
           onReviewIntegration={() => setTaskIntegrationOpen(true)}
+        />
+      )}
+
+      {durablePlanReview === undefined ? null : (
+        <PlanCard
+          key={durablePlanReview.planId}
+          review={durablePlanReview}
+          disabled={submissionBlocked || pendingApproval?.approval !== undefined}
+          busy={planDecisionBusy}
+          failure={planDecisionFailure}
+          onDecision={(action) => void submitPlanDecision(action)}
         />
       )}
 

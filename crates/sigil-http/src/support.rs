@@ -30,13 +30,13 @@ use sigil_runtime::{
 };
 
 use crate::dto::{
-    HttpProviderConfigMode, HttpProviderConnectionEntry, HttpProviderConnectionInventory,
-    HttpProviderConnectionIssue, HttpProviderConnectionReadiness, HttpProviderCredentialSource,
-    HttpProviderDefaultModelSaveRequest, HttpProviderDefaultModelSaveResult, HttpProviderModelRef,
-    HttpProviderSetupCatalog, HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource,
-    HttpProviderSetupModel, HttpProviderSetupProtocol, HttpProviderSetupSaveRequest,
-    HttpProviderSetupSaveResult, HttpProviderSetupTemplate, HttpSupportBundleExport,
-    HttpSupportDoctorReport,
+    HttpOrchestrationRolloutSummary, HttpProviderConfigMode, HttpProviderConnectionEntry,
+    HttpProviderConnectionInventory, HttpProviderConnectionIssue, HttpProviderConnectionReadiness,
+    HttpProviderCredentialSource, HttpProviderDefaultModelSaveRequest,
+    HttpProviderDefaultModelSaveResult, HttpProviderModelRef, HttpProviderSetupCatalog,
+    HttpProviderSetupCatalogRequest, HttpProviderSetupCredentialSource, HttpProviderSetupModel,
+    HttpProviderSetupProtocol, HttpProviderSetupSaveRequest, HttpProviderSetupSaveResult,
+    HttpProviderSetupTemplate, HttpSupportBundleExport, HttpSupportDoctorReport,
 };
 
 /// Process-private inputs used to project path-free desktop diagnostics.
@@ -154,7 +154,23 @@ impl HttpSupportContext {
         let result = self
             .load_setup_catalog(&draft)
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        Ok(project_setup_catalog(&draft.connection, &result))
+        let rollout = self
+            .config_path
+            .exists()
+            .then(|| RootConfig::load(&self.config_path).ok())
+            .flatten()
+            .map(|config| {
+                let decision =
+                    sigil_runtime::new_install_orchestration_rollout_decision_for_config(&config);
+                HttpOrchestrationRolloutSummary {
+                    status: decision.status.as_str().to_owned(),
+                    routing_policy: decision.routing_policy.as_str().to_owned(),
+                    multi_agent_mode: decision.multi_agent_mode.as_str().to_owned(),
+                    route_identity_digest: decision.route_identity_digest.clone(),
+                    reason: decision.reason.clone(),
+                }
+            });
+        Ok(project_setup_catalog(&draft.connection, &result, rollout))
     }
 
     /// Atomically publishes one explicitly selected provider connection and saved default.
@@ -576,6 +592,7 @@ fn next_connection_id(
 fn project_setup_catalog(
     connection: &ProviderConnectionConfig,
     result: &ModelCatalogResult,
+    rollout: Option<HttpOrchestrationRolloutSummary>,
 ) -> HttpProviderSetupCatalog {
     let models = result
         .entries
@@ -623,6 +640,7 @@ fn project_setup_catalog(
         models,
         suggested_model,
         manual_entry_allowed: result.manual_entry_allowed,
+        orchestration_rollout: rollout,
     }
 }
 

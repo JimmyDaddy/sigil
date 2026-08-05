@@ -8,7 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    IntentPlanProposalV1, IntentProposalUnitV1, TaskStepIntentAliasBindingV1,
+    ConversationRouteDecisionId, ConversationTurnRef, IntentPlanProposalV1, IntentProposalUnitV1,
+    PlanReviewId, TaskStepIntentAliasBindingV1,
     session::{ControlEntry, SessionLogEntry},
     task::{
         AgentRole, TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
@@ -46,6 +47,9 @@ impl PlanId {
 }
 
 /// Source reference for a durable plan artifact.
+///
+/// Plan review lifecycles additionally bind the exact source turn, route decision, and plan
+/// review identity so a pending plan can be restored and audited without guessing provenance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PlanSourceRef {
@@ -55,6 +59,12 @@ pub struct PlanSourceRef {
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_turn: Option<ConversationTurnRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_decision_id: Option<ConversationRouteDecisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review_id: Option<PlanReviewId>,
 }
 
 /// One model-suggested verification check extracted from a plan.
@@ -138,6 +148,10 @@ pub enum PlanDecision {
     Accepted,
     Rejected,
     RevisionRequested,
+    /// The requested revision could not start (host-side spawn failure). Unlike
+    /// `RevisionRequested`, this is recoverable: the original plan stays actionable and a new
+    /// revision of the same retry-stable identity may be requested.
+    RevisionFailed,
     SavedOnly,
 }
 
@@ -147,6 +161,7 @@ impl PlanDecision {
             Self::Accepted => "accepted",
             Self::Rejected => "rejected",
             Self::RevisionRequested => "revision_requested",
+            Self::RevisionFailed => "revision_failed",
             Self::SavedOnly => "saved_only",
         }
     }
@@ -392,9 +407,62 @@ pub fn plan_draft_created_entry(
         plan_text_hash(&inline_plan_text)
     };
     let plan_id = plan_id_from_hash(&plan_hash)?;
+    plan_draft_created_entry_with_plan_id(
+        plan_id,
+        plan_text,
+        source,
+        created_at_ms,
+        workspace_snapshot_id,
+    )
+}
+
+/// Creates a durable plan draft record bound to a host-derived plan identity.
+///
+/// Plan review lifecycles derive the plan id deterministically from the plan review and attempt
+/// identity (RFC-0063), so the identity is stable before the draft content exists. The plan hash
+/// still binds the exact draft content for stale decisions.
+pub fn plan_draft_created_entry_with_plan_id(
+    plan_id: PlanId,
+    plan_text: &str,
+    source: PlanSourceRef,
+    created_at_ms: u64,
+    workspace_snapshot_id: Option<String>,
+) -> Result<Option<PlanDraftCreatedEntry>> {
+    let plan_text = plan_text.trim();
+    if plan_text.is_empty() {
+        return Ok(None);
+    }
+    let Some(exact_structured) = structured_plan_draft(plan_text) else {
+        return Ok(None);
+    };
+    let structured = safe_structured_plan_draft(exact_structured.clone());
+    let inline_plan_text = render_structured_plan_text(&structured);
+    let plan_hash = if structured == exact_structured {
+        plan_text_hash(plan_text)
+    } else {
+        plan_text_hash(&inline_plan_text)
+    };
+    plan_draft_entry_from_structured(
+        plan_id,
+        structured,
+        plan_hash,
+        source,
+        created_at_ms,
+        workspace_snapshot_id,
+    )
+}
+
+fn plan_draft_entry_from_structured(
+    plan_id: PlanId,
+    structured: StructuredPlanDraft,
+    plan_hash: String,
+    source: PlanSourceRef,
+    created_at_ms: u64,
+    workspace_snapshot_id: Option<String>,
+) -> Result<Option<PlanDraftCreatedEntry>> {
     let intent_proposal = intent_proposal_from_structured(&structured, &plan_hash)?;
-    let inline_text =
-        (inline_plan_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_plan_text);
+    let inline_text = render_structured_plan_text(&structured);
+    let inline_text = (inline_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_text);
     Ok(Some(PlanDraftCreatedEntry {
         plan_id,
         schema_version: structured.schema_version,
@@ -411,6 +479,79 @@ pub fn plan_draft_created_entry(
         workspace_snapshot_id,
         created_at_ms,
     }))
+}
+
+/// Strict model-visible structured draft submitted through the typed plan review tool.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct SubmitPlanDraftArgs {
+    pub schema_version: u32,
+    pub summary: String,
+    pub steps: Vec<RawPlanDraftStep>,
+    #[serde(default)]
+    pub intents: Vec<IntentProposalUnitV1>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<RawPlanSuggestedCheck>,
+    #[serde(default)]
+    pub risk: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
+    pub notes: Vec<String>,
+}
+
+/// Validates a typed `submit_plan_draft` call and materializes the durable draft entry.
+///
+/// The host strict-validates the schema, stable ids, paths, checks and intent proposal; the model
+/// never supplies identity, timestamps, or authority. Empty or non-materializable drafts fail
+/// closed instead of being guessed into plan steps.
+///
+/// # Errors
+///
+/// Returns an error for unknown fields, wrong schema version, empty steps, invalid paths/checks,
+/// or intent proposals that cannot be materialized.
+pub fn submit_plan_draft_entry(
+    args_json: &str,
+    plan_id: PlanId,
+    source: PlanSourceRef,
+    created_at_ms: u64,
+    workspace_snapshot_id: Option<String>,
+) -> Result<Option<PlanDraftCreatedEntry>> {
+    let args: SubmitPlanDraftArgs = serde_json::from_str(args_json)
+        .map_err(|error| anyhow::anyhow!("invalid submit_plan_draft arguments: {error}"))?;
+    if args.schema_version != 2 {
+        bail!(
+            "submit_plan_draft requires schema version 2, got {}",
+            args.schema_version
+        );
+    }
+    if args.steps.is_empty() {
+        bail!("submit_plan_draft requires at least one executable step");
+    }
+    let structured = materialize_structured_plan(
+        2,
+        RawStructuredPlanDraft {
+            summary: args.summary,
+            steps: args.steps,
+            intents: args.intents,
+            target_paths: args.target_paths,
+            suggested_checks: args.suggested_checks,
+            risk: args.risk,
+            notes: args.notes,
+        },
+    );
+    if structured.steps.is_empty() {
+        bail!("submit_plan_draft steps did not materialize into any executable step");
+    }
+    let sanitized = safe_structured_plan_draft(structured);
+    let inline_plan_text = render_structured_plan_text(&sanitized);
+    let plan_hash = plan_text_hash(&inline_plan_text);
+    plan_draft_entry_from_structured(
+        plan_id,
+        sanitized,
+        plan_hash,
+        source,
+        created_at_ms,
+        workspace_snapshot_id,
+    )
 }
 
 /// Builds the objective passed to the normal `/task` planner after a user approves a plan.
@@ -790,7 +931,7 @@ fn plan_identifier_has_secret_marker(value: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-struct RawStructuredPlanDraft {
+pub(crate) struct RawStructuredPlanDraft {
     #[serde(default)]
     summary: String,
     #[serde(default)]
@@ -809,7 +950,7 @@ struct RawStructuredPlanDraft {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-struct RawPlanDraftStep {
+pub(crate) struct RawPlanDraftStep {
     #[serde(default)]
     step_id: Option<String>,
     title: String,
@@ -858,14 +999,14 @@ where
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum RawPlanSuggestedCheck {
+pub(crate) enum RawPlanSuggestedCheck {
     CommandLine(String),
     Object(RawPlanSuggestedCheckObject),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-struct RawPlanSuggestedCheckObject {
+pub(crate) struct RawPlanSuggestedCheckObject {
     #[serde(default)]
     check_spec_id: Option<String>,
     command: String,

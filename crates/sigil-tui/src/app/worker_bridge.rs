@@ -448,7 +448,15 @@ impl AppState {
                     &self.session_browser.current_entries,
                 );
                 if let Some(draft) = plan_projection.latest_pending_plan() {
-                    self.set_pending_plan_approval_from_draft(draft);
+                    let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
+                        sigil_runtime::plan_handoff_workspace_snapshot_id(
+                            root_config,
+                            &self.workspace_root,
+                        )
+                        .ok()
+                        .flatten()
+                    });
+                    self.set_pending_plan_approval_from_draft(draft, current_snapshot.as_deref());
                 }
                 self.last_notice = if self.pending_plan_approval().is_some() {
                     Some("plan ready".to_owned())
@@ -472,6 +480,15 @@ impl AppState {
                 self.refresh_session_history();
                 self.last_notice = Some(format!("plan {} rejected", entry.plan_id.as_str()));
                 self.push_event("plan:rejected", entry.plan_id.as_str().to_owned());
+            }
+            WorkerMessage::PlanSaved { entry, entries } => {
+                self.runtime.is_busy = false;
+                self.approval.pending = None;
+                self.clear_pending_plan_approval();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.last_notice = Some(format!("plan {} saved", entry.plan_id.as_str()));
+                self.push_event("plan:saved", entry.plan_id.as_str().to_owned());
             }
             WorkerMessage::TaskCreatedFromPlan {
                 entry,

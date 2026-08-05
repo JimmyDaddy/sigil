@@ -34,14 +34,17 @@ use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 
+#[path = "rollout_manifest_test_support.rs"]
+pub(crate) mod rollout_manifest_test_support;
+
 use super::{
     ApplicationTerminalLifecycleHandler, ApplicationTerminalLifecycleRouter,
     ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher,
     activate_eager_remote_mcp_server, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
     activate_or_refresh_configured_remote_mcp_server, build_plan_prompt_tool_registry,
-    build_provider, build_role_provider, build_role_run_options, build_role_skill_tool_registry,
-    build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
-    build_tool_registry_without_eager_mcp,
+    build_plan_review_tool_registry, build_provider, build_role_provider, build_role_run_options,
+    build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
+    build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust,
     build_tool_surface_without_eager_mcp_with_workspace_trust,
     deactivate_configured_remote_mcp_server, launch_planned_mcp_process, load_anthropic_config,
@@ -975,6 +978,32 @@ async fn build_plan_prompt_tool_registry_keeps_agent_tools_with_readonly_scope()
             .is_some()
     );
     assert!(planner.spec_for("write_file").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_plan_review_tool_registry_is_fail_closed_even_with_write_planner_allowlist()
+-> Result<()> {
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut registry);
+    let mut config = test_root_config("deepseek");
+    // Adversarial planner allowlist that explicitly grants mutation tools.
+    config.task.planner.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: true,
+        names: vec!["write_file".to_owned(), "bash".to_owned()],
+        prefixes: vec!["edit_".to_owned(), "terminal_".to_owned()],
+    };
+    super::register_agent_tools(&mut registry, &config)?;
+
+    let plan_review = build_plan_review_tool_registry(&registry, &config);
+
+    assert!(plan_review.spec_for("read_file").is_some());
+    assert!(plan_review.spec_for("grep").is_some());
+    assert!(plan_review.spec_for("write_file").is_none());
+    assert!(plan_review.spec_for("bash").is_none());
+    assert!(plan_review.spec_for("edit_file").is_none());
+    assert!(plan_review.spec_for("terminal_start").is_none());
+    assert!(plan_review.spec_for(super::SPAWN_AGENT_TOOL_NAME).is_none());
     Ok(())
 }
 

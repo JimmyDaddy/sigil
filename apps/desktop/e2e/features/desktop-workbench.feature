@@ -59,12 +59,18 @@ Feature: Desktop workbench remains usable
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation
     And I invoke Desktop plan mode
-    Then the supervised plan agent executes with durable profile evidence
+    Then the supervised plan agent drafts a durable plan
+    And the draft plan becomes ready on the Desktop plan card
+    When I save the reviewed plan from Desktop
+    Then the plan card closes without creating a Task
 
-  Scenario: Automatically plan and dispatch parallel Agents
+  Scenario: Automatically review and run a draft plan with parallel Agents
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation
     And I request automatic multi-Agent execution
+    Then the automatic plan review drafts a durable plan
+    And the draft plan becomes ready on the Desktop plan card
+    When I run the reviewed plan from Desktop
     Then Desktop completes one durable task with two overlapping read Agents
 
   Scenario: Delete a conversation source that the current runtime cannot open

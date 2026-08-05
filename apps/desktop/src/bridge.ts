@@ -72,6 +72,8 @@ import type {
   IntentStackState,
   IntentVersionRef,
   TaskPauseBinding,
+  PlanDecisionAction,
+  PlanDecisionSummary,
   ToolArtifactPage,
   ToolArtifactReadInput,
   SupportDoctorReport,
@@ -205,6 +207,13 @@ export interface DesktopBridge {
     runId: string,
     request: TaskPauseBinding,
   ): Promise<RunSummary>;
+  planDecision(
+    workspaceId: string,
+    sessionId: string,
+    planId: string,
+    expectedPlanHash: string,
+    action: PlanDecisionAction,
+  ): Promise<PlanDecisionSummary>;
   resolveApproval(
     workspaceId: string,
     sessionId: string,
@@ -413,6 +422,11 @@ export const desktopBridge: DesktopBridge = {
     invoke<RunSummary>("desktop_pause_task", {
       workspaceId,
       input: { sessionId, runId, taskId: request.taskId, planVersion: request.planVersion },
+    }),
+  planDecision: (workspaceId, sessionId, planId, expectedPlanHash, action) =>
+    invoke<PlanDecisionSummary>("desktop_plan_decision", {
+      workspaceId,
+      input: { sessionId, planId, expectedPlanHash, action },
     }),
   resolveApproval: (workspaceId, sessionId, runId, approval, decision) =>
     invoke<ApprovalDecisionSummary>("desktop_resolve_approval", {

@@ -1071,6 +1071,10 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::PlanDraftCreated(_) => DurableEventType::PlanDraftCreated,
         ControlEntry::PlanDecisionRecorded(_) => DurableEventType::PlanDecisionRecorded,
         ControlEntry::PlanPermissionGranted(_) => DurableEventType::PlanPermissionGranted,
+        ControlEntry::ConversationRouteDecisionRecorded(_) => {
+            DurableEventType::ConversationRouteDecisionRecorded
+        }
+        ControlEntry::PlanReviewAttempt(_) => DurableEventType::PlanReviewAttempt,
         ControlEntry::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
         ControlEntry::TaskHandoffRequested(_) => DurableEventType::TaskHandoffRequested,
         ControlEntry::TaskHandoffResolved(_) => DurableEventType::TaskHandoffResolved,

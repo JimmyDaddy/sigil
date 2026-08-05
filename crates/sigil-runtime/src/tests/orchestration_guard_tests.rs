@@ -25,10 +25,14 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
     session.append_control(ControlEntry::TaskHandoffRequested(duplicate))?;
 
     let guard = OrchestrationRouteGuard::new("provider", "model", "build-1");
+    assert!(
+        guard.direct_task_blocked(&session),
+        "preflight must block the DirectTask tier before enforce persists the disablement"
+    );
     assert_eq!(
         guard.effective_policy(&session, TaskRoutingPolicy::Auto),
-        TaskRoutingPolicy::Manual,
-        "preflight must not freeze an auto-routing request that enforce will disable"
+        TaskRoutingPolicy::Auto,
+        "the route-local kill switch keeps the review-first handoff"
     );
     assert!(!session.entries().iter().any(|entry| matches!(
         entry,
@@ -65,9 +69,10 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
         1,
         "rechecking a disabled route must not append duplicate kill-switch facts"
     );
+    assert!(guard.direct_task_blocked(&session));
     assert_eq!(
         guard.effective_policy(&session, TaskRoutingPolicy::Auto),
-        TaskRoutingPolicy::Manual
+        TaskRoutingPolicy::Auto
     );
     assert_eq!(
         guard.effective_multi_agent_mode(&session, MultiAgentMode::Proactive),
@@ -79,7 +84,7 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
         ..TaskConfig::default()
     };
     guard.apply_effective_task_config(&session, &mut effective_task);
-    assert_eq!(effective_task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(effective_task.routing_policy, TaskRoutingPolicy::Auto);
     assert_eq!(
         effective_task.multi_agent_mode,
         MultiAgentMode::ExplicitRequestOnly
@@ -125,8 +130,61 @@ fn coordinator_with_disabled_route_exposes_no_automatic_handoff() -> Result<()> 
     let Some(sigil_kernel::AgentRunPurpose::Conversation(context)) = bound.purpose else {
         panic!("conversation purpose must be present");
     };
-    assert_eq!(context.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(context.routing_policy, TaskRoutingPolicy::Auto);
     assert!(context.task_handoff.is_none());
+    assert!(
+        context.plan_review.is_some(),
+        "a route-local kill switch keeps the review-first plan review binding"
+    );
+    Ok(())
+}
+
+#[test]
+fn qualified_route_kill_switch_degrades_direct_task_to_review_first() -> Result<()> {
+    let mut session = Session::new("provider", "model");
+    let guard = OrchestrationRouteGuard::new("provider", "model", "build-1");
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_orchestration_route_guard(guard.clone())
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
+    assert_eq!(
+        coordinator.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::DirectTask,
+        "a clean qualified route starts at the DirectTask tier"
+    );
+    let duplicate = duplicate_final_entry()?;
+    session.append_control(duplicate.clone())?;
+    session.append_control(duplicate)?;
+    coordinator.enforce_orchestration_route_kill_switch(&mut session, 2)?;
+
+    assert_eq!(
+        coordinator.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::ReviewFirst,
+        "a route-local invariant must degrade DirectTask to ReviewFirst, not Unsupported"
+    );
+    let input = sigil_kernel::AgentRunInput::user("ordinary prompt");
+    let bound = coordinator.bind_conversation_input(
+        &session,
+        input,
+        sigil_kernel::SessionRef::new_relative("session.jsonl")?,
+        "run-1",
+        None,
+        3,
+    )?;
+    let Some(sigil_kernel::AgentRunPurpose::Conversation(context)) = bound.purpose else {
+        panic!("conversation purpose must be present");
+    };
+    assert_eq!(
+        context.route_capability,
+        sigil_kernel::AutomaticRouteCapability::ReviewFirst
+    );
+    assert!(context.task_handoff.is_none());
+    assert!(
+        context.plan_review.is_some(),
+        "the review-first plan review binding survives the DirectTask kill switch"
+    );
     Ok(())
 }
 

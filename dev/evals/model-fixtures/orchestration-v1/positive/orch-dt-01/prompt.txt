@@ -1,0 +1,1 @@
+Finish the workspace by applying the pending normalization across parser and formatter so render_record outputs [mixed-42] for input "  MiXeD-42  ".

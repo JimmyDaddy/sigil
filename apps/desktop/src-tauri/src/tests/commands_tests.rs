@@ -456,6 +456,7 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                 lanes_truncated: false,
                 can_continue: true,
             }),
+            plan_review: None,
         });
     let json = serde_json::to_value(projected).expect("display page should serialize");
 

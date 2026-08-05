@@ -12,8 +12,9 @@ use crate::dto::{
     HttpConversationRecoveryCommandAction, HttpConversationRecoveryView,
     HttpDurableSessionFrontier, HttpForegroundRunOwner, HttpIntentDropExecution,
     HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackView, HttpPermissionMode,
-    HttpProviderModelRef, HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot,
-    HttpRunStartRequest, HttpSessionBinding, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
+    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpProviderModelRef,
+    HttpReasoningEffort, HttpRunContextView, HttpRunSnapshot, HttpRunStartRequest,
+    HttpSessionBinding, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
     HttpSessionTranscriptPage, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpTaskPauseRequest,
     HttpTerminalLifecycleView, HttpToolArtifactPage, HttpToolArtifactReadRequest,
@@ -560,6 +561,20 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpRunDriverError::new(
             "Task integration acceptance is unavailable",
         ))
+    }
+
+    /// Applies one exact typed plan decision under the shared session lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is stale, the decision conflicts with durable facts, or the
+    /// session cannot be opened.
+    fn plan_decision(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpPlanDecisionRequest,
+    ) -> Result<HttpPlanDecisionCommandReceipt, HttpRunDriverError> {
+        Err(HttpRunDriverError::new("Plan decision is unavailable"))
     }
 
     /// Waits until every driver-owned run supervisor has completed cleanup.

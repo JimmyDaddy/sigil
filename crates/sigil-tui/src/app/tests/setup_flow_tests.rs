@@ -100,7 +100,7 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
         root_config.agent.connection.as_ref().map(|id| id.as_str()),
         Some("deepseek-default")
     );
-    assert_eq!(root_config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(root_config.task.routing_policy, TaskRoutingPolicy::Auto);
     assert_eq!(
         root_config.task.multi_agent_mode,
         MultiAgentMode::ExplicitRequestOnly
@@ -388,6 +388,11 @@ fn setup_paste_updates_model_and_api_key_fields() {
 
 #[test]
 fn setup_validation_and_builder_reject_empty_model_and_auth() {
+    // Pin the environment: the environment credential branch must be deterministic regardless of
+    // the developer machine's shell state (other setup tests mutate the same variables under the
+    // global lock).
+    let _env_guard = crate::test_env::lock();
+    let _unset_api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
     state.model = "  ".to_owned();
     state.api_key = SecretString::new("test-key");
@@ -403,21 +408,20 @@ fn setup_validation_and_builder_reject_empty_model_and_auth() {
         "model cannot be empty"
     );
 
-    if std::env::var(DEFAULT_SETUP_API_KEY_ENV).is_err() {
-        state.model = "deepseek-v4-flash".to_owned();
-        state.api_key.clear();
-
-        assert_eq!(
-            validate_setup_state(&state),
-            Some("enter an API key to save in the protected credential store".to_owned())
-        );
-        assert_eq!(
-            build_setup_root_config(&state)
-                .expect_err("missing auth should fail")
-                .to_string(),
-            format!("provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}")
-        );
-    }
+    // With the environment pinned absent, the default credential source is the secure store and
+    // an empty key is rejected deterministically.
+    state.model = "deepseek-v4-flash".to_owned();
+    state.api_key.clear();
+    assert_eq!(
+        validate_setup_state(&state),
+        Some("enter an API key to save in the protected credential store".to_owned())
+    );
+    assert_eq!(
+        build_setup_root_config(&state)
+            .expect_err("missing auth should fail")
+            .to_string(),
+        format!("provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}")
+    );
 
     state.provider_name = "unsupported".to_owned();
     state.model = "test-model".to_owned();

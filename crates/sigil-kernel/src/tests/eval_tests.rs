@@ -180,10 +180,12 @@ fn orchestration_eval_qualifies_only_a_complete_exact_route_campaign() -> Result
     assert_eq!(manifest.route_gates.len(), 1);
     let gate = &manifest.route_gates[0];
     assert_eq!(gate.status, OrchestrationEvalRouteStatus::Qualified);
-    assert_eq!(gate.eligible_negative_cases, 20);
-    assert_eq!(gate.eligible_positive_cases, 10);
-    assert_eq!(gate.false_positive_rate_ppm, Some(0));
-    assert_eq!(gate.positive_miss_rate_ppm, Some(0));
+    assert_eq!(gate.eligible_chat_cases, 20);
+    assert_eq!(gate.eligible_plan_review_cases, 15);
+    assert_eq!(gate.eligible_direct_task_cases, 15);
+    assert_eq!(gate.chat_to_task_false_positive_rate_ppm, Some(0));
+    assert_eq!(gate.plan_review_to_task_premature_rate_ppm, Some(0));
+    assert_eq!(gate.direct_task_miss_rate_ppm, Some(0));
     assert_eq!(gate.hard_invariant_violations, 0);
     assert!(gate.reasons.is_empty());
     Ok(())
@@ -220,15 +222,15 @@ fn orchestration_eval_marks_unresolved_provider_version_stale() -> Result<()> {
 }
 
 #[test]
-fn orchestration_eval_blocks_a_majority_misrouted_negative_case_below_global_threshold()
--> Result<()> {
+fn orchestration_eval_blocks_a_majority_chat_to_task_misroute_below_global_threshold() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("orchestration-report");
     let mut records = orchestration_campaign_records();
     for record in records.iter_mut().filter(|record| {
-        record.model_eval.result.metadata.case_id == "negative-0"
-            && record.model_eval.repetition < 3
+        record.model_eval.result.metadata.case_id == "chat-0" && record.model_eval.repetition < 3
     }) {
+        record.observation.task_route_decisions = 1;
         record.observation.automatic_task_created = true;
     }
     write_orchestration_eval_report_v1(
@@ -245,7 +247,7 @@ fn orchestration_eval_blocks_a_majority_misrouted_negative_case_below_global_thr
     let manifest: crate::OrchestrationEvalReportManifestV1 =
         serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
     let gate = &manifest.route_gates[0];
-    assert_eq!(gate.false_positive_rate_ppm, Some(33_333));
+    assert_eq!(gate.chat_to_task_false_positive_rate_ppm, Some(33_333));
     assert_eq!(gate.cases_with_majority_misroute, 1);
     assert_eq!(gate.status, OrchestrationEvalRouteStatus::Blocked);
     assert!(
@@ -257,16 +259,16 @@ fn orchestration_eval_blocks_a_majority_misrouted_negative_case_below_global_thr
 }
 
 #[test]
-fn orchestration_eval_blocks_a_majority_missed_positive_case_below_global_threshold() -> Result<()>
-{
+fn orchestration_eval_blocks_a_majority_plan_review_miss_below_global_threshold() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("orchestration-report");
     let mut records = orchestration_campaign_records();
     for record in records.iter_mut().filter(|record| {
-        record.model_eval.result.metadata.case_id == "positive-0"
+        record.model_eval.result.metadata.case_id == "plan-review-0"
             && record.model_eval.repetition < 3
     }) {
-        record.observation.automatic_task_created = false;
+        record.observation.chat_route_decisions = 1;
+        record.observation.plan_review_route_decisions = 0;
     }
     write_orchestration_eval_report_v1(
         &output,
@@ -282,7 +284,7 @@ fn orchestration_eval_blocks_a_majority_missed_positive_case_below_global_thresh
     let manifest: crate::OrchestrationEvalReportManifestV1 =
         serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
     let gate = &manifest.route_gates[0];
-    assert_eq!(gate.positive_miss_rate_ppm, Some(66_666));
+    assert_eq!(gate.plan_review_miss_rate_ppm, Some(44_444));
     assert_eq!(gate.cases_with_majority_misroute, 1);
     assert_eq!(gate.status, OrchestrationEvalRouteStatus::Blocked);
     Ok(())
@@ -310,7 +312,7 @@ fn orchestration_eval_rejects_duplicate_repetition_identity_as_evidence() -> Res
         serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
     let gate = &manifest.route_gates[0];
     assert_eq!(gate.cases_with_duplicate_repetition_identity, 1);
-    assert_eq!(gate.eligible_negative_cases, 19);
+    assert_eq!(gate.eligible_chat_cases, 19);
     assert_eq!(
         gate.status,
         OrchestrationEvalRouteStatus::InsufficientEvidence
@@ -324,10 +326,10 @@ fn orchestration_eval_hard_invariant_violation_blocks_even_with_insufficient_evi
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("orchestration-report");
     let mut record = orchestration_report_record(
-        "negative-invariant",
-        OrchestrationEvalCaseClass::Negative,
+        "chat-invariant",
+        OrchestrationEvalCaseClass::Chat,
         1,
-        false,
+        OrchestrationEvalCaseClass::Chat,
     );
     record.observation.duplicate_handoffs = 1;
     write_orchestration_eval_report_v1(
@@ -344,8 +346,9 @@ fn orchestration_eval_hard_invariant_violation_blocks_even_with_insufficient_evi
     let manifest: crate::OrchestrationEvalReportManifestV1 =
         serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
     let gate = &manifest.route_gates[0];
-    assert_eq!(gate.eligible_negative_cases, 0);
-    assert_eq!(gate.eligible_positive_cases, 0);
+    assert_eq!(gate.eligible_chat_cases, 0);
+    assert_eq!(gate.eligible_plan_review_cases, 0);
+    assert_eq!(gate.eligible_direct_task_cases, 0);
     assert_eq!(gate.hard_invariant_violations, 1);
     assert_eq!(gate.status, OrchestrationEvalRouteStatus::Blocked);
     assert!(
@@ -386,50 +389,72 @@ fn orchestration_eval_never_combines_different_endpoint_identities() -> Result<(
 }
 
 fn orchestration_campaign_records() -> Vec<OrchestrationEvalReportRecordV1> {
-    let negatives = (0..20).flat_map(|case_index| {
+    let chats = (0..20).flat_map(|case_index| {
         (1..=3).map(move |repetition| {
             orchestration_report_record(
-                &format!("negative-{case_index}"),
-                OrchestrationEvalCaseClass::Negative,
+                &format!("chat-{case_index}"),
+                OrchestrationEvalCaseClass::Chat,
                 repetition,
-                false,
+                OrchestrationEvalCaseClass::Chat,
             )
         })
     });
-    let positives = (0..10).flat_map(|case_index| {
+    let plan_reviews = (0..15).flat_map(|case_index| {
         (1..=3).map(move |repetition| {
             orchestration_report_record(
-                &format!("positive-{case_index}"),
-                OrchestrationEvalCaseClass::Positive,
+                &format!("plan-review-{case_index}"),
+                OrchestrationEvalCaseClass::PlanReview,
                 repetition,
-                true,
+                OrchestrationEvalCaseClass::PlanReview,
             )
         })
     });
-    negatives.chain(positives).collect()
+    let direct_tasks = (0..15).flat_map(|case_index| {
+        (1..=3).map(move |repetition| {
+            orchestration_report_record(
+                &format!("direct-task-{case_index}"),
+                OrchestrationEvalCaseClass::DirectTask,
+                repetition,
+                OrchestrationEvalCaseClass::DirectTask,
+            )
+        })
+    });
+    chats.chain(plan_reviews).chain(direct_tasks).collect()
 }
 
 fn orchestration_report_record(
     case_id: &str,
     case_class: OrchestrationEvalCaseClass,
     repetition: u32,
-    automatic_task_created: bool,
+    actual_route: OrchestrationEvalCaseClass,
 ) -> OrchestrationEvalReportRecordV1 {
     let mut model_eval = model_report_record(repetition, true);
     model_eval.result.metadata.case_id = case_id.to_owned();
     model_eval.result.metadata.fixture_id = case_id.to_owned();
     model_eval.result.metadata.run_id = format!("{case_id}-{repetition}");
+    let observation = match actual_route {
+        OrchestrationEvalCaseClass::Chat => OrchestrationEvalObservationV1 {
+            chat_route_decisions: 1,
+            ..OrchestrationEvalObservationV1::default()
+        },
+        OrchestrationEvalCaseClass::PlanReview => OrchestrationEvalObservationV1 {
+            plan_review_route_decisions: 1,
+            ..OrchestrationEvalObservationV1::default()
+        },
+        OrchestrationEvalCaseClass::DirectTask => OrchestrationEvalObservationV1 {
+            automatic_task_created: true,
+            task_route_decisions: 1,
+            ..OrchestrationEvalObservationV1::default()
+        },
+    };
     OrchestrationEvalReportRecordV1 {
-        report_schema_version: 1,
+        report_schema_version: 2,
         identity: OrchestrationEvalIdentityV1 {
             route: orchestration_route_identity(),
             repetition_seed: u64::from(repetition),
         },
         case_class,
-        observation: OrchestrationEvalObservationV1 {
-            automatic_task_created,
-            ..OrchestrationEvalObservationV1::default()
-        },
+        observation,
         model_eval,
     }
 }

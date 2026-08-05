@@ -107,6 +107,14 @@ pub(in crate::runner) enum RunPlanCommand {
         plan_id: String,
         expected_plan_hash: String,
     },
+    SavePlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
+    RevisePlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
 }
 
 #[derive(Debug)]
@@ -381,6 +389,20 @@ pub(in crate::runner) fn classify_worker_command(
             plan_id,
             expected_plan_hash,
         } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::RejectPlan {
+            plan_id,
+            expected_plan_hash,
+        }),
+        WorkerCommand::SavePlan {
+            plan_id,
+            expected_plan_hash,
+        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::SavePlan {
+            plan_id,
+            expected_plan_hash,
+        }),
+        WorkerCommand::RevisePlan {
+            plan_id,
+            expected_plan_hash,
+        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::RevisePlan {
             plan_id,
             expected_plan_hash,
         }),

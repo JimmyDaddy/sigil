@@ -80,6 +80,20 @@ impl AppState {
                 plan_id,
                 expected_plan_hash,
             },
+            AppAction::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            } => WorkerCommand::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            AppAction::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            } => WorkerCommand::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            },
             AppAction::InvokeInlineSkill {
                 skill_id,
                 arguments,

@@ -59,7 +59,11 @@ fn sha256_hex(value: &str) -> String {
 #[test]
 fn coordinator_binds_stable_host_owned_ids_for_direct_auto_input() -> Result<()> {
     let session = Session::new("mock", "model");
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
     let input = AgentRunInput::user("implement across crates");
     let message_id = input
         .persisted_user_message_id
@@ -90,7 +94,11 @@ fn coordinator_binds_stable_host_owned_ids_for_direct_auto_input() -> Result<()>
 
 #[test]
 fn auto_routing_exposes_model_handoff_without_classifying_prompt_text() -> Result<()> {
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
 
     for (index, prompt) in [
         "你好",
@@ -126,7 +134,11 @@ fn auto_routing_exposes_model_handoff_without_classifying_prompt_text() -> Resul
 #[test]
 fn coordinator_uses_the_exact_durable_url_and_attachment_projection() -> Result<()> {
     let session = Session::new("mock", "model");
-    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
     let input = AgentRunInput::user("inspect https://example.com/private?q=secret")
         .with_image_attachments(vec![ImageAttachment::from_bytes(
             "image-1",
@@ -1060,5 +1072,131 @@ fn handoff_admission_prefix_with_root_cancel_never_resumes_task() -> Result<()> 
         })
         .expect("task start is durable");
     assert!(binding_index < started_index);
+    Ok(())
+}
+
+#[test]
+fn review_first_capability_binds_plan_review_without_direct_task_authority() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let mut session = Session::new("review-first", "planned-model");
+    let input = AgentRunInput::user("design the migration before touching anything");
+    let bound = coordinator.bind_conversation_input(
+        &session,
+        input,
+        SessionRef::new_relative("session.jsonl")?,
+        "review-first-run",
+        None,
+        42,
+    )?;
+    let AgentRunPurpose::Conversation(context) = bound.purpose.expect("conversation purpose")
+    else {
+        panic!("expected conversation purpose");
+    };
+    assert_eq!(
+        context.route_capability,
+        sigil_kernel::AutomaticRouteCapability::ReviewFirst
+    );
+    assert!(
+        context.task_handoff.is_none(),
+        "ReviewFirst never binds direct task handoff"
+    );
+    let plan_review = context.plan_review.expect("plan review binding");
+    assert_eq!(
+        plan_review.plan_review_id,
+        sigil_kernel::plan_review_id_for_source(&context.source_turn)
+    );
+    assert_eq!(
+        plan_review.plan_id,
+        sigil_kernel::plan_review_plan_id_for_attempt(
+            &plan_review.plan_review_id,
+            &plan_review.attempt_id
+        )
+    );
+    assert_eq!(
+        plan_review.objective,
+        "design the migration before touching anything"
+    );
+    assert!(!plan_review.route_contract_fingerprint.is_empty());
+    session.append_user_message(ModelMessage::user(
+        "design the migration before touching anything",
+    ))?;
+    Ok(())
+}
+
+#[test]
+fn direct_task_capability_binds_both_handoff_authorities() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
+    let mut session = Session::new("direct-task", "planned-model");
+    let input = AgentRunInput::user("ship the cross-layer change in reviewed batches");
+    let bound = coordinator.bind_conversation_input(
+        &session,
+        input,
+        SessionRef::new_relative("session.jsonl")?,
+        "direct-task-run",
+        None,
+        42,
+    )?;
+    let AgentRunPurpose::Conversation(context) = bound.purpose.expect("conversation purpose")
+    else {
+        panic!("expected conversation purpose");
+    };
+    assert_eq!(
+        context.route_capability,
+        sigil_kernel::AutomaticRouteCapability::DirectTask
+    );
+    assert!(
+        context.task_handoff.is_some(),
+        "qualified route binds direct task handoff"
+    );
+    assert!(
+        context.plan_review.is_some(),
+        "qualified route also binds plan review"
+    );
+    session.append_user_message(ModelMessage::user(
+        "ship the cross-layer change in reviewed batches",
+    ))?;
+    Ok(())
+}
+
+#[test]
+fn capability_resolution_is_host_owned_and_fail_closed() -> Result<()> {
+    let session = Session::new("capability", "planned-model");
+    let unsupported_tools = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: false,
+            route_qualified: true,
+        });
+    assert_eq!(
+        unsupported_tools.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::Unsupported
+    );
+    let unqualified = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    assert_eq!(
+        unqualified.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::ReviewFirst
+    );
+    let manual = ConversationCoordinator::new(true, TaskRoutingPolicy::Manual);
+    assert_eq!(
+        manual.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::Unsupported
+    );
+    let disabled = ConversationCoordinator::new(false, TaskRoutingPolicy::Auto);
+    assert_eq!(
+        disabled.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::Unsupported
+    );
+    let qualified = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
+    assert_eq!(
+        qualified.resolve_route_capability(&session),
+        sigil_kernel::AutomaticRouteCapability::DirectTask
+    );
     Ok(())
 }

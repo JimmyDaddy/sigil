@@ -28,15 +28,15 @@ use crate::{
     dto::{
         HttpApprovalDecisionRequest, HttpCheckpointRestoreRequest,
         HttpConversationQueueCommandRequest, HttpConversationRecoveryCommandAction,
-        HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpProviderDefaultModelSaveRequest,
-        HttpProviderSetupCatalogRequest, HttpProviderSetupSaveRequest, HttpRunCancelRequest,
-        HttpRunStartRequest, HttpServerInfo, HttpSessionCatalogBatchExecuteRequest,
-        HttpSessionCatalogBatchPlanRequest, HttpSessionCreateRequest, HttpSessionDeleteRequest,
-        HttpSessionInvalidSourceDeleteReceipt, HttpSessionInvalidSourceDeleteRequest,
-        HttpSessionMutationReceipt, HttpSessionOpenRequest, HttpSessionQuarantineReceipt,
-        HttpSessionQuarantineRequest, HttpSessionRenameRequest, HttpTaskIntegrationReviewRequest,
-        HttpTaskPauseRequest, HttpTerminalTaskCancelRequest, HttpToolArtifactReadRequest,
-        HttpVerificationRerunRequest,
+        HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpPlanDecisionRequest,
+        HttpProviderDefaultModelSaveRequest, HttpProviderSetupCatalogRequest,
+        HttpProviderSetupSaveRequest, HttpRunCancelRequest, HttpRunStartRequest, HttpServerInfo,
+        HttpSessionCatalogBatchExecuteRequest, HttpSessionCatalogBatchPlanRequest,
+        HttpSessionCreateRequest, HttpSessionDeleteRequest, HttpSessionInvalidSourceDeleteReceipt,
+        HttpSessionInvalidSourceDeleteRequest, HttpSessionMutationReceipt, HttpSessionOpenRequest,
+        HttpSessionQuarantineReceipt, HttpSessionQuarantineRequest, HttpSessionRenameRequest,
+        HttpTaskIntegrationReviewRequest, HttpTaskPauseRequest, HttpTerminalTaskCancelRequest,
+        HttpToolArtifactReadRequest, HttpVerificationRerunRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
@@ -1066,6 +1066,24 @@ fn route_http_request(
             );
         };
         return match registry.accept_task_integration_command(session_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/plan-decision"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpPlanDecisionRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid plan decision command body");
+        };
+        return match registry.plan_decision_command(session_id, command) {
             Ok(receipt) => json_response(200, json!(receipt)),
             Err(error) => registry_error_response(error),
         };

@@ -880,6 +880,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{id}/plan-decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply one exact typed plan decision (Run, Save, Revise, Reject) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PlanDecisionCommand"];
+                };
+            };
+            responses: {
+                /** @description Plan decision command receipt */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlanDecisionCommandReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}": {
         parameters: {
             query?: never;
@@ -2600,6 +2648,7 @@ export interface components {
             items: components["schemas"]["ConversationDisplayItem"][];
             live_provisional_anchor?: components["schemas"]["ConversationLiveProvisionalAnchor"] | null;
             next_cursor?: string | null;
+            plan_review?: components["schemas"]["PlanReview"] | null;
             request_scope: string;
             /** @constant */
             schema_version: 1;
@@ -3081,6 +3130,50 @@ export interface components {
         };
         /** @enum {string} */
         PermissionMode: "read-only" | "manual" | "auto-edit" | "danger-full-access";
+        PlanDecisionCommand: {
+            client_id: string;
+            command_id: string;
+            correlation_id?: string | null;
+            expected_stream_sequence?: string | null;
+            payload: components["schemas"]["PlanDecisionRequest"];
+            /** @constant */
+            protocol_version: 2;
+            session_id: string;
+        };
+        PlanDecisionCommandReceipt: {
+            /** @enum {string} */
+            action: "run" | "save" | "revise" | "reject";
+            client_id: string;
+            command_id: string;
+            plan_hash: string;
+            plan_id: string;
+            replayed: boolean;
+            revision_run_id?: string | null;
+            session_id: string;
+            task_id?: string | null;
+        };
+        PlanDecisionRequest: {
+            /** @enum {string} */
+            action: "run" | "save" | "revise" | "reject";
+            expected_plan_hash: string;
+            permission_grant?: ("ask" | "workspace_edits") | null;
+            plan_id: string;
+        };
+        PlanReview: {
+            allowed_actions: ("run" | "save" | "revise" | "reject")[];
+            plan_hash?: string | null;
+            plan_id: string;
+            risk?: string | null;
+            /** @enum {string} */
+            source: "explicit_plan_command" | "automatic_conversation_route";
+            stale: boolean;
+            /** @enum {string} */
+            status: "started" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
+            step_count?: number | null;
+            suggested_check_count?: number | null;
+            summary?: string | null;
+            target_path_count?: number | null;
+        };
         ProtocolEvent: {
             approval_request?: components["schemas"]["PendingApproval"];
             /** @enum {string} */

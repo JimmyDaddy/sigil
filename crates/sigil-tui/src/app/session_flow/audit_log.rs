@@ -877,6 +877,19 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.plan_version,
             truncate_session_view_text(&entry.dispatch_run_id, 24)
         ),
+        ControlEntry::ConversationRouteDecisionRecorded(decision) => {
+            format!(
+                "[ctl] route {} decided as {}",
+                decision.decision_id.as_str(),
+                decision.route.as_str()
+            )
+        }
+        ControlEntry::PlanReviewAttempt(attempt) => format!(
+            "[ctl] plan review {} attempt {} {}",
+            attempt.plan_review_id.as_str(),
+            attempt.attempt_id.as_str(),
+            attempt.status.as_str()
+        ),
         ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
     }
 }

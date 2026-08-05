@@ -113,6 +113,7 @@ fn plan_draft_created_entry_skips_blank_and_preserves_metadata() -> Result<()> {
             session_ref: Some("session.jsonl".to_owned()),
             run_id: Some("run_1".to_owned()),
             final_message_id: Some("msg_1".to_owned()),
+            ..PlanSourceRef::default()
         },
         42,
         Some("snapshot_1".to_owned()),

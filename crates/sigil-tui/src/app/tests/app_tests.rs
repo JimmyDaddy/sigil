@@ -83,7 +83,7 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
         None,
     )?
     .expect("structured plan should create draft");
-    app.set_pending_plan_approval_from_draft(&draft);
+    app.set_pending_plan_approval_from_draft(&draft, None);
     let ignored = app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
     assert!(ignored.is_none());
     assert!(app.pending_plan_approval().is_some());

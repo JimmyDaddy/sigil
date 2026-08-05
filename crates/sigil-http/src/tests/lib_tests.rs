@@ -60,23 +60,24 @@ use super::{
     HttpIntegrationLaneCandidateKind, HttpIntegrationPromotionTargetKind, HttpIntentDropExecution,
     HttpIntentDropPreview, HttpIntentDropRequest, HttpIntentStackDriverError, HttpIntentStackView,
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer, HttpModelSelectionPolicy,
-    HttpPendingApproval, HttpPermissionMode, HttpProtocolEvent, HttpProtocolEventBuffer,
-    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpProviderModelRef, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError, HttpRunAdmissionError,
-    HttpRunCancelRequest, HttpRunContextView, HttpRunDriver, HttpRunDriverApproval,
-    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunDriverTaskPause,
-    HttpRunDriverTerminalTaskCancel, HttpRunEventSequencer, HttpRunSnapshot, HttpRunStartRequest,
-    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
-    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionOpenBindingError,
-    HttpSessionOpenRequest, HttpSessionRunRegistry, HttpSessionTranscriptMessage,
-    HttpSessionTranscriptPage, HttpSseError, HttpSseEvent, HttpSupportContext,
-    HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView, HttpTaskIntegrationLaneView,
-    HttpTaskIntegrationReviewView, HttpTerminalLifecycleView, HttpTerminalTaskCancelRequest,
-    HttpToolArtifactPage, HttpToolArtifactPageEncoding, HttpToolArtifactReadDriverError,
-    HttpToolArtifactReadRequest, HttpToolArtifactSelector, HttpTranscriptAssistantKind,
-    HttpTranscriptRole, HttpVerificationRerunRequest, HttpVerificationView, http_openapi_document,
-    public_run_event_to_sse,
+    HttpPendingApproval, HttpPermissionMode, HttpPlanAction, HttpPlanDecisionAction,
+    HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpPlanReview, HttpPlanReviewSource,
+    HttpPlanReviewStatus, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
+    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpProviderModelRef,
+    HttpQueuedRunAdmission, HttpQueuedRunDriverStart, HttpReasoningEffort, HttpRegistryError,
+    HttpRunAdmissionError, HttpRunCancelRequest, HttpRunContextView, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunEventSequencer,
+    HttpRunSnapshot, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig,
+    HttpServerConfigError, HttpSessionBinding, HttpSessionCreateRequest,
+    HttpSessionOpenBindingError, HttpSessionOpenRequest, HttpSessionRunRegistry,
+    HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpSseError, HttpSseEvent,
+    HttpSupportContext, HttpTaskContinuationRequest, HttpTaskIntegrationAcceptanceView,
+    HttpTaskIntegrationLaneView, HttpTaskIntegrationReviewView, HttpTerminalLifecycleView,
+    HttpTerminalTaskCancelRequest, HttpToolArtifactPage, HttpToolArtifactPageEncoding,
+    HttpToolArtifactReadDriverError, HttpToolArtifactReadRequest, HttpToolArtifactSelector,
+    HttpTranscriptAssistantKind, HttpTranscriptRole, HttpVerificationRerunRequest,
+    HttpVerificationView, http_openapi_document, public_run_event_to_sse,
 };
 
 fn unavailable_session_grant_reason() -> Option<ToolApprovalSessionGrantUnavailableReason> {
@@ -2011,6 +2012,7 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
         gap_facts: Vec::new(),
         live_provisional_anchor: None,
         task_control: None,
+        plan_review: None,
     });
 
     let path = format!("/sessions/{session_id}/display?limit=1");
@@ -2131,6 +2133,144 @@ async fn local_server_pages_canonical_display_without_private_session_fields() {
             (Some("eyJzY2hlbWFfdmVyc2lvbiI6MX0".to_owned()), 50),
         ]
     );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempotently() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    let (status, session) = http_raw_request(
+        address,
+        http_post(
+            "/sessions",
+            Some("secret-token"),
+            &json!({"label": "plan review"}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_id = session["id"].as_str().expect("session id");
+    let plan_hash = format!("sha256:{}", "a".repeat(64));
+    driver.set_conversation_display_page(HttpConversationDisplayPage {
+        schema_version: 1,
+        request_scope: session_id.to_owned(),
+        through_session_stream_sequence: "5".to_owned(),
+        terminal_frontier: None,
+        total_items: "0".to_owned(),
+        items: Vec::new(),
+        next_cursor: None,
+        has_more: false,
+        gap_facts: Vec::new(),
+        live_provisional_anchor: None,
+        task_control: None,
+        plan_review: Some(HttpPlanReview {
+            plan_id: "plan-review-1".to_owned(),
+            plan_hash: Some(plan_hash.clone()),
+            status: HttpPlanReviewStatus::DraftReady,
+            summary: Some("Refactor the recovery binding".to_owned()),
+            step_count: Some(2),
+            target_path_count: Some(1),
+            suggested_check_count: Some(0),
+            risk: None,
+            allowed_actions: vec![
+                HttpPlanAction::Run,
+                HttpPlanAction::Save,
+                HttpPlanAction::Revise,
+                HttpPlanAction::Reject,
+            ],
+            source: HttpPlanReviewSource::AutomaticConversationRoute,
+            stale: false,
+        }),
+    });
+
+    let path = format!("/sessions/{session_id}/display?limit=1");
+    let (status, body) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["plan_review"]["plan_id"], "plan-review-1");
+    assert_eq!(body["plan_review"]["plan_hash"], plan_hash);
+    assert_eq!(body["plan_review"]["status"], "draft_ready");
+    assert_eq!(body["plan_review"]["allowed_actions"][0], "run");
+    assert!(body["plan_review"].get("summary").is_some());
+    assert!(body["plan_review"].get("stale").is_some());
+
+    let command = HttpCommandEnvelope::new(
+        "plan-decision-command-1",
+        "desktop-client",
+        session_id,
+        HttpPlanDecisionRequest {
+            plan_id: "plan-review-1".to_owned(),
+            expected_plan_hash: plan_hash.clone(),
+            action: HttpPlanDecisionAction::Run,
+            permission_grant: None,
+        },
+    );
+    let body = serde_json::to_string(&command).expect("plan decision command should serialize");
+    let (status, receipt) = http_raw_request(
+        address,
+        http_post(
+            &format!("/sessions/{session_id}/plan-decision"),
+            Some("secret-token"),
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(receipt["command_id"], "plan-decision-command-1");
+    assert_eq!(receipt["client_id"], "desktop-client");
+    assert_eq!(receipt["session_id"], session_id);
+    assert_eq!(receipt["plan_id"], "plan-review-1");
+    assert_eq!(receipt["plan_hash"], plan_hash);
+    assert_eq!(receipt["action"], "run");
+    assert_eq!(receipt["replayed"], false);
+
+    let (status, replay) = http_raw_request(
+        address,
+        http_post(
+            &format!("/sessions/{session_id}/plan-decision"),
+            Some("secret-token"),
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(replay["command_id"], "plan-decision-command-1");
+    assert_eq!(replay["plan_id"], "plan-review-1");
+    assert_eq!(replay["replayed"], true);
+
+    let decisions = driver.plan_decisions();
+    assert_eq!(
+        decisions.len(),
+        1,
+        "replayed command must not re-drive the decision"
+    );
+    assert_eq!(decisions[0].plan_id, "plan-review-1");
+    assert_eq!(decisions[0].expected_plan_hash, plan_hash);
+    assert_eq!(decisions[0].action, HttpPlanDecisionAction::Run);
+
+    let missing = HttpCommandEnvelope::new(
+        "plan-decision-unauthorized",
+        "desktop-client",
+        session_id,
+        HttpPlanDecisionRequest {
+            plan_id: "plan-review-1".to_owned(),
+            expected_plan_hash: plan_hash,
+            action: HttpPlanDecisionAction::Save,
+            permission_grant: None,
+        },
+    );
+    let body = serde_json::to_string(&missing).expect("plan decision command should serialize");
+    let (status, body) = http_raw_request(
+        address,
+        http_post(
+            &format!("/sessions/{session_id}/plan-decision"),
+            None,
+            &body,
+        ),
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
     let _ = shutdown.send(());
 }
 
@@ -8675,6 +8815,7 @@ struct RecordingRunDriver {
     pauses: Mutex<Vec<HttpRunDriverTaskPause>>,
     terminal_cancels: Mutex<Vec<HttpRunDriverTerminalTaskCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
+    plan_decisions: Mutex<Vec<HttpPlanDecisionRequest>>,
     next_start_error: Mutex<Option<String>>,
     next_admission_error: Mutex<Option<HttpRunAdmissionError>>,
     next_session_mutation_attachment_error: Mutex<Option<HttpRunAdmissionError>>,
@@ -8742,6 +8883,10 @@ impl RecordingRunDriver {
 
     fn approvals(&self) -> Vec<HttpRunDriverApproval> {
         lock(&self.approvals).clone()
+    }
+
+    fn plan_decisions(&self) -> Vec<HttpPlanDecisionRequest> {
+        lock(&self.plan_decisions).clone()
     }
 
     fn reject_next_start(&self, message: &str) {
@@ -8970,6 +9115,25 @@ impl HttpRunDriver for RecordingRunDriver {
         }
         lock(&self.pauses).push(pause);
         Ok(())
+    }
+
+    fn plan_decision(
+        &self,
+        session: &super::HttpSessionSnapshot,
+        request: &HttpPlanDecisionRequest,
+    ) -> Result<HttpPlanDecisionCommandReceipt, HttpRunDriverError> {
+        lock(&self.plan_decisions).push(request.clone());
+        Ok(HttpPlanDecisionCommandReceipt {
+            command_id: String::new(),
+            client_id: String::new(),
+            session_id: session.id.clone(),
+            plan_id: request.plan_id.clone(),
+            plan_hash: request.expected_plan_hash.clone(),
+            action: request.action,
+            task_id: None,
+            revision_run_id: None,
+            replayed: false,
+        })
     }
 
     fn cancel_terminal_task(

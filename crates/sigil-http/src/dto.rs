@@ -406,6 +406,20 @@ pub struct HttpProviderSetupCatalog {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_model: Option<String>,
     pub manual_entry_allowed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration_rollout: Option<HttpOrchestrationRolloutSummary>,
+}
+
+/// Secret-free automatic-orchestration summary shown by setup and settings surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpOrchestrationRolloutSummary {
+    pub status: String,
+    pub routing_policy: String,
+    pub multi_agent_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_identity_digest: Option<String>,
+    pub reason: String,
 }
 
 /// Secret-bearing atomic setup request. The model always belongs to the generated connection.
@@ -1251,6 +1265,58 @@ pub struct HttpConversationDisplayPage {
     pub live_provisional_anchor: Option<HttpConversationLiveProvisionalAnchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_control: Option<HttpConversationTaskControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review: Option<HttpPlanReview>,
+}
+
+/// Bounded public plan review surface with no prompt, transcript, path, ref, or authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpPlanReview {
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    pub status: HttpPlanReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_check_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    pub allowed_actions: Vec<HttpPlanAction>,
+    pub source: HttpPlanReviewSource,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpPlanReviewStatus {
+    Started,
+    DraftReady,
+    CompletedWithoutDraft,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpPlanAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpPlanReviewSource {
+    ExplicitPlanCommand,
+    AutomaticConversationRoute,
 }
 
 impl HttpConversationDisplayPage {
@@ -1267,6 +1333,7 @@ impl HttpConversationDisplayPage {
             gap_facts: Vec::new(),
             live_provisional_anchor: None,
             task_control: page.task_control.map(Into::into),
+            plan_review: page.plan_review.map(Into::into),
         }
     }
 }
@@ -3532,5 +3599,153 @@ impl HttpTaskIntegrationAcceptanceCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
+    }
+}
+
+impl From<sigil_kernel::PublicPlanReview> for HttpPlanReview {
+    fn from(review: sigil_kernel::PublicPlanReview) -> Self {
+        Self {
+            plan_id: review.plan_id,
+            plan_hash: review.plan_hash,
+            status: review.status.into(),
+            summary: review.summary,
+            step_count: review.step_count,
+            target_path_count: review.target_path_count,
+            suggested_check_count: review.suggested_check_count,
+            risk: review.risk,
+            allowed_actions: review.allowed_actions.into_iter().map(Into::into).collect(),
+            source: review.source.into(),
+            stale: review.stale,
+        }
+    }
+}
+
+impl From<sigil_kernel::PublicPlanReviewStatus> for HttpPlanReviewStatus {
+    fn from(status: sigil_kernel::PublicPlanReviewStatus) -> Self {
+        match status {
+            sigil_kernel::PublicPlanReviewStatus::Started => Self::Started,
+            sigil_kernel::PublicPlanReviewStatus::DraftReady => Self::DraftReady,
+            sigil_kernel::PublicPlanReviewStatus::CompletedWithoutDraft => {
+                Self::CompletedWithoutDraft
+            }
+            sigil_kernel::PublicPlanReviewStatus::Failed => Self::Failed,
+            sigil_kernel::PublicPlanReviewStatus::Interrupted => Self::Interrupted,
+            sigil_kernel::PublicPlanReviewStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<sigil_kernel::PublicPlanAction> for HttpPlanAction {
+    fn from(action: sigil_kernel::PublicPlanAction) -> Self {
+        match action {
+            sigil_kernel::PublicPlanAction::Run => Self::Run,
+            sigil_kernel::PublicPlanAction::Save => Self::Save,
+            sigil_kernel::PublicPlanAction::Revise => Self::Revise,
+            sigil_kernel::PublicPlanAction::Reject => Self::Reject,
+        }
+    }
+}
+
+impl From<sigil_kernel::PublicPlanReviewSource> for HttpPlanReviewSource {
+    fn from(source: sigil_kernel::PublicPlanReviewSource) -> Self {
+        match source {
+            sigil_kernel::PublicPlanReviewSource::ExplicitPlanCommand => Self::ExplicitPlanCommand,
+            sigil_kernel::PublicPlanReviewSource::AutomaticConversationRoute => {
+                Self::AutomaticConversationRoute
+            }
+        }
+    }
+}
+
+/// Typed authenticated plan decision command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HttpPlanDecisionRequest {
+    pub plan_id: String,
+    pub expected_plan_hash: String,
+    pub action: HttpPlanDecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_grant: Option<sigil_kernel::PlanApprovalPermission>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpPlanDecisionAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
+}
+
+impl From<HttpPlanDecisionRequest> for sigil_runtime::ApplicationPlanDecisionCommand {
+    fn from(request: HttpPlanDecisionRequest) -> Self {
+        Self {
+            plan_id: request.plan_id,
+            expected_plan_hash: request.expected_plan_hash,
+            action: request.action.into(),
+            permission_grant: request.permission_grant,
+        }
+    }
+}
+
+impl From<HttpPlanDecisionAction> for sigil_runtime::ApplicationPlanAction {
+    fn from(action: HttpPlanDecisionAction) -> Self {
+        match action {
+            HttpPlanDecisionAction::Run => Self::Run,
+            HttpPlanDecisionAction::Save => Self::Save,
+            HttpPlanDecisionAction::Revise => Self::Revise,
+            HttpPlanDecisionAction::Reject => Self::Reject,
+        }
+    }
+}
+
+/// Idempotent receipt for one typed plan decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpPlanDecisionCommandReceipt {
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub action: HttpPlanDecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Run identity of the supervised revision plan review executed for a `Revise` action, so the
+    /// client can subscribe to and track the child run's event stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_run_id: Option<String>,
+    pub replayed: bool,
+}
+
+impl HttpPlanDecisionCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+impl From<sigil_runtime::ApplicationPlanDecisionReceipt> for HttpPlanDecisionCommandReceipt {
+    fn from(receipt: sigil_runtime::ApplicationPlanDecisionReceipt) -> Self {
+        let revision_run_id = receipt
+            .revision_request
+            .as_ref()
+            .map(|request| request.child_logical_run_id());
+        Self {
+            command_id: String::new(),
+            client_id: String::new(),
+            session_id: String::new(),
+            plan_id: receipt.plan_id,
+            plan_hash: receipt.plan_hash,
+            action: match receipt.action {
+                sigil_runtime::ApplicationPlanAction::Run => HttpPlanDecisionAction::Run,
+                sigil_runtime::ApplicationPlanAction::Save => HttpPlanDecisionAction::Save,
+                sigil_runtime::ApplicationPlanAction::Revise => HttpPlanDecisionAction::Revise,
+                sigil_runtime::ApplicationPlanAction::Reject => HttpPlanDecisionAction::Reject,
+            },
+            task_id: receipt.task_id,
+            revision_run_id,
+            replayed: false,
+        }
     }
 }

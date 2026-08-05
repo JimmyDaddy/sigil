@@ -7,6 +7,7 @@ use sigil_kernel::{
 };
 
 use super::*;
+use sigil_kernel::{TaskPlanEntry, TaskRunEntry};
 
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=queue-secret-value exactly";
 

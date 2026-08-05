@@ -329,6 +329,7 @@ where
             payload: RunTaskPayload::Chat {
                 result,
                 plan_mode: false,
+                plan_review: false,
                 queue_id: None,
                 provider_logical_run_id: None,
                 agent_result_continuation_thread_ids: completed_thread_ids,
@@ -349,6 +350,162 @@ where
     })
 }
 
+pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
+    run_session: &mut Session,
+    action: sigil_kernel::StartPlanReviewAction,
+    agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
+    options: AgentRunOptions,
+    tool_registry: sigil_kernel::ToolRegistry,
+    workspace_snapshot_id: Option<String>,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: sigil_kernel::RunCancellationHandle,
+) -> std::result::Result<sigil_kernel::AgentRunResult, String>
+where
+    H: sigil_kernel::EventHandler + Send,
+    A: sigil_kernel::ApprovalHandler + Send,
+{
+    let request = sigil_runtime::PlanReviewCoordinator::prepare_automatic_plan_review(
+        run_session,
+        &action,
+        workspace_snapshot_id,
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("failed to prepare plan review: {error:#}"))?;
+    run_prepared_plan_review(
+        run_session,
+        &request,
+        agent,
+        options,
+        tool_registry,
+        handler,
+        approval_handler,
+        cancellation_handle,
+    )
+    .await
+}
+
+/// Runs an already-prepared plan review (automatic decision or revision) and commits the typed
+/// draft to the parent session.
+pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
+    run_session: &mut Session,
+    request: &sigil_runtime::PlanReviewRunRequest,
+    agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
+    options: AgentRunOptions,
+    tool_registry: sigil_kernel::ToolRegistry,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: sigil_kernel::RunCancellationHandle,
+) -> std::result::Result<sigil_kernel::AgentRunResult, String>
+where
+    H: sigil_kernel::EventHandler + Send,
+    A: sigil_kernel::ApprovalHandler + Send,
+{
+    sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(
+        run_session,
+        request,
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
+    let outcome = match sigil_runtime::PlanReviewCoordinator::run_plan_review(
+        run_session,
+        request,
+        agent,
+        options,
+        tool_registry,
+        handler,
+        approval_handler,
+        cancellation_handle,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let close = sigil_runtime::PlanReviewCoordinator::close_plan_review_run_if_open(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::Failed(
+                    "plan review run failed before an outcome".to_owned(),
+                ),
+                current_unix_time_ms(),
+            );
+            return Err(match close {
+                Ok(()) => format!("plan review run failed: {error:#}"),
+                Err(close_error) => format!(
+                    "plan review run failed ({error:#}) and its terminal closure also failed ({close_error:#})"
+                ),
+            });
+        }
+    };
+    match outcome {
+        sigil_runtime::PlanReviewRunOutcome::DraftReady { draft } => {
+            sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
+                run_session,
+                &draft,
+                request,
+                current_unix_time_ms(),
+            )
+            .map_err(|error| format!("failed to commit plan review draft: {error:#}"))?;
+            Ok(sigil_kernel::AgentRunResult {
+                final_text: format!("Plan ready: {}", draft.summary),
+                tool_calls: 0,
+                final_message_id: None,
+            })
+        }
+        sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft => {
+            sigil_runtime::PlanReviewCoordinator::complete_without_draft(
+                run_session,
+                request,
+                current_unix_time_ms(),
+            )
+            .map_err(|error| format!("failed to close plan review: {error:#}"))?;
+            Ok(sigil_kernel::AgentRunResult {
+                final_text: "Plan review closed without a draft; no task was created.".to_owned(),
+                tool_calls: 0,
+                final_message_id: None,
+            })
+        }
+        sigil_runtime::PlanReviewRunOutcome::Cancelled => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::Cancelled,
+                current_unix_time_ms(),
+            )
+            .map_err(|close_error| {
+                format!(
+                    "plan review cancelled and its terminal closure also failed: {close_error:#}"
+                )
+            })?;
+            Err("plan review was cancelled before a draft".to_owned())
+        }
+        sigil_runtime::PlanReviewRunOutcome::Interrupted(error) => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::Interrupted(error.clone()),
+                current_unix_time_ms(),
+            )
+            .map_err(|close_error| {
+                format!("plan review interrupted ({error}) and its terminal closure also failed: {close_error:#}")
+            })?;
+            Err(error)
+        }
+        sigil_runtime::PlanReviewRunOutcome::Failed(error) => {
+            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
+                run_session,
+                request,
+                &sigil_runtime::PlanReviewRunOutcome::Failed(error.clone()),
+                current_unix_time_ms(),
+            )
+            .map_err(|close_error| {
+                format!("plan review failed ({error}) and its terminal closure also failed: {close_error:#}")
+            })?;
+            Err(error)
+        }
+    }
+}
+
 pub(in crate::runner) fn agent_result_continuation_run_result(
     output: sigil_kernel::AgentRunOutput,
 ) -> std::result::Result<sigil_kernel::AgentRunResult, String> {
@@ -362,6 +519,12 @@ pub(in crate::runner) fn agent_result_continuation_run_result(
         }
         AgentRunDisposition::StartDurableTask(_) => {
             Err("agent result continuation cannot hand off to a durable task".to_owned())
+        }
+        AgentRunDisposition::StartPlanReview(_) => {
+            Err("agent result continuation cannot start a plan review".to_owned())
+        }
+        AgentRunDisposition::PlanReviewDraftSubmitted(_) => {
+            Err("agent result continuation cannot submit a plan review draft".to_owned())
         }
         AgentRunDisposition::TaskPlanAccepted => {
             Err("agent result continuation cannot accept a task plan".to_owned())
@@ -488,8 +651,13 @@ where
                 &root_config.agent.runtime_provider,
                 &root_config.agent.model,
                 sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
-            ));
+            ))
+            .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
+                provider_supports_routing_tools: agent.provider_capabilities().supports_tool_stream,
+                route_qualified: sigil_runtime::route_qualification_evidence(root_config),
+            });
     let task_root_config = root_config.clone();
+    let plan_review_root_config = root_config.clone();
     let task_base_registry = base_registry.clone();
     let task_agent_supervisor = agent_supervisor.clone();
     let run_id = *next_run_id;
@@ -540,6 +708,7 @@ where
                     AgentRunDisposition::FinalAnswer => RunTaskPayload::Chat {
                         result: Ok(output.result),
                         plan_mode: false,
+                        plan_review: false,
                         queue_id: Some(queue_id.clone()),
                         provider_logical_run_id: None,
                         agent_result_continuation_thread_ids: Vec::new(),
@@ -588,6 +757,7 @@ where
                                 RunTaskPayload::Chat {
                                     result: Err(error),
                                     plan_mode: false,
+                                    plan_review: false,
                                     queue_id: Some(queue_id.clone()),
                                     provider_logical_run_id: None,
                                     agent_result_continuation_thread_ids: Vec::new(),
@@ -598,6 +768,7 @@ where
                     AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
                         result: Err("run was interrupted before a final answer".to_owned()),
                         plan_mode: false,
+                        plan_review: false,
                         queue_id: Some(queue_id.clone()),
                         provider_logical_run_id: None,
                         agent_result_continuation_thread_ids: Vec::new(),
@@ -605,6 +776,7 @@ where
                     AgentRunDisposition::Blocked => RunTaskPayload::Chat {
                         result: Err("run was blocked before a final answer".to_owned()),
                         plan_mode: false,
+                        plan_review: false,
                         queue_id: Some(queue_id.clone()),
                         provider_logical_run_id: None,
                         agent_result_continuation_thread_ids: Vec::new(),
@@ -612,6 +784,52 @@ where
                     AgentRunDisposition::TaskPlanAccepted => RunTaskPayload::Chat {
                         result: Err("task planning completed outside a task run".to_owned()),
                         plan_mode: false,
+                        plan_review: false,
+                        queue_id: Some(queue_id.clone()),
+                        provider_logical_run_id: None,
+                        agent_result_continuation_thread_ids: Vec::new(),
+                    },
+                    AgentRunDisposition::StartPlanReview(action) => {
+                        let _ = run_message_tx.send(WorkerMessage::PlanRunStarted {
+                            prompt: format!("plan review {}", action.plan_review_id.as_str()),
+                        });
+                        let plan_registry = sigil_runtime::build_plan_review_tool_registry(
+                            agent.tool_registry(),
+                            &plan_review_root_config,
+                        )
+                        .into_registry();
+                        let result = run_automatic_plan_review(
+                            &mut run_session,
+                            action,
+                            agent.as_ref(),
+                            options.clone(),
+                            plan_registry,
+                            sigil_runtime::plan_handoff_workspace_snapshot_id(
+                                &plan_review_root_config,
+                                &options.workspace_root,
+                            )
+                            .ok()
+                            .flatten(),
+                            &mut handler,
+                            &mut approval_handler,
+                            cancellation_handle.clone(),
+                        )
+                        .await;
+                        RunTaskPayload::Chat {
+                            result,
+                            plan_mode: false,
+                            plan_review: true,
+                            queue_id: Some(queue_id.clone()),
+                            provider_logical_run_id: None,
+                            agent_result_continuation_thread_ids: Vec::new(),
+                        }
+                    }
+                    AgentRunDisposition::PlanReviewDraftSubmitted(_) => RunTaskPayload::Chat {
+                        result: Err(
+                            "plan review draft submitted outside a plan review run".to_owned()
+                        ),
+                        plan_mode: false,
+                        plan_review: false,
                         queue_id: Some(queue_id.clone()),
                         provider_logical_run_id: None,
                         agent_result_continuation_thread_ids: Vec::new(),
@@ -620,6 +838,7 @@ where
                 Err(error) => RunTaskPayload::Chat {
                     result: Err(error),
                     plan_mode: false,
+                    plan_review: false,
                     queue_id: Some(queue_id.clone()),
                     provider_logical_run_id: None,
                     agent_result_continuation_thread_ids: Vec::new(),
@@ -632,6 +851,7 @@ where
             payload = match payload {
                 RunTaskPayload::Chat {
                     plan_mode,
+                    plan_review,
                     queue_id,
                     provider_logical_run_id,
                     agent_result_continuation_thread_ids,
@@ -639,6 +859,7 @@ where
                 } => RunTaskPayload::Chat {
                     result: Err(error),
                     plan_mode,
+                    plan_review,
                     queue_id,
                     provider_logical_run_id,
                     agent_result_continuation_thread_ids,
@@ -766,6 +987,7 @@ where
             payload: RunTaskPayload::Chat {
                 result,
                 plan_mode: false,
+                plan_review: false,
                 queue_id: None,
                 provider_logical_run_id: None,
                 agent_result_continuation_thread_ids: Vec::new(),

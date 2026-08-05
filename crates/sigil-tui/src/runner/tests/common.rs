@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -12,10 +12,12 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
     Agent, AgentConfig, CompactionConfig, ConnectionId, ControlEntry, McpServerConfig,
-    MemoryConfig, ModelRef, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningStreamSupport, RootConfig, SessionConfig, SessionLogEntry, Tool, ToolAccess, ToolCall,
-    ToolCategory, ToolContext, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
-    WorkspaceConfig,
+    MemoryConfig, ModelRef, OrchestrationEvalReportManifestV1, OrchestrationEvalRouteGateV1,
+    OrchestrationEvalRouteIdentityV1, OrchestrationEvalRouteStatus, PermissionConfig, Provider,
+    ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, RootConfig, SessionConfig,
+    SessionLogEntry, TaskConfig, TaskRoutingPolicy, Tool, ToolAccess, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    stable_event_hash,
 };
 
 use super::super::{
@@ -58,7 +60,12 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         execution: Default::default(),
         verification: Default::default(),
         appearance: Default::default(),
-        task: Default::default(),
+        task: TaskConfig {
+            // Ordinary chat fixtures stay explicit: the release default is now `Auto`, and only
+            // `routed_test_root_config` opts specific tests into automatic routing.
+            routing_policy: TaskRoutingPolicy::Manual,
+            ..Default::default()
+        },
         connections: BTreeMap::new(),
         web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
@@ -66,7 +73,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
 }
 
 pub(super) fn routed_test_root_config(workspace_root: &Path, model: &str) -> RootConfig {
-    let mut config = test_root_config(workspace_root, "", model);
+    let mut config = test_root_config(workspace_root, "planned", model);
     let connection_id = ConnectionId::new("test-default").expect("test connection id");
     config.config_version = sigil_kernel::CONFIG_VERSION_V2;
     config.agent.connection = Some(connection_id);
@@ -177,6 +184,94 @@ impl Drop for TestWorker {
     }
 }
 
+/// Installs a release-qualified rollout manifest for the deterministic test route once per
+/// process and points `SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST` at it.
+///
+/// The manifest qualifies `deepseek` + `planned-model` with the standard Auto task config, which
+/// matches the routed test fixtures that exercise DirectTask handoffs. Tests that use other task
+/// configs or models keep the ReviewFirst baseline.
+pub(super) fn install_qualified_rollout_manifest() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let task = TaskConfig {
+            routing_policy: TaskRoutingPolicy::Auto,
+            ..TaskConfig::default()
+        };
+        let task_config_digest = sigil_runtime::orchestration_task_config_digest(&task)
+            .expect("test task config digest");
+        let build = sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID;
+        let commit = build
+            .rsplit_once('+')
+            .expect("test build identity includes commit")
+            .1;
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let identity = OrchestrationEvalRouteIdentityV1 {
+            provider_adapter: "deepseek".to_owned(),
+            provider_kind: "deepseek".to_owned(),
+            endpoint_family: "openai_chat_completions".to_owned(),
+            canonical_model_id: "planned-model".to_owned(),
+            canonical_model_version: "Planned-Model@fp-test".to_owned(),
+            route_fingerprint: digest.clone(),
+            routing_prompt_digest: digest.clone(),
+            planner_prompt_digest: digest.clone(),
+            system_prompt_digest: digest.clone(),
+            tool_profile_contract_digest: digest.clone(),
+            task_config_digest,
+            corpus_version: "rfc-0063-orchestration-v1".to_owned(),
+            corpus_digest: digest,
+            sigil_commit: commit.to_owned(),
+            sigil_build: build.to_owned(),
+        };
+        let identity_digest =
+            stable_event_hash(serde_json::to_vec(&identity).expect("serialize route identity"));
+        let gate = OrchestrationEvalRouteGateV1 {
+            identity,
+            identity_digest,
+            status: OrchestrationEvalRouteStatus::Qualified,
+            chat_cases: 20,
+            plan_review_cases: 15,
+            direct_task_cases: 15,
+            eligible_chat_cases: 20,
+            eligible_plan_review_cases: 15,
+            eligible_direct_task_cases: 15,
+            provider_admitted_repetitions: 150,
+            completed_repetitions: 150,
+            chat_to_task_false_positive_rate_ppm: Some(0),
+            plan_review_to_task_premature_rate_ppm: Some(0),
+            direct_task_miss_rate_ppm: Some(0),
+            chat_to_plan_review_overroute_rate_ppm: Some(0),
+            plan_review_miss_rate_ppm: Some(0),
+            cases_with_majority_misroute: 0,
+            cases_with_duplicate_repetition_identity: 0,
+            hard_invariant_violations: 0,
+            reasons: Vec::new(),
+        };
+        let report = OrchestrationEvalReportManifestV1 {
+            report_schema_version: 2,
+            campaign_id: "campaign-rfc-0063-tui-test".to_owned(),
+            started_at_unix_ms: 1,
+            ended_at_unix_ms: 2,
+            requested_repetitions: 150,
+            results_jsonl_path: "private/results.jsonl".into(),
+            summary_path: "private/summary.md".into(),
+            route_gates: vec![gate],
+        };
+        let manifest = sigil_runtime::build_orchestration_rollout_manifest(&report)
+            .expect("test manifest should build");
+        let path = std::env::temp_dir().join(format!(
+            "sigil-tui-rollout-test-{}.json",
+            std::process::id()
+        ));
+        let bytes = serde_json::to_vec(&manifest).expect("manifest should serialize");
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, &bytes).expect("manifest temp write should succeed");
+        std::fs::rename(&temporary, &path).expect("manifest rename should succeed");
+        unsafe {
+            std::env::set_var("SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST", &path);
+        }
+    });
+}
+
 pub(super) fn spawn_test_worker<P>(
     root_config: RootConfig,
     session_log_path: PathBuf,
@@ -205,6 +300,7 @@ pub(super) fn spawn_test_worker_with_role_provider_builder<P>(
 where
     P: Provider + Send + Sync + 'static,
 {
+    install_qualified_rollout_manifest();
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);

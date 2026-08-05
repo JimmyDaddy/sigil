@@ -381,6 +381,9 @@ pub(in crate::runner) enum RunTaskPayload {
     Chat {
         result: std::result::Result<AgentRunResult, String>,
         plan_mode: bool,
+        /// True when the chat run was an automatic plan review whose typed draft was already
+        /// committed durably by the shared PlanReviewCoordinator.
+        plan_review: bool,
         queue_id: Option<ConversationInputQueueId>,
         /// Present only for a first foreground conversation request that may qualify for the
         /// one-shot overflow-recovery controller. Recovery runs deliberately omit it.

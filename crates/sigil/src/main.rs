@@ -17,7 +17,7 @@ use std::io;
 #[cfg(not(test))]
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::StreamExt;
 use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig, HttpServerInfo};
@@ -154,6 +154,18 @@ enum Commands {
         #[command(subcommand)]
         command: UpdateCommand,
     },
+    /// Apply one typed plan decision (Run | Save | Revise | Reject) to a durable session that is
+    /// awaiting a plan decision. The decision is hash-bound and never auto-accepts execution.
+    PlanDecision {
+        #[arg(long, value_name = "JSONL_PATH")]
+        session: PathBuf,
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long)]
+        plan_hash: String,
+        #[arg(long, value_enum)]
+        action: PlanDecisionAction,
+    },
     Serve {
         #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
         host: IpAddr,
@@ -224,6 +236,14 @@ enum Commands {
         #[arg(long)]
         max_tokens: Option<u32>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PlanDecisionAction {
+    Run,
+    Save,
+    Revise,
+    Reject,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -469,6 +489,18 @@ async fn run_main() -> Result<u8> {
         }
         Commands::Update { command } => {
             update_command(&config_path, &cwd, build, command).await?;
+        }
+        Commands::PlanDecision {
+            session,
+            plan_id,
+            plan_hash,
+            action,
+        } => {
+            println!(
+                "{}",
+                plan_decision_command(&config_path, &cwd, &session, &plan_id, &plan_hash, action)
+                    .await?
+            );
         }
         Commands::Serve {
             host,
@@ -1348,6 +1380,97 @@ fn render_serve_startup_json(info: &HttpServerInfo) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string(info)?))
 }
 
+/// Projects the bounded pending plan artifact for a headless run, if any.
+///
+/// RFC-0063 9.3: a committed draft without a decision and without a created task means the run
+/// must stop at `awaiting_plan_decision`; nothing is auto-accepted or executed.
+fn pending_plan_review_artifact(
+    session_log_path: &str,
+) -> Result<Option<sigil_runtime::machine_protocol::MachinePlanReviewArtifact>> {
+    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
+    let session = sigil_kernel::Session::load_from_store("", "", store)?;
+    let projection = session.plan_artifact_projection();
+    for (plan_id, draft) in &projection.plans {
+        if projection.latest_decision(plan_id).is_some()
+            || projection.task_created_for_plan(plan_id)
+        {
+            continue;
+        }
+        return Ok(Some(
+            sigil_runtime::machine_protocol::MachinePlanReviewArtifact {
+                plan_id: plan_id.as_str().to_owned(),
+                plan_hash: draft.plan_hash.clone(),
+                summary: draft.summary.clone(),
+                step_count: draft.steps.len(),
+                target_path_count: draft.target_paths.len(),
+                suggested_check_count: draft.suggested_checks.len(),
+                risk: draft.risk.clone(),
+            },
+        ));
+    }
+    Ok(None)
+}
+
+async fn plan_decision_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: &Path,
+    plan_id: &str,
+    plan_hash: &str,
+    action: PlanDecisionAction,
+) -> Result<String> {
+    let root_config = RootConfig::load(config_path)
+        .with_context(|| format!("failed to load config at {}", config_path.display()))?;
+    let workspace_root =
+        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let store = sigil_kernel::JsonlSessionStore::new(session_path)?;
+    let session = sigil_kernel::Session::load_from_store("", "", store)
+        .with_context(|| format!("failed to load session at {}", session_path.display()))?;
+    let action = match action {
+        PlanDecisionAction::Run => sigil_runtime::ApplicationPlanAction::Run,
+        PlanDecisionAction::Save => sigil_runtime::ApplicationPlanAction::Save,
+        PlanDecisionAction::Revise => sigil_runtime::ApplicationPlanAction::Revise,
+        PlanDecisionAction::Reject => sigil_runtime::ApplicationPlanAction::Reject,
+    };
+    let receipt = sigil_runtime::application_plan_decision(
+        &root_config,
+        &workspace_root,
+        session_path,
+        session.session_scope_id(),
+        &sigil_runtime::ApplicationPlanDecisionCommand {
+            plan_id: plan_id.to_owned(),
+            expected_plan_hash: plan_hash.to_owned(),
+            action,
+            permission_grant: None,
+        },
+    )
+    .with_context(|| "plan decision was rejected by the durable session".to_owned())?;
+    let rendered = serde_json::to_string_pretty(&CliPlanDecisionReceipt {
+        command: "plan_decision",
+        plan_id: receipt.plan_id,
+        plan_hash: receipt.plan_hash,
+        action: match receipt.action {
+            sigil_runtime::ApplicationPlanAction::Run => "run",
+            sigil_runtime::ApplicationPlanAction::Save => "save",
+            sigil_runtime::ApplicationPlanAction::Revise => "revise",
+            sigil_runtime::ApplicationPlanAction::Reject => "reject",
+        },
+        task_id: receipt.task_id,
+    })
+    .context("failed to serialize plan decision receipt")?;
+    Ok(rendered)
+}
+
+#[derive(serde::Serialize)]
+struct CliPlanDecisionReceipt {
+    command: &'static str,
+    plan_id: String,
+    plan_hash: String,
+    action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+}
+
 fn cli_application_run_request(
     config_path: &Path,
     launch_cwd: &Path,
@@ -1644,6 +1767,7 @@ where
                         final_text: String::new(),
                         route_transition: None,
                         session_log_path,
+                        plan_review: None,
                     }),
                     MachineExitCode::Cancelled,
                 )
@@ -1676,11 +1800,23 @@ where
     }
     match executed {
         Ok(run) => {
-            let status = match run.terminal_status {
+            let mut status = match run.terminal_status {
                 ApplicationRunTerminalStatus::Succeeded => MachineRunStatus::Succeeded,
                 ApplicationRunTerminalStatus::Interrupted
                 | ApplicationRunTerminalStatus::Blocked => MachineRunStatus::Failed,
             };
+            // RFC-0063 9.3: a headless run that committed a plan draft without a decision must
+            // terminate as `awaiting_plan_decision`, never auto-accept or execute.
+            let plan_review = match pending_plan_review_artifact(&session_log_path) {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    eprintln!("sigil run: pending plan artifact projection failed: {error:#}");
+                    None
+                }
+            };
+            if plan_review.is_some() {
+                status = MachineRunStatus::AwaitingPlanDecision;
+            }
             let result = MachineRunResult {
                 session_id: run.session_id,
                 run_id: run.run_id,
@@ -1692,6 +1828,7 @@ where
                     ),
                 ),
                 session_log_path,
+                plan_review,
             };
             write_machine_terminal(
                 handler.writer,
@@ -2133,6 +2270,8 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
         | PublicRunEventKind::RunFinished { .. }
         | PublicRunEventKind::TaskRunFinished { .. }
         | PublicRunEventKind::TaskRoutingChanged { .. }
+        | PublicRunEventKind::ConversationRouteChanged { .. }
+        | PublicRunEventKind::PlanReviewChanged { .. }
         | PublicRunEventKind::TaskPhaseChanged { .. }
         | PublicRunEventKind::TaskPlanUpdated { .. }
         | PublicRunEventKind::TaskBatchChanged { .. }

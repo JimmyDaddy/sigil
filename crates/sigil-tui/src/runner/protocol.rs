@@ -277,6 +277,14 @@ pub enum WorkerCommand {
         plan_id: String,
         expected_plan_hash: String,
     },
+    SavePlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
+    RevisePlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
@@ -661,6 +669,10 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     PlanRejected {
+        entry: PlanDecisionRecordedEntry,
+        entries: Vec<SessionLogEntry>,
+    },
+    PlanSaved {
         entry: PlanDecisionRecordedEntry,
         entries: Vec<SessionLogEntry>,
     },

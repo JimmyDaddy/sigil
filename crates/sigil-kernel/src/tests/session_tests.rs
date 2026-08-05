@@ -3473,6 +3473,7 @@ fn plan_artifact_projection_replays_durable_stream_records() -> Result<()> {
             session_ref: Some("first.jsonl".to_owned()),
             run_id: Some("run_first".to_owned()),
             final_message_id: Some("msg_first".to_owned()),
+            ..PlanSourceRef::default()
         },
         10,
         Some("snapshot_first".to_owned()),
@@ -3491,6 +3492,7 @@ fn plan_artifact_projection_replays_durable_stream_records() -> Result<()> {
             session_ref: Some("session.jsonl".to_owned()),
             run_id: Some("run_v2".to_owned()),
             final_message_id: Some("msg_v2".to_owned()),
+            ..PlanSourceRef::default()
         },
         20,
         Some("snapshot_v2".to_owned()),

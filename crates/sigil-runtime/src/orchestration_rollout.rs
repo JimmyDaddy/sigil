@@ -9,12 +9,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    MultiAgentMode, ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM,
-    ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM, ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES,
-    ORCHESTRATION_EVAL_MIN_POSITIVE_CASES, ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE,
-    ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION, OrchestrationEvalReportManifestV1,
-    OrchestrationEvalRouteGateV1, OrchestrationEvalRouteStatus, RootConfig, TaskConfig,
-    TaskRoutingPolicy, stable_event_hash,
+    MultiAgentMode, ORCHESTRATION_EVAL_MAX_CHAT_TO_TASK_FP_RATE_PPM,
+    ORCHESTRATION_EVAL_MAX_DIRECT_TASK_MISS_RATE_PPM,
+    ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_TO_TASK_RATE_PPM, ORCHESTRATION_EVAL_MIN_CHAT_CASES,
+    ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES, ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES,
+    ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE, ORCHESTRATION_EVAL_REPORT_SCHEMA_VERSION,
+    OrchestrationEvalReportManifestV1, OrchestrationEvalRouteGateV1, OrchestrationEvalRouteStatus,
+    RootConfig, TaskConfig, TaskRoutingPolicy, stable_event_hash,
 };
 
 use crate::{
@@ -256,6 +257,15 @@ pub fn new_install_orchestration_rollout_decision_for_config(
     new_install_orchestration_rollout_decision_for_config_and_task(root_config, &root_config.task)
 }
 
+/// Returns true when the current exact route is qualified by the release rollout manifest.
+///
+/// This is the runtime capability evidence used to grant `DirectTask`: without a matching
+/// qualified manifest the automatic route stays at the `ReviewFirst` baseline.
+#[must_use]
+pub fn route_qualification_evidence(root_config: &RootConfig) -> bool {
+    new_install_orchestration_rollout_decision_for_config(root_config).is_qualified()
+}
+
 /// Stable digest used by both eval reports and new-install route matching.
 ///
 /// # Errors
@@ -477,19 +487,24 @@ fn validate_qualified_route_gate(
 ) -> Result<()> {
     if gate.status != OrchestrationEvalRouteStatus::Qualified
         || !gate.reasons.is_empty()
-        || gate.negative_cases < ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES
-        || gate.positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES
-        || gate.eligible_negative_cases < ORCHESTRATION_EVAL_MIN_NEGATIVE_CASES
-        || gate.eligible_positive_cases < ORCHESTRATION_EVAL_MIN_POSITIVE_CASES
+        || gate.chat_cases < ORCHESTRATION_EVAL_MIN_CHAT_CASES
+        || gate.plan_review_cases < ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES
+        || gate.direct_task_cases < ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES
+        || gate.eligible_chat_cases < ORCHESTRATION_EVAL_MIN_CHAT_CASES
+        || gate.eligible_plan_review_cases < ORCHESTRATION_EVAL_MIN_PLAN_REVIEW_CASES
+        || gate.eligible_direct_task_cases < ORCHESTRATION_EVAL_MIN_DIRECT_TASK_CASES
         || gate.cases_with_majority_misroute != 0
         || gate.cases_with_duplicate_repetition_identity != 0
         || gate.hard_invariant_violations != 0
         || gate
-            .false_positive_rate_ppm
-            .is_none_or(|rate| rate > ORCHESTRATION_EVAL_MAX_FALSE_POSITIVE_RATE_PPM)
+            .chat_to_task_false_positive_rate_ppm
+            .is_none_or(|rate| rate > ORCHESTRATION_EVAL_MAX_CHAT_TO_TASK_FP_RATE_PPM)
         || gate
-            .positive_miss_rate_ppm
-            .is_none_or(|rate| rate > ORCHESTRATION_EVAL_MAX_POSITIVE_MISS_RATE_PPM)
+            .plan_review_to_task_premature_rate_ppm
+            .is_none_or(|rate| rate > ORCHESTRATION_EVAL_MAX_PLAN_REVIEW_TO_TASK_RATE_PPM)
+        || gate
+            .direct_task_miss_rate_ppm
+            .is_none_or(|rate| rate > ORCHESTRATION_EVAL_MAX_DIRECT_TASK_MISS_RATE_PPM)
     {
         bail!(
             "orchestration route {} is not qualified for rollout",
@@ -497,8 +512,9 @@ fn validate_qualified_route_gate(
         );
     }
     let minimum_repetitions = gate
-        .eligible_negative_cases
-        .checked_add(gate.eligible_positive_cases)
+        .eligible_chat_cases
+        .checked_add(gate.eligible_plan_review_cases)
+        .and_then(|cases| cases.checked_add(gate.eligible_direct_task_cases))
         .and_then(|cases| cases.checked_mul(ORCHESTRATION_EVAL_MIN_REPETITIONS_PER_CASE))
         .context("orchestration route repetition count overflow")?;
     if gate.provider_admitted_repetitions < minimum_repetitions

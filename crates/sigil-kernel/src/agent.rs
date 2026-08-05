@@ -4,19 +4,27 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    FrozenProviderRequestMaterial, RuntimeContextCandidates,
+    FrozenProviderRequestMaterial, PlanId, RuntimeContextCandidates,
     approval::{
         APPROVAL_REQUEST_NO_EXPIRY_MS, ApprovalHandler, ApprovalRequestIdentityV2,
         AutoApproveHandler, ToolApproval, ToolApprovalContext,
     },
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig, TaskRoutingPolicy},
+    conversation_route::{
+        AutomaticRouteCapability, ConversationRouteDecisionId, PlanReviewAttemptId,
+        PlanReviewDraftContext, PlanReviewHandoffBinding, PlanReviewId,
+        REQUEST_PLAN_REVIEW_TOOL_NAME, SUBMIT_PLAN_DRAFT_TOOL_NAME,
+        conversation_route_routing_contract_material,
+        direct_conversation_continuation_prompt_contract_material, request_plan_review_tool_spec,
+        submit_plan_draft_tool_spec,
+    },
     event::{EventHandler, RunEvent},
     permission::{
         ApprovalMode, InteractionMode, PathTrustZone, PermissionConfig,
@@ -37,9 +45,7 @@ use crate::{
     task_handoff::{
         CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ConversationTurnRef,
         REQUEST_TASK_PLANNING_TOOL_NAME, TaskHandoffId, TaskPlanningHandoffBinding,
-        continue_without_task_planning_tool_spec,
-        direct_conversation_continuation_prompt_contract_material, request_task_planning_tool_spec,
-        task_routing_system_prompt_contract_material,
+        continue_without_task_planning_tool_spec, request_task_planning_tool_spec,
     },
     task_orchestrator::{
         task_participant_finalization_prompt_contract_material,
@@ -57,6 +63,8 @@ use crate::permission::PermissionPolicy;
 
 mod approval_policy;
 mod assistant_messages;
+mod plan_draft;
+mod plan_review;
 mod preview;
 mod provider_stream;
 mod readiness;
@@ -71,6 +79,14 @@ use approval_policy::{
     plan_approval_decision_override, tool_session_grant_decision_override,
 };
 use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
+use plan_draft::{
+    append_tool_ignored_after_plan_draft, handle_submit_plan_draft_call,
+    submit_plan_draft_call_is_accepted,
+};
+use plan_review::{
+    append_tool_ignored_after_plan_review_decision, handle_request_plan_review_call,
+    plan_review_call_is_accepted,
+};
 use preview::{
     approval_permission_signature, capture_tool_preview_for_decision,
     pending_interactive_approval_identity, preparation_plan_approval_identity,
@@ -222,6 +238,7 @@ pub struct AgentRunResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRunPurpose {
     Conversation(Box<ConversationPurposeContext>),
+    PlanReview(PlanReviewPurposeContext),
     TaskPlanner(TaskPlannerContext),
     TaskParticipant(TaskParticipantContext),
     TaskSynthesis(TaskSynthesisContext),
@@ -233,7 +250,25 @@ pub struct ConversationPurposeContext {
     pub root_run_id: String,
     pub source_turn: ConversationTurnRef,
     pub routing_policy: TaskRoutingPolicy,
+    /// Effective automatic route capability derived from exact provider/model/build evidence.
+    pub route_capability: AutomaticRouteCapability,
+    /// Direct durable task handoff binding; present only when the capability allows DirectTask.
     pub task_handoff: Option<TaskPlanningHandoffBinding>,
+    /// Plan review handoff binding; present whenever automatic routing may choose PlanReview.
+    pub plan_review: Option<PlanReviewHandoffBinding>,
+}
+
+/// Purpose binding for one read-only plan review run.
+///
+/// The run produces a `PlanDraftCreated` awaiting a user decision; it never creates a TaskRun,
+/// executes write steps, or obtains parent final execution authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReviewPurposeContext {
+    pub plan_review_id: PlanReviewId,
+    pub attempt_id: PlanReviewAttemptId,
+    pub plan_id: PlanId,
+    pub source_turn: ConversationTurnRef,
+    pub route_decision_id: Option<ConversationRouteDecisionId>,
 }
 
 /// Purpose binding for the internal task planner.
@@ -264,10 +299,35 @@ pub struct TaskSynthesisContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRunDisposition {
     FinalAnswer,
+    StartPlanReview(StartPlanReviewAction),
+    PlanReviewDraftSubmitted(PlanReviewDraftSubmittedAction),
     StartDurableTask(StartDurableTaskAction),
     TaskPlanAccepted,
     Interrupted,
     Blocked,
+}
+
+/// Stable action emitted after a PlanReview route decision is accepted.
+///
+/// Carries only host-bound identity/reference; the caller continues the read-only plan review
+/// lifecycle through the shared runtime coordinator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartPlanReviewAction {
+    pub decision_id: ConversationRouteDecisionId,
+    pub plan_review_id: PlanReviewId,
+    pub plan_id: PlanId,
+    pub source_turn: ConversationTurnRef,
+}
+
+/// Stable action emitted when a plan review run submitted a validated typed draft.
+///
+/// The draft itself is recorded on the plan review run session; this action only carries identity
+/// so the runtime coordinator can commit the draft and attempt status to the parent session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReviewDraftSubmittedAction {
+    pub plan_review_id: PlanReviewId,
+    pub attempt_id: PlanReviewAttemptId,
+    pub plan_id: PlanId,
 }
 
 /// Stable action emitted after a durable conversation-to-task handoff is accepted.
@@ -287,6 +347,7 @@ pub struct AgentRunInput {
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
+    pub plan_review_draft: Option<PlanReviewDraftContext>,
     pub task_guidance_assessment: Option<TaskGuidanceAssessmentContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     pub purpose: Option<AgentRunPurpose>,
@@ -395,6 +456,7 @@ impl AgentRunInput {
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            plan_review_draft: None,
             task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
@@ -425,6 +487,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            plan_review_draft: None,
             task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
@@ -454,6 +517,7 @@ impl AgentRunInput {
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
+            plan_review_draft: None,
             task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
@@ -522,6 +586,13 @@ impl AgentRunInput {
             }));
         }
         self.task_plan_update = Some(context);
+        self
+    }
+
+    /// Binds the typed plan review draft context for a read-only plan review run.
+    #[must_use]
+    pub fn with_plan_review_draft(mut self, context: PlanReviewDraftContext) -> Self {
+        self.plan_review_draft = Some(context);
         self
     }
 
@@ -738,6 +809,54 @@ fn validate_initial_frozen_task_routing_request(
     session: &Session,
     frozen_request: &FrozenProviderRequestMaterial,
     binding: &TaskPlanningHandoffBinding,
+    route_capability: AutomaticRouteCapability,
+    options: &AgentRunOptions,
+    max_output_tokens: Option<u32>,
+    transient_context: &[ModelMessage],
+    runtime_context: RuntimeContextCandidates,
+) -> Result<()> {
+    validate_initial_frozen_routing_request(
+        session,
+        frozen_request,
+        &binding.source_turn,
+        &binding.objective,
+        route_surface_tool_specs(route_capability),
+        options,
+        max_output_tokens,
+        transient_context,
+        runtime_context,
+    )
+}
+
+fn validate_initial_frozen_plan_review_routing_request(
+    session: &Session,
+    frozen_request: &FrozenProviderRequestMaterial,
+    binding: &PlanReviewHandoffBinding,
+    route_capability: AutomaticRouteCapability,
+    options: &AgentRunOptions,
+    max_output_tokens: Option<u32>,
+    transient_context: &[ModelMessage],
+    runtime_context: RuntimeContextCandidates,
+) -> Result<()> {
+    validate_initial_frozen_routing_request(
+        session,
+        frozen_request,
+        &binding.source_turn,
+        &binding.objective,
+        route_surface_tool_specs(route_capability),
+        options,
+        max_output_tokens,
+        transient_context,
+        runtime_context,
+    )
+}
+
+fn validate_initial_frozen_routing_request(
+    session: &Session,
+    frozen_request: &FrozenProviderRequestMaterial,
+    source_turn: &ConversationTurnRef,
+    objective: &str,
+    tool_specs: Vec<ToolSpec>,
     options: &AgentRunOptions,
     max_output_tokens: Option<u32>,
     transient_context: &[ModelMessage],
@@ -748,19 +867,19 @@ fn validate_initial_frozen_task_routing_request(
         .entries()
         .iter()
         .find_map(|entry| match entry {
-            SessionLogEntry::User(message) if message.id == binding.source_turn.message_id => {
+            SessionLogEntry::User(message) if message.id == source_turn.message_id => {
                 Some(message.clone())
             }
             _ => None,
         })
         .ok_or_else(|| {
-            anyhow!("automatic task routing frozen request source is not durable in the session")
+            anyhow!("automatic routing frozen request source is not durable in the session")
         })?;
     if durable_user.role != crate::MessageRole::User
-        || durable_user.content.as_deref() != Some(binding.objective.as_str())
+        || durable_user.content.as_deref() != Some(objective)
     {
         return Err(anyhow!(
-            "automatic task routing frozen request source conflicts with its handoff binding"
+            "automatic routing frozen request source conflicts with its routing binding"
         ));
     }
 
@@ -769,13 +888,11 @@ fn validate_initial_frozen_task_routing_request(
         .messages
         .iter()
         .enumerate()
-        .filter_map(|(index, message)| {
-            (message.id == binding.source_turn.message_id).then_some(index)
-        })
+        .filter_map(|(index, message)| (message.id == source_turn.message_id).then_some(index))
         .collect::<Vec<_>>();
     let [message_index] = matching_indices.as_slice() else {
         return Err(anyhow!(
-            "automatic task routing frozen request must contain its exact source turn once"
+            "automatic routing frozen request must contain its exact source turn once"
         ));
     };
     let exact_user = &normalized_request.messages[*message_index];
@@ -793,19 +910,16 @@ fn validate_initial_frozen_task_routing_request(
         || exact_user.image_attachments != durable_user.image_attachments
     {
         return Err(anyhow!(
-            "automatic task routing frozen request source shape conflicts with the durable turn"
+            "automatic routing frozen request source shape conflicts with the durable turn"
         ));
     }
     normalized_request.messages[*message_index] = durable_user;
-    normalize_task_routing_system_message_id(&mut normalized_request)?;
+    normalize_routing_system_message_id(&mut normalized_request)?;
 
     let mut expected_request = session.build_pre_turn_candidate_request(
         &options.workspace_root,
         &options.memory_config,
-        vec![
-            request_task_planning_tool_spec(),
-            continue_without_task_planning_tool_spec(),
-        ],
+        tool_specs,
         max_output_tokens,
         options.reasoning_effort.clone(),
         session.latest_response_handle(frozen_request.request().provider_name.as_str()),
@@ -814,7 +928,7 @@ fn validate_initial_frozen_task_routing_request(
         runtime_context,
         &[],
     )?;
-    normalize_task_routing_system_message_id(&mut expected_request)?;
+    normalize_routing_system_message_id(&mut expected_request)?;
     let normalized_material =
         FrozenProviderRequestMaterial::freeze(session.session_scope_id(), normalized_request)?;
     let expected_material =
@@ -823,13 +937,32 @@ fn validate_initial_frozen_task_routing_request(
         != expected_material.canonical_bytes_for_in_process_use()
     {
         return Err(anyhow!(
-            "caller-frozen initial provider request does not match automatic task routing"
+            "caller-frozen initial provider request does not match automatic routing"
         ));
     }
     Ok(())
 }
 
-fn normalize_task_routing_system_message_id(request: &mut crate::CompletionRequest) -> Result<()> {
+/// Frozen tool surface for one automatic route capability.
+///
+/// `ReviewFirst` never exposes the direct durable task decision; `DirectTask` exposes all three.
+#[must_use]
+pub fn route_surface_tool_specs(capability: AutomaticRouteCapability) -> Vec<ToolSpec> {
+    match capability {
+        AutomaticRouteCapability::Unsupported => Vec::new(),
+        AutomaticRouteCapability::ReviewFirst => vec![
+            request_plan_review_tool_spec(),
+            continue_without_task_planning_tool_spec(),
+        ],
+        AutomaticRouteCapability::DirectTask => vec![
+            request_plan_review_tool_spec(),
+            request_task_planning_tool_spec(),
+            continue_without_task_planning_tool_spec(),
+        ],
+    }
+}
+
+fn normalize_routing_system_message_id(request: &mut crate::CompletionRequest) -> Result<()> {
     let matching_indices = request
         .messages
         .iter()
@@ -837,13 +970,13 @@ fn normalize_task_routing_system_message_id(request: &mut crate::CompletionReque
         .filter_map(|(index, message)| {
             (message.role == crate::MessageRole::System
                 && message.content.as_deref()
-                    == Some(task_routing_system_prompt_contract_material()))
+                    == Some(conversation_route_routing_contract_material()))
             .then_some(index)
         })
         .collect::<Vec<_>>();
     let [message_index] = matching_indices.as_slice() else {
         return Err(anyhow!(
-            "automatic task routing request must contain its system contract once"
+            "automatic routing request must contain its system contract once"
         ));
     };
     let message = &mut request.messages[*message_index];
@@ -853,10 +986,63 @@ fn normalize_task_routing_system_message_id(request: &mut crate::CompletionReque
         || !message.image_attachments.is_empty()
     {
         return Err(anyhow!(
-            "automatic task routing system contract has an invalid message shape"
+            "automatic routing system contract has an invalid message shape"
         ));
     }
-    message.id = "system:task-routing-contract-v1".to_owned();
+    message.id = "system:conversation-route-contract-v1".to_owned();
+    Ok(())
+}
+
+fn append_chat_route_decision<H>(
+    session: &mut Session,
+    handler: &mut H,
+    source_turn: &ConversationTurnRef,
+    capability: AutomaticRouteCapability,
+    route_contract_fingerprint: &str,
+    decided_at_ms: u64,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    use crate::conversation_route::{
+        ConversationRoute, ConversationRouteDecisionProjection,
+        ConversationRouteDecisionRecordedEntry, conversation_route_decision_id_for_source,
+    };
+    let projection = ConversationRouteDecisionProjection::from_entries(session.entries());
+    if projection.has_conflicts() {
+        bail!("conversation route decision projection contains conflicting durable facts");
+    }
+    let decision_id = conversation_route_decision_id_for_source(source_turn);
+    if let Some(existing) = projection.decision_id_for_source(source_turn)
+        && existing != &decision_id
+    {
+        bail!("source turn is already bound to a different route decision");
+    }
+    let entry = ConversationRouteDecisionRecordedEntry {
+        decision_id,
+        source_turn: source_turn.clone(),
+        route: ConversationRoute::Chat,
+        reason_codes: Vec::new(),
+        configured_policy: TaskRoutingPolicy::Auto,
+        effective_capability: capability,
+        policy_snapshot_hash: crate::conversation_route::plan_review_policy_snapshot_hash(),
+        route_contract_fingerprint: route_contract_fingerprint.to_owned(),
+        decided_at_ms,
+    };
+    match projection.decision(&entry.decision_id) {
+        None => {
+            let control = ControlEntry::ConversationRouteDecisionRecorded(entry);
+            session.append_control(control.clone())?;
+            handler.handle(RunEvent::Control(control))?;
+        }
+        Some(previous) if previous == &entry => {}
+        Some(_) => {
+            bail!(
+                "route decision {} has conflicting durable facts",
+                entry.decision_id.as_str()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -927,6 +1113,7 @@ pub enum AgentRunTerminalReason {
     DelegationUnsatisfied,
     TaskRoutingUnsatisfied,
     TaskHandoff,
+    PlanReviewHandoff,
 }
 
 impl AgentRunTerminalReason {
@@ -937,6 +1124,7 @@ impl AgentRunTerminalReason {
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
             Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
             Self::TaskHandoff => "task_handoff",
+            Self::PlanReviewHandoff => "plan_review_handoff",
         }
     }
 }
@@ -1397,6 +1585,7 @@ where
             mut transient_context,
             runtime_context,
             task_plan_update,
+            plan_review_draft,
             task_guidance_assessment,
             agent_delegation,
             purpose,
@@ -1422,27 +1611,51 @@ where
         let user_url_capability_registrar =
             user_url_capability_registrar.or_else(|| session.user_url_capability_registrar());
 
-        let task_handoff_binding = match purpose.as_ref() {
+        let (task_handoff_binding, plan_review_binding) = match purpose.as_ref() {
             Some(AgentRunPurpose::Conversation(context))
                 if context.routing_policy == TaskRoutingPolicy::Auto =>
             {
-                context.task_handoff.clone()
+                if !context.route_capability.routes_automatically() {
+                    return Err(anyhow!(
+                        "automatic routing cannot carry handoff bindings with capability {}",
+                        context.route_capability.as_str()
+                    ));
+                }
+                (context.task_handoff.clone(), context.plan_review.clone())
             }
             Some(AgentRunPurpose::Conversation(context)) => {
-                if context.task_handoff.is_some() {
+                if context.task_handoff.is_some() || context.plan_review.is_some() {
                     return Err(anyhow!(
                         "manual task routing cannot carry an automatic handoff binding"
                     ));
                 }
-                None
+                (None, None)
             }
             Some(
-                AgentRunPurpose::TaskPlanner(_)
+                AgentRunPurpose::PlanReview(_)
+                | AgentRunPurpose::TaskPlanner(_)
                 | AgentRunPurpose::TaskParticipant(_)
                 | AgentRunPurpose::TaskSynthesis(_),
             )
-            | None => None,
+            | None => (None, None),
         };
+        let routing_decision_pending =
+            task_handoff_binding.is_some() || plan_review_binding.is_some();
+        if let Some(context) = purpose.as_ref().and_then(|purpose| match purpose {
+            AgentRunPurpose::Conversation(context) => Some(context.as_ref()),
+            _ => None,
+        }) {
+            if task_handoff_binding.is_some() && !context.route_capability.allows_direct_task() {
+                return Err(anyhow!(
+                    "direct task handoff binding requires the DirectTask route capability"
+                ));
+            }
+            if plan_review_binding.is_some() && !context.route_capability.routes_automatically() {
+                return Err(anyhow!(
+                    "plan review binding requires an automatic route capability"
+                ));
+            }
+        }
         let agent_delegation_run_context = match purpose.as_ref() {
             Some(AgentRunPurpose::Conversation(context)) => {
                 Some(crate::AgentDelegationRunContext {
@@ -1469,22 +1682,54 @@ where
             Some(AgentRunPurpose::TaskPlanner(_) | AgentRunPurpose::TaskSynthesis(_)) | None => {
                 None
             }
+            Some(AgentRunPurpose::PlanReview(_)) => None,
         };
         let is_task_participant =
             matches!(purpose.as_ref(), Some(AgentRunPurpose::TaskParticipant(_)));
-        if task_handoff_binding.is_some()
-            && tools.spec_for(REQUEST_TASK_PLANNING_TOOL_NAME).is_some()
-        {
-            return Err(anyhow!(
-                "tool registry collides with reserved internal tool {REQUEST_TASK_PLANNING_TOOL_NAME}"
-            ));
-        }
-        if task_handoff_binding.is_some() {
+        if routing_decision_pending {
+            for reserved in [
+                REQUEST_TASK_PLANNING_TOOL_NAME,
+                REQUEST_PLAN_REVIEW_TOOL_NAME,
+            ] {
+                if tools.spec_for(reserved).is_some() {
+                    return Err(anyhow!(
+                        "tool registry collides with reserved internal tool {reserved}"
+                    ));
+                }
+            }
             transient_context.insert(
                 0,
-                ModelMessage::system(task_routing_system_prompt_contract_material()),
+                ModelMessage::system(conversation_route_routing_contract_material()),
             );
         }
+        if let Some(draft_context) = plan_review_draft.as_ref() {
+            if !matches!(purpose.as_ref(), Some(AgentRunPurpose::PlanReview(_))) {
+                return Err(anyhow!(
+                    "plan review draft context requires the PlanReview run purpose"
+                ));
+            }
+            if tools.spec_for(SUBMIT_PLAN_DRAFT_TOOL_NAME).is_some() {
+                return Err(anyhow!(
+                    "tool registry collides with reserved internal tool {SUBMIT_PLAN_DRAFT_TOOL_NAME}"
+                ));
+            }
+            if let Some(AgentRunPurpose::PlanReview(context)) = purpose.as_ref()
+                && (context.plan_review_id != draft_context.plan_review_id
+                    || context.attempt_id != draft_context.attempt_id
+                    || context.plan_id != draft_context.plan_id)
+            {
+                return Err(anyhow!(
+                    "plan review draft context does not match its run purpose binding"
+                ));
+            }
+        }
+        let route_capability = purpose
+            .as_ref()
+            .and_then(|purpose| match purpose {
+                AgentRunPurpose::Conversation(context) => Some(context.route_capability),
+                _ => None,
+            })
+            .unwrap_or(AutomaticRouteCapability::Unsupported);
         if let (Some(binding), Some(frozen_request)) = (
             task_handoff_binding.as_ref(),
             initial_frozen_provider_request.as_ref(),
@@ -1493,6 +1738,22 @@ where
                 session,
                 frozen_request,
                 binding,
+                route_capability,
+                &options,
+                max_output_tokens,
+                &transient_context,
+                runtime_context.clone(),
+            )?;
+        }
+        if let (Some(binding), Some(frozen_request)) = (
+            plan_review_binding.as_ref(),
+            initial_frozen_provider_request.as_ref(),
+        ) {
+            validate_initial_frozen_plan_review_routing_request(
+                session,
+                frozen_request,
+                binding,
+                route_capability,
                 &options,
                 max_output_tokens,
                 &transient_context,
@@ -1509,6 +1770,7 @@ where
                 ModelMessage::system(task_participant_system_prompt_contract_material()),
             ),
             Some(AgentRunPurpose::Conversation(_))
+            | Some(AgentRunPurpose::PlanReview(_))
             | Some(AgentRunPurpose::TaskSynthesis(_))
             | None => {}
         }
@@ -1642,7 +1904,7 @@ where
         let agent_delegation_enforced = agent_delegation;
         let mut satisfied_agent_tool_calls = 0usize;
         let mut delegation_retry_used = false;
-        let mut task_routing_decision_pending = task_handoff_binding.is_some();
+        let mut task_routing_decision_pending = routing_decision_pending;
         let mut task_routing_retry_used = false;
         let mut final_answer_context_key: Option<String> = None;
         let mut pending_join_context_keys: Vec<String> = Vec::new();
@@ -1732,10 +1994,7 @@ where
             let mut tool_specs = if participant_finalization_turn {
                 Vec::new()
             } else if task_routing_decision_pending {
-                vec![
-                    request_task_planning_tool_spec(),
-                    continue_without_task_planning_tool_spec(),
-                ]
+                route_surface_tool_specs(route_capability)
             } else {
                 tools
                     .specs()
@@ -1748,6 +2007,9 @@ where
                     tool_specs.push(task_plan_update_tool_spec_for_worktree(
                         context.worktree_availability,
                     ));
+                }
+                if plan_review_draft.is_some() {
+                    tool_specs.push(submit_plan_draft_tool_spec());
                 }
                 if task_guidance_assessment.is_some() {
                     tool_specs.push(task_guidance_apply_tool_spec());
@@ -1990,13 +2252,29 @@ where
                         .as_ref()
                         .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
                 });
+                let accepted_plan_draft_in_batch = !accepted_task_plan_in_batch
+                    && plan_review_draft.is_some()
+                    && completed_calls.iter().any(|call| {
+                        plan_review_draft.as_ref().is_some_and(|context| {
+                            submit_plan_draft_call_is_accepted(context, call)
+                        })
+                    });
                 let accepted_task_handoff_in_batch = task_routing_decision_pending
                     && task_handoff_binding.is_some()
                     && completed_calls
                         .iter()
                         .any(task_planning_request_call_is_accepted);
+                let accepted_plan_review_in_batch = task_routing_decision_pending
+                    && !accepted_task_handoff_in_batch
+                    && plan_review_binding.is_some()
+                    && completed_calls.iter().any(|call| {
+                        plan_review_binding
+                            .as_ref()
+                            .is_some_and(|binding| plan_review_call_is_accepted(binding, call))
+                    });
                 let accepted_direct_conversation_in_batch = task_routing_decision_pending
                     && !accepted_task_handoff_in_batch
+                    && !accepted_plan_review_in_batch
                     && completed_calls
                         .iter()
                         .any(continue_without_task_planning_call_is_accepted);
@@ -2011,7 +2289,9 @@ where
                     delegate.set_join_batch_eligibility(&completed_calls);
                 }
                 let mut accepted_task_plan = false;
+                let mut accepted_plan_draft = false;
                 let mut accepted_task_handoff = None;
+                let mut accepted_plan_review = None;
                 let mut accepted_direct_conversation = false;
                 let mut accepted_task_guidance = false;
                 let mut assistant_batch_results: Vec<(crate::ToolCall, ToolResult)> = Vec::new();
@@ -2023,6 +2303,18 @@ where
                             || accepted_task_handoff.is_some())
                     {
                         append_tool_ignored_after_task_handoff(
+                            session,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut outcome,
+                            &call,
+                        )?;
+                        continue;
+                    }
+                    if accepted_plan_review_in_batch
+                        && (call.name != REQUEST_PLAN_REVIEW_TOOL_NAME
+                            || accepted_plan_review.is_some())
+                    {
+                        append_tool_ignored_after_plan_review_decision(
                             session,
                             &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
@@ -2044,6 +2336,15 @@ where
                     }
                     if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
                         append_tool_ignored_after_task_plan_acceptance(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                        )?;
+                        continue;
+                    }
+                    if accepted_plan_draft_in_batch && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME {
+                        append_tool_ignored_after_plan_draft(
                             session,
                             handler,
                             &mut outcome,
@@ -2145,6 +2446,62 @@ where
                         )?;
                         continue;
                     }
+                    if call.name == REQUEST_PLAN_REVIEW_TOOL_NAME {
+                        if !task_routing_decision_pending {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "request_plan_review is not available after the routing microturn",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        }
+                        let Some(binding) = plan_review_binding.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "request_plan_review is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        };
+                        accepted_plan_review = handle_request_plan_review_call(
+                            session,
+                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut outcome,
+                            &call,
+                            binding,
+                            cancellation
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "plan review handoff requires a root cancellation scope"
+                                    )
+                                })?
+                                .scope_id(),
+                        )?;
+                        continue;
+                    }
                     if task_routing_decision_pending {
                         append_tool_rejected_during_task_routing(
                             session,
@@ -2182,6 +2539,41 @@ where
                             context,
                         )?;
                         accepted_task_plan = accepted_task_plan || accepted;
+                        continue;
+                    }
+                    if call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME {
+                        let Some(context) = plan_review_draft.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "submit_plan_draft is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            continue;
+                        };
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let accepted = handle_submit_plan_draft_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            context,
+                            now_ms,
+                        )?;
+                        accepted_plan_draft = accepted_plan_draft || accepted;
                         continue;
                     }
                     if call.name == TASK_GUIDANCE_APPLY_TOOL_NAME {
@@ -2307,8 +2699,59 @@ where
                         disposition: AgentRunDisposition::StartDurableTask(action),
                     });
                 }
+                if let Some(action) = accepted_plan_review {
+                    outcome.terminal_reason = AgentRunTerminalReason::PlanReviewHandoff;
+                    outcome.tool_calls = total_tool_calls;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::StartPlanReview(action),
+                    });
+                }
                 if accepted_direct_conversation {
                     task_routing_decision_pending = false;
+                    if let Some(conversation) = purpose.as_ref().and_then(|purpose| match purpose {
+                        AgentRunPurpose::Conversation(context) => Some(context.as_ref()),
+                        _ => None,
+                    }) {
+                        let fingerprint = conversation
+                            .plan_review
+                            .as_ref()
+                            .map(|binding| binding.route_contract_fingerprint.clone())
+                            .or_else(|| {
+                                conversation
+                                    .task_handoff
+                                    .as_ref()
+                                    .map(|binding| binding.route_contract_fingerprint.clone())
+                            })
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "accepted chat decision requires a route contract fingerprint"
+                                )
+                            })?;
+                        append_chat_route_decision(
+                            session,
+                            handler,
+                            &conversation.source_turn,
+                            conversation.route_capability,
+                            &fingerprint,
+                            conversation
+                                .plan_review
+                                .as_ref()
+                                .map(|binding| binding.decided_at_ms)
+                                .or_else(|| {
+                                    conversation
+                                        .task_handoff
+                                        .as_ref()
+                                        .map(|binding| binding.decided_at_ms)
+                                })
+                                .unwrap_or_default(),
+                        )?;
+                    }
                     transient_context.push(ModelMessage::system(
                         direct_conversation_continuation_prompt_contract_material(),
                     ));
@@ -2316,15 +2759,15 @@ where
                     if !task_routing_retry_used {
                         task_routing_retry_used = true;
                         handler.handle(RunEvent::Notice(
-                            "task routing decision was invalid; retrying the typed routing microturn"
+                            "routing decision was invalid; retrying the typed routing microturn"
                                 .to_owned(),
                         ))?;
                         transient_context.push(ModelMessage::system(
-                            task_routing_system_prompt_contract_material(),
+                            conversation_route_routing_contract_material(),
                         ));
                     } else {
                         handler.handle(RunEvent::Notice(
-                            "task routing decision remained invalid; no user-visible answer was recorded"
+                            "routing decision remained invalid; no user-visible answer was recorded"
                                 .to_owned(),
                         ))?;
                         outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
@@ -2375,6 +2818,40 @@ where
                         disposition: AgentRunDisposition::TaskPlanAccepted,
                     });
                 }
+                if accepted_plan_draft {
+                    let Some(draft_context) = plan_review_draft.as_ref() else {
+                        return Err(anyhow!(
+                            "plan review draft accepted without a bound draft context"
+                        ));
+                    };
+                    outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
+                    append_run_lifecycle_events(
+                        session,
+                        "completed",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: "plan draft submitted; awaiting your decision".to_owned(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::PlanReviewDraftSubmitted(
+                            PlanReviewDraftSubmittedAction {
+                                plan_review_id: draft_context.plan_review_id.clone(),
+                                attempt_id: draft_context.attempt_id.clone(),
+                                plan_id: draft_context.plan_id.clone(),
+                            },
+                        ),
+                    });
+                }
                 if accepted_task_guidance {
                     outcome.tool_calls = total_tool_calls;
                     claim_natural_run_terminal(
@@ -2407,16 +2884,16 @@ where
                 if !task_routing_retry_used {
                     task_routing_retry_used = true;
                     handler.handle(RunEvent::Notice(
-                        "task routing microturn returned free text; retrying with a typed decision"
+                        "routing microturn returned free text; retrying with a typed decision"
                             .to_owned(),
                     ))?;
                     transient_context.push(ModelMessage::system(
-                        task_routing_system_prompt_contract_material(),
+                        conversation_route_routing_contract_material(),
                     ));
                     continue;
                 }
                 handler.handle(RunEvent::Notice(
-                    "task routing microturn did not return a typed decision; no user-visible answer was recorded"
+                    "routing microturn did not return a typed decision; no user-visible answer was recorded"
                         .to_owned(),
                 ))?;
                 outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;

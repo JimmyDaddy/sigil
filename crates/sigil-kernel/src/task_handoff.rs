@@ -13,36 +13,6 @@ pub const REQUEST_TASK_PLANNING_TOOL_NAME: &str = "request_task_planning";
 pub const CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME: &str = "continue_without_task_planning";
 pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
 
-/// Stable model-visible policy for semantic conversation-to-task routing.
-///
-/// The host exposes bounded criteria and the handoff tool, but does not inspect prompt keywords or
-/// make the semantic routing decision itself.
-#[must_use]
-pub fn task_routing_system_prompt_contract_material() -> &'static str {
-    r#"You are the semantic task router for the current user turn. This is a routing-only microturn: do not answer the user or use ordinary tools.
-
-Classify the requested outcome by its meaning, not by keywords or by whether the user explicitly mentioned tasks, plans, or agents. Judge the structure of the requested outcome, not its estimated effort or the number of files that may need to be read. Call exactly one of the two routing tools and then stop.
-
-Call request_task_planning when fulfilling the goal clearly requires one or more of:
-- coordinated changes across multiple files, components, or architectural layers that must land consistently;
-- two or more independently useful requested outcomes or work streams that can be investigated or implemented separately and then combined, even when each part is small;
-- a multi-stage implementation whose stages have dependencies;
-- long-running or multi-part verification;
-- high-risk execution that benefits from a durable reviewed plan.
-
-Call continue_without_task_planning for one bounded outcome: an explanation, one symbol lookup, one linear call-flow trace or summary of connected code, one narrow read-only query about a single concern, or a small single-file edit that does not meet any task-planning criterion.
-
-Multiple files alone do not require planning. A single bounded explanation, trace, or summary remains an ordinary conversation when every file read is only supporting evidence for that one result. Conversely, read-only work requires planning when the requested product contains separate component investigations, a comparison across those investigations, or a synthesis of independently useful results. If two requested parts could each produce a useful standalone result before being combined, treat them as independent work streams.
-
-Do not inspect files, run commands, edit code, start solving the task, or produce free text in this routing microturn. The host will either start the durable planner or begin an ordinary conversation turn after your typed decision."#
-}
-
-/// Stable host-owned transition contract after the model selects ordinary conversation.
-#[must_use]
-pub fn direct_conversation_continuation_prompt_contract_material() -> &'static str {
-    "The routing-only microturn is complete and the typed decision selected an ordinary conversation turn. Fulfill the original user request now, using the ordinary tools advertised in this request when they are needed. Do not discuss or restate the routing decision, announce future work, or stop at an intention to act. Return a final answer only after the requested outcome is complete or you can truthfully report a concrete blocker."
-}
-
 /// Stable identity for one conversation-to-task handoff.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -178,6 +148,9 @@ pub struct TaskPlanningHandoffBinding {
     pub parent_session_ref: SessionRef,
     pub objective: String,
     pub policy_snapshot_hash: String,
+    /// Deterministic digest of the routing contract, tool surface, capability and host route
+    /// facts; frozen before provider dispatch and recorded with the route decision.
+    pub route_contract_fingerprint: String,
     pub requested_at_ms: u64,
     pub decided_at_ms: u64,
 }

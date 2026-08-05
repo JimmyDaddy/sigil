@@ -14,8 +14,51 @@ impl AppState {
                 Some(self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None))
             }
             KeyCode::Esc if key.modifiers.is_empty() => Some(self.reject_pending_plan()),
+            KeyCode::Char('s')
+                if self.composer.input.trim().is_empty() && key.modifiers.is_empty() =>
+            {
+                Some(self.save_pending_plan())
+            }
+            KeyCode::Char('r')
+                if self.composer.input.trim().is_empty() && key.modifiers.is_empty() =>
+            {
+                Some(self.revise_pending_plan())
+            }
             _ => None,
         }
+    }
+
+    fn save_pending_plan(&mut self) -> Option<AppAction> {
+        let pending = self.composer.pending_plan_approval.as_ref()?;
+        if pending.stale {
+            self.last_notice = Some(
+                pending
+                    .stale_reason
+                    .clone()
+                    .unwrap_or_else(|| "plan may be stale; cannot save".to_owned()),
+            );
+            return None;
+        }
+        let plan_id = pending.plan_id.clone()?;
+        let expected_plan_hash = pending.plan_hash.clone();
+        self.last_notice = Some("saving plan".to_owned());
+        self.push_event("plan", "save");
+        Some(AppAction::SavePlan {
+            plan_id,
+            expected_plan_hash,
+        })
+    }
+
+    fn revise_pending_plan(&mut self) -> Option<AppAction> {
+        let pending = self.composer.pending_plan_approval.as_ref()?;
+        let plan_id = pending.plan_id.clone()?;
+        let expected_plan_hash = pending.plan_hash.clone();
+        self.last_notice = Some("revising plan".to_owned());
+        self.push_event("plan", "revise");
+        Some(AppAction::RevisePlan {
+            plan_id,
+            expected_plan_hash,
+        })
     }
 
     fn reject_pending_plan(&mut self) -> Option<AppAction> {
@@ -40,6 +83,16 @@ impl AppState {
         start_mode: PlanTaskStartMode,
         permission_grant: Option<PlanApprovalPermission>,
     ) -> Option<AppAction> {
+        let pending = self.composer.pending_plan_approval.as_ref()?;
+        if pending.stale {
+            self.last_notice = Some(
+                pending
+                    .stale_reason
+                    .clone()
+                    .unwrap_or_else(|| "plan may be stale; cannot create a task".to_owned()),
+            );
+            return None;
+        }
         let pending = self.composer.pending_plan_approval.take()?;
         let Some(plan_id) = pending.plan_id else {
             self.last_notice = Some("plan is not durable yet".to_owned());
@@ -66,7 +119,11 @@ impl AppState {
         self.composer.pending_plan_approval.as_ref()
     }
 
-    pub(crate) fn set_pending_plan_approval_from_draft(&mut self, draft: &PlanDraftCreatedEntry) {
+    pub(crate) fn set_pending_plan_approval_from_draft(
+        &mut self,
+        draft: &PlanDraftCreatedEntry,
+        current_workspace_snapshot_id: Option<&str>,
+    ) {
         if draft.steps.is_empty() {
             self.composer.pending_plan_approval = None;
             return;
@@ -95,6 +152,10 @@ impl AppState {
                     .join(" ")
             })
             .collect::<Vec<_>>();
+        let stale_reason = sigil_runtime::plan_review_coordinator::plan_handoff_stale_reason(
+            draft.workspace_snapshot_id.as_deref(),
+            current_workspace_snapshot_id,
+        );
         self.composer.pending_plan_approval = Some(PendingPlanApproval {
             plan_id: Some(draft.plan_id.as_str().to_owned()),
             plan_text: plan_text.to_owned(),
@@ -105,6 +166,9 @@ impl AppState {
             suggested_checks,
             target_path_count: draft.target_paths.len(),
             suggested_check_count: draft.suggested_checks.len(),
+            workspace_snapshot_id: draft.workspace_snapshot_id.clone(),
+            stale: stale_reason.is_some(),
+            stale_reason,
         });
     }
 

@@ -2826,14 +2826,11 @@ pub struct AgentConfig {
 pub struct TaskConfig {
     #[serde(default = "default_task_enabled")]
     pub enabled: bool,
-    /// Controls whether ordinary conversation input may hand off to durable task orchestration.
-    ///
-    /// The default is `manual`; `default_mode` remains a composer preference and does not grant
-    /// autonomous routing authority.
+    /// Controls whether ordinary conversation input may route to plan review or durable task
+    /// orchestration. Explicit `manual` keeps chat-first behavior and disables automatic
+    /// handoff; automatic routing never grants tool, shell, network, MCP or merge permission.
     #[serde(default)]
     pub routing_policy: TaskRoutingPolicy,
-    #[serde(default)]
-    pub default_mode: TaskMode,
     #[serde(default)]
     pub planner: RoleModelConfig,
     #[serde(default)]
@@ -2865,7 +2862,6 @@ impl Default for TaskConfig {
         Self {
             enabled: default_task_enabled(),
             routing_policy: TaskRoutingPolicy::default(),
-            default_mode: TaskMode::default(),
             planner: RoleModelConfig::default(),
             executor: RoleModelConfig::default(),
             subagent_read: RoleModelConfig::default(),
@@ -2908,8 +2904,8 @@ impl TaskConfig {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRoutingPolicy {
-    #[default]
     Manual,
+    #[default]
     Auto,
 }
 
@@ -2920,15 +2916,6 @@ impl TaskRoutingPolicy {
             Self::Auto => "auto",
         }
     }
-}
-
-/// Default launch mode for user prompts.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskMode {
-    #[default]
-    Chat,
-    Plan,
 }
 
 /// Model delegation policy for agent tools.
@@ -2947,15 +2934,6 @@ impl MultiAgentMode {
             Self::None => "none",
             Self::ExplicitRequestOnly => "explicit_request_only",
             Self::Proactive => "proactive",
-        }
-    }
-}
-
-impl TaskMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chat => "chat",
-            Self::Plan => "plan",
         }
     }
 }

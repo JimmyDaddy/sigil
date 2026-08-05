@@ -1,0 +1,1 @@
+Implement the cross-layer parser/formatter normalization end to end; the public facade must compile and render_record must emit [mixed-42].

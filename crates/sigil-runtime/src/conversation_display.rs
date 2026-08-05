@@ -362,6 +362,8 @@ pub struct ConversationDisplayPageV1 {
     pub has_more: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_control: Option<ConversationTaskControlV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review: Option<sigil_kernel::PublicPlanReview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +680,7 @@ pub fn conversation_display_page(
     expected_scope: &str,
     cursor: Option<&str>,
     limit: usize,
+    current_workspace_snapshot_id: Option<&str>,
 ) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
     let records = JsonlSessionStore::read_event_records(session_path).with_context(|| {
         format!(
@@ -685,7 +688,13 @@ pub fn conversation_display_page(
             session_path.display()
         )
     })?;
-    let mut page = conversation_display_page_from_records(&records, expected_scope, cursor, limit)?;
+    let mut page = conversation_display_page_from_records(
+        &records,
+        expected_scope,
+        cursor,
+        limit,
+        current_workspace_snapshot_id,
+    )?;
     reconcile_physical_artifact_availability(
         &mut page,
         &ToolArtifactStore::for_session_path(session_path),
@@ -734,6 +743,7 @@ pub fn conversation_display_page_from_records(
     expected_scope: &str,
     cursor: Option<&str>,
     limit: usize,
+    current_workspace_snapshot_id: Option<&str>,
 ) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
     validate_page_request(expected_scope, limit)?;
 
@@ -757,6 +767,7 @@ pub fn conversation_display_page_from_records(
     let mut run_skills = HashMap::<String, ConversationDisplaySkillReferenceV1>::new();
     let mut terminal_frontier = None;
     let mut task_control = ConversationTaskControlProjection::default();
+    let mut plan_review = PlanReviewDisplayProjection::default();
     let mut total_items = 0_u64;
     let mut eligible_items = 0_u64;
     let mut cursor_boundary_found = decoded_cursor.is_none();
@@ -765,6 +776,7 @@ pub fn conversation_display_page_from_records(
         .iter()
         .take_while(|record| record.stream_sequence() <= frontier.sequence)
     {
+        plan_review.apply_record(record);
         let mut projected = project_record(
             record,
             expected_scope,
@@ -851,6 +863,7 @@ pub fn conversation_display_page_from_records(
         next_cursor,
         has_more,
         task_control: task_control.latest_unfinished(),
+        plan_review: plan_review.into_public(current_workspace_snapshot_id),
     })
 }
 
@@ -1799,5 +1812,112 @@ fn map_checkpoint_conflict_reason(
         CheckpointRestoreConflictReason::InvalidBinding => {
             ConversationDisplayCheckpointConflictReasonV1::InvalidBinding
         }
+    }
+}
+
+/// Incremental display projection for the bounded pending plan review surface.
+#[derive(Debug, Default)]
+struct PlanReviewDisplayProjection {
+    attempts: Vec<sigil_kernel::PlanReviewAttemptEntry>,
+    drafts: std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::PlanDraftCreatedEntry>,
+    decisions: std::collections::BTreeMap<
+        sigil_kernel::PlanId,
+        Vec<sigil_kernel::PlanDecisionRecordedEntry>,
+    >,
+    tasks_created: std::collections::BTreeMap<
+        sigil_kernel::PlanId,
+        Vec<sigil_kernel::TaskCreatedFromPlanEntry>,
+    >,
+}
+
+impl PlanReviewDisplayProjection {
+    fn apply_record(&mut self, record: &sigil_kernel::SessionStreamRecord) {
+        let Ok(Some(entry)) = record.session_log_entry() else {
+            return;
+        };
+        match entry {
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::PlanReviewAttempt(attempt),
+            ) => self.attempts.push(attempt),
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::PlanDraftCreated(draft),
+            ) => {
+                self.drafts.insert(draft.plan_id.clone(), draft);
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::PlanDecisionRecorded(decision),
+            ) => {
+                self.decisions
+                    .entry(decision.plan_id.clone())
+                    .or_default()
+                    .push(decision);
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::TaskCreatedFromPlan(created),
+            ) => {
+                self.tasks_created
+                    .entry(created.plan_id.clone())
+                    .or_default()
+                    .push(created);
+            }
+            _ => {}
+        }
+    }
+
+    fn into_public(
+        self,
+        current_workspace_snapshot_id: Option<&str>,
+    ) -> Option<sigil_kernel::PublicPlanReview> {
+        let latest = self.attempts.iter().next_back()?;
+        if self
+            .decisions
+            .get(&latest.plan_id)
+            .and_then(|entries| entries.last())
+            .is_some_and(|decision| {
+                matches!(
+                    decision.decision,
+                    sigil_kernel::PlanDecision::Accepted | sigil_kernel::PlanDecision::Rejected
+                )
+            })
+        {
+            return None;
+        }
+        if self.tasks_created.contains_key(&latest.plan_id) {
+            return None;
+        }
+        // The attempt status always projects; draft-specific details exist only when the latest
+        // attempt committed a typed draft (a Started/failed/interrupted/cancelled attempt must
+        // stay visible across reloads instead of disappearing from the display).
+        let draft = self.drafts.get(&latest.plan_id);
+        let stale = draft
+            .and_then(|draft| {
+                crate::plan_review_coordinator::plan_handoff_stale_reason(
+                    draft.workspace_snapshot_id.as_deref(),
+                    current_workspace_snapshot_id,
+                )
+            })
+            .is_some();
+        let allowed_actions = match latest.status {
+            sigil_kernel::PlanReviewAttemptStatus::DraftReady if draft.is_some() => vec![
+                sigil_kernel::PublicPlanAction::Run,
+                sigil_kernel::PublicPlanAction::Save,
+                sigil_kernel::PublicPlanAction::Revise,
+                sigil_kernel::PublicPlanAction::Reject,
+            ],
+            _ => Vec::new(),
+        };
+        Some(sigil_kernel::PublicPlanReview {
+            plan_id: latest.plan_id.as_str().to_owned(),
+            plan_hash: draft.map(|draft| draft.plan_hash.clone()),
+            status: latest.status.into(),
+            summary: draft.map(|draft| draft.summary.clone()),
+            step_count: draft.map(|draft| draft.steps.len()),
+            target_path_count: draft.map(|draft| draft.target_paths.len()),
+            suggested_check_count: draft.map(|draft| draft.suggested_checks.len()),
+            risk: draft.and_then(|draft| draft.risk.clone()),
+            allowed_actions,
+            source: latest.source.into(),
+            stale,
+        })
     }
 }

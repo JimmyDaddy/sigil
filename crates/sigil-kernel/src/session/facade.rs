@@ -387,6 +387,7 @@ impl Session {
             .unwrap_or_default()
             .as_millis() as u64;
         crate::reconcile_unfinished_run_cancellations(&mut session, recovered_at_ms)?;
+        crate::reconcile_plan_review_attempts(&mut session, recovered_at_ms)?;
         Ok(session)
     }
 

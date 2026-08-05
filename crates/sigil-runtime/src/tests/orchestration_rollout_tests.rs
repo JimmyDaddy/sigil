@@ -27,7 +27,7 @@ fn qualified_gate(task_config_digest: String) -> OrchestrationEvalRouteGateV1 {
         system_prompt_digest: digest.clone(),
         tool_profile_contract_digest: digest.clone(),
         task_config_digest,
-        corpus_version: "rfc-0053-orchestration-v1".to_owned(),
+        corpus_version: "rfc-0063-orchestration-v1".to_owned(),
         corpus_digest: digest,
         sigil_commit: commit.to_owned(),
         sigil_build: ORCHESTRATION_RUNTIME_BUILD_ID.to_owned(),
@@ -38,14 +38,19 @@ fn qualified_gate(task_config_digest: String) -> OrchestrationEvalRouteGateV1 {
         identity,
         identity_digest,
         status: OrchestrationEvalRouteStatus::Qualified,
-        negative_cases: 20,
-        positive_cases: 10,
-        eligible_negative_cases: 20,
-        eligible_positive_cases: 10,
-        provider_admitted_repetitions: 90,
-        completed_repetitions: 90,
-        false_positive_rate_ppm: Some(0),
-        positive_miss_rate_ppm: Some(0),
+        chat_cases: 20,
+        plan_review_cases: 15,
+        direct_task_cases: 15,
+        eligible_chat_cases: 20,
+        eligible_plan_review_cases: 15,
+        eligible_direct_task_cases: 15,
+        provider_admitted_repetitions: 150,
+        completed_repetitions: 150,
+        chat_to_task_false_positive_rate_ppm: Some(0),
+        plan_review_to_task_premature_rate_ppm: Some(0),
+        direct_task_miss_rate_ppm: Some(0),
+        chat_to_plan_review_overroute_rate_ppm: Some(0),
+        plan_review_miss_rate_ppm: Some(0),
         cases_with_majority_misroute: 0,
         cases_with_duplicate_repetition_identity: 0,
         hard_invariant_violations: 0,
@@ -55,11 +60,11 @@ fn qualified_gate(task_config_digest: String) -> OrchestrationEvalRouteGateV1 {
 
 fn qualified_report(task_config_digest: String) -> OrchestrationEvalReportManifestV1 {
     OrchestrationEvalReportManifestV1 {
-        report_schema_version: 1,
+        report_schema_version: 2,
         campaign_id: "campaign-qualified".to_owned(),
         started_at_unix_ms: 1,
         ended_at_unix_ms: 2,
-        requested_repetitions: 90,
+        requested_repetitions: 150,
         results_jsonl_path: "private/results.jsonl".into(),
         summary_path: "private/summary.md".into(),
         route_gates: vec![qualified_gate(task_config_digest)],
@@ -191,7 +196,7 @@ fn quick_setup_fails_closed_for_missing_stale_or_mismatched_manifests() -> Resul
         missing_decision.status,
         NewInstallOrchestrationRolloutStatus::ManifestUnavailable
     );
-    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
     assert_eq!(
         config.task.multi_agent_mode,
         MultiAgentMode::ExplicitRequestOnly
@@ -212,7 +217,7 @@ fn quick_setup_fails_closed_for_missing_stale_or_mismatched_manifests() -> Resul
         mismatch.status,
         NewInstallOrchestrationRolloutStatus::RouteNotQualified
     );
-    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
     Ok(())
 }
 
@@ -227,7 +232,7 @@ fn rollout_rejects_tampered_gate_and_custom_endpoint() -> Result<()> {
     target_task.multi_agent_mode = MultiAgentMode::Proactive;
     let task_digest = orchestration_task_config_digest(&target_task)?;
     let mut report = qualified_report(task_digest);
-    report.route_gates[0].positive_miss_rate_ppm = Some(100_001);
+    report.route_gates[0].plan_review_to_task_premature_rate_ppm = Some(100_001);
     assert!(build_orchestration_rollout_manifest(&report).is_err());
 
     let task_digest = orchestration_task_config_digest(&target_task)?;
@@ -249,7 +254,7 @@ fn rollout_rejects_tampered_gate_and_custom_endpoint() -> Result<()> {
         decision.status,
         NewInstallOrchestrationRolloutStatus::RouteNotQualified
     );
-    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Manual);
+    assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
     Ok(())
 }
 
