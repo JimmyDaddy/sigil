@@ -13,7 +13,7 @@ use crate::{
 use super::{
     AgentRunOutcome,
     tool_audit::{append_tool_execution_audit, attach_tool_call_context},
-    tool_results::record_and_emit_tool_result,
+    tool_results::record_tool_result_to_batch,
 };
 
 pub(super) fn task_planning_request_call_is_accepted(call: &ToolCall) -> bool {
@@ -25,15 +25,12 @@ pub(super) fn continue_without_task_planning_call_is_accepted(call: &ToolCall) -
         && validate_continue_without_task_planning_call(call).is_ok()
 }
 
-pub(super) fn handle_continue_without_task_planning_call<H>(
+pub(super) fn handle_continue_without_task_planning_call(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-) -> Result<bool>
-where
-    H: EventHandler + Send,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<bool> {
     append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
     if let Err(error) = validate_continue_without_task_planning_call(call) {
         let mut result = ToolResult::error(
@@ -51,7 +48,7 @@ where
             None,
             Some(&result),
         )?;
-        record_and_emit_tool_result(session, handler, outcome, result)?;
+        record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
         return Ok(false);
     }
 
@@ -72,7 +69,7 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
     Ok(true)
 }
 
@@ -83,6 +80,7 @@ pub(super) fn handle_task_planning_request_call<H>(
     call: &ToolCall,
     binding: &TaskPlanningHandoffBinding,
     run_scope_id: &str,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<Option<StartDurableTaskAction>>
 where
     H: EventHandler + Send,
@@ -106,7 +104,7 @@ where
                 None,
                 Some(&result),
             )?;
-            record_and_emit_tool_result(session, handler, outcome, result)?;
+            record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
             return Ok(None);
         }
     };
@@ -218,7 +216,7 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
     Ok(Some(StartDurableTaskAction {
         handoff_id: binding.handoff_id.clone(),
         task_id: binding.task_id.clone(),
@@ -278,15 +276,12 @@ where
     Ok(())
 }
 
-pub(super) fn append_tool_ignored_after_task_handoff<H>(
+pub(super) fn append_tool_ignored_after_task_handoff(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<()> {
     let mut result = ToolResult::error(
         call.id.clone(),
         call.name.clone(),
@@ -302,18 +297,16 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(())
 }
 
-pub(super) fn append_tool_ignored_after_routing_decision<H>(
+pub(super) fn append_tool_ignored_after_routing_decision(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<()> {
     let mut result = ToolResult::error(
         call.id.clone(),
         call.name.clone(),
@@ -329,18 +322,16 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(())
 }
 
-pub(super) fn append_tool_rejected_during_task_routing<H>(
+pub(super) fn append_tool_rejected_during_task_routing(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<()> {
     let mut result = ToolResult::error(
         call.id.clone(),
         call.name.clone(),
@@ -356,7 +347,8 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(())
 }
 
 fn validate_binding_against_session(

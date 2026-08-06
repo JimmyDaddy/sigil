@@ -14,7 +14,7 @@ use crate::{
 use super::{
     AgentRunOutcome,
     tool_audit::{append_tool_execution_audit, attach_tool_call_context},
-    tool_results::record_and_emit_tool_result,
+    tool_results::record_tool_result_to_batch,
 };
 
 pub(super) fn task_plan_update_call_is_accepted(
@@ -35,6 +35,7 @@ pub(super) fn handle_task_plan_update_call<H>(
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
     context: &TaskPlanUpdateContext,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<bool>
 where
     H: EventHandler + Send,
@@ -81,19 +82,16 @@ where
             result
         }
     };
-    record_and_emit_tool_result(session, handler, outcome, result)?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
     Ok(accepted)
 }
 
-pub(super) fn append_tool_ignored_after_task_plan_acceptance<H>(
+pub(super) fn append_tool_ignored_after_task_plan_acceptance(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<()> {
     let mut result = ToolResult::error(
         call.id.clone(),
         call.name.clone(),
@@ -109,6 +107,6 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
     Ok(())
 }

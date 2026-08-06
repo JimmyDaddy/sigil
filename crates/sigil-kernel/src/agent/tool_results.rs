@@ -18,17 +18,17 @@ use super::{
     tool_audit::{append_tool_execution_audit, attach_tool_call_context},
 };
 
-pub(super) fn record_and_emit_tool_result<H>(
-    session: &mut Session,
-    handler: &mut H,
+/// RFC-0062 11.5: records one host-settled tool result into the assistant batch instead of
+/// emitting it immediately, so every result of the batch settles with the deterministic
+/// declaration-order allocator and a single failure contract.
+pub(super) fn record_tool_result_to_batch(
     outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
     result: ToolResult,
-) -> Result<()>
-where
-    H: EventHandler,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) {
     record_tool_run_outcome(outcome, &result);
-    emit_tool_result(session, handler, result)
+    assistant_batch_results.push((call.clone(), result));
 }
 
 /// RFC-0062 11.2: settles one assistant tool-call batch with deterministic two-phase preview
@@ -81,6 +81,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) fn emit_tool_result<H>(
     session: &mut Session,
     handler: &mut H,
@@ -226,16 +227,15 @@ pub(super) fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &To
     outcome.tool_errors.push(error.clone());
 }
 
-pub(super) fn append_invalid_tool_input_result<H, E>(
+pub(super) fn append_invalid_tool_input_result<E>(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
     subjects: &[ToolSubject],
     error: E,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<()>
 where
-    H: EventHandler,
     E: fmt::Display,
 {
     let mut result = ToolResult::error(
@@ -253,7 +253,8 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(())
 }
 
 pub(super) fn agent_tool_result_satisfies_delegation(result: &ToolResult) -> bool {

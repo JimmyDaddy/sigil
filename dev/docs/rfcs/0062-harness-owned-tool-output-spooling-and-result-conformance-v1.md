@@ -2,6 +2,22 @@
 
 状态：proposed / design complete / implementation deferred
 
+- delegate/spawn 结果 batch 收口已闭合（2026-08-06）：`task_handoff` / `task_plan` /
+  `plan_review` / `plan_draft` / `task_guidance` 系列的成功、忽略、拒绝与 invalid-input 结果全部从
+  per-tool `record_and_emit_tool_result` 改为经 `record_tool_result_to_batch` 进入
+  `assistant_batch_results`，与普通工具结果一起按 declaration order 由 `emit_tool_result_batch`
+  统一结算（同一 preview allocator、同一 settlement 失败契约：abort join dependencies 后显式失败）。
+  时序分析确认 batch 结算（agent 主循环）先于 routing 决策处理与后续 provider 请求，microturn 语义
+  不变；仅 handler 只用于 emit 的 append 辅助函数删除 handler 参数。`emit_tool_result` /
+  `record_and_emit_tool_result` 在 lib 中移除（测试保留 `emit_tool_result` 为 cfg(test)）。
+- active-reader lease 已落地（与 R62.5 记录同步）：`ToolArtifactStore` 的 `read_all` / `read_page`
+  在读取期间持有 ref 文件的 shared lock（`try_lock_shared`，失败返回 "being retired"），
+  `garbage_collect` 以 exclusive `try_lock` 竞争同一 ref lock，`WouldBlock` 时跳过该 artifact 并
+  计入 `skipped_active_reads`（不删 body、保留 manifest，由 reconciler 重试）——即 §9.4 的
+  "body 删除等待旧 generation reader lease drain / 超时取消本轮 GC" 的确定性实现；覆盖测试：
+  kernel `manifest_gc_skips_artifact_with_concurrent_read_lease`（`skipped_active_reads == 1`）与
+  runtime `artifact_gc_waits_for_active_reader_lease_before_deletion`。
+
 ### 2026-08-06 scratch lifecycle status (`worktree-rfc-0062-scratch-lifecycle`)
 
 R62.5 的 `$SIGIL_SCRATCH_DIR` 生命周期与隔离部分已在独立 worktree 落地（未合入 main）：
@@ -103,8 +119,7 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `cargo check --workspace --target x86_64-pc-windows-gnu`（Windows target 交叉编译通过）、
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
-- 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
-  Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
+- 已知残留：Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
   （delete-on-close 不保证断电删除，grace GC 为兜底；本机为 macOS，Windows 行为仅通过
   x86_64-pc-windows-gnu 交叉编译验证，未做实机测试）；Windows staging 目录在创建任何文件
   前即设置 owner-only DACL（文件继承后逐文件校验），share_mode 仅保留 FILE_SHARE_DELETE；

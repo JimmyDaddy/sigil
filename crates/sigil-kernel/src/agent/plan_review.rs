@@ -12,7 +12,7 @@ use crate::{
 use super::{
     AgentRunOutcome,
     tool_audit::{append_tool_execution_audit, attach_tool_call_context},
-    tool_results::record_and_emit_tool_result,
+    tool_results::record_tool_result_to_batch,
 };
 
 pub(super) fn plan_review_call_is_accepted(
@@ -29,6 +29,7 @@ pub(super) fn handle_request_plan_review_call<H>(
     call: &ToolCall,
     binding: &PlanReviewHandoffBinding,
     _run_scope_id: &str,
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<Option<StartPlanReviewAction>>
 where
     H: EventHandler + Send,
@@ -52,7 +53,7 @@ where
                 None,
                 Some(&result),
             )?;
-            record_and_emit_tool_result(session, handler, outcome, result)?;
+            record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
             return Ok(None);
         }
     };
@@ -116,7 +117,7 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)?;
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
     Ok(Some(StartPlanReviewAction {
         decision_id: binding.decision_id.clone(),
         plan_review_id: binding.plan_review_id.clone(),
@@ -125,15 +126,12 @@ where
     }))
 }
 
-pub(super) fn append_tool_ignored_after_plan_review_decision<H>(
+pub(super) fn append_tool_ignored_after_plan_review_decision(
     session: &mut Session,
-    handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
+    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
+) -> Result<()> {
     let mut result = ToolResult::error(
         call.id.clone(),
         call.name.clone(),
@@ -149,7 +147,8 @@ where
         None,
         Some(&result),
     )?;
-    record_and_emit_tool_result(session, handler, outcome, result)
+    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
+    Ok(())
 }
 
 fn validate_binding_against_session(

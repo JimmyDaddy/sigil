@@ -2304,9 +2304,9 @@ where
                     {
                         append_tool_ignored_after_task_handoff(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
@@ -2316,9 +2316,9 @@ where
                     {
                         append_tool_ignored_after_plan_review_decision(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
@@ -2328,27 +2328,27 @@ where
                     {
                         append_tool_ignored_after_routing_decision(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
                     if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
                         append_tool_ignored_after_task_plan_acceptance(
                             session,
-                            handler,
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
                     if accepted_plan_draft_in_batch && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME {
                         append_tool_ignored_after_plan_draft(
                             session,
-                            handler,
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
@@ -2357,9 +2357,9 @@ where
                     {
                         append_tool_ignored_after_task_guidance_acceptance(
                             session,
-                            handler,
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
@@ -2385,9 +2385,9 @@ where
                         }
                         let accepted = handle_continue_without_task_planning_call(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         accepted_direct_conversation = accepted_direct_conversation || accepted;
                         continue;
@@ -2443,6 +2443,7 @@ where
                                     anyhow!("task handoff requires a root cancellation scope")
                                 })?
                                 .scope_id(),
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
@@ -2499,15 +2500,16 @@ where
                                     )
                                 })?
                                 .scope_id(),
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
                     if task_routing_decision_pending {
                         append_tool_rejected_during_task_routing(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
                             &mut outcome,
                             &call,
+                            &mut assistant_batch_results,
                         )?;
                         continue;
                     }
@@ -2537,6 +2539,7 @@ where
                             &mut outcome,
                             &call,
                             context,
+                            &mut assistant_batch_results,
                         )?;
                         accepted_task_plan = accepted_task_plan || accepted;
                         continue;
@@ -2572,6 +2575,7 @@ where
                             &call,
                             context,
                             now_ms,
+                            &mut assistant_batch_results,
                         )?;
                         accepted_plan_draft = accepted_plan_draft || accepted;
                         continue;
@@ -2602,6 +2606,7 @@ where
                             &mut outcome,
                             &call,
                             context,
+                            &mut assistant_batch_results,
                         )?;
                         accepted_task_guidance = accepted_task_guidance || accepted;
                         continue;
@@ -3132,7 +3137,14 @@ where
         let preparation_draft = match tools.prepare(tool_ctx.clone(), call.clone()).await {
             Ok(preparation) => preparation,
             Err(error) => {
-                append_invalid_tool_input_result(session, handler, outcome, &call, &[], error)?;
+                append_invalid_tool_input_result(
+                    session,
+                    outcome,
+                    &call,
+                    &[],
+                    error,
+                    assistant_batch_results,
+                )?;
                 return Ok(());
             }
         };
@@ -3143,11 +3155,11 @@ where
                 Err(error) => {
                     append_invalid_tool_input_result(
                         session,
-                        handler,
                         outcome,
                         &call,
                         prepared_subjects.unwrap_or_default(),
                         error,
+                        assistant_batch_results,
                     )?;
                     return Ok(());
                 }
@@ -3158,11 +3170,11 @@ where
                 Err(error) => {
                     append_invalid_tool_input_result(
                         session,
-                        handler,
                         outcome,
                         &call,
                         prepared_subjects.unwrap_or_default(),
                         error,
+                        assistant_batch_results,
                     )?;
                     return Ok(());
                 }
@@ -3650,11 +3662,11 @@ where
                                 })?;
                                 append_invalid_tool_input_result(
                                     session,
-                                    handler,
                                     outcome,
                                     &approved_call,
                                     &decision.subjects,
                                     error,
+                                    assistant_batch_results,
                                 )?;
                                 return Ok(());
                             }
@@ -3844,11 +3856,11 @@ where
             Err(error) => {
                 append_invalid_tool_input_result(
                     session,
-                    handler,
                     outcome,
                     &call,
                     &decision.subjects,
                     error,
+                    assistant_batch_results,
                 )?;
                 return Ok(());
             }
