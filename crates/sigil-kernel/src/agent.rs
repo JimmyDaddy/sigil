@@ -130,7 +130,7 @@ use tool_audit::{
 use tool_results::emit_tool_result;
 use tool_results::{
     agent_tool_result_satisfies_delegation, append_invalid_tool_input_result,
-    emit_tool_result_batch, record_tool_run_outcome,
+    emit_tool_result_batch, record_and_emit_tool_result, record_tool_run_outcome,
 };
 
 const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
