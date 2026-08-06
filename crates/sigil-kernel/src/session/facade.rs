@@ -694,6 +694,148 @@ impl Session {
         self.append_controls(controls)
     }
 
+    /// RFC-0062 16.2: atomically appends availability transitions together with the durable
+    /// tombstone plans for every ref being disabled in this batch or already disabled.
+    ///
+    /// The whole batch lands under one durable intent, so a crash after the append can always
+    /// reconcile `DisabledPendingDelete -> Expired` from the plans even when the physical body
+    /// move completed before the terminal append.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when both inputs are empty, a transition is not state-contiguous, a ref
+    /// repeats across either input, or a plan is not bound to the exact generation the
+    /// `DisabledPendingDelete` state has (current generation + 1 when the ref is disabled in this
+    /// batch, current generation when it is already disabled).
+    pub fn append_availability_transitions_with_tombstone_plans(
+        &mut self,
+        transitions: Vec<(
+            ToolArtifactRefV1,
+            ToolArtifactAvailabilityStateV1,
+            ToolArtifactAvailabilityStateV1,
+            ToolArtifactAvailabilityReasonV1,
+        )>,
+        plans: Vec<ToolArtifactTombstonePlannedV1>,
+        changed_at_ms: u64,
+    ) -> Result<()> {
+        if transitions.is_empty() && plans.is_empty() {
+            bail!("tool artifact GC plan batch must not be empty");
+        }
+        let mut seen_transitions = std::collections::BTreeSet::new();
+        for (artifact_ref, previous, _, _) in &transitions {
+            if !seen_transitions.insert(artifact_ref.clone()) {
+                bail!("tool artifact availability batch repeats an opaque ref");
+            }
+            let current = self.artifact_availability_state(artifact_ref);
+            if *previous != current {
+                bail!(
+                    "tool artifact availability transition is not state-contiguous: expected {:?}, got {:?}",
+                    current,
+                    previous
+                );
+            }
+        }
+        let mut seen_plans = std::collections::BTreeSet::new();
+        let mut controls = transitions
+            .into_iter()
+            .map(|(artifact_ref, previous, next, reason)| {
+                let generation = self.artifact_availability_generation(&artifact_ref);
+                ControlEntry::ToolArtifactAvailabilityChanged(ToolArtifactAvailabilityChangedV1 {
+                    schema_version: TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION,
+                    artifact_ref,
+                    expected_generation: generation,
+                    generation: generation.saturating_add(1),
+                    previous,
+                    next,
+                    reason,
+                    changed_at_ms,
+                })
+            })
+            .collect::<Vec<_>>();
+        for plan in plans {
+            plan.validate()?;
+            if !seen_plans.insert(plan.artifact_ref.clone()) {
+                bail!("tool artifact GC plan batch repeats an opaque ref");
+            }
+            let generation = self.artifact_availability_generation(&plan.artifact_ref);
+            let disabling_now = controls.iter().any(|control| {
+                matches!(
+                    control,
+                    ControlEntry::ToolArtifactAvailabilityChanged(change)
+                        if change.artifact_ref == plan.artifact_ref
+                )
+            });
+            let expected = if disabling_now {
+                generation.saturating_add(1)
+            } else {
+                if self.artifact_availability_state(&plan.artifact_ref)
+                    != ToolArtifactAvailabilityStateV1::DisabledPendingDelete
+                {
+                    bail!(
+                        "tool artifact tombstone plan requires a disabled artifact: {}",
+                        plan.artifact_ref.artifact_id
+                    );
+                }
+                generation
+            };
+            if plan.expected_generation != expected {
+                bail!(
+                    "tool artifact tombstone plan generation mismatch for {}: plan {}, ledger {}",
+                    plan.artifact_ref.artifact_id,
+                    plan.expected_generation,
+                    expected
+                );
+            }
+            controls.push(ControlEntry::ToolArtifactTombstonePlan(plan));
+        }
+        self.append_controls(controls)
+    }
+
+    /// RFC-0062 16.2: returns every durable tombstone plan recorded in this session, in append
+    /// order. Recovery completes `DisabledPendingDelete -> Expired` from these plans.
+    pub fn tombstone_plans(&self) -> Vec<&ToolArtifactTombstonePlannedV1> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                if let SessionLogEntry::Control(ControlEntry::ToolArtifactTombstonePlan(plan)) =
+                    entry
+                {
+                    Some(plan)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// RFC-0062 16.2: true when a durable tombstone plan already exists for this artifact.
+    #[must_use]
+    pub fn has_tombstone_plan(&self, artifact_ref: &ToolArtifactRefV1) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolArtifactTombstonePlan(plan))
+                    if &plan.artifact_ref == artifact_ref
+            )
+        })
+    }
+
+    /// RFC-0062 16.2: returns the durable tombstone plan bound to this artifact, when one exists.
+    pub fn tombstone_plan_for(
+        &self,
+        artifact_ref: &ToolArtifactRefV1,
+    ) -> Option<&ToolArtifactTombstonePlannedV1> {
+        self.entries.iter().rev().find_map(|entry| {
+            if let SessionLogEntry::Control(ControlEntry::ToolArtifactTombstonePlan(plan)) = entry
+                && &plan.artifact_ref == artifact_ref
+            {
+                Some(plan)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn append_controls(&mut self, controls: Vec<ControlEntry>) -> Result<()> {
         if controls.is_empty() {
             bail!("control append batch must not be empty");

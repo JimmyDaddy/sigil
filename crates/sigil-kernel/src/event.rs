@@ -1667,6 +1667,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolExecution(_) => "tool_execution",
         ControlEntry::ToolArtifactRead(_) => "tool_artifact_read",
         ControlEntry::ToolArtifactAvailabilityChanged(_) => "tool_artifact_availability_changed",
+        ControlEntry::ToolArtifactTombstonePlan(_) => "tool_artifact_tombstone_plan",
         ControlEntry::ToolEgress(_) => "tool_egress",
         ControlEntry::McpElicitation(_) => "mcp_elicitation",
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",

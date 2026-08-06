@@ -2053,6 +2053,173 @@ fn availability_batch_api_rejects_duplicate_refs_and_state_gaps() -> Result<()> 
 }
 
 #[test]
+fn tombstone_plan_batch_binds_new_and_resumed_disables_atomically() -> Result<()> {
+    // RFC-0062 16.2: the durable tombstone plan is appended in the SAME append as the disable
+    // transitions (fresh disables) or as a standalone batch (already-disabled refs), and the
+    // plan is bound to the exact generation the DisabledPendingDelete state has.
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(session_store);
+    let fresh = ToolArtifactRefV1::random();
+    let resumed = ToolArtifactRefV1::random();
+
+    // Fresh disable: the plan must carry the generation the disable event will produce (1).
+    session.append_availability_transitions_with_tombstone_plans(
+        vec![(
+            fresh.clone(),
+            crate::ToolArtifactAvailabilityStateV1::Available,
+            crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+            crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+        )],
+        vec![ToolArtifactTombstonePlannedV1 {
+            schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+            artifact_ref: fresh.clone(),
+            expected_generation: 1,
+            planned_at_ms: 1,
+        }],
+        1,
+    )?;
+    assert_eq!(
+        session.artifact_availability_state(&fresh),
+        crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete
+    );
+    assert_eq!(session.artifact_availability_generation(&fresh), 1);
+    assert!(session.has_tombstone_plan(&fresh));
+    assert_eq!(
+        session
+            .tombstone_plan_for(&fresh)
+            .expect("plan")
+            .expected_generation,
+        1
+    );
+
+    // Resumed disable: the plan must carry the CURRENT generation (1) and the batch may carry
+    // no transitions at all.
+    session
+        .append_availability_transitions_with_tombstone_plans(
+            Vec::new(),
+            vec![ToolArtifactTombstonePlannedV1 {
+                schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                artifact_ref: resumed.clone(),
+                expected_generation: 1,
+                planned_at_ms: 2,
+            }],
+            2,
+        )
+        .expect_err("plan for an artifact that is not disabled must fail");
+
+    // Disable the resumed ref, then plan it with the current generation (1).
+    session.append_availability_transitions_with_tombstone_plans(
+        vec![(
+            resumed.clone(),
+            crate::ToolArtifactAvailabilityStateV1::Available,
+            crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+            crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+        )],
+        vec![ToolArtifactTombstonePlannedV1 {
+            schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+            artifact_ref: resumed.clone(),
+            expected_generation: 1,
+            planned_at_ms: 3,
+        }],
+        3,
+    )?;
+    assert_eq!(session.artifact_availability_generation(&resumed), 1);
+    assert_eq!(session.tombstone_plans().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn tombstone_plan_batch_fails_closed_on_bad_bindings() -> Result<()> {
+    // RFC-0062 16.2: a plan must not be appended for an artifact that is neither being disabled
+    // in the batch nor already disabled, must not repeat a ref, and must bind the exact
+    // generation — otherwise recovery could complete a bogus Expired transition.
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(session_store);
+    let artifact_ref = ToolArtifactRefV1::random();
+
+    // Empty batch must fail.
+    session
+        .append_availability_transitions_with_tombstone_plans(Vec::new(), Vec::new(), 1)
+        .expect_err("empty GC plan batch must fail");
+
+    // Wrong generation for a fresh disable must fail.
+    let error = session
+        .append_availability_transitions_with_tombstone_plans(
+            vec![(
+                artifact_ref.clone(),
+                crate::ToolArtifactAvailabilityStateV1::Available,
+                crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+            )],
+            vec![ToolArtifactTombstonePlannedV1 {
+                schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                artifact_ref: artifact_ref.clone(),
+                expected_generation: 7,
+                planned_at_ms: 1,
+            }],
+            1,
+        )
+        .expect_err("plan generation mismatch must fail");
+    assert!(
+        format!("{error:#}").contains("generation mismatch"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        session.artifact_availability_state(&artifact_ref),
+        crate::ToolArtifactAvailabilityStateV1::Available,
+        "a failed plan batch must not disable the artifact"
+    );
+
+    // A ref repeated across the transition and the plan must fail.
+    let error = session
+        .append_availability_transitions_with_tombstone_plans(
+            vec![(
+                artifact_ref.clone(),
+                crate::ToolArtifactAvailabilityStateV1::Available,
+                crate::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                crate::ToolArtifactAvailabilityReasonV1::GcDisable,
+            )],
+            vec![
+                ToolArtifactTombstonePlannedV1 {
+                    schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                    artifact_ref: artifact_ref.clone(),
+                    expected_generation: 1,
+                    planned_at_ms: 2,
+                },
+                ToolArtifactTombstonePlannedV1 {
+                    schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                    artifact_ref: artifact_ref.clone(),
+                    expected_generation: 1,
+                    planned_at_ms: 3,
+                },
+            ],
+            2,
+        )
+        .expect_err("duplicate plan ref must fail");
+    assert!(
+        format!("{error:#}").contains("repeats an opaque ref"),
+        "unexpected error: {error:#}"
+    );
+
+    // A plan alone for an Available artifact must fail (no disable in the same batch).
+    session
+        .append_availability_transitions_with_tombstone_plans(
+            Vec::new(),
+            vec![ToolArtifactTombstonePlannedV1 {
+                schema_version: TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                artifact_ref,
+                expected_generation: 0,
+                planned_at_ms: 4,
+            }],
+            4,
+        )
+        .expect_err("plan without a disabled artifact must fail");
+    Ok(())
+}
+
+#[test]
 fn dropped_sink_never_leaves_staging_files() -> Result<()> {
     // RFC-0062 16.2: a sink dropped WITHOUT finalize (simulating cancelled execution,
     // supervisor error, or mutex poison) must not leave .part files behind on unix (the

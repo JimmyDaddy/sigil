@@ -59,9 +59,7 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
 - 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
-  跨流 secret 拆分不参与脱敏（只按流内整体检测）；GC 物理删除后、Expired append 前崩溃时，ledger
-  可能停在 DisabledPendingDelete（需 journal 化 tombstone 计划才能自动补 Expired，当前由
-  DisabledPendingDelete 状态安全拒绝读取兜底）；Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
+  跨流 secret 拆分不参与脱敏（只按流内整体检测）；Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
   （delete-on-close 不保证断电删除，grace GC 为兜底；本机为 macOS，Windows 行为仅通过
   x86_64-pc-windows-gnu 交叉编译验证，未做实机测试）；Windows staging 目录在创建任何文件
   前即设置 owner-only DACL（文件继承后逐文件校验），share_mode 仅保留 FILE_SHARE_DELETE；
@@ -70,6 +68,13 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   staging 目录与两条 live pipe 文件均在写入未脱敏字节前成为 protected DACL、第二 read-open
   以原始 `ERROR_SHARING_VIOLATION` 拒绝；
   不同 SID 的第二 principal 未声称（需跨账号 helper process，超出单测范围）。
+- GC 崩溃窗口已闭合（2026-08-06）：`ControlEntry::ToolArtifactTombstonePlan` 在物理删除前与
+  disable 批次同一原子 append 落地（已 disabled 的 resume 用独立 batch），记录 artifact ref 与
+  exact availability generation；GC 收尾阶段对所有“manifest 已消失且 ledger 仍为
+  DisabledPendingDelete”的 plan 幂等补 append `Expired`（generation 绑定 fail-closed）。物理删除
+  后、Expired append 前崩溃不再停留在 DisabledPendingDelete；fault-injection 覆盖 disable 后 /
+  manifest 入 trash 后 / body 删除后 / Expired 后（journal 完成前）四个 crash point，每个点重试
+  两次仍幂等，active-reader lease 未 drain 时不删除。
 
 创建日期：2026-08-03
 

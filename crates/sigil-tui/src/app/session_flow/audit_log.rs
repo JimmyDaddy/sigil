@@ -69,6 +69,10 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             "[ctl] artifact {} {:?} -> {:?} (generation {})",
             change.artifact_ref.artifact_id, change.previous, change.next, change.generation
         ),
+        ControlEntry::ToolArtifactTombstonePlan(plan) => format!(
+            "[ctl] artifact {} tombstone planned (generation {})",
+            plan.artifact_ref.artifact_id, plan.expected_generation
+        ),
         ControlEntry::SessionIdentity {
             provider_name,
             model_name,
