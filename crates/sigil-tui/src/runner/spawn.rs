@@ -312,7 +312,8 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 WorkerLoopTerminalRuntime::new(
                     terminal_lifecycle_router,
                     Some(terminal_control),
-                ),
+                )
+                .with_scratch_control(surface.scratch_control),
             );
         })
         .context("failed to spawn sigil agent worker")?;

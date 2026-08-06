@@ -128,7 +128,7 @@ Sigil uses `--config <path>` when supplied; otherwise it loads `~/.sigil/sigil.t
 | State root `workspaces/<workspace-id>/sessions/` | Session logs |
 | State root `workspaces/<workspace-id>/input-history.jsonl` | Composer history |
 | State root `workspaces/<workspace-id>/artifacts/` | Terminal and change artifacts |
-| Cache root `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` |
+| Cache root `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` base; each session gets its own owner-only `tmp/sessions/<session-id>/` namespace with a size quota and TTL reclamation |
 | User config `~/.sigil/sigil.toml` | Default local config |
 | `.sigil/agents`, `.sigil/commands`, `.sigil/skills`, `.sigil/plugins` | Native workspace resources |
 | `.agents/skills`, `.codex/agents`, `.opencode/{skills,commands,agents}`, `.claude/{skills,commands,agents}` | Compatibility resources discovered by default and covered by workspace trust; commands use slash-prefixed names, agents use `@name` |

@@ -7,6 +7,9 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) wake_coalescer: WorkerWakeCoalescer,
     pub(in crate::runner) terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
     pub(in crate::runner) terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+    /// Session-scoped scratch lease registry shared with bash/terminal tools; session-delete
+    /// cleanup uses it so live namespaces are never reclaimed.
+    pub(in crate::runner) scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
     pub(in crate::runner) readiness: WorkerReadiness,
     pub(in crate::runner) session: SessionWorkerState,
     pub(in crate::runner) run: RunWorkerState,
@@ -33,6 +36,7 @@ impl WorkerLoopState {
         wake_coalescer: WorkerWakeCoalescer,
         terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
         terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+        scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
     ) -> Self {
         let pending_agent_result_continuations =
             pending_agent_result_continuations_from_session(session.as_ref());
@@ -62,6 +66,7 @@ impl WorkerLoopState {
             wake_coalescer,
             terminal_lifecycle_router,
             terminal_control,
+            scratch_control,
             readiness: WorkerReadiness::new(),
             session: SessionWorkerState {
                 log_path: session_log_path,

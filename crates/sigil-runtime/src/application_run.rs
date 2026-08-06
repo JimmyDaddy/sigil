@@ -2409,10 +2409,40 @@ async fn assemble_application_tool_surface(
         terminal_lifecycle_sink,
     )
     .await?;
+    // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run
+    // assembly. Leases are in-memory only, so this fresh process cannot hold one; the sweep
+    // reclaims namespaces abandoned by crashed or deleted sessions and never races a live tool.
+    {
+        let scratch_root =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root)
+                .scratch_root;
+        let scratch_control = surface.scratch_control.clone();
+        tokio::task::spawn_blocking(move || {
+            match sigil_tools_builtin::gc_scratch_namespaces(
+                &scratch_root,
+                &scratch_control,
+                &sigil_tools_builtin::ScratchGcConfig::default(),
+                current_unix_time_ms(),
+            ) {
+                Ok(report) if report.deleted > 0 => {
+                    tracing::debug!(
+                        deleted = report.deleted,
+                        reclaimed_bytes = report.deleted_bytes,
+                        "application runtime scratch TTL sweep reclaimed expired namespaces"
+                    );
+                }
+                Ok(_report) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "application runtime scratch TTL sweep failed");
+                }
+            }
+        });
+    }
     let crate::RuntimeToolSurface {
         mut registry,
         context_resolver,
         terminal_control,
+        scratch_control,
     } = surface;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
@@ -2464,6 +2494,7 @@ async fn assemble_application_tool_surface(
             registry,
             context_resolver,
             terminal_control,
+            scratch_control,
         },
         warnings,
     ))

@@ -30,6 +30,22 @@ pub(in crate::runner) fn local_session_lifecycle_service(
     .with_lifecycle_journal_path(paths.session_lifecycle_journal)
 }
 
+/// RFC-0062 14.1: lifecycle service with session-scoped scratch cleanup bound to deletion.
+pub(in crate::runner) fn local_session_lifecycle_service_with_scratch(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    scratch_control: &sigil_tools_builtin::ScratchNamespaceControl,
+) -> LocalSessionLifecycleService {
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    LocalSessionLifecycleService::new(
+        paths.workspace_id,
+        paths.session_log_dir,
+        paths.session_exports_root,
+    )
+    .with_lifecycle_journal_path(paths.session_lifecycle_journal)
+    .with_scratch_cleanup(paths.scratch_root, scratch_control.clone())
+}
+
 pub(in crate::runner) fn local_session_lifecycle_service_for_source(
     root_config: &RootConfig,
     workspace_root: &Path,

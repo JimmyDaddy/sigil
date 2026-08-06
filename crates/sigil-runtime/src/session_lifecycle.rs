@@ -361,6 +361,14 @@ pub struct LocalSessionLifecycleService {
     export_dir: PathBuf,
     lifecycle_journal_path: PathBuf,
     limits: LocalSessionLifecycleLimits,
+    scratch_cleanup: Option<ScratchCleanupBinding>,
+}
+
+/// RFC-0062 14.1: session-scoped scratch namespace cleanup bound to session deletion.
+#[derive(Debug, Clone)]
+struct ScratchCleanupBinding {
+    scratch_root: PathBuf,
+    control: sigil_tools_builtin::ScratchNamespaceControl,
 }
 
 impl LocalSessionLifecycleService {
@@ -381,12 +389,30 @@ impl LocalSessionLifecycleService {
             export_dir,
             lifecycle_journal_path,
             limits: LocalSessionLifecycleLimits::default(),
+            scratch_cleanup: None,
         }
     }
 
     #[must_use]
     pub fn with_limits(mut self, limits: LocalSessionLifecycleLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// RFC-0062 14.1: binds session-scoped scratch cleanup to deletion. After a session is
+    /// deleted, its scratch namespace is reclaimed under the lease registry (never while a
+    /// live tool or terminal task holds it). Cleanup failures are bounded diagnostics and do
+    /// not fail the deletion itself; TTL GC remains the fallback.
+    #[must_use]
+    pub fn with_scratch_cleanup(
+        mut self,
+        scratch_root: impl Into<PathBuf>,
+        control: sigil_tools_builtin::ScratchNamespaceControl,
+    ) -> Self {
+        self.scratch_cleanup = Some(ScratchCleanupBinding {
+            scratch_root: scratch_root.into(),
+            control,
+        });
         self
     }
 
@@ -1282,6 +1308,23 @@ impl LocalSessionLifecycleService {
             applied_at_unix_ms,
             LocalSessionLifecycleEvent::DeleteCompleted(binding),
         )?;
+        // RFC-0062 14.1: the deleted session also loses its scratch namespace. Cleanup runs
+        // under the lease registry so a live tool/terminal namespace is never reclaimed;
+        // failures are bounded diagnostics and TTL GC remains the fallback.
+        if let Some(binding) = &self.scratch_cleanup {
+            match sigil_tools_builtin::delete_session_scratch_namespace(
+                &binding.scratch_root,
+                Some(&preview.source_session_id),
+                &binding.control,
+            ) {
+                Ok(outcome) => {
+                    tracing::debug!(?outcome, "deleted session scratch namespace");
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "session scratch namespace cleanup failed");
+                }
+            }
+        }
         Ok(SessionDeleteOutput {
             operation_id,
             source_session_ref: preview.source_session_ref.clone(),

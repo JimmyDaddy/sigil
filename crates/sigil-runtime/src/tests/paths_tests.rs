@@ -215,3 +215,30 @@ fn relative_session_override_resolves_under_workspace_state_root() {
         paths.workspace_state_root.join("custom-sessions")
     );
 }
+
+#[test]
+fn session_scratch_dir_is_derived_from_scratch_root_and_session_scope() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let paths = resolve_sigil_paths_with_env(
+        &StorageConfig::default(),
+        &SessionConfig::default(),
+        workspace.path(),
+        &env(StoragePlatform::Linux),
+    );
+
+    let session_a = "11111111-2222-3333-4444-555555555555";
+    let session_b = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let dir_a = session_scratch_dir(&paths, Some(session_a));
+    let dir_b = session_scratch_dir(&paths, Some(session_b));
+
+    // RFC-0062 14.1: the base is workspace-wide, the namespace is per-session and stable.
+    assert_eq!(dir_a, paths.scratch_root.join("sessions").join(session_a));
+    assert_eq!(dir_b, paths.scratch_root.join("sessions").join(session_b));
+    assert_ne!(dir_a, dir_b);
+    assert_eq!(session_scratch_dir(&paths, Some(session_a)), dir_a);
+    // Direct tool invocations without a durable session get a fixed fallback namespace.
+    assert_eq!(
+        session_scratch_dir(&paths, None),
+        paths.scratch_root.join("sessions").join("no-session")
+    );
+}

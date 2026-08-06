@@ -114,6 +114,9 @@
 - workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须标记为 `External` subject
 - workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`
 - Sigil 自身和模型可见 shell 工具需要临时 scratch 文件时，优先使用运行时注入的 `$SIGIL_SCRATCH_DIR`；它位于用户态 cache root，对模型显示为 `cache/tmp`。不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
+- `$SIGIL_SCRATCH_DIR` 必须按 session scope id 推导 session-scoped 命名空间（`<scratch root>/sessions/<session scope id>`），不得把 workspace-wide scratch root 直接注入给 child；bash、terminal_start、TUI 维护与 Desktop/application runtime 共用同一推导规则
+- scratch 命名空间在写入前必须 owner-only（Windows 复用 `secure_private_path_permissions` 的受保护 owner-only DACL），并执行 per-session 配额与 workspace 硬上限计量；配额/TTL 失败必须结构化、可诊断（工具返回 `scratch_quota_exceeded`），禁止静默转用系统 `/tmp`
+- scratch TTL GC 只能删除无 active tool/terminal lease 的命名空间，删除与 lease 获取必须在同一注册表锁内完成；session 删除必须同时回收该 session 的 scratch 命名空间
 - 工具失败必须结构化返回，不能 panic
 - provider-visible tool result 必须使用 V2 bounded model view；durable history 写 descriptor、facts 和 initial model view，不写裸文本或完整工具正文
 - initial model view 必须同时受 tool-specific per-result cap 与 root-run aggregate cap；aggregate cap 只按实际写入 `initial_model_view.preview` 的 UTF-8 bytes 扣减，不得按工具最大额度预扣；预算耗尽后保留 facts、opaque artifact ref 和 typed retrieval hint，不得回退为扩大 inline preview

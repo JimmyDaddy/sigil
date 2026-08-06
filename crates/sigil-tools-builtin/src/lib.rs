@@ -7,6 +7,7 @@ mod path;
 mod process_group;
 mod process_owner;
 mod registry;
+mod scratch_namespace;
 mod shell;
 mod shell_runtime;
 mod support;
@@ -25,11 +26,18 @@ pub use execution_backends::{
     long_lived_stdio_process_plan,
 };
 pub use registry::{
-    BuiltinToolPaths, register_builtin_tools, register_builtin_tools_with_paths,
-    register_builtin_tools_with_paths_and_execution_backend,
+    BuiltinToolHandles, BuiltinToolPaths, register_builtin_tools,
+    register_builtin_tools_with_paths, register_builtin_tools_with_paths_and_execution_backend,
     register_builtin_tools_with_paths_execution_backend_and_execution_config,
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory,
+};
+pub use scratch_namespace::{
+    ScratchDeleteOutcome, ScratchGcConfig, ScratchGcReport, ScratchNamespaceControl,
+    ScratchNamespaceLease, ScratchNamespaceLeaseRegistry, ScratchQuota, ScratchQuotaExceededError,
+    ScratchQuotaScope, ScratchTaskLeaseRegistry, ScratchUsage, SessionScratchProvision,
+    delete_session_scratch_namespace, ensure_session_scratch, gc_scratch_namespaces,
+    measure_scratch_usage, session_scratch_dir, session_scratch_key,
 };
 pub use terminal_process::{
     MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,

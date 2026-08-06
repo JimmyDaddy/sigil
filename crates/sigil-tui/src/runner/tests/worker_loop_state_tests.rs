@@ -78,6 +78,7 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
         WorkerWakeCoalescer::new(event_tx, None),
         terminal_lifecycle_router,
         None,
+        None,
     );
 
     assert_eq!(state.session.log_path, session_log_path);
@@ -436,6 +437,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         WorkerWakeCoalescer::new(event_tx, None),
         terminal_lifecycle_router,
         None,
+        None,
     );
     let queue_id = ConversationInputQueueId::new("queue_1")?;
     state
@@ -604,6 +606,7 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
         WorkerWakeCoalescer::new(event_tx, None),
         terminal_lifecycle_router,
         None,
+        None,
     );
     let queue_id = ConversationInputQueueId::new("fork_queue")?;
     state
@@ -735,6 +738,7 @@ allowed_tools = ["grep"]
         event_tx.clone(),
         WorkerWakeCoalescer::new(event_tx, None),
         terminal_lifecycle_router,
+        None,
         None,
     );
     let (message_tx, _message_rx) = std::sync::mpsc::channel();

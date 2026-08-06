@@ -48,6 +48,9 @@ fn record_worker_advancement() {
 pub(in crate::runner) struct WorkerLoopTerminalRuntime {
     lifecycle_router: ChannelTerminalLifecycleRouter,
     control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+    /// Session-scoped scratch lease registry shared with bash/terminal tools; used by startup
+    /// TTL GC and session-delete cleanup so live namespaces are never reclaimed.
+    scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 }
 
 impl WorkerLoopTerminalRuntime {
@@ -58,7 +61,16 @@ impl WorkerLoopTerminalRuntime {
         Self {
             lifecycle_router,
             control,
+            scratch_control: None,
         }
+    }
+
+    pub(in crate::runner) fn with_scratch_control(
+        mut self,
+        scratch_control: sigil_tools_builtin::ScratchNamespaceControl,
+    ) -> Self {
+        self.scratch_control = Some(scratch_control);
+        self
     }
 }
 
@@ -119,6 +131,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let WorkerLoopTerminalRuntime {
         lifecycle_router: terminal_lifecycle_router,
         control: terminal_control,
+        scratch_control,
     } = terminal_runtime;
     let initial_exact_conversation_prompts = ExactConversationPromptStore::new();
     let attachment_paths = sigil_runtime::resolve_sigil_paths(
@@ -265,7 +278,35 @@ pub(in crate::runner) fn run_worker_loop<P>(
         wake_coalescer,
         terminal_lifecycle_router,
         terminal_control,
+        scratch_control.clone(),
     );
+    // RFC-0062 14.1: one startup TTL sweep over the workspace scratch namespaces. Leases are
+    // in-memory only, so a fresh worker cannot hold one; expired namespaces from crashed or
+    // deleted sessions are reclaimed here, and the sweep never races a live tool or terminal
+    // because none exist yet in this process.
+    if let Some(scratch_control) = scratch_control {
+        let scratch_root = attachment_paths.scratch_root.clone();
+        runtime.spawn_blocking(move || {
+            match sigil_tools_builtin::gc_scratch_namespaces(
+                &scratch_root,
+                &scratch_control,
+                &sigil_tools_builtin::ScratchGcConfig::default(),
+                current_unix_time_ms(),
+            ) {
+                Ok(report) if report.deleted > 0 => {
+                    tracing::debug!(
+                        deleted = report.deleted,
+                        reclaimed_bytes = report.deleted_bytes,
+                        "startup scratch TTL sweep reclaimed expired namespaces"
+                    );
+                }
+                Ok(_report) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "startup scratch TTL sweep failed");
+                }
+            }
+        });
+    }
     if let Err(error) = register_worker_active_projection_observer(&mut state) {
         let _ = message_tx.send(WorkerMessage::RunFailed(error));
         return;

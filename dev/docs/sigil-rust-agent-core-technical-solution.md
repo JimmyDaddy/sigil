@@ -437,7 +437,7 @@ pub trait Tool: Send + Sync {
 - `egress_audit` 用于工具域内安全出境审计摘要，返回值会进入 durable control state；实现必须先脱敏并限制大小，不能包含原始 secret、文件内容或大 payload
 - `execute` 必须接收 provider 侧的 `call_id` 并原样写回 `ToolResult.call_id`，保证 tool call / result 配对可恢复
 - 文件类内置工具必须对 workspace root 做 canonicalize，并用路径组件判断 confinement；绝对路径、`..`、目标 symlink 或父目录 symlink 指向 workspace 外时必须生成 `External` subject，再由 `permission.external_directory` gate 决定 deny / ask / allow
-- 临时 shell scratch 文件使用运行时注入的 `$SIGIL_SCRATCH_DIR`，实际目录位于 Sigil 用户态 cache root，对模型显示为 `cache/tmp`。系统 temp 目录不作为内置例外：`/tmp`、macOS `/private/tmp`、Windows `%TEMP%` 等仍属于 workspace 外路径，必须走 `permission.external_directory`。
+- 临时 shell scratch 文件使用运行时注入的 `$SIGIL_SCRATCH_DIR`，实际目录位于 Sigil 用户态 cache root，对模型显示为 `cache/tmp`。scratch 是 session-scoped：每个 session 通过其稳定 scope id 推导独立命名空间（`<cache root>/workspaces/<workspace>/tmp/sessions/<session scope id>`），同一 session 的连续 tool call 复用同一目录，resume 后路径不变；bash、terminal_start、TUI 与 Desktop/application runtime 共用同一推导规则。命名空间在写入前设置为 owner-only（Windows 使用受保护的 owner-only DACL），并受 per-session 容量配额与 workspace 硬上限约束；达到配额时工具返回结构化 `scratch_quota_exceeded` 错误，绝不静默转用系统 `/tmp`。过期命名空间由 TTL GC 回收，且 GC 永远不会删除仍被 active tool 或 terminal task lease 占用的命名空间。系统 temp 目录不作为内置例外：`/tmp`、macOS `/private/tmp`、Windows `%TEMP%` 等仍属于 workspace 外路径，必须走 `permission.external_directory`。
 
 ### 6.3 Tool Registry
 
