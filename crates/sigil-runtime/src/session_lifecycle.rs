@@ -921,21 +921,47 @@ impl LocalSessionLifecycleService {
         // of hard-coding Available -> DisabledPendingDelete. Already-disabled artifacts resume
         // straight to deletion; terminal states are skipped entirely; the disable batch is
         // appended atomically so a partial failure cannot leave a half-disabled set.
+        // RFC-0062 16.2: every ref that will be physically deleted gets a durable tombstone plan
+        // in the same atomic batch (new disables) or a standalone batch (already-disabled refs
+        // without a plan), so a crash between the physical move and the terminal Expired append
+        // can be reconciled from the plan instead of staying DisabledPendingDelete forever.
         let mut pending_disable = Vec::new();
+        let mut pending_plan = Vec::new();
         for artifact_ref in &disabled {
             let state = session.artifact_availability_state(artifact_ref);
             match state {
                 sigil_kernel::ToolArtifactAvailabilityStateV1::Available => {
                     pending_disable.push(artifact_ref.clone());
                 }
-                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete => {}
+                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete => {
+                    if !session.has_tombstone_plan(artifact_ref) {
+                        pending_plan.push(artifact_ref.clone());
+                    }
+                }
                 _ => {}
             }
         }
-        // RFC-0062 9.4: the whole disable set is appended as ONE durable batch so a partial
-        // failure cannot leave half the candidates disabled; retry restarts from scratch.
-        if !pending_disable.is_empty() {
-            session.append_availability_transitions(
+        if !pending_disable.is_empty() || !pending_plan.is_empty() {
+            let mut plans = Vec::new();
+            for artifact_ref in &pending_disable {
+                plans.push(sigil_kernel::ToolArtifactTombstonePlannedV1 {
+                    schema_version: sigil_kernel::TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                    artifact_ref: artifact_ref.clone(),
+                    expected_generation: session
+                        .artifact_availability_generation(artifact_ref)
+                        .saturating_add(1),
+                    planned_at_ms: now_unix_ms,
+                });
+            }
+            for artifact_ref in &pending_plan {
+                plans.push(sigil_kernel::ToolArtifactTombstonePlannedV1 {
+                    schema_version: sigil_kernel::TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+                    artifact_ref: artifact_ref.clone(),
+                    expected_generation: session.artifact_availability_generation(artifact_ref),
+                    planned_at_ms: now_unix_ms,
+                });
+            }
+            session.append_availability_transitions_with_tombstone_plans(
                 pending_disable
                     .into_iter()
                     .map(|artifact_ref| {
@@ -947,6 +973,7 @@ impl LocalSessionLifecycleService {
                         )
                     })
                     .collect(),
+                plans,
                 now_unix_ms,
             )?;
         }
@@ -955,19 +982,48 @@ impl LocalSessionLifecycleService {
             now_unix_ms,
             sigil_kernel::session::TOOL_ARTIFACT_ORPHAN_GRACE_MS,
         )?;
-        for artifact_ref in &report.tombstoned_refs {
+        // RFC-0062 16.2: reconcile every durable tombstone plan whose manifest is already gone
+        // (crash between the physical move and the Expired append) together with the manifests
+        // just moved by this pass. Completing from the durable plan — not from the ephemeral
+        // inventory alone — makes every crash point idempotently converge; the generation
+        // binding fails closed if the ledger moved under the plan.
+        let inventory = store.manifest_inventory()?;
+        let mut reconcile = std::collections::BTreeSet::new();
+        for plan in session.tombstone_plans() {
+            if session.artifact_availability_state(&plan.artifact_ref)
+                == sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete
+                && !inventory
+                    .iter()
+                    .any(|entry| entry.descriptor.artifact_ref == plan.artifact_ref)
+            {
+                reconcile.insert(plan.artifact_ref.clone());
+            }
+        }
+        reconcile.extend(report.tombstoned_refs.iter().cloned());
+        for artifact_ref in &reconcile {
             let generation = session.artifact_availability_generation(artifact_ref);
             let state = session.artifact_availability_state(artifact_ref);
-            if state == sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete {
-                session.append_artifact_availability_transition(
-                    artifact_ref,
-                    generation,
-                    sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
-                    sigil_kernel::ToolArtifactAvailabilityStateV1::Expired,
-                    sigil_kernel::ToolArtifactAvailabilityReasonV1::GcExpired,
-                    now_unix_ms,
-                )?;
+            if state != sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete {
+                continue;
             }
+            if let Some(plan) = session.tombstone_plan_for(artifact_ref)
+                && plan.expected_generation != generation
+            {
+                bail!(
+                    "artifact GC reconciliation failed: tombstone plan generation mismatch for {}: plan {}, ledger {}",
+                    artifact_ref.artifact_id,
+                    plan.expected_generation,
+                    generation
+                );
+            }
+            session.append_artifact_availability_transition(
+                artifact_ref,
+                generation,
+                sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+                sigil_kernel::ToolArtifactAvailabilityStateV1::Expired,
+                sigil_kernel::ToolArtifactAvailabilityReasonV1::GcExpired,
+                now_unix_ms,
+            )?;
         }
         let operation_id = format!("session-artifact-gc:{}", uuid::Uuid::new_v4());
         self.lifecycle_journal().append(

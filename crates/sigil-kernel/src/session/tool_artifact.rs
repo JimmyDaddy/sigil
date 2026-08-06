@@ -828,6 +828,36 @@ impl ToolArtifactAvailabilityChangedV1 {
     }
 }
 
+pub const TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION: u16 = 1;
+
+/// RFC-0062 16.2: durable tombstone intent persisted BEFORE the physical body move.
+///
+/// A crash between the move and the terminal `DisabledPendingDelete -> Expired` append leaves the
+/// manifest gone while the ledger still says `DisabledPendingDelete`; the reconciler completes the
+/// transition from this record (bound to the exact availability generation) instead of guessing
+/// from the ephemeral manifest inventory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolArtifactTombstonePlannedV1 {
+    pub schema_version: u16,
+    pub artifact_ref: ToolArtifactRefV1,
+    /// Availability generation the `DisabledPendingDelete` state has at plan time. Recovery
+    /// appends `DisabledPendingDelete -> Expired` with this expected generation and fails closed
+    /// when the ledger generation no longer matches.
+    pub expected_generation: u64,
+    pub planned_at_ms: u64,
+}
+
+impl ToolArtifactTombstonePlannedV1 {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION {
+            bail!("tool artifact tombstone plan schema version is unsupported");
+        }
+        self.artifact_ref.validate()?;
+        Ok(())
+    }
+}
+
 /// RFC-0062 9.1: session-aware capture plan frozen before spawn. Execution backends derive a
 /// process-local config from it and receive an opaque sink; they never see session authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

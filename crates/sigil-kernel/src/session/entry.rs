@@ -214,6 +214,9 @@ pub enum ControlEntry {
     ToolArtifactRead(ToolArtifactReadRecordedV1),
     /// RFC-0062 9.4: generation-guarded availability transition for one artifact.
     ToolArtifactAvailabilityChanged(ToolArtifactAvailabilityChangedV1),
+    /// RFC-0062 16.2: durable tombstone intent persisted before the physical body move so a
+    /// crash between the move and the terminal Expired append can be reconciled on restart.
+    ToolArtifactTombstonePlan(ToolArtifactTombstonePlannedV1),
     ToolEgress(Box<ToolEgressEntry>),
     McpElicitation(Box<McpElicitationEntry>),
     ToolPreviewCaptured(ToolPreviewSnapshot),
@@ -330,6 +333,7 @@ impl ControlEntry {
             Self::ToolExecution(entry) => entry.validate(),
             Self::TerminalTask(entry) => entry.validate_durable(),
             Self::ToolArtifactAvailabilityChanged(entry) => entry.validate(),
+            Self::ToolArtifactTombstonePlan(entry) => entry.validate(),
             _ => Ok(()),
         }
     }

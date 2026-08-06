@@ -1472,6 +1472,18 @@ fn artifact_gc_appends_durable_disable_before_delete_and_expired_after() -> Resu
         .iter()
         .map(|record| record.session_log_entry())
         .collect::<Result<Vec<_>>>()?;
+    let plans = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Some(sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::ToolArtifactTombstonePlan(plan),
+            )) => Some(plan),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 1, "one durable tombstone plan before deletion");
+    assert_eq!(plans[0].expected_generation, 1);
+    assert_eq!(plans[0].artifact_ref, orphan.artifact_ref);
     let transitions = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -1497,6 +1509,353 @@ fn artifact_gc_appends_durable_disable_before_delete_and_expired_after() -> Resu
         sigil_kernel::ToolArtifactAvailabilityStateV1::Expired
     );
     assert!(store.resolve(&orphan.artifact_ref).is_err());
+    Ok(())
+}
+
+fn gc_crash_fixture(
+    temp: &tempfile::TempDir,
+    stem: &str,
+) -> Result<(
+    std::path::PathBuf,
+    sigil_kernel::SessionRef,
+    String,
+    sigil_kernel::ToolArtifactStore,
+    sigil_kernel::ToolArtifactRefV1,
+)> {
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join(format!("{stem}.jsonl"));
+    finalized_session(&source, stem)?;
+    let source_ref = sigil_kernel::SessionRef::new_relative(format!("{stem}.jsonl"))?;
+    let source_session_id = JsonlSessionStore::read_event_records(&source)?
+        .first()
+        .context("session identity")?
+        .session_id()
+        .to_owned();
+    let store = sigil_kernel::ToolArtifactStore::for_session_path(&source);
+    let artifact = store.capture_text(
+        &format!("call-{stem}"),
+        "shell",
+        "crash-window body",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    Ok((
+        source,
+        source_ref,
+        source_session_id,
+        store,
+        artifact.artifact_ref,
+    ))
+}
+
+fn append_durable_disable_with_plan(
+    session_path: &std::path::Path,
+    artifact_ref: &sigil_kernel::ToolArtifactRefV1,
+    now_unix_ms: u64,
+) -> Result<()> {
+    // Mirrors the runtime GC prefix: the disable transition and its tombstone plan land in one
+    // atomic durable batch BEFORE any physical move.
+    let store = JsonlSessionStore::new(session_path)?;
+    let mut session = Session::load_from_store("session", "model", store)?;
+    session.append_availability_transitions_with_tombstone_plans(
+        vec![(
+            artifact_ref.clone(),
+            sigil_kernel::ToolArtifactAvailabilityStateV1::Available,
+            sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+            sigil_kernel::ToolArtifactAvailabilityReasonV1::GcDisable,
+        )],
+        vec![sigil_kernel::ToolArtifactTombstonePlannedV1 {
+            schema_version: sigil_kernel::TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+            artifact_ref: artifact_ref.clone(),
+            expected_generation: 1,
+            planned_at_ms: now_unix_ms,
+        }],
+        now_unix_ms,
+    )
+}
+
+fn availability_and_plan_counts(session_path: &std::path::Path) -> Result<(usize, usize)> {
+    let records = JsonlSessionStore::read_event_records(session_path)?;
+    let mut transitions = 0usize;
+    let mut plans = 0usize;
+    for record in &records {
+        if let Some(entry) = record.session_log_entry()? {
+            match entry {
+                SessionLogEntry::Control(ControlEntry::ToolArtifactAvailabilityChanged(_)) => {
+                    transitions += 1;
+                }
+                SessionLogEntry::Control(ControlEntry::ToolArtifactTombstonePlan(_)) => {
+                    plans += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((transitions, plans))
+}
+
+fn move_to_trash(
+    store: &sigil_kernel::ToolArtifactStore,
+    artifact_ref: &sigil_kernel::ToolArtifactRefV1,
+    include_blob: bool,
+) -> Result<()> {
+    // Simulates the physical phase of the store GC: the manifest (and optionally the blob) are
+    // moved into trash while the ledger still says DisabledPendingDelete.
+    let trash = store.root().join("trash").join("simulated-crash");
+    fs::create_dir_all(&trash)?;
+    let descriptor = if include_blob {
+        Some(store.resolve(artifact_ref)?)
+    } else {
+        None
+    };
+    let manifest = store
+        .root()
+        .join("refs")
+        .join(format!("{}.json", artifact_ref.artifact_id));
+    fs::rename(
+        &manifest,
+        trash.join(format!("{}.json", artifact_ref.artifact_id)),
+    )?;
+    if let Some(descriptor) = descriptor {
+        let digest = descriptor
+            .content_sha256
+            .strip_prefix("sha256:")
+            .context("content hash")?;
+        let blob = store
+            .root()
+            .join("blobs")
+            .join(&digest[..2])
+            .join(format!("{digest}.blob"));
+        fs::rename(&blob, trash.join(format!("{digest}.blob")))?;
+    }
+    Ok(())
+}
+
+fn run_gc_recovery_twice(
+    service: &LocalSessionLifecycleService,
+    source_ref: &sigil_kernel::SessionRef,
+    source_session_id: &str,
+    source: &std::path::Path,
+) -> Result<()> {
+    // Every crash point must converge on the first recovery run and stay terminal across two
+    // further retries: no new transitions, no new plans, no error.
+    let baseline = availability_and_plan_counts(source)?;
+    service.garbage_collect_session_artifacts(
+        source_ref,
+        source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    service.garbage_collect_session_artifacts(
+        source_ref,
+        source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(
+        availability_and_plan_counts(source)?,
+        baseline,
+        "recovery retries must be idempotent"
+    );
+    Ok(())
+}
+
+#[test]
+fn artifact_gc_recovers_after_crash_post_disable_append() -> Result<()> {
+    // RFC-0062 16.2 crash point 1: the durable disable + tombstone plan landed, the physical
+    // move never ran. Recovery must resume deletion and complete Expired.
+    let temp = tempfile::tempdir()?;
+    let (source, source_ref, source_session_id, store, artifact_ref) =
+        gc_crash_fixture(&temp, "session-crash-post-disable")?;
+    append_durable_disable_with_plan(&source, &artifact_ref, u64::MAX)?;
+    let service = LocalSessionLifecycleService::new(
+        "workspace-1",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    );
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 1);
+    assert_eq!(report.tombstoned_refs.len(), 1);
+    assert_eq!(
+        availability_and_plan_counts(&source)?,
+        (2, 1),
+        "disable then expired, with exactly one durable plan"
+    );
+    assert!(store.resolve(&artifact_ref).is_err());
+    run_gc_recovery_twice(&service, &source_ref, &source_session_id, &source)?;
+    Ok(())
+}
+
+#[test]
+fn artifact_gc_recovers_after_crash_post_manifest_tombstone() -> Result<()> {
+    // RFC-0062 16.2 crash point 2: the manifest moved into trash, the blob is still live, and
+    // Expired was never appended. Recovery must complete the terminal transition from the plan.
+    let temp = tempfile::tempdir()?;
+    let (source, source_ref, source_session_id, store, artifact_ref) =
+        gc_crash_fixture(&temp, "session-crash-post-manifest")?;
+    append_durable_disable_with_plan(&source, &artifact_ref, u64::MAX)?;
+    move_to_trash(&store, &artifact_ref, false)?;
+    let service = LocalSessionLifecycleService::new(
+        "workspace-1",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    );
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 0, "manifest was already moved");
+    assert_eq!(
+        availability_and_plan_counts(&source)?,
+        (2, 1),
+        "reconciliation completed Expired from the durable plan"
+    );
+    assert!(store.resolve(&artifact_ref).is_err());
+    run_gc_recovery_twice(&service, &source_ref, &source_session_id, &source)?;
+    Ok(())
+}
+
+#[test]
+fn artifact_gc_recovers_after_crash_between_body_delete_and_expired_append() -> Result<()> {
+    // RFC-0062 16.2 crash point 3: manifest AND body are gone while the ledger still says
+    // DisabledPendingDelete. Without the durable plan the ledger would be stuck; recovery must
+    // append the terminal Expired.
+    let temp = tempfile::tempdir()?;
+    let (source, source_ref, source_session_id, store, artifact_ref) =
+        gc_crash_fixture(&temp, "session-crash-post-body-delete")?;
+    append_durable_disable_with_plan(&source, &artifact_ref, u64::MAX)?;
+    move_to_trash(&store, &artifact_ref, true)?;
+    let service = LocalSessionLifecycleService::new(
+        "workspace-1",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    );
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 0, "manifest was already moved");
+    assert_eq!(
+        availability_and_plan_counts(&source)?,
+        (2, 1),
+        "reconciliation completed Expired from the durable plan"
+    );
+    assert!(store.resolve(&artifact_ref).is_err());
+    run_gc_recovery_twice(&service, &source_ref, &source_session_id, &source)?;
+    Ok(())
+}
+
+#[test]
+fn artifact_gc_recovers_after_crash_post_expired_append() -> Result<()> {
+    // RFC-0062 16.2 crash point 4: the terminal Expired is already durable, only the lifecycle
+    // journal completion is missing. Recovery must not re-append or regress the ledger.
+    let temp = tempfile::tempdir()?;
+    let (source, source_ref, source_session_id, store, artifact_ref) =
+        gc_crash_fixture(&temp, "session-crash-post-expired")?;
+    append_durable_disable_with_plan(&source, &artifact_ref, u64::MAX)?;
+    move_to_trash(&store, &artifact_ref, true)?;
+    {
+        let store = JsonlSessionStore::new(&source)?;
+        let mut session = Session::load_from_store("session", "model", store)?;
+        session.append_artifact_availability_transition(
+            &artifact_ref,
+            1,
+            sigil_kernel::ToolArtifactAvailabilityStateV1::DisabledPendingDelete,
+            sigil_kernel::ToolArtifactAvailabilityStateV1::Expired,
+            sigil_kernel::ToolArtifactAvailabilityReasonV1::GcExpired,
+            u64::MAX,
+        )?;
+    }
+    let service = LocalSessionLifecycleService::new(
+        "workspace-1",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    );
+
+    service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(
+        availability_and_plan_counts(&source)?,
+        (2, 1),
+        "already terminal ledger must not grow"
+    );
+    assert!(store.resolve(&artifact_ref).is_err());
+    run_gc_recovery_twice(&service, &source_ref, &source_session_id, &source)?;
+    Ok(())
+}
+
+#[test]
+fn artifact_gc_waits_for_active_reader_lease_before_deletion() -> Result<()> {
+    // RFC-0062 9.4: an old-generation reader lease must drain before the body is deleted; the
+    // disable event already rejects new readers. GC skips the locked ref, then completes once
+    // the lease is released.
+    let temp = tempfile::tempdir()?;
+    let (source, source_ref, source_session_id, store, artifact_ref) =
+        gc_crash_fixture(&temp, "session-gc-active-reader")?;
+    let service = LocalSessionLifecycleService::new(
+        "workspace-1",
+        temp.path().join("sessions"),
+        temp.path().join("exports"),
+    );
+
+    let locks_dir = store.root().join("locks");
+    fs::create_dir_all(&locks_dir)?;
+    let lock_path = locks_dir.join(format!("{}.lock", artifact_ref.artifact_id));
+    let reader = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    fs2::FileExt::try_lock_shared(&reader).context("reader lease")?;
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.skipped_active_reads, 1);
+    assert_eq!(report.tombstoned_manifests, 0);
+    assert_eq!(
+        availability_and_plan_counts(&source)?,
+        (1, 1),
+        "only the disable landed; Expired must wait for the reader drain"
+    );
+    assert!(store.resolve(&artifact_ref).is_ok(), "body must survive");
+
+    reader.unlock().context("release reader lease")?;
+    drop(reader);
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+    assert_eq!(report.tombstoned_manifests, 1);
+    assert_eq!(
+        availability_and_plan_counts(&source)?,
+        (2, 1),
+        "deletion and Expired complete after the lease drains"
+    );
+    assert!(store.resolve(&artifact_ref).is_err());
+    run_gc_recovery_twice(&service, &source_ref, &source_session_id, &source)?;
     Ok(())
 }
 
