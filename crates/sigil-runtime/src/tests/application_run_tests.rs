@@ -26,7 +26,7 @@ use sigil_kernel::{
     TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool,
     ToolAccess, ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory,
     ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolResultRecordedV2, ToolSpec, UsageStats,
+    ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats,
     conversation_run_lifecycle_record_from_stream,
 };
 
