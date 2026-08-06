@@ -59,7 +59,7 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `cargo clippy --all-targets -- -D warnings`、`pnpm --dir apps/desktop check`、
   `./scripts/check-docs.sh`、`./scripts/generate-desktop-contract.sh --check` 全部通过。
 - 已知残留：delegate/spawn 工具结果走 per-tool emit（batch 全量接入会改变 settle/completion 时序语义）；
-  跨流 secret 拆分不参与脱敏（只按流内整体检测）；GC 物理删除后、Expired append 前崩溃时，ledger
+  GC 物理删除后、Expired append 前崩溃时，ledger
   可能停在 DisabledPendingDelete（需 journal 化 tombstone 计划才能自动补 Expired，当前由
   DisabledPendingDelete 状态安全拒绝读取兜底）；Windows staging 依赖 FILE_FLAG_DELETE_ON_CLOSE + 显式 SDDL DACL
   （delete-on-close 不保证断电删除，grace GC 为兜底；本机为 macOS，Windows 行为仅通过
@@ -70,6 +70,14 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   staging 目录与两条 live pipe 文件均在写入未脱敏字节前成为 protected DACL、第二 read-open
   以原始 `ERROR_SHARING_VIOLATION` 拒绝；
   不同 SID 的第二 principal 未声称（需跨账号 helper process，超出单测范围）。
+- 2026-08-05 关闭跨流 secret 拆分残留：canonical body 的 stdout/stderr seam 在 finalize 时经过
+  确定性边界 re-scan（`redact_cross_stream_boundary`）——对边界合并 token 复用同一 URL/value-marker
+  策略并补 `redact_next` carry，替换按 span 首字节归属所在 stream，segment offset/eligible/persisted
+  与 canonical hash 保持真实。逐流 pass 已把 carry 型 value 前半替换为 `[redacted]` 时，若该
+  `[redacted]` 是 stdout 最后一个 token 且前一个 token 是 carry marker，则 stderr 侧 value 残片被
+  吸收进同一替换（与全文本 tokenizer 语义一致，canonical 闭合）。URL query 值跨 seam 拆分时，
+  per-stream URL 投影已消除 marker，残片不携带任何可重建信息且 canonical 闭合，保持原样。
+  新增测试覆盖全字节边界拆分、selector 读取、ledger/offset、cap 附近与 invalid UTF-8 下 hash 稳定。
 
 创建日期：2026-08-03
 
