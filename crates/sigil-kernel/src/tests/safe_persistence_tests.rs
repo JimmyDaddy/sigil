@@ -362,3 +362,205 @@ fn streamed_tool_identity_failure_emits_only_redacted_terminal_error() {
     ));
     assert!(!format!("{:?}", chunks[0]).contains(secret));
 }
+
+/// Mirrors the `finish_process_capture` pipeline: per-stream projection, then the boundary pass.
+fn redact_cross_stream_pair(stdout: &str, stderr: &str) -> (String, String) {
+    let stdout = safe_persistence_text(stdout);
+    let stderr = safe_persistence_text(stderr);
+    redact_cross_stream_boundary(&stdout, &stderr)
+}
+
+fn assert_cross_stream_closed(stdout: &str, stderr: &str, forbidden: &[&str]) {
+    let (safe_stdout, safe_stderr) = redact_cross_stream_pair(stdout, stderr);
+    let canonical = format!("{safe_stdout}{safe_stderr}");
+    for secret in forbidden {
+        assert!(
+            !canonical.contains(secret),
+            "canonical must not contain {secret:?}, got: {canonical:?}"
+        );
+    }
+    assert_eq!(
+        safe_persistence_text(&canonical),
+        canonical,
+        "canonical must be redaction-closed, got: {canonical:?}"
+    );
+}
+
+#[test]
+fn cross_stream_boundary_redacts_value_markers_at_every_split() {
+    // RFC-0062 16.1: for every supported value-marker secret, split the full match at every
+    // possible byte boundary between stdout and stderr; the canonical body must never reassemble
+    // the match and must stay redaction-closed.
+    for match_text in [
+        "token=SUPER-SECRET-123",
+        "secret=SUPER-SECRET-123",
+        "password=SUPER-SECRET-123",
+        "api_key=SUPER-SECRET-123",
+        "apikey=SUPER-SECRET-123",
+        "authorization=SUPER-SECRET-123",
+    ] {
+        for split in 0..=match_text.len() {
+            let stdout = format!("head {}", &match_text[..split]);
+            let stderr = format!("{} tail", &match_text[split..]);
+            assert_cross_stream_closed(&stdout, &stderr, &[match_text]);
+        }
+    }
+}
+
+#[test]
+fn cross_stream_boundary_redacts_carry_markers_at_every_split() {
+    // The whitespace-separated carry forms (--token VALUE etc.) must hold at every split too:
+    // the merged token may itself become the carry marker, and the value token on the stderr
+    // side must then be redacted.
+    for match_text in [
+        "--token SUPER-SECRET-123",
+        "--secret SUPER-SECRET-123",
+        "--password SUPER-SECRET-123",
+        "--api-key SUPER-SECRET-123",
+    ] {
+        for split in 0..=match_text.len() {
+            let stdout = format!("head {}", &match_text[..split]);
+            let stderr = format!("{} tail", &match_text[split..]);
+            assert_cross_stream_closed(&stdout, &stderr, &[match_text]);
+        }
+    }
+}
+
+#[test]
+fn cross_stream_boundary_redacts_url_queries_split_across_streams() {
+    let url = "https://example.com/path?token=SUPER-SECRET-123";
+    for split in 0..=url.len() {
+        let stdout = format!("head {}", &url[..split]);
+        let stderr = format!("{} tail", &url[split..]);
+        assert_cross_stream_closed(&stdout, &stderr, &[url, "token=SUPER-SECRET-123"]);
+    }
+}
+
+#[test]
+fn cross_stream_boundary_attributes_replacements_to_the_span_start_stream() {
+    // Marker split at the boundary: the whole replacement (including the stderr value bytes it
+    // replaces) is attributed to stdout; the stderr segment loses the absorbed bytes.
+    let (stdout, stderr) = redact_cross_stream_pair("head tok", "en=x tail");
+    assert_eq!(stdout, "head token=[redacted]");
+    assert_eq!(stderr, " tail");
+
+    // Expansion: token=x -> token=[redacted] grows the stdout segment.
+    let (stdout, stderr) = redact_cross_stream_pair("tok", "en=x");
+    assert_eq!(stdout, "token=[redacted]");
+    assert_eq!(stdout.len(), "token=[redacted]".len());
+    assert!(stderr.is_empty());
+
+    // Shrinkage: a long value absorbed into the replacement shrinks the canonical body.
+    let (stdout, stderr) = redact_cross_stream_pair("head tok", &format!("en={}", "A".repeat(100)));
+    assert_eq!(stdout, "head token=[redacted]");
+    assert!(stderr.is_empty());
+
+    // Marker fully inside the stderr token stays attributed to stderr.
+    let (stdout, stderr) = redact_cross_stream_pair("head xyz", "token=SECRET tail");
+    assert_eq!(stdout, "head xyz");
+    assert_eq!(stderr, "token=[redacted] tail");
+
+    // Carry marker at the end of stdout redacts the first stderr token in place.
+    let (stdout, stderr) = redact_cross_stream_pair("head --token ", "SUPER-SECRET-123 tail");
+    assert_eq!(stdout, "head --token ");
+    assert_eq!(stderr, "[redacted] tail");
+
+    // Merged token equal to a carry marker redacts the stderr token AFTER it; the unchanged
+    // merged token stays attributed to its source streams.
+    let (stdout, stderr) = redact_cross_stream_pair("head --to", "ken SUPER-SECRET-123 tail");
+    assert_eq!(stdout, "head --to");
+    assert_eq!(stderr, "ken [redacted] tail");
+    assert_eq!(
+        format!("{stdout}{stderr}"),
+        "head --token [redacted] tail",
+        "canonical must match the full-text tokenizer output"
+    );
+
+    // URL crossing the boundary is projected and attributed to the span-start stream. The
+    // per-stream pass already normalized the stdout fragment (trailing slash), so the merged
+    // URL keeps the fragmentary host; the sensitive query is still projected away.
+    let (stdout, stderr) = redact_cross_stream_pair("head https://exam", "ple.com?token=x tail");
+    assert_eq!(stdout, "head https://exam/ple.com?[redacted]");
+    assert_eq!(stderr, " tail");
+    // The scheme marker itself split at the boundary is reassembled and projected.
+    let (stdout, stderr) = redact_cross_stream_pair("head https:/", "/exa.com?token=x tail");
+    assert_eq!(stdout, "head https://exa.com/?[redacted]");
+    assert_eq!(stderr, " tail");
+}
+
+#[test]
+fn cross_stream_boundary_leaves_non_merged_and_clean_streams_unchanged() {
+    // Whitespace-separated streams are already closed by the per-stream passes.
+    let cases = [
+        ("line one\n", "\nerror line\n"),
+        ("", ""),
+        ("no secrets here", "and none here"),
+        ("ends with space ", " starts with space"),
+        ("--token", ""),
+        ("", "token=SECRET"),
+    ];
+    for (stdout, stderr) in cases {
+        let (safe_stdout, safe_stderr) = redact_cross_stream_pair(stdout, stderr);
+        assert_eq!(
+            safe_stdout,
+            safe_persistence_text(stdout),
+            "stdout {stdout:?}"
+        );
+        assert_eq!(
+            safe_stderr,
+            safe_persistence_text(stderr),
+            "stderr {stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn cross_stream_boundary_absorbs_carry_value_fragments_like_the_full_text_scan() {
+    // The per-stream pass consumed `redact_next` on the last stdout token; the value continues
+    // into the first stderr token and must be absorbed into the same `[redacted]` replacement,
+    // exactly like the full-text tokenizer over the raw combined bytes.
+    let (stdout, stderr) = redact_cross_stream_pair("head --token SUPER-SECRE", "T-123 tail");
+    assert_eq!(stdout, "head --token [redacted]");
+    assert_eq!(stderr, " tail");
+    assert_cross_stream_closed(
+        "head --token SUPER-SECRE",
+        "T-123 tail",
+        &["--token SUPER-SECRET-123"],
+    );
+
+    // The literal `[redacted]` tail preceded by a carry marker is indistinguishable from a
+    // consumed flag, and the full-text scan absorbs its continuation the same way.
+    let (stdout, stderr) = redact_cross_stream_pair("head --token [redacted]", "hello tail");
+    assert_eq!(stdout, "head --token [redacted]");
+    assert_eq!(stderr, " tail");
+
+    // A value-marker replacement keeps its marker prefix, so the continuation is already
+    // absorbed by the merged-token scan; no separate rule is needed.
+    let (stdout, stderr) = redact_cross_stream_pair("head token=SUPER-SECRE", "T-123 tail");
+    assert_eq!(stdout, "head token=[redacted]");
+    assert_eq!(stderr, " tail");
+
+    // A bare `[redacted]` that is NOT preceded by a carry marker must not absorb stderr content.
+    let (stdout, stderr) = redact_cross_stream_pair("head token=x [redacted]", "hello tail");
+    assert_eq!(stdout, "head token=[redacted] [redacted]");
+    assert_eq!(stderr, "hello tail");
+
+    // Whitespace-separated value fragments are kept by the full-text scan too.
+    let (stdout, stderr) = redact_cross_stream_pair("head --token SUPER-SECRE ", "T-123 tail");
+    assert_eq!(stdout, "head --token [redacted] ");
+    assert_eq!(stderr, "T-123 tail");
+}
+
+#[test]
+fn cross_stream_boundary_is_deterministic() {
+    let stdout = "build step 12 of 99 tok";
+    let stderr = "en=SUPER-SECRET-123 warning https://exa";
+    let first = redact_cross_stream_pair(stdout, stderr);
+    for _ in 0..8 {
+        assert_eq!(redact_cross_stream_pair(stdout, stderr), first);
+    }
+    assert_eq!(
+        format!("{}{}", first.0, first.1),
+        "build step 12 of 99 token=[redacted] warning https://exa/"
+    );
+}

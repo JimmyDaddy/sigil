@@ -881,6 +881,26 @@ fn secret_shaped_key(key: &str) -> bool {
     .any(|candidate| normalized == *candidate || normalized.ends_with(candidate))
 }
 
+/// Value markers redacted inside a token: the first marker found in this list wins and the rest
+/// of the token is dropped in favor of `[redacted]`.
+const SECRET_VALUE_MARKERS: [&str; 6] = [
+    "token=",
+    "secret=",
+    "password=",
+    "api_key=",
+    "apikey=",
+    "authorization=",
+];
+
+/// Standalone tokens that redact the NEXT non-whitespace token.
+const SECRET_CARRY_MARKERS: [&str; 5] = [
+    "--token",
+    "--secret",
+    "--password",
+    "--api-key",
+    "authorization:",
+];
+
 fn redact_secret_carriers(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut redact_next = false;
@@ -908,28 +928,13 @@ fn redact_secret_carriers(value: &str) -> String {
             continue;
         }
         let lower = token.to_ascii_lowercase();
-        if [
-            "--token",
-            "--secret",
-            "--password",
-            "--api-key",
-            "authorization:",
-        ]
-        .contains(&lower.as_str())
-        {
+        if SECRET_CARRY_MARKERS.contains(&lower.as_str()) {
             output.push_str(token);
             redact_next = true;
             continue;
         }
         let mut projected = None;
-        for marker in [
-            "token=",
-            "secret=",
-            "password=",
-            "api_key=",
-            "apikey=",
-            "authorization=",
-        ] {
+        for marker in SECRET_VALUE_MARKERS {
             if let Some(index) = lower.find(marker) {
                 let prefix_end = index + marker.len();
                 projected = Some(format!("{}[redacted]", &token[..prefix_end]));
@@ -939,6 +944,190 @@ fn redact_secret_carriers(value: &str) -> String {
         output.push_str(projected.as_deref().unwrap_or(token));
     }
     output
+}
+
+/// Byte bounds of the last non-whitespace token in `value`, or `None` when no such token exists.
+fn last_non_whitespace_token_bounds(value: &str) -> Option<(usize, usize)> {
+    let last_non_ws = value.rfind(|character: char| !character.is_whitespace())?;
+    let start = value[..=last_non_ws]
+        .rfind(|character: char| character.is_whitespace())
+        .map_or(0, |ws| ws + 1);
+    Some((start, last_non_ws + 1))
+}
+
+/// Byte bounds of the first non-whitespace token in `value`, or `None` when no such token exists.
+fn first_non_whitespace_token_bounds(value: &str) -> Option<(usize, usize)> {
+    let start = value.find(|character: char| !character.is_whitespace())?;
+    let end = value[start..]
+        .find(|character: char| character.is_whitespace())
+        .map_or(value.len(), |offset| start + offset);
+    Some((start, end))
+}
+
+fn is_carry_marker(token: &str) -> bool {
+    SECRET_CARRY_MARKERS.contains(&token.to_ascii_lowercase().as_str())
+}
+
+/// The non-whitespace token immediately before byte position `before`, or `None`.
+fn previous_non_whitespace_token(value: &str, before: usize) -> Option<&str> {
+    let head = &value[..before];
+    let end = head.rfind(|character: char| !character.is_whitespace())?;
+    let start = head[..=end]
+        .rfind(|character: char| character.is_whitespace())
+        .map_or(0, |ws| ws + 1);
+    Some(&head[start..=end])
+}
+
+/// RFC-0062 16.1: closes the cross-stream secret reassembly gap.
+///
+/// `stdout`/`stderr` are the per-stream policy projections of an ordinary dual-pipe capture. A
+/// secret whose marker or value is split at the stream boundary is invisible to both per-stream
+/// scans but is reassembled by the canonical stdout-then-stderr artifact body. This re-scans
+/// exactly the boundary-merged token (the last stdout token directly followed by the first
+/// stderr token) with the same URL and value-marker policy as [`safe_persistence_text`], plus
+/// the `redact_next` carry from the last stdout token into the first stderr token. Every
+/// replacement is attributed to the stream containing the replaced span's first byte, so a
+/// crossing span's replacement (including the stderr bytes it replaces) lands in stdout and the
+/// segment ledger reports the actual policy-safe bytes attributable to each stream. The result
+/// depends only on the final stream bytes, never on pipe reader scheduling or chunk boundaries.
+#[must_use]
+pub(crate) fn redact_cross_stream_boundary(stdout: &str, stderr: &str) -> (String, String) {
+    let Some((out_start, out_end)) = last_non_whitespace_token_bounds(stdout) else {
+        return (stdout.to_owned(), stderr.to_owned());
+    };
+    let Some((in_start, in_end)) = first_non_whitespace_token_bounds(stderr) else {
+        return (stdout.to_owned(), stderr.to_owned());
+    };
+    let out_token = &stdout[out_start..out_end];
+    let in_token = &stderr[in_start..in_end];
+    if out_end == stdout.len() && in_start == 0 {
+        if out_token == "[redacted]"
+            && previous_non_whitespace_token(stdout, out_start).is_some_and(is_carry_marker)
+        {
+            // The per-stream pass consumed `redact_next` on the last stdout token, so the value
+            // continues into the first stderr token; the full-text tokenizer absorbs that
+            // continuation into the same `[redacted]` replacement.
+            return (stdout.to_owned(), stderr[in_end..].to_owned());
+        }
+        // The two tokens merge into one token in the canonical body; re-scan that merged token
+        // so a marker or URL split at the boundary is redacted like the full-text scan would.
+        let token = format!("{out_token}{in_token}");
+        let (out_part, in_part, carry) = redact_merged_boundary_token(&token, out_token.len());
+        let mut stderr_final = format!("{in_part}{}", &stderr[in_end..]);
+        if carry
+            && let Some((next_start, next_end)) =
+                first_non_whitespace_token_bounds(&stderr[in_end..])
+        {
+            // The merged token is exactly a carry marker; the full-text tokenizer would redact
+            // the stderr token AFTER the merged token.
+            let before = in_part.len() + next_start;
+            let after = in_part.len() + next_end;
+            stderr_final = format!(
+                "{}[redacted]{}",
+                &stderr_final[..before],
+                &stderr_final[after..]
+            );
+        }
+        return (
+            format!("{}{}", &stdout[..out_start], out_part),
+            stderr_final,
+        );
+    }
+    if is_carry_marker(out_token) {
+        // The full-text tokenizer would carry `redact_next` from the last stdout token into the
+        // first stderr token; reproduce that replacement deterministically.
+        return (
+            stdout.to_owned(),
+            format!("{}[redacted]{}", &stderr[..in_start], &stderr[in_end..]),
+        );
+    }
+    (stdout.to_owned(), stderr.to_owned())
+}
+
+fn redact_merged_boundary_token(token: &str, boundary: usize) -> (String, String, bool) {
+    let mut stdout_part = String::new();
+    let mut stderr_part = String::new();
+    let mut cursor = 0usize;
+    for (start, end) in url_spans(token) {
+        append_by_boundary(
+            &mut stdout_part,
+            &mut stderr_part,
+            &token[cursor..start],
+            boundary,
+            cursor,
+        );
+        let replacement = project_boundary_url(&token[start..end]);
+        if start < boundary {
+            stdout_part.push_str(&replacement);
+        } else {
+            stderr_part.push_str(&replacement);
+        }
+        cursor = end;
+    }
+    append_by_boundary(
+        &mut stdout_part,
+        &mut stderr_part,
+        &token[cursor..],
+        boundary,
+        cursor,
+    );
+    if SECRET_CARRY_MARKERS.contains(
+        &format!("{stdout_part}{stderr_part}")
+            .to_ascii_lowercase()
+            .as_str(),
+    ) {
+        return (stdout_part, stderr_part, true);
+    }
+    let (out_part, in_part) = redact_boundary_value_markers(&stdout_part, &stderr_part);
+    (out_part, in_part, false)
+}
+
+/// Appends unchanged bytes to the stream that contains them, splitting the original boundary.
+fn append_by_boundary(
+    stdout_part: &mut String,
+    stderr_part: &mut String,
+    chunk: &str,
+    boundary: usize,
+    chunk_start: usize,
+) {
+    let chunk_end = chunk_start + chunk.len();
+    if chunk_end <= boundary {
+        stdout_part.push_str(chunk);
+    } else if chunk_start >= boundary {
+        stderr_part.push_str(chunk);
+    } else {
+        let split = boundary - chunk_start;
+        stdout_part.push_str(&chunk[..split]);
+        stderr_part.push_str(&chunk[split..]);
+    }
+}
+
+fn project_boundary_url(raw_url: &str) -> String {
+    canonical_web_url_persistence_projection(raw_url)
+        .map(|projection| projection.safe_display_url)
+        .unwrap_or_else(|_| "[unsafe text projection failed]".to_owned())
+}
+
+/// Applies the value-marker scan of [`redact_secret_carriers`] to the boundary-merged token.
+fn redact_boundary_value_markers(stdout_part: &str, stderr_part: &str) -> (String, String) {
+    let token = format!("{stdout_part}{stderr_part}");
+    let lower = token.to_ascii_lowercase();
+    for marker in SECRET_VALUE_MARKERS {
+        let Some(index) = lower.find(marker) else {
+            continue;
+        };
+        let prefix_end = index + marker.len();
+        if index < stdout_part.len() {
+            // The marker starts in stdout: the whole remaining token (including the stderr bytes
+            // it replaces) is attributed to stdout.
+            return (format!("{}[redacted]", &token[..prefix_end]), String::new());
+        }
+        return (
+            stdout_part.to_owned(),
+            format!("{}[redacted]", &token[stdout_part.len()..prefix_end]),
+        );
+    }
+    (stdout_part.to_owned(), stderr_part.to_owned())
 }
 
 fn project_text_urls(

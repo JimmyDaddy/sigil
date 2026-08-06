@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{JsonlSessionStore, session_id_for_path};
+use crate::persistence::redact_cross_stream_boundary;
 use crate::{
     MessageRole, ModelMessage, ToolError, ToolResult, safe_persistence_json_value,
     safe_persistence_text, stable_event_hash, tool::PreCapturedToolArtifact,
@@ -3845,14 +3846,17 @@ impl ToolArtifactCaptureSink {
             file.seek(SeekFrom::Start(0))?;
             file.read_to_end(&mut stderr_bytes)?;
         }
-        // RFC-0062 10.2/9.2: redact EACH stream first so policy-eligible sizes are exact; then
-        // apply the reservation-reclaim settlement on the redacted (eligible) bytes so segments
-        // and the canonical body always describe the true persisted layout. A secret split
-        // across chunks within one stream is still caught because the stream is redacted as a
-        // whole; cross-stream secret splitting is not a supported persistence boundary.
+        // RFC-0062 10.2/9.2: redact EACH stream first so policy-eligible sizes are exact, then
+        // close the cross-stream boundary gap so a secret split at the stdout/stderr seam cannot
+        // be reassembled by the canonical body. The reservation-reclaim settlement then runs on
+        // the redacted (eligible) bytes so segments and the canonical body always describe the
+        // true persisted layout. A secret split across chunks within one stream is still caught
+        // because the stream is redacted as a whole.
         let redaction_count = if self.encoding == ToolArtifactEncoding::Utf8 {
             let stdout_redacted = safe_persistence_text(&String::from_utf8_lossy(&stdout_bytes));
             let stderr_redacted = safe_persistence_text(&String::from_utf8_lossy(&stderr_bytes));
+            let (stdout_redacted, stderr_redacted) =
+                redact_cross_stream_boundary(&stdout_redacted, &stderr_redacted);
             let stdout_changed = stdout_redacted.as_bytes() != stdout_bytes.as_slice();
             let stderr_changed = stderr_redacted.as_bytes() != stderr_bytes.as_slice();
             stdout_bytes = stdout_redacted.into_bytes();

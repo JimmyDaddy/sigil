@@ -1950,9 +1950,12 @@ fn process_capture_ledger_uses_policy_safe_sizes_for_expanding_redaction() -> Re
     let mut sink = sink.begin_process_capture(config)?;
     let raw_stdout = "token=x";
     sink.write_stream(ToolOutputStreamV1::Stdout, raw_stdout.as_bytes())?;
-    sink.write_stream(ToolOutputStreamV1::Stderr, b"err")?;
+    // Leading whitespace keeps stderr a separate token: a boundary-adjacent non-whitespace
+    // suffix would merge with the redacted stdout tail and be absorbed by the cross-stream
+    // boundary re-scan (covered by the dedicated cross-stream tests).
+    sink.write_stream(ToolOutputStreamV1::Stderr, b"\nerr")?;
     let (descriptor, segments, completeness) = sink.finish_process_capture(
-        (raw_stdout.len() + 3) as u64,
+        (raw_stdout.len() + 4) as u64,
         0,
         ToolSourceCompletenessV1::Complete,
     )?;
@@ -1966,10 +1969,10 @@ fn process_capture_ledger_uses_policy_safe_sizes_for_expanding_redaction() -> Re
     assert_eq!(segments[0].persisted_bytes, segments[0].eligible_bytes);
     assert_eq!(
         descriptor.policy_projected_bytes,
-        ("token=[redacted]".len() + 3) as u64,
+        ("token=[redacted]".len() + 4) as u64,
         "policy_projected must be the post-policy size"
     );
-    assert_eq!(descriptor.observed_bytes, (raw_stdout.len() + 3) as u64);
+    assert_eq!(descriptor.observed_bytes, (raw_stdout.len() + 4) as u64);
     assert_eq!(
         completeness.storage,
         ToolStorageCompletenessV1::Complete,
@@ -2216,5 +2219,334 @@ fn windows_staging_is_owner_only_before_unredacted_bytes_are_written() -> Result
         "expected sharing violation, got {error:?}"
     );
     drop(sink);
+    Ok(())
+}
+
+fn dual_stream_capture(
+    store: &ToolArtifactStore,
+    call_id: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    payload_cap: u64,
+) -> Result<(
+    ToolArtifactDescriptorV1,
+    Vec<ToolOutputSegmentV1>,
+    ToolResultCaptureCompletenessV1,
+)> {
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: payload_cap,
+        artifact_reservation_stdout_bytes: payload_cap / 2,
+        artifact_reservation_stderr_bytes: payload_cap / 2,
+        artifact_staging_limit_bytes_per_stream: payload_cap,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = store.begin_policy_safe_capture(
+        call_id,
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    sink.write_stream(ToolOutputStreamV1::Stdout, stdout)?;
+    sink.write_stream(ToolOutputStreamV1::Stderr, stderr)?;
+    sink.finish_process_capture(
+        (stdout.len() + stderr.len()) as u64,
+        0,
+        ToolSourceCompletenessV1::Complete,
+    )
+}
+
+#[test]
+fn process_capture_redacts_secrets_split_across_stream_boundary() -> Result<()> {
+    // RFC-0062 16.1: a value marker split at the stdout/stderr seam is invisible to both
+    // per-stream scans but must not be reassembled by the canonical body.
+    let (_temp, store) = store_fixture()?;
+    let (descriptor, segments, completeness) = dual_stream_capture(
+        &store,
+        "call-cross-secret",
+        b"prefix tok",
+        b"en=SUPER-SECRET-123 suffix\n",
+        1024 * 1024,
+    )?;
+    let body = String::from_utf8_lossy(&store.read_all(&descriptor)?).into_owned();
+    assert!(
+        !body.contains("token=SUPER-SECRET-123"),
+        "canonical must not reassemble the secret: {body:?}"
+    );
+    assert!(
+        !body.contains("SUPER-SECRET-123"),
+        "canonical must not contain the secret value: {body:?}"
+    );
+    assert!(
+        body.contains("token=[redacted]"),
+        "canonical must contain the redacted projection: {body:?}"
+    );
+    assert_eq!(completeness.policy, ToolPolicyCompletenessV1::Redacted);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].artifact_offset, 0);
+    assert_eq!(
+        segments[1].artifact_offset, segments[0].persisted_bytes,
+        "stderr must start exactly after the redacted stdout bytes"
+    );
+    assert!(
+        String::from_utf8_lossy(&store.read_all(&descriptor)?)
+            [segments[1].artifact_offset as usize..]
+            .starts_with(" suffix"),
+        "absorbed value bytes must not appear in the stderr segment"
+    );
+    Ok(())
+}
+
+#[test]
+fn process_capture_cross_stream_selector_reads_are_secret_free() -> Result<()> {
+    // RFC-0062 15: typed retrieval of the stdout and stderr segment ranges must not expose the
+    // reassembled secret either.
+    let (_temp, store) = store_fixture()?;
+    let (descriptor, segments, _) = dual_stream_capture(
+        &store,
+        "call-cross-selector",
+        b"prefix tok",
+        b"en=SUPER-SECRET-123 suffix\n",
+        1024 * 1024,
+    )?;
+    for segment in &segments {
+        let page = store.read_page(
+            &descriptor.artifact_ref,
+            ToolArtifactSelectorV1::ByteSlice {
+                offset: segment.artifact_offset,
+                limit: segment.persisted_bytes.min(u32::MAX as u64) as u32,
+            },
+        )?;
+        let text = &page.body;
+        assert!(
+            !text.contains("SUPER-SECRET-123"),
+            "segment {:?} must not contain the secret: {text:?}",
+            segment.stream
+        );
+        assert!(!text.contains("token=SUPER-SECRET-123"));
+    }
+    let search = store.read_page(
+        &descriptor.artifact_ref,
+        ToolArtifactSelectorV1::SearchLiteral {
+            query: "SUPER-SECRET-123".to_owned(),
+            start_offset: 0,
+            max_matches: 4,
+            context_lines: 1,
+        },
+    )?;
+    assert_eq!(
+        search.match_count, 0,
+        "literal search must not find the secret"
+    );
+    Ok(())
+}
+
+#[test]
+fn process_capture_cross_stream_ledger_and_offsets_stay_true() -> Result<()> {
+    // RFC-0062 9.2/9.3: the cross-stream replacement expands (token=x -> token=[redacted]) and
+    // absorbs the stderr value bytes; eligible/persisted bytes and the stderr offset must
+    // describe the actual canonical layout.
+    let (_temp, store) = store_fixture()?;
+    let (descriptor, segments, completeness) = dual_stream_capture(
+        &store,
+        "call-cross-ledger",
+        b"tok",
+        b"en=x tail",
+        1024 * 1024,
+    )?;
+    let body = store.read_all(&descriptor)?;
+    assert_eq!(body, b"token=[redacted] tail");
+    assert_eq!(segments[0].eligible_bytes, "token=[redacted]".len() as u64);
+    assert_eq!(segments[0].persisted_bytes, segments[0].eligible_bytes);
+    assert_eq!(segments[1].eligible_bytes, " tail".len() as u64);
+    assert_eq!(segments[1].persisted_bytes, segments[1].eligible_bytes);
+    assert_eq!(segments[1].artifact_offset, segments[0].persisted_bytes);
+    assert_eq!(
+        descriptor.policy_projected_bytes,
+        body.len() as u64,
+        "policy_projected must be the post-policy size"
+    );
+    assert_eq!(
+        completeness.storage,
+        ToolStorageCompletenessV1::Complete,
+        "a fully persisted policy-safe capture must not report storage truncation"
+    );
+
+    // Shrinkage: a long value is absorbed into the short replacement.
+    let (_temp, store) = store_fixture()?;
+    let long_value = "A".repeat(100);
+    let (descriptor, segments, _) = dual_stream_capture(
+        &store,
+        "call-cross-shrink",
+        b"head tok",
+        format!("en={long_value} tail").as_bytes(),
+        1024 * 1024,
+    )?;
+    let body = store.read_all(&descriptor)?;
+    assert_eq!(body, b"head token=[redacted] tail");
+    assert_eq!(
+        segments[0].persisted_bytes,
+        "head token=[redacted]".len() as u64
+    );
+    assert_eq!(segments[1].persisted_bytes, " tail".len() as u64);
+    assert_eq!(descriptor.persisted_bytes, body.len() as u64);
+    Ok(())
+}
+
+#[test]
+fn process_capture_cross_stream_hash_is_stable_across_chunk_schedulings() -> Result<()> {
+    // RFC-0062 9.2/18: boundary redaction must be deterministic — identical stream bytes produce
+    // one canonical hash across reader scheduling, chunk sizes, and invalid-UTF-8 boundaries.
+    let stdout = b"prefix tok";
+    let stderr = b"en=SUPER-SECRET-123 suffix\n";
+    let invalid_stdout = b"head \xff\xfe tok";
+    let invalid_stderr = b"en=OTHER-SECRET-999 tail\n";
+    let mut digests = std::collections::BTreeSet::new();
+    for chunk in [1usize, 3, 7, 64, 1024] {
+        for (stdout_bytes, stderr_bytes, secret) in [
+            (stdout.as_slice(), stderr.as_slice(), "SUPER-SECRET-123"),
+            (
+                invalid_stdout.as_slice(),
+                invalid_stderr.as_slice(),
+                "OTHER-SECRET-999",
+            ),
+        ] {
+            let (_temp, store) = store_fixture()?;
+            let config = ProcessStreamCaptureConfigV1 {
+                stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+                preview_limit_bytes_per_stream: 64 * 1024,
+                artifact_payload_limit_bytes_combined: 1024 * 1024,
+                artifact_reservation_stdout_bytes: 512 * 1024,
+                artifact_reservation_stderr_bytes: 512 * 1024,
+                artifact_staging_limit_bytes_per_stream: 1024 * 1024,
+                observed_limit_bytes_combined: 128 * 1024 * 1024,
+            };
+            let sink = store.begin_policy_safe_capture(
+                "call-cross-hash",
+                "shell",
+                "text/plain; charset=utf-8",
+                ToolArtifactEncoding::Utf8,
+                ToolArtifactSensitivity::Ordinary,
+            );
+            let mut sink = sink.begin_process_capture(config)?;
+            for chunk_bytes in stdout_bytes.chunks(chunk) {
+                sink.write_stream(ToolOutputStreamV1::Stdout, chunk_bytes)?;
+            }
+            for chunk_bytes in stderr_bytes.chunks(chunk) {
+                sink.write_stream(ToolOutputStreamV1::Stderr, chunk_bytes)?;
+            }
+            let (descriptor, _, _) = sink.finish_process_capture(
+                (stdout_bytes.len() + stderr_bytes.len()) as u64,
+                0,
+                ToolSourceCompletenessV1::Complete,
+            )?;
+            let body = String::from_utf8_lossy(&store.read_all(&descriptor)?).into_owned();
+            assert!(
+                !body.contains(secret),
+                "chunk {chunk}: canonical must not contain {secret}: {body:?}"
+            );
+            digests.insert(descriptor.content_sha256.clone());
+        }
+    }
+    assert_eq!(
+        digests.len(),
+        2,
+        "each fixture must produce exactly one canonical hash across chunk schedulings"
+    );
+    Ok(())
+}
+
+#[test]
+fn process_capture_absorbs_carry_value_fragments_split_at_the_boundary() -> Result<()> {
+    // RFC-0062 16.1: a carry-form value split at the seam is partially replaced by the
+    // per-stream pass; the remaining fragment must be absorbed so the canonical body matches
+    // the full-text tokenizer and stays redaction-closed.
+    let (_temp, store) = store_fixture()?;
+    let (descriptor, segments, completeness) = dual_stream_capture(
+        &store,
+        "call-cross-carry",
+        b"head --token SUPER-SECRE",
+        b"T-123 tail\n",
+        1024 * 1024,
+    )?;
+    let body = String::from_utf8_lossy(&store.read_all(&descriptor)?).into_owned();
+    assert_eq!(body, "head --token [redacted] tail\n");
+    assert!(!body.contains("SUPER-SECRET-123"));
+    assert_eq!(
+        segments[0].persisted_bytes,
+        "head --token [redacted]".len() as u64
+    );
+    assert_eq!(
+        segments[1].artifact_offset, segments[0].persisted_bytes,
+        "stderr must start exactly after the absorbed stdout replacement"
+    );
+    assert_eq!(
+        segments[1].persisted_bytes,
+        " tail\n".len() as u64,
+        "the value fragment must be absorbed, not persisted"
+    );
+    assert_eq!(
+        safe_persistence_text(&body),
+        body,
+        "canonical must be redaction-closed"
+    );
+    assert_eq!(completeness.policy, ToolPolicyCompletenessV1::Redacted);
+    Ok(())
+}
+
+#[test]
+fn process_capture_cross_stream_redaction_near_reservation_cap_stays_secret_free() -> Result<()> {
+    // RFC-0062 9.2: the boundary replacement crossing the stdout reservation cap settles into
+    // the reclaim budget without leaking the secret or corrupting the truncation ledger.
+    let (_temp, store) = store_fixture()?;
+    let fill = 512 * 1024 - 5;
+    let mut stdout = vec![b'a'; fill];
+    stdout.extend_from_slice(b"tok");
+    let stderr = b"en=SUPER-SECRET-123\n";
+    let config = ProcessStreamCaptureConfigV1 {
+        stream_layout: ToolOutputStreamLayoutV1::SeparatePipesNoCrossStreamOrder,
+        preview_limit_bytes_per_stream: 64 * 1024,
+        artifact_payload_limit_bytes_combined: 1024 * 1024,
+        artifact_reservation_stdout_bytes: 512 * 1024,
+        artifact_reservation_stderr_bytes: 512 * 1024,
+        artifact_staging_limit_bytes_per_stream: 1024 * 1024,
+        observed_limit_bytes_combined: 128 * 1024 * 1024,
+    };
+    let sink = store.begin_policy_safe_capture(
+        "call-cross-cap",
+        "shell",
+        "text/plain; charset=utf-8",
+        ToolArtifactEncoding::Utf8,
+        ToolArtifactSensitivity::Ordinary,
+    );
+    let mut sink = sink.begin_process_capture(config)?;
+    sink.write_stream(ToolOutputStreamV1::Stdout, &stdout)?;
+    sink.write_stream(ToolOutputStreamV1::Stderr, stderr)?;
+    let (descriptor, segments, completeness) = sink.finish_process_capture(
+        (stdout.len() + stderr.len()) as u64,
+        0,
+        ToolSourceCompletenessV1::Complete,
+    )?;
+    let body = store.read_all(&descriptor)?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("SUPER-SECRET-123"));
+    assert!(
+        text.ends_with("token=[redacted]\n"),
+        "the crossing replacement must land at the stdout tail"
+    );
+    // The crossing replacement shrinks the merged token (token=SUPER-SECRET-123 -> 16 B
+    // token=[redacted]) and is attributed to stdout, still within the reclaim budget.
+    assert_eq!(
+        segments[0].eligible_bytes,
+        (fill + "token=[redacted]".len()) as u64,
+        "eligible must be the post-redaction stdout size"
+    );
+    assert_eq!(segments[0].persisted_bytes, segments[0].eligible_bytes);
+    assert_eq!(segments[1].eligible_bytes, 1);
+    assert_eq!(completeness.storage, ToolStorageCompletenessV1::Complete);
+    assert_eq!(descriptor.policy_projected_bytes, body.len() as u64);
     Ok(())
 }
