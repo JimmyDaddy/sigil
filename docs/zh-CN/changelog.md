@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # 用户变更记录
 
@@ -7,6 +7,14 @@
 这一页只记录用户能够直接感知的变化。当前支持边界和早期预览说明见[当前支持状态与后续计划](status.md)。
 
 ## 尚未发布 - main
+
+- 自 v0.0.1-beta.3 起暂无面向用户的新变更。
+
+## v0.0.1-beta.3 - 2026-08-06
+
+本次 beta 发布自动计划审阅与 AI 编排生命周期、带配额/TTL 的 session-scoped scratch，以及
+RFC-0062 工具结果结算的收口。
+
 
 - 自动 Task 路由现在是默认行为：普通输入先在 review-first 基线上运行一次由 host 拥有的
   Chat / PlanReview / Task 决策，只有被接受的计划才能创建 durable Task。直接任务执行需要
@@ -27,6 +35,7 @@
   被表达成 host 终结指令；初始工具 preview 预算耗尽后，typed artifact retrieval 仍然可见。
 - 交互式工具审批不再于 300 秒后自动过期。**本次会话允许** 会在重新打开同一 session 后继续
   生效，并允许可识别验证命令跨 `tail`、`head`、`grep` 等纯展示变化复用，同时保留逐次精确执行校验。
+
 
 ## v0.0.1-beta.2 - 2026-08-03
 

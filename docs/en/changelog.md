@@ -1,4 +1,4 @@
-<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
+<!-- public-doc-role: changelog; authority: user-visible-release-history; sections: unreleased-main,v0-0-1-beta-3-2026-08-06,v0-0-1-beta-2-2026-08-03,v0-0-1-beta-1-2026-08-02,v0-0-1-alpha-6-2026-07-30,v0-0-1-alpha-5-2026-07-18,v0-0-1-alpha-4-2026-07-16,v0-0-1-alpha-3-2026-07-15,v0-0-1-alpha-2-2026-07-15,v0-0-1-alpha-1-2026-07-08,v0-0-1-alpha-2026-07-07; cta: open-installation -->
 
 # User Changelog
 
@@ -7,6 +7,15 @@
 This page lists user-facing release notes. For support boundaries and early-preview caveats, see [Supported Today And Future Work](status.md).
 
 ## Unreleased - main
+
+- No user-facing changes since v0.0.1-beta.3.
+
+## v0.0.1-beta.3 - 2026-08-06
+
+This beta releases the automatic plan-review and
+AI orchestration lifecycle, session-scoped scratch with quota/TTL, and the RFC-0062 tool-result
+settlement closures.
+
 
 - Automatic Task routing is now the default: ordinary input first runs a host-owned
   Chat / PlanReview / Task decision on the review-first baseline, and only an accepted plan can
@@ -32,6 +41,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 - Interactive tool approvals no longer expire automatically after 300 seconds. `Allow for
   session` persists across reopening the same session and reuses recognized validation grants
   across presentation-only `tail`, `head`, or `grep` changes while retaining exact execution checks.
+
 
 ## v0.0.1-beta.2 - 2026-08-03
 
