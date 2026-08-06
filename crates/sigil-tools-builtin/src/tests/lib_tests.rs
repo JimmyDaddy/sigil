@@ -28,7 +28,7 @@ use sigil_kernel::{
     ToolProgressSink, ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV3,
     ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
@@ -37,6 +37,7 @@ use super::{
     ReadToolArtifactTool, TerminalInputTool, TerminalProcessManagers, TerminalReadResult,
     TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
     register_builtin_tools_with_paths,
+    register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
 };
 
 use serial_test::serial;
@@ -47,6 +48,10 @@ fn bash_tool(test_root: &Path) -> BashTool {
     BashTool {
         scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_namespaces: Arc::new(
+            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
+        ),
         backend: Arc::new(LocalExecutionBackend),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
@@ -56,6 +61,10 @@ fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
     Ok(BashTool {
         scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_namespaces: Arc::new(
+            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
+        ),
         backend: Arc::new(LocalExecutionBackend),
         shell: crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
     })
@@ -2747,7 +2756,9 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
             subject.kind == ToolSubjectKind::Path
                 && subject.original == "$SIGIL_SCRATCH_DIR/result.txt"
                 && subject.scope == ToolSubjectScope::Workspace
-                && subject.normalized.ends_with("scratch-cache/tmp/result.txt")
+                && subject
+                    .normalized
+                    .ends_with("scratch-cache/tmp/sessions/no-session/result.txt")
         }),
         "{:?}",
         scratch_plan.subjects
@@ -2776,7 +2787,9 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
         subject.kind == ToolSubjectKind::Path
             && subject.original == "$TMPDIR/build"
             && subject.scope == ToolSubjectScope::Workspace
-            && subject.normalized.ends_with("scratch-cache/tmp/build")
+            && subject
+                .normalized
+                .ends_with("scratch-cache/tmp/sessions/no-session/build")
     }));
     Ok(())
 }
@@ -2840,8 +2853,9 @@ fn shell_symbolic_path_binding_rejects_symlink_escape() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let tool = bash_tool(workspace.path());
-    fs::create_dir_all(&tool.scratch_root)?;
-    symlink(outside.path(), tool.scratch_root.join("escape"))?;
+    let session_scratch = crate::scratch_namespace::session_scratch_dir(&tool.scratch_root, None);
+    fs::create_dir_all(&session_scratch)?;
+    symlink(outside.path(), session_scratch.join("escape"))?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let plan = tool.permission_plan(
@@ -3528,6 +3542,7 @@ fn register_builtin_tools_with_test_paths(
             terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
             scratch_root,
             scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
         },
     );
 }
@@ -3573,6 +3588,10 @@ fn temporary_file_guidance_is_model_visible() {
         BashTool {
             scratch_root: scratch_root.clone(),
             scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+            scratch_namespaces: Arc::new(
+                crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
+            ),
             backend: Arc::new(LocalExecutionBackend),
             shell: crate::shell_runtime::ResolvedShell::detect_default(),
         }
@@ -3583,6 +3602,8 @@ fn temporary_file_guidance_is_model_visible() {
             artifact_label_root: PathBuf::from("state/artifacts/tasks"),
             scratch_root,
             scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+            scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
         }
         .spec(),
     ] {
@@ -4773,9 +4794,354 @@ async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
     assert!(matches!(read.status, ToolResultStatus::Ok));
     assert_eq!(read.content, "done");
     assert_eq!(
-        fs::read_to_string(scratch_root.join("probe"))?,
+        fs::read_to_string(
+            scratch_root
+                .join("sessions")
+                .join("no-session")
+                .join("probe")
+        )?,
         "terminal-ok"
     );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn bash_uses_session_scoped_scratch_namespace_env() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session_a = "tool-a-0000-0000-0000-000000000101";
+    let session_b = "tool-b-0000-0000-0000-000000000102";
+    let ctx_a = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session_a);
+    let ctx_b = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session_b);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools_with_test_paths(&mut registry, &workspace, scratch_root.clone());
+
+    let result_a = registry
+        .execute(
+            ctx_a.clone(),
+            tool_call(
+                "bash",
+                json!({
+                    "command": "printf tool-a > \"$SIGIL_SCRATCH_DIR/probe\" && printf '%s' \"$SIGIL_SCRATCH_DIR\" > \"$SIGIL_SCRATCH_DIR/env-path\" && printf ok"
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(result_a.status, ToolResultStatus::Ok));
+
+    let result_b = registry
+        .execute(
+            ctx_b.clone(),
+            tool_call(
+                "bash",
+                json!({
+                    "command": "test ! -e \"$SIGIL_SCRATCH_DIR/probe\" && printf isolated"
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(result_b.status, ToolResultStatus::Ok));
+    assert_eq!(result_b.content, "isolated");
+
+    let namespace_a = scratch_root.join("sessions").join(session_a);
+    assert_eq!(fs::read_to_string(namespace_a.join("probe"))?, "tool-a");
+    assert_eq!(
+        fs::read_to_string(namespace_a.join("env-path"))?,
+        namespace_a.to_string_lossy()
+    );
+    assert!(
+        !scratch_root
+            .join("sessions")
+            .join(session_b)
+            .join("probe")
+            .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_scratch_quota_exceeded_is_structured_tool_error() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session = "quota-tool-0000-0000-0000-000000000103";
+    let ctx = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools_with_paths(
+        &mut registry,
+        BuiltinToolPaths {
+            changesets_root: workspace.join("state/artifacts/changesets"),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: workspace.join("state/artifacts/tasks"),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root: scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota {
+                per_session_bytes: 16,
+                workspace_hard_bytes: 1024 * 1024,
+            },
+        },
+    );
+
+    let namespace = crate::scratch_namespace::session_scratch_dir(&scratch_root, Some(session));
+    fs::create_dir_all(&namespace)?;
+    fs::write(namespace.join("blob"), vec![b'x'; 32])?;
+
+    let result = registry
+        .execute(
+            ctx.clone(),
+            tool_call("bash", json!({ "command": "printf ok" })),
+        )
+        .await?;
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("over-quota bash must fail with a structured tool error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::ScratchQuotaExceeded);
+    assert!(error.message.contains("scratch quota exceeded"));
+    assert_eq!(error.details["scope"], json!("session"));
+    assert_eq!(error.details["usage_bytes"], 32);
+    assert_eq!(error.details["quota_bytes"], 16);
+
+    fs::remove_file(namespace.join("blob"))?;
+    let result = registry
+        .execute(ctx, tool_call("bash", json!({ "command": "printf ok" })))
+        .await?;
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    Ok(())
+}
+
+#[test]
+fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let external = crate::scratch_namespace::ScratchNamespaceControl::new();
+    let mut registry = ToolRegistry::new();
+    let handles =
+        register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+            &mut registry,
+            BuiltinToolPaths {
+                changesets_root: workspace.join("state/artifacts/changesets"),
+                changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+                terminal_tasks_root: workspace.join("state/artifacts/tasks"),
+                terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+                scratch_root: workspace.join("cache/tmp"),
+                scratch_label: "cache/tmp".to_owned(),
+                scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+            },
+            Arc::new(LocalExecutionBackend),
+            &sigil_kernel::ExecutionConfig::default(),
+            None,
+            Some(external.clone()),
+        );
+
+    // RFC-0062 14.1: a shared external control means leases acquired through the tool surface
+    // are visible to session-delete cleanup and TTL GC that hold the same registry.
+    assert!(std::sync::Arc::ptr_eq(
+        &external.namespaces,
+        &handles.scratch.namespaces
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &external.tasks,
+        &handles.scratch.tasks
+    ));
+    let lease = handles.scratch.namespaces.acquire("shared-session");
+    assert!(external.namespaces.is_leased("shared-session"));
+    drop(lease);
+    assert!(!external.namespaces.is_leased("shared-session"));
+    Ok(())
+}
+
+#[test]
+fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
+    let scratch_root = PathBuf::from("/tmp/sigil-scratch-test");
+    let bash = BashTool {
+        scratch_root: scratch_root.clone(),
+        scratch_label: "cache/tmp".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_namespaces: Arc::new(
+            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
+        ),
+        backend: Arc::new(LocalExecutionBackend),
+        shell: crate::shell_runtime::ResolvedShell::detect_default(),
+    }
+    .spec();
+    let terminal = super::TerminalStartTool {
+        managers: Default::default(),
+        artifact_root: PathBuf::from("state/artifacts/tasks"),
+        artifact_label_root: PathBuf::from("state/artifacts/tasks"),
+        scratch_root,
+        scratch_label: "cache/tmp".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
+    }
+    .spec();
+    for spec in [bash, terminal] {
+        assert!(spec.description.contains("$SIGIL_SCRATCH_DIR"));
+        assert!(spec.description.contains("cache/tmp"));
+        assert!(spec.description.contains("scoped to the current session"));
+        assert!(spec.description.contains("size quota"));
+        assert!(spec.description.contains("TTL"));
+        assert!(spec.description.contains("permission.external_directory"));
+    }
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_start_holds_and_releases_session_scratch_lease() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session = "terminal-lease-0000-0000-0000-000000000104";
+    let shell = test_shell(&workspace)?;
+    let ctx = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session);
+    let mut registry = ToolRegistry::new();
+    let handles = register_builtin_tools_with_paths(
+        &mut registry,
+        BuiltinToolPaths {
+            changesets_root: workspace.join("state/artifacts/changesets"),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: workspace.join("state/artifacts/tasks"),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root: scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        },
+    );
+
+    let start = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-scratch-lease",
+                    "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf terminal-lease-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf done",
+                    "mode": "background",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(start.status, ToolResultStatus::Ok));
+    assert!(handles.scratch.tasks.is_leased("terminal-scratch-lease"));
+
+    let read = wait_for_terminal_read(&registry, ctx.clone(), "terminal-scratch-lease", 64).await?;
+    assert!(matches!(read.status, ToolResultStatus::Ok));
+    assert_eq!(read.content, "done");
+
+    let namespace = crate::scratch_namespace::session_scratch_dir(&scratch_root, Some(session));
+    assert_eq!(
+        fs::read_to_string(namespace.join("probe"))?,
+        "terminal-lease-ok"
+    );
+
+    let generation = start.metadata.details["generation"]
+        .as_u64()
+        .expect("terminal_start should return generation");
+    let waited = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_wait",
+                json!({
+                    "task_id": "terminal-scratch-lease",
+                    "after_generation": generation,
+                    "until": "exit",
+                    "timeout_secs": 30
+                }),
+            ),
+        )
+        .await?;
+    assert_eq!(waited.metadata.details["outcome"], "condition_met");
+    assert!(
+        !handles.scratch.tasks.is_leased("terminal-scratch-lease"),
+        "settled terminal task must release its scratch lease"
+    );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_scratch_lease_is_released_on_natural_exit_without_wait() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session = "terminal-natural-exit-0000-0000-0000-000000000105";
+    let shell = test_shell(&workspace)?;
+    let ctx = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session);
+    let mut registry = ToolRegistry::new();
+    let handles = register_builtin_tools_with_paths(
+        &mut registry,
+        BuiltinToolPaths {
+            changesets_root: workspace.join("state/artifacts/changesets"),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: workspace.join("state/artifacts/tasks"),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root: scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        },
+    );
+
+    let start = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-natural-exit",
+                    "command": "sleep 0.3; printf done",
+                    "mode": "background",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(start.status, ToolResultStatus::Ok));
+    assert!(
+        handles.scratch.tasks.is_leased("terminal-natural-exit"),
+        "a live terminal task must hold its scratch lease"
+    );
+
+    // RFC-0062 14.1: the lease is released when the child exits even if the model never
+    // waits or reads the settled task again.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if !handles.scratch.tasks.is_leased("terminal-natural-exit") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal scratch lease must be released after natural exit"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    // The released namespace becomes TTL-eligible and can be reclaimed by GC.
+    let namespace = crate::scratch_namespace::session_scratch_dir(&scratch_root, Some(session));
+    assert!(namespace.exists());
+    let report = crate::scratch_namespace::gc_scratch_namespaces(
+        &scratch_root,
+        &handles.scratch,
+        &crate::scratch_namespace::ScratchGcConfig { ttl_ms: 0 },
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_millis() as u64
+            + 10_000,
+    )?;
+    assert_eq!(report.deleted, 1);
+    assert!(!namespace.exists());
     Ok(())
 }
 
@@ -5230,6 +5596,10 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
     let tool = BashTool {
         scratch_root: temp.path().join("cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_namespaces: Arc::new(
+            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
+        ),
         backend: Arc::new(LocalExecutionBackend),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     };
@@ -5251,7 +5621,7 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
         json!("unknown")
     );
     assert_eq!(
-        fs::read_to_string(temp.path().join("cache/tmp/probe"))?,
+        fs::read_to_string(temp.path().join("cache/tmp/sessions/no-session/probe"))?,
         "bash-ok"
     );
     Ok(())
@@ -5269,16 +5639,19 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
     let bash_error = BashTool {
         scratch_root: scratch_file.clone(),
         scratch_label: "scratch-file".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch_namespaces: Arc::new(
+            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
+        ),
         backend: Arc::new(LocalExecutionBackend),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
     .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))
     .await
-    .expect_err("bash scratch file should fail create_dir_all");
+    .expect_err("bash scratch file should fail provisioning");
     assert!(
-        bash_error
-            .to_string()
-            .contains("failed to create scratch-file")
+        bash_error.to_string().contains("not a directory"),
+        "unexpected bash error: {bash_error:#}"
     );
 
     let terminal_error = TerminalStartTool {
@@ -5287,6 +5660,8 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
         artifact_label_root: PathBuf::from("state/artifacts/tasks"),
         scratch_root: scratch_file,
         scratch_label: "scratch-file".to_owned(),
+        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
     }
     .execute(
         ctx,
@@ -5294,11 +5669,10 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
         json!({ "command": "printf never; sleep 5", "mode": "background" }),
     )
     .await
-    .expect_err("terminal_start scratch file should fail create_dir_all");
+    .expect_err("terminal_start scratch file should fail provisioning");
     assert!(
-        terminal_error
-            .to_string()
-            .contains("failed to create scratch-file")
+        terminal_error.to_string().contains("not a directory"),
+        "unexpected terminal_start error: {terminal_error:#}"
     );
     Ok(())
 }

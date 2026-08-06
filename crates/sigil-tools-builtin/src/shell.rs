@@ -25,6 +25,10 @@ use crate::{
         ResolvedToolPath, absolute_path_from, canonical_workspace_root, lexically_normalize_path,
         resolve_existing_prefix, resolve_tool_path_from_base,
     },
+    scratch_namespace::{
+        ScratchNamespaceLeaseRegistry, ScratchQuota, ScratchQuotaExceededError,
+        ensure_session_scratch, session_scratch_dir, session_scratch_key,
+    },
     shell_runtime::{ResolvedShell, ShellDialect},
     support::{
         TextLimitResult, ceil_char_boundary, floor_char_boundary, limit_text_head_tail,
@@ -38,14 +42,23 @@ const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 1;
 pub(crate) struct BashTool {
     pub(crate) scratch_root: PathBuf,
     pub(crate) scratch_label: String,
+    pub(crate) scratch_quota: ScratchQuota,
+    pub(crate) scratch_namespaces: Arc<ScratchNamespaceLeaseRegistry>,
     pub(crate) backend: Arc<dyn ExecutionBackend>,
     pub(crate) shell: ResolvedShell,
 }
 
 impl BashTool {
+    fn session_scratch_dir(&self, ctx: &ToolContext) -> PathBuf {
+        session_scratch_dir(&self.scratch_root, ctx.session_scope_id())
+    }
+
     fn analyze_command(&self, ctx: &ToolContext, command: &str) -> Result<ShellCommandAnalysis> {
-        let path_policy =
-            ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &self.scratch_root, true)?;
+        let path_policy = ShellPathPolicyBinding::for_runtime(
+            &ctx.workspace_root,
+            &self.session_scratch_dir(ctx),
+            true,
+        )?;
         analyze_shell_command_with_path_policy(
             &ctx.workspace_root,
             command,
@@ -61,7 +74,7 @@ impl Tool for BashTool {
         ToolSpec {
             name: "bash".to_owned(),
             description: format!(
-                "Run a shell command from the workspace root using {} syntax (the tool name remains `bash`). Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                "Run a shell command from the workspace root using {} syntax (the tool name remains `bash`). Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files that must survive across tool calls in this session (shown as {}). The scratch directory is scoped to the current session, private to this user, capped by a size quota, and reclaimed after a TTL; do not rely on it for long-term storage. OS temp directories are outside the workspace and require permission.external_directory.",
                 shell_syntax_guidance(&self.shell),
                 self.scratch_label
             ),
@@ -125,7 +138,7 @@ impl Tool for BashTool {
             "environment_binding".to_owned(),
             shell_environment_binding(
                 ctx,
-                &self.scratch_root,
+                &self.session_scratch_dir(ctx),
                 &self.shell,
                 plan.containment.environment,
             )?,
@@ -140,7 +153,8 @@ impl Tool for BashTool {
             .get("timeout_secs")
             .and_then(Value::as_u64)
             .unwrap_or(ctx.timeout_secs);
-        let scratch_root = absolute_path_from(&ctx.workspace_root, &self.scratch_root);
+        let session_scope_id = ctx.session_scope_id().map(str::to_owned);
+        let session_scratch = session_scratch_dir(&self.scratch_root, session_scope_id.as_deref());
         let (request, fallback_analysis) = if let Some(plan) = ctx.prepared_permission_plan() {
             anyhow::ensure!(
                 plan.tool_name == "bash",
@@ -148,7 +162,7 @@ impl Tool for BashTool {
             );
             let expected_environment_binding = shell_environment_binding(
                 &ctx,
-                &self.scratch_root,
+                &session_scratch,
                 &self.shell,
                 plan.containment.environment,
             )?;
@@ -158,7 +172,7 @@ impl Tool for BashTool {
                 "prepared shell environment binding changed before execution"
             );
             let expected_path_policy_binding =
-                ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &self.scratch_root, true)?
+                ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &session_scratch, true)?
                     .stable_hash();
             anyhow::ensure!(
                 plan.analysis_bindings.get("path_policy_binding")
@@ -169,7 +183,7 @@ impl Tool for BashTool {
                 bash_execution_request_from_containment(
                     command,
                     &ctx.workspace_root,
-                    &scratch_root,
+                    &session_scratch,
                     timeout_secs,
                     &self.shell,
                     plan.containment.environment,
@@ -183,13 +197,57 @@ impl Tool for BashTool {
             let request = bash_execution_request_with_shell(
                 command,
                 &ctx.workspace_root,
-                &scratch_root,
+                &session_scratch,
                 timeout_secs,
                 &self.shell,
                 &analysis,
             );
             (request, Some(analysis))
         };
+        // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
+        // checked) before any child can write into it. Quota failures are recoverable tool
+        // errors, never a silent fallback to the system temp directory.
+        let provision_root = self.scratch_root.clone();
+        let provision_scope = session_scope_id.clone();
+        let provision_quota = self.scratch_quota;
+        let provision = tokio::task::spawn_blocking(move || {
+            ensure_session_scratch(
+                &provision_root,
+                provision_scope.as_deref(),
+                &provision_quota,
+            )
+        })
+        .await
+        .context("scratch provisioning task panicked")?;
+        let session_key = session_scratch_key(session_scope_id.as_deref());
+        match provision {
+            Ok(_provision) => {}
+            Err(error) if error.downcast_ref::<ScratchQuotaExceededError>().is_some() => {
+                let quota_error = error
+                    .downcast::<ScratchQuotaExceededError>()
+                    .expect("downcast checked above");
+                return Ok(ToolResult::error(
+                    call_id,
+                    self.spec().name,
+                    sigil_kernel::ToolErrorKind::ScratchQuotaExceeded,
+                    quota_error.to_string(),
+                )
+                .with_error_details(
+                    false,
+                    json!({
+                        "scope": quota_error.scope.as_str(),
+                        "usage_bytes": quota_error.usage_bytes,
+                        "quota_bytes": quota_error.quota_bytes,
+                        "scratch_label": self.scratch_label,
+                    }),
+                ));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to provision {}", self.scratch_label));
+            }
+        };
+        let _scratch_lease = self.scratch_namespaces.acquire(&session_key);
         // RFC-0062 8.1: create the harness-owned capture plan and staging sink BEFORE spawn so
         // stdout/stderr chunks are tee'd as they arrive instead of being reconstructed from the
         // bounded post-execution content.
@@ -225,7 +283,7 @@ impl Tool for BashTool {
             }
         }
         let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
-        tokio::fs::create_dir_all(&scratch_root)
+        tokio::fs::create_dir_all(&session_scratch)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
         let execution_hash = sigil_kernel::stable_event_hash(call_id.as_bytes());

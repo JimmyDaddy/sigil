@@ -39,6 +39,8 @@ use sigil_provider_openai_responses::{
     OPENAI_RESPONSES_API_KEY_ENV, OpenAiResponsesProvider, OpenAiResponsesProviderConfig,
     openai_responses_capabilities,
 };
+/// Session-scoped scratch lease registry shared by built-in tools and maintenance GC.
+pub use sigil_tools_builtin::ScratchNamespaceControl as RuntimeScratchNamespaceControl;
 use tokio::process::Command;
 
 #[cfg(test)]

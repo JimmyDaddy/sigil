@@ -278,7 +278,17 @@ where
                     });
                     continue;
                 }
-                let service = local_session_lifecycle_service(root_config, workspace_root);
+                let service = match &state.scratch_control {
+                    // RFC-0062 14.1: session delete also reclaims the session-scoped scratch
+                    // namespace; the lifecycle service does this under the shared lease
+                    // registry so a live tool/terminal namespace is never deleted.
+                    Some(scratch_control) => local_session_lifecycle_service_with_scratch(
+                        root_config,
+                        workspace_root,
+                        scratch_control,
+                    ),
+                    None => local_session_lifecycle_service(root_config, workspace_root),
+                };
                 let _target_attachment = match sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
                     &preview.source_path,
                 ) {

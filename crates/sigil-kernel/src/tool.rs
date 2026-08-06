@@ -565,8 +565,12 @@ impl ToolContext {
     }
 
     /// Installs the exact logical session scope for capability lookup.
+    ///
+    /// This is the per-run authority for session-scoped resources such as `$SIGIL_SCRATCH_DIR`;
+    /// tools derive their session namespace from it, so the value must be stable across resume
+    /// and identical between permission planning and execution.
     #[must_use]
-    pub(crate) fn with_session_scope_id(mut self, session_scope_id: impl Into<String>) -> Self {
+    pub fn with_session_scope_id(mut self, session_scope_id: impl Into<String>) -> Self {
         self.session_scope_id = Some(session_scope_id.into());
         self
     }
@@ -1386,6 +1390,8 @@ pub enum ToolErrorKind {
     DurabilityRequired,
     /// An approval-bound immutable mutation no longer matches its call or workspace revision.
     StalePreparedMutation,
+    /// The session-scoped scratch namespace has reached its capacity quota.
+    ScratchQuotaExceeded,
     Internal,
 }
 
@@ -1410,6 +1416,7 @@ impl ToolErrorKind {
             Self::Unsupported => "unsupported",
             Self::DurabilityRequired => "durability_required",
             Self::StalePreparedMutation => "stale_prepared_mutation",
+            Self::ScratchQuotaExceeded => "scratch_quota_exceeded",
             Self::Internal => "internal",
         }
     }

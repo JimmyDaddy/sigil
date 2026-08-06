@@ -128,7 +128,7 @@ sigil serve --startup-output json --shutdown-on-stdin-close
 | 状态根目录 `workspaces/<workspace-id>/sessions/` | 会话日志 |
 | 状态根目录 `workspaces/<workspace-id>/input-history.jsonl` | 输入历史 |
 | 状态根目录 `workspaces/<workspace-id>/artifacts/` | 终端任务与变更记录 |
-| 缓存根目录 `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` |
+| 缓存根目录 `workspaces/<workspace-id>/tmp/` | `$SIGIL_SCRATCH_DIR` 基础目录；每个会话拥有独立的 owner-only `tmp/sessions/<会话 id>/` 命名空间，带容量配额与 TTL 回收 |
 | 用户配置 `~/.sigil/sigil.toml` | 默认本机配置 |
 | `.sigil/agents`、`.sigil/commands`、`.sigil/skills`、`.sigil/plugins` | Sigil 原生工作区资源 |
 | `.agents/skills`、`.codex/agents`、`.opencode/{skills,commands,agents}`、`.claude/{skills,commands,agents}` | 默认发现并继承工作区信任的兼容资源；command 使用斜杠前缀名称，agent 使用 `@名称` |

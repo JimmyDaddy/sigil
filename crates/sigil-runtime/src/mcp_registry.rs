@@ -10,6 +10,9 @@ pub struct RuntimeToolSurface {
     pub registry: ToolRegistry,
     pub context_resolver: crate::context::RequestContextResolver,
     pub terminal_control: sigil_tools_builtin::TerminalTaskControlHandle,
+    /// Session-scoped scratch lease registry shared by bash/terminal tools; maintenance GC and
+    /// session delete use it to avoid reclaiming live namespaces.
+    pub scratch_control: sigil_tools_builtin::ScratchNamespaceControl,
 }
 
 /// Read-through source for the latest durable plugin trust projection.
@@ -328,6 +331,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         Some(terminal_lifecycle_sink),
         workspace_trust,
         network_admission,
+        None,
     )
     .await?
     .registry)
@@ -362,6 +366,7 @@ pub async fn build_tool_surface_with_mutation_recorder_and_workspace_trust_and_n
         workspace_trust,
         network_admission,
         terminal_lifecycle_sink,
+        None,
     )
     .await
 }
@@ -376,6 +381,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
     terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+    scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 ) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
@@ -387,6 +393,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         Some(terminal_lifecycle_sink),
         workspace_trust,
         network_admission,
+        scratch_control,
     )
     .await
 }
@@ -457,6 +464,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         None,
         workspace_trust,
         network_admission,
+        None,
     )
     .await?
     .registry)
@@ -473,16 +481,18 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     terminal_lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
+    external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let mut registry = ToolRegistry::new();
-    let (code_intelligence, terminal_control) = register_local_tools(
+    let (code_intelligence, terminal_control, scratch_control) = register_local_tools(
         &mut registry,
         root_config,
         workspace_root.clone(),
         workspace_trust,
         terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
+        external_scratch_control,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -522,6 +532,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         registry,
         context_resolver,
         terminal_control,
+        scratch_control,
     })
 }
 
@@ -683,12 +694,13 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
     let _declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let mut registry = ToolRegistry::new();
-    let (code_intelligence, terminal_control) = register_local_tools(
+    let (code_intelligence, terminal_control, scratch_control) = register_local_tools(
         &mut registry,
         root_config,
         workspace_root.clone(),
         workspace_trust,
         terminal_lifecycle_route,
+        None,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -710,6 +722,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         registry,
         context_resolver,
         terminal_control,
+        scratch_control,
     })
 }
 
@@ -1029,9 +1042,11 @@ fn register_local_tools(
     workspace_root: PathBuf,
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_route: Option<RuntimeTerminalLifecycleRoute>,
+    external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 ) -> Result<(
     Option<sigil_code_intel::CodeIntelligenceService>,
     sigil_tools_builtin::TerminalTaskControlHandle,
+    sigil_tools_builtin::ScratchNamespaceControl,
 )> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let execution_backend = build_configured_execution_backend(root_config)?;
@@ -1042,8 +1057,9 @@ fn register_local_tools(
         terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
         scratch_root: paths.scratch_root.clone(),
         scratch_label: "cache/tmp".to_owned(),
+        scratch_quota: sigil_tools_builtin::ScratchQuota::default(),
     };
-    let terminal_control = match terminal_lifecycle_route {
+    let handles = match terminal_lifecycle_route {
         Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
             sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory(
                 registry,
@@ -1051,6 +1067,7 @@ fn register_local_tools(
                 execution_backend,
                 &root_config.execution,
                 factory,
+                external_scratch_control.clone(),
             )
         }
         route => {
@@ -1065,6 +1082,7 @@ fn register_local_tools(
                 execution_backend,
                 &root_config.execution,
                 sink,
+                external_scratch_control,
             )
         }
     };
@@ -1087,7 +1105,7 @@ fn register_local_tools(
             crate::WritableMemoryStore::from_paths(&paths),
         );
     }
-    Ok((code_intelligence, terminal_control))
+    Ok((code_intelligence, handles.terminal, handles.scratch))
 }
 
 /// Builds the execution backend configured for tools and verification checks.

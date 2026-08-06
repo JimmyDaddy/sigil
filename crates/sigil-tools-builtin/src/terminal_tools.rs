@@ -26,6 +26,10 @@ use crate::{
         absolute_path_from, canonical_workspace_root, resolve_tool_path_from_base,
         tool_path_subject,
     },
+    scratch_namespace::{
+        ScratchNamespaceControl, ScratchQuota, ScratchQuotaExceededError, ensure_session_scratch,
+        session_scratch_dir, session_scratch_key,
+    },
     shell::{
         CommandFamily, ShellCommandAnalysis, ShellPathPolicyBinding,
         analyze_shell_command_with_path_policy, bash_path_subjects_from_cwd,
@@ -52,16 +56,20 @@ pub(crate) struct TerminalStartTool {
     pub(crate) artifact_label_root: PathBuf,
     pub(crate) scratch_root: PathBuf,
     pub(crate) scratch_label: String,
+    pub(crate) scratch_quota: ScratchQuota,
+    pub(crate) scratch: ScratchNamespaceControl,
 }
 pub(crate) struct TerminalReadTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
     pub(crate) artifact_root: PathBuf,
     pub(crate) artifact_label_root: PathBuf,
+    pub(crate) scratch: ScratchNamespaceControl,
 }
 pub(crate) struct TerminalWaitTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
     pub(crate) artifact_root: PathBuf,
     pub(crate) artifact_label_root: PathBuf,
+    pub(crate) scratch: ScratchNamespaceControl,
 }
 pub(crate) struct TerminalInputTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
@@ -77,6 +85,7 @@ pub(crate) struct TerminalCancelTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
     pub(crate) artifact_root: PathBuf,
     pub(crate) artifact_label_root: PathBuf,
+    pub(crate) scratch: ScratchNamespaceControl,
 }
 
 /// Process-local typed control retained by product adapters for persistent terminal tasks.
@@ -160,6 +169,7 @@ impl TerminalTaskControlHandle {
 pub(crate) struct TerminalProcessManagers {
     terminal_execution_config: TerminalExecutionConfig,
     lifecycle_route: Option<TerminalLifecycleRoute>,
+    scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
     terminal_read_guards: StdMutex<TerminalReadGuardState>,
 }
@@ -275,6 +285,7 @@ impl TerminalProcessManagers {
         Self {
             terminal_execution_config,
             lifecycle_route: None,
+            scratch_leases: None,
             terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
             managers: StdMutex::new(BTreeMap::new()),
         }
@@ -285,6 +296,15 @@ impl TerminalProcessManagers {
         lifecycle_route: Option<TerminalLifecycleRoute>,
     ) -> Self {
         self.lifecycle_route = lifecycle_route;
+        self
+    }
+
+    /// RFC-0062 14.1: shares the task-scoped scratch lease registry with every spawned task.
+    pub(crate) fn with_scratch_task_leases(
+        mut self,
+        scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
+    ) -> Self {
+        self.scratch_leases = scratch_leases;
         self
     }
 
@@ -355,7 +375,8 @@ impl TerminalProcessManagers {
                 artifact_root,
                 artifact_label_root.to_path_buf(),
                 self.terminal_execution_config.clone(),
-            )?,
+            )?
+            .with_scratch_task_leases(self.scratch_leases.clone()),
         );
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)
@@ -401,14 +422,21 @@ impl TerminalProcessManagers {
 }
 
 impl TerminalStartTool {
+    fn session_scratch_dir(&self, ctx: &ToolContext) -> PathBuf {
+        session_scratch_dir(&self.scratch_root, ctx.session_scope_id())
+    }
+
     fn analyze_command(
         &self,
         ctx: &ToolContext,
         command: &str,
         shell: &ResolvedShell,
     ) -> Result<ShellCommandAnalysis> {
-        let path_policy =
-            ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &self.scratch_root, false)?;
+        let path_policy = ShellPathPolicyBinding::for_runtime(
+            &ctx.workspace_root,
+            &self.session_scratch_dir(ctx),
+            false,
+        )?;
         analyze_shell_command_with_path_policy(&ctx.workspace_root, command, shell, &path_policy)
     }
 }
@@ -419,7 +447,7 @@ impl Tool for TerminalStartTool {
         ToolSpec {
             name: "terminal_start".to_owned(),
             description: format!(
-                "Start a persistent background or interactive terminal task from the workspace. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or cmd executables. mode is required: use background for long-lived services/watchers and interactive with pty=true for tasks that need input. Never use terminal_start for finite checks, builds, or tests; use bash for one-shot commands. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                "Start a persistent background or interactive terminal task from the workspace. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or cmd executables. mode is required: use background for long-lived services/watchers and interactive with pty=true for tasks that need input. Never use terminal_start for finite checks, builds, or tests; use bash for one-shot commands. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files that must survive across tool calls in this session (shown as {}). The scratch directory is scoped to the current session, private to this user, capped by a size quota, and reclaimed after a TTL; do not rely on it for long-term storage. OS temp directories are outside the workspace and require permission.external_directory.",
                 self.managers.default_shell_summary(),
                 self.scratch_label
             ),
@@ -528,7 +556,7 @@ impl Tool for TerminalStartTool {
             "environment_binding".to_owned(),
             shell_environment_binding(
                 ctx,
-                &self.scratch_root,
+                &self.session_scratch_dir(ctx),
                 &resolved_shell,
                 EnvironmentContainment::UserInherited,
             )?,
@@ -566,7 +594,7 @@ impl Tool for TerminalStartTool {
                 plan,
                 &shell,
                 &args,
-                &self.scratch_root,
+                &self.session_scratch_dir(&ctx),
                 &self.managers,
             )?;
             None
@@ -585,20 +613,63 @@ impl Tool for TerminalStartTool {
                 })
                 .expect("terminal start always has a prepared plan or fallback analysis")
         };
+        // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
+        // checked) before any forward effect or child spawn. Quota failures are recoverable
+        // tool errors, never a silent fallback to the system temp directory.
+        let provision_root = self.scratch_root.clone();
+        let provision_scope = ctx.session_scope_id().map(str::to_owned);
+        let provision_quota = self.scratch_quota;
+        let provision = tokio::task::spawn_blocking(move || {
+            ensure_session_scratch(
+                &provision_root,
+                provision_scope.as_deref(),
+                &provision_quota,
+            )
+        })
+        .await
+        .context("scratch provisioning task panicked")?;
+        let session_key = session_scratch_key(ctx.session_scope_id());
+        match provision {
+            Ok(_provision) => {}
+            Err(error) if error.downcast_ref::<ScratchQuotaExceededError>().is_some() => {
+                let quota_error = error
+                    .downcast::<ScratchQuotaExceededError>()
+                    .expect("downcast checked above");
+                return Ok(ToolResult::error(
+                    call_id,
+                    self.spec().name,
+                    ToolErrorKind::ScratchQuotaExceeded,
+                    quota_error.to_string(),
+                )
+                .with_error_details(
+                    false,
+                    json!({
+                        "scope": quota_error.scope.as_str(),
+                        "usage_bytes": quota_error.usage_bytes,
+                        "quota_bytes": quota_error.quota_bytes,
+                        "scratch_label": self.scratch_label,
+                    }),
+                ));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to provision {}", self.scratch_label));
+            }
+        };
         let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         let manager = self.managers.manager_for(
             &ctx.workspace_root,
             &self.artifact_root,
             &self.artifact_label_root,
         )?;
-        let scratch_root = absolute_path_from(&ctx.workspace_root, &self.scratch_root);
-        tokio::fs::create_dir_all(&scratch_root)
+        let session_scratch = session_scratch_dir(&self.scratch_root, ctx.session_scope_id());
+        tokio::fs::create_dir_all(&session_scratch)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
         let mut env = BTreeMap::new();
         env.insert(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
-            scratch_root.to_string_lossy().into_owned(),
+            session_scratch.to_string_lossy().into_owned(),
         );
         let request = TerminalStartRequest {
             task_id: args.task_id,
@@ -686,6 +757,13 @@ impl Tool for TerminalStartTool {
                 ));
             }
         }
+        if !snapshot.entry.status.is_terminal() {
+            // RFC-0062 14.1: hold a task-scoped scratch lease while the terminal task is alive
+            // so TTL GC never deletes the namespace under a live child process.
+            self.scratch
+                .tasks
+                .register(task_id.as_str(), &session_key, &self.scratch.namespaces);
+        }
         Ok(terminal_start_result(
             call_id,
             self.spec().name,
@@ -752,6 +830,15 @@ impl Tool for TerminalReadTool {
             &self.artifact_label_root,
         )?;
         let read = manager.read(&task_id, offset, limit_bytes).await?;
+        if read
+            .latest_entry
+            .as_ref()
+            .is_some_and(|entry| entry.status.is_terminal())
+        {
+            // RFC-0062 14.1: the terminal task has settled, so its scratch lease can be
+            // released and the namespace becomes TTL-eligible.
+            self.scratch.tasks.release(task_id.as_str());
+        }
         if self
             .managers
             .observe_terminal_read(&ctx, &task_id, offset, &read)?
@@ -870,6 +957,11 @@ impl Tool for TerminalWaitTool {
             Duration::from_secs(timeout_secs),
         )
         .await?;
+        if result.snapshot.entry.status.is_terminal() {
+            // RFC-0062 14.1: the terminal task has settled, so its scratch lease can be
+            // released and the namespace becomes TTL-eligible.
+            self.scratch.tasks.release(task_id.as_str());
+        }
         Ok(terminal_wait_result(call_id, self.spec().name, result))
     }
 }
@@ -1203,6 +1295,9 @@ impl Tool for TerminalCancelTool {
             &self.artifact_label_root,
         )?;
         let entry = manager.cancel(&task_id).await?;
+        // RFC-0062 14.1: a cancelled or interrupted terminal task no longer holds a scratch
+        // lease, so TTL GC can reclaim its session namespace.
+        self.scratch.tasks.release(task_id.as_str());
         let action = match entry.status {
             TerminalTaskStatus::Cancelled => "cancelled",
             TerminalTaskStatus::Interrupted => "interrupted",

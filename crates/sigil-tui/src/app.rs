@@ -1062,7 +1062,11 @@ impl AppState {
 
     fn ensure_scratch_dir(&mut self) {
         let temp_dir = self.sigil_paths.scratch_root.clone();
-        match std::fs::create_dir_all(&temp_dir) {
+        // RFC-0062 14.1: the workspace scratch base must be owner-only before any session
+        // namespace is created below it.
+        match std::fs::create_dir_all(&temp_dir).and_then(|()| {
+            sigil_kernel::secure_private_path_permissions(&temp_dir).map_err(std::io::Error::other)
+        }) {
             Ok(()) => self.push_event("scratch", SCRATCH_DIR_LABEL),
             Err(error) => self.push_event(
                 "scratch",

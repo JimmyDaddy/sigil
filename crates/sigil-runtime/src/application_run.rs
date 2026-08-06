@@ -643,6 +643,9 @@ pub struct ApplicationRunServices {
     task_role_provider_builder:
         Option<Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>>,
     terminal_lifecycle_handler: Option<Arc<dyn crate::ApplicationTerminalLifecycleHandler>>,
+    /// RFC-0062 14.1: process-scoped scratch lease registry shared by every run surface so
+    /// tool/terminal leases, session-delete cleanup and TTL GC observe the same authority.
+    scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 }
 
 /// Process-local typed control for persistent terminal tasks admitted by one prepared run.
@@ -723,6 +726,7 @@ impl ApplicationRunServices {
             session_leases: Arc::new(ApplicationSessionLeaseManager::new()),
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
+            scratch_control: None,
         }
     }
 
@@ -737,6 +741,7 @@ impl ApplicationRunServices {
             session_leases,
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
+            scratch_control: None,
         }
     }
 
@@ -758,6 +763,22 @@ impl ApplicationRunServices {
     ) -> Self {
         self.terminal_lifecycle_handler = Some(handler);
         self
+    }
+
+    /// Shares the process-scoped scratch lease registry with every run tool surface.
+    #[must_use]
+    pub fn with_scratch_control(
+        mut self,
+        scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    ) -> Self {
+        self.scratch_control = scratch_control;
+        self
+    }
+
+    /// Returns the process-scoped scratch lease registry, when the adapter shared one.
+    #[must_use]
+    pub fn scratch_control(&self) -> Option<&sigil_tools_builtin::ScratchNamespaceControl> {
+        self.scratch_control.as_ref()
     }
 
     /// Reports whether this adapter can execute an accepted durable task handoff.
@@ -2407,12 +2428,43 @@ async fn assemble_application_tool_surface(
             false,
         ),
         terminal_lifecycle_sink,
+        services.scratch_control().cloned(),
     )
     .await?;
+    // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run
+    // assembly. Leases are in-memory only, so this fresh process cannot hold one; the sweep
+    // reclaims namespaces abandoned by crashed or deleted sessions and never races a live tool.
+    {
+        let scratch_root =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root)
+                .scratch_root;
+        let scratch_control = surface.scratch_control.clone();
+        tokio::task::spawn_blocking(move || {
+            match sigil_tools_builtin::gc_scratch_namespaces(
+                &scratch_root,
+                &scratch_control,
+                &sigil_tools_builtin::ScratchGcConfig::default(),
+                current_unix_time_ms(),
+            ) {
+                Ok(report) if report.deleted > 0 => {
+                    tracing::debug!(
+                        deleted = report.deleted,
+                        reclaimed_bytes = report.deleted_bytes,
+                        "application runtime scratch TTL sweep reclaimed expired namespaces"
+                    );
+                }
+                Ok(_report) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "application runtime scratch TTL sweep failed");
+                }
+            }
+        });
+    }
     let crate::RuntimeToolSurface {
         mut registry,
         context_resolver,
         terminal_control,
+        scratch_control,
     } = surface;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
@@ -2464,6 +2516,7 @@ async fn assemble_application_tool_surface(
             registry,
             context_resolver,
             terminal_control,
+            scratch_control,
         },
         warnings,
     ))

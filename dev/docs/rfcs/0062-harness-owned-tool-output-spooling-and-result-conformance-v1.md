@@ -2,6 +2,50 @@
 
 状态：proposed / design complete / implementation deferred
 
+### 2026-08-06 scratch lifecycle status (`worktree-rfc-0062-scratch-lifecycle`)
+
+R62.5 的 `$SIGIL_SCRATCH_DIR` 生命周期与隔离部分已在独立 worktree 落地（未合入 main）：
+
+- **session-scoped 命名空间**：`$SIGIL_SCRATCH_DIR` 从 workspace-wide `tmp/` 改为按 session scope id 推导的
+  `<scratch root>/sessions/<session scope id>`。`SigilPaths.scratch_root` 只作为 workspace-wide base，不再
+  直接注入 child；per-run authority 是 `ToolContext.session_scope_id()`（agent loop 已注入，plan 与 execute
+  一致）。同一 session 连续 tool call 复用同一目录，resume 后路径与内容保持（TTL 未回收时）；fork 产生新
+  session file → 新 scope id → 新命名空间，不跨 session 混用；直接调用（无 session scope）使用固定
+  `no-session` 命名空间。
+- **同一推导规则**：`sigil-tools-builtin::scratch_namespace::session_scratch_dir` 是唯一推导函数，bash、
+  terminal_start、TUI worker 启动 GC、session 删除钩子与 application runtime 全部消费它；runtime
+  `paths::session_scratch_dir(&SigilPaths, session_scope_id)` 是薄包装。`$SIGIL_SCRATCH_DIR` env 注入、
+  `ShellPathPolicyBinding`、`environment_binding` 与 Bubblewrap bind 全部使用 session-scoped 路径。
+- **owner-only**：命名空间（含 base 与 sessions 层）在写入前经 `secure_private_path_permissions` 加固；
+  unix 0700，Windows 受保护 owner-only DACL（新增 `windows_scratch_namespace_narrows_wide_parent_dacl`
+  Windows CI 测试，模式与 staging DACL 测试一致）。
+- **quota**：per-session 512 MiB + workspace 硬上限 4 GiB（`ScratchQuota`，可经 `BuiltinToolPaths` 装配）。
+  计量在 spawn 前确定性执行（bounded walk，拒绝 symlink）；超限返回结构化 `ToolError`
+  （`ToolErrorKind::ScratchQuotaExceeded`，details 含 scope/usage/quota），不静默转用系统 `/tmp`；
+  删除文件释放空间后下一次调用确定性恢复。
+- **TTL/GC**：`ScratchNamespaceLeaseRegistry` 进程内 lease（bash 每次执行持有；terminal task 从 start 到
+  terminalize/cancel 持有）；`gc_scratch_namespaces` 只在无 lease 时删除过期命名空间，删除与 lease 获取
+  在同一注册表锁内完成（无 TOCTOU）。TUI worker 启动与 application runtime surface 装配各执行一次
+  TTL sweep；session 删除同时回收该 session 的 scratch 命名空间。crash 后由下次启动 sweep 回收。
+- **模型可见性不变**：scratch 继续对模型显示为 `cache/tmp`，harness-private artifact spool 仍不可见，
+  两者未合并；真实本机路径不进入 session event、HTTP/Desktop DTO 或 telemetry（既有 label/hash 行为保持）。
+- 测试：`scratch_namespace_tests.rs` 14 个单测（session 隔离、resume 复用、no-session 回退、symlink
+  拒绝、quota 到达/释放、workspace 硬上限、GC lease 并发、task lease、delete lease、unix owner-only、
+  Windows ACL、锁内删除）+ 工具级测试（bash/terminal env 注入与隔离、quota 结构化错误、description 与
+  env 一致、terminal lease 生命周期）+ runtime paths 推导测试；`cargo test --workspace` 5491 passed。
+- 生命周期收口：serve 进程的 scratch lease 已统一——启动时创建一个 process-scoped
+  `ScratchNamespaceControl`，同时注入 `LocalSessionLifecycleService.with_scratch_cleanup`
+  与 `HttpProductionRunDriverOptions.with_scratch_control`，经 `ApplicationRunServices` 穿过 run
+  preparation 链到达每次 `assemble_application_tool_surface`，tools-builtin 注册函数接受
+  `Option<ScratchNamespaceControl>`（Some 共享、None 新建），因此 serve 的 per-run tool/terminal
+  lease、session-delete 清理与 TTL GC 观察同一注册表；TUI worker 继续使用单 surface 自建实例。
+  测试 `registration_shares_external_scratch_control_across_surfaces` 覆盖共享语义。
+  terminal task 的 scratch lease 释放下沉到 `TerminalLifecycleOwner`：`mark_terminal` /
+  `prepare_terminal`（child exit、cancel、capture failed、readiness 失败、lifecycle route 失败的全部
+  终态收敛点）自动释放 task lease，模型不再 wait/read 已退出任务也不会泄漏；
+  测试 `terminal_scratch_lease_is_released_on_natural_exit_without_wait` 覆盖自然退出 + 随后 TTL GC
+  回收。
+
 ### 2026-08-04 partial implementation status
 
 R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 RFC **尚未满足全部 acceptance criteria**，
@@ -38,7 +82,8 @@ R62.0–R62.5 的核心契约已在 `worktree-rfc-0059-verify` 落地，但本 R
   `artifact_gc_appends_durable_disable_before_delete_and_expired_after`、
   `artifact_gc_fails_closed_when_durable_disable_cannot_be_written`、
   `availability_disable_event_denies_retrieval_binding`；
-  **active-reader lease 集成、scratch quota/TTL 尚未落地**。
+  **active-reader lease 集成、scratch quota/TTL 尚未落地**。scratch 部分已在
+  `worktree-rfc-0062-scratch-lifecycle` 落地（见上方 2026-08-06 status）；active-reader lease 仍待集成。
 - R62.6 完成：TUI/HTTP/Desktop/Tauri IPC 消费同一 typed descriptor；`ToolDisplayViewV1` 携带
   `preview_truncated`/`truncation_reason`/`capture_completeness`，HTTP/Desktop DTO、OpenAPI 与
   生成的 TypeScript schema 均已同步并通过 drift check。

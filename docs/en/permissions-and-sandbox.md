@@ -60,7 +60,7 @@ default_mode = "ask"
 rules = []
 ```
 
-Enabling this section does not make every external path safe or accessible; each path still follows its rule and protected-path checks. Use `$SIGIL_SCRATCH_DIR` for command scratch files when possible.
+Enabling this section does not make every external path safe or accessible; each path still follows its rule and protected-path checks. Use `$SIGIL_SCRATCH_DIR` for command scratch files when possible. The scratch directory is scoped to the current session, private to this user, capped by a size quota, and reclaimed after a TTL; do not rely on it for long-term storage.
 
 ## Network And Web Tools
 

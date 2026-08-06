@@ -702,6 +702,55 @@ fn session_delete_preview_protects_current_and_apply_is_exact_and_audited() -> R
 }
 
 #[test]
+fn session_delete_reclaims_scratch_namespace_under_lease_registry() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source_a = sessions.join("session-scratch-a.jsonl");
+    let source_b = sessions.join("session-scratch-b.jsonl");
+    finalized_session(&source_a, "delete scratch a")?;
+    finalized_session(&source_b, "delete scratch b")?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let control = sigil_tools_builtin::ScratchNamespaceControl::new();
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
+            .with_scratch_cleanup(scratch_root.clone(), control.clone());
+
+    // Session A: a held lease keeps the namespace while deletion still succeeds.
+    let preview_a = service.preview_delete(&source_a, &[])?;
+    let namespace_a =
+        sigil_tools_builtin::session_scratch_dir(&scratch_root, Some(&preview_a.source_session_id));
+    fs::create_dir_all(&namespace_a)?;
+    fs::write(namespace_a.join("blob"), b"scratch-a")?;
+    let lease = control
+        .namespaces
+        .acquire(&sigil_tools_builtin::session_scratch_key(Some(
+            &preview_a.source_session_id,
+        )));
+    service.apply_delete(&preview_a, &[], 5678)?;
+    assert!(!source_a.exists());
+    assert!(
+        namespace_a.exists(),
+        "leased namespace must survive deletion"
+    );
+    drop(lease);
+
+    // Session B: without a lease the namespace is reclaimed with the session.
+    let preview_b = service.preview_delete(&source_b, &[])?;
+    let namespace_b =
+        sigil_tools_builtin::session_scratch_dir(&scratch_root, Some(&preview_b.source_session_id));
+    fs::create_dir_all(&namespace_b)?;
+    fs::write(namespace_b.join("blob"), b"scratch-b")?;
+    service.apply_delete(&preview_b, &[], 5679)?;
+    assert!(!source_b.exists());
+    assert!(
+        !namespace_b.exists(),
+        "deleted session scratch namespace must be reclaimed"
+    );
+    Ok(())
+}
+
+#[test]
 fn session_delete_tombstones_artifacts_before_grace_prune() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let sessions = temp.path().join("sessions");

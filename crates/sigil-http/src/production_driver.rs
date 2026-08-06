@@ -117,6 +117,9 @@ pub struct HttpProductionRunDriverOptions {
     pub cancellation_timeout: Duration,
     /// Workspace-bound lifecycle truth used to authorize historical session reopen.
     pub session_lifecycle: Option<LocalSessionLifecycleService>,
+    /// RFC-0062 14.1: process-scoped scratch lease registry shared by every run tool surface
+    /// and session-delete cleanup in this serve process.
+    pub scratch_control: Option<sigil_runtime::RuntimeScratchNamespaceControl>,
 }
 
 impl HttpProductionRunDriverOptions {
@@ -128,6 +131,7 @@ impl HttpProductionRunDriverOptions {
             launch_cwd: launch_cwd.into(),
             cancellation_timeout: DEFAULT_HTTP_CANCELLATION_TIMEOUT,
             session_lifecycle: None,
+            scratch_control: None,
         }
     }
 
@@ -138,6 +142,16 @@ impl HttpProductionRunDriverOptions {
         session_lifecycle: LocalSessionLifecycleService,
     ) -> Self {
         self.session_lifecycle = Some(session_lifecycle);
+        self
+    }
+
+    /// Shares the process-scoped scratch lease registry with every run tool surface.
+    #[must_use]
+    pub fn with_scratch_control(
+        mut self,
+        scratch_control: sigil_runtime::RuntimeScratchNamespaceControl,
+    ) -> Self {
+        self.scratch_control = Some(scratch_control);
         self
     }
 }
@@ -711,7 +725,8 @@ impl HttpProductionRunDriver {
         ))
         .with_task_role_provider_builder(Arc::new(
             sigil_runtime::agent_supervisor::task_role_runtime::RuntimeTaskRoleProviderBuilder,
-        ));
+        ))
+        .with_scratch_control(options.scratch_control.clone());
         Ok(Self {
             options,
             services,
