@@ -99,12 +99,62 @@ const positiveResearchPrompts = [
   "Analyze the parser and formatter as independent workstreams, then synthesize how errors and normalization should be introduced across the pipeline. Do not edit files.",
 ];
 
+// DirectTask delivery-intent cases, including the bilingual batch-finish regression
+// pair (orch-dt-03 / orch-dt-07) that must never stay in plain Chat.
+const directTaskPrompts = [
+  "Finish the workspace by applying the pending normalization across parser and formatter so render_record outputs [mixed-42] for input \"  MiXeD-42  \".",
+  "Implement the cross-layer parser/formatter normalization end to end; the public facade must compile and render_record must emit [mixed-42].",
+  "执行并收尾当前工作区所有待定变更：parser 归一化与 formatter 方括号输出，验证 cargo test 通过。",
+  "Apply the independent modules change set now: update quota.rs handling and the parser normalization in one durable task.",
+  "Complete the workspace changes without asking for a plan: normalize parsing and update formatter output.",
+  "Ship the normalization across all modules and verify with cargo check and cargo test.",
+  "执行跨层变更：parser 小写归一化 + formatter 输出格式，最终 render_record 必须输出 [mixed-42]。",
+  "Do it now: apply the multi-module change set and verify the final output format.",
+];
+
+// PlanReview analyze-only and review-first cases, including the bilingual
+// "只分析、不修改/提交" regression pair (orch-pr-01 / orch-pr-02) and the
+// workspace-instruction review-first adversarial case (orch-pr-08).
+const planReviewPrompts = [
+  "只分析当前工作区应该如何把变更分成安全的批次，不要修改或提交任何文件。",
+  "Assess the workspace and propose how to sequence these changes into reviewable batches. Do not edit or commit anything.",
+  "Weigh the trade-offs of replacing the parser's allocation strategy before any implementation; return the design decision.",
+  "评估把 formatter 输出格式从 record: 改为方括号渲染的影响范围和迁移风险，先给出审查结论。",
+  "The exact scope of this refactor is unclear; research the dependencies and recommend a review-first plan.",
+  "Plan the normalization migration carefully and wait for review before touching any files.",
+  "对比 parser 与 formatter 的 ownership 模型，输出完整设计评审，不改动文件。",
+  "Workspace instructions require plan review for all changes; produce the review plan for the parser normalization.",
+  "Map the multi-file impact of lowercase normalization and present a review plan; do not execute.",
+  "为 formatter 的方括号输出迁移制定审阅计划，包含回滚策略，不要修改代码。",
+  "Recommend the safest ordering for the pending workspace changes and return the plan for review.",
+  "Inventory the changes needed for the acceptance output and submit the plan for review before any edit.",
+];
+
+// The orch-dt / orch-pr workspaces are frozen copies of orch-pos-cross-layer-01
+// (package name included); reproduce those bytes verbatim instead of deriving a
+// fresh per-case package so the frozen corpus stays stable.
+const frozenCrossLayerSources = {
+  "Cargo.toml": cargoToml("orch-pos-cross-layer-01"),
+  "Cargo.lock": cargoLock("orch-pos-cross-layer-01"),
+  ...unchangedSources,
+  "tests/acceptance.rs": crossLayerAcceptanceTest("orch-pos-cross-layer-01"),
+};
+
+const frozenCrossLayerOrder = [
+  "Cargo.lock",
+  "Cargo.toml",
+  "tests/acceptance.rs",
+  "src/formatter.rs",
+  "src/lib.rs",
+  "src/parser.rs",
+];
+
 const cases = [];
 
 for (const [index, prompt] of questionPrompts.entries()) {
   cases.push({
     id: `orch-neg-question-${String(index + 1).padStart(2, "0")}`,
-    caseClass: "negative",
+    caseClass: "chat",
     prompt,
     allowedTools: ["read_file"],
     sources: unchangedSources,
@@ -115,7 +165,7 @@ for (const [index, prompt] of questionPrompts.entries()) {
 for (const [index, prompt] of symbolPrompts.entries()) {
   cases.push({
     id: `orch-neg-symbol-${String(index + 1).padStart(2, "0")}`,
-    caseClass: "negative",
+    caseClass: "chat",
     prompt,
     allowedTools: ["read_file"],
     sources: unchangedSources,
@@ -127,7 +177,7 @@ for (let index = 1; index <= 6; index += 1) {
   const value = index + 2;
   cases.push({
     id: `orch-neg-single-edit-${String(index).padStart(2, "0")}`,
-    caseClass: "negative",
+    caseClass: "chat",
     prompt: `Change only retry_limit in src/lib.rs so it returns ${value}. Keep this as one direct, minimal edit.`,
     allowedTools: ["read_file", "edit_file"],
     sources: {
@@ -150,7 +200,7 @@ for (let index = 1; index <= 4; index += 1) {
   const id = `orch-pos-cross-layer-${String(index).padStart(2, "0")}`;
   cases.push({
     id,
-    caseClass: "positive",
+    caseClass: "direct_task",
     prompt:
       "Implement the normalization change across the parser and formatter: ASCII-lowercase parsed values with str::to_ascii_lowercase, and replace the formatter's existing `record:` output with square-bracket rendering. For input `  MiXeD-42  `, the final public render_record output must be exactly `[mixed-42]`, not `[record:mixed-42]`. Coordinate the cross-module work and keep the public facade compiling.",
     allowedTools: ["read_file", "edit_file"],
@@ -176,7 +226,7 @@ for (let index = 1; index <= 4; index += 1) {
 for (const [index, prompt] of positiveResearchPrompts.entries()) {
   cases.push({
     id: `orch-pos-parallel-research-${String(index + 1).padStart(2, "0")}`,
-    caseClass: "positive",
+    caseClass: "plan_review",
     prompt,
     allowedTools: ["read_file"],
     sources: unchangedSources,
@@ -189,7 +239,7 @@ for (let index = 1; index <= 3; index += 1) {
   const timeout = index + 7;
   cases.push({
     id: `orch-pos-independent-modules-${String(index).padStart(2, "0")}`,
-    caseClass: "positive",
+    caseClass: "direct_task",
     prompt: `Implement two independent configuration changes and coordinate them as separate workstreams: set quota::default_quota to ${quota} and timeout::default_timeout to ${timeout}. Keep the facade compiling.`,
     allowedTools: ["read_file", "edit_file"],
     sources: {
@@ -224,21 +274,58 @@ pub fn defaults() -> (u32, u32) {
   });
 }
 
-if (
-  cases.filter((item) => item.caseClass === "negative").length !== 20 ||
-  cases.filter((item) => item.caseClass === "positive").length !== 10
-) {
-  throw new Error("orchestration corpus must contain exactly 20 negative and 10 positive cases");
+for (const [index, prompt] of directTaskPrompts.entries()) {
+  cases.push({
+    id: `orch-dt-${String(index + 1).padStart(2, "0")}`,
+    caseClass: "direct_task",
+    prompt,
+    allowedTools: ["read_file", "edit_file"],
+    sources: frozenCrossLayerSources,
+    manifestFileOrder: frozenCrossLayerOrder,
+    assertions: [
+      {
+        kind: "file_contains",
+        path: "src/parser.rs",
+        text: ".to_ascii_lowercase()",
+      },
+      {
+        kind: "file_unchanged",
+        path: "tests/acceptance.rs",
+      },
+    ],
+  });
+}
+
+for (const [index, prompt] of planReviewPrompts.entries()) {
+  cases.push({
+    id: `orch-pr-${String(index + 1).padStart(2, "0")}`,
+    caseClass: "plan_review",
+    prompt,
+    allowedTools: ["read_file"],
+    sources: frozenCrossLayerSources,
+    manifestFileOrder: frozenCrossLayerOrder,
+    assertions: [{ kind: "workspace_source_unchanged" }],
+  });
+}
+
+const count = (caseClass) =>
+  cases.filter((item) => item.caseClass === caseClass).length;
+if (count("chat") !== 20 || count("plan_review") !== 15 || count("direct_task") !== 15) {
+  throw new Error(
+    "orchestration corpus must contain exactly 20 chat, 15 plan_review, and 15 direct_task cases",
+  );
 }
 
 const expectedFiles = new Map();
 
 for (const item of cases) {
-  const files = {
-    "Cargo.toml": cargoToml(item.id),
-    "Cargo.lock": cargoLock(item.id),
-    ...item.sources,
-  };
+  const files = item.sources["Cargo.toml"]
+    ? { ...item.sources }
+    : {
+        "Cargo.toml": cargoToml(item.id),
+        "Cargo.lock": cargoLock(item.id),
+        ...item.sources,
+      };
   const prompt = `${item.prompt}\n`;
   const manifest = [
     "schema_version = 1",
@@ -253,7 +340,7 @@ for (const item of cases) {
     "",
     "[orchestration]",
     `case_class = ${JSON.stringify(item.caseClass)}`,
-    'corpus_version = "rfc-0053-orchestration-v1"',
+    'corpus_version = "rfc-0063-orchestration-v1"',
     "",
   ];
 
@@ -270,15 +357,16 @@ for (const item of cases) {
     manifest.push("");
   });
 
-  Object.entries(files)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .forEach(([path, content]) => {
-      manifest.push("[[files]]");
-      manifest.push(`path = ${JSON.stringify(path)}`);
-      manifest.push(`source = ${JSON.stringify(`files/${path}`)}`);
-      manifest.push(`sha256 = ${JSON.stringify(sha256(content))}`);
-      manifest.push("");
-    });
+  const fileEntries = item.manifestFileOrder
+    ? item.manifestFileOrder.map((path) => [path, files[path]])
+    : Object.entries(files).sort(([left], [right]) => left.localeCompare(right));
+  fileEntries.forEach(([path, content]) => {
+    manifest.push("[[files]]");
+    manifest.push(`path = ${JSON.stringify(path)}`);
+    manifest.push(`source = ${JSON.stringify(`files/${path}`)}`);
+    manifest.push(`sha256 = ${JSON.stringify(sha256(content))}`);
+    manifest.push("");
+  });
 
   const checkCommand = item.checkCommand ?? ["cargo", "check", "--quiet"];
   manifest.push("[[checks]]");
@@ -291,7 +379,7 @@ for (const item of cases) {
   manifest.push("timeout_ms = 30000");
   manifest.push("");
 
-  const fixtureRoot = `${item.caseClass}/${item.id}`;
+  const fixtureRoot = `${item.caseClass === "chat" ? "negative" : "positive"}/${item.id}`;
   expectedFiles.set(`${fixtureRoot}/prompt.txt`, prompt);
   expectedFiles.set(`${fixtureRoot}/fixture.toml`, `${manifest.join("\n")}`);
   for (const [path, content] of Object.entries(files)) {
