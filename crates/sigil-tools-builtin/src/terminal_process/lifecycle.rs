@@ -8,6 +8,11 @@ const TERMINAL_REGEX_SIZE_LIMIT_BYTES: usize = 1024 * 1024;
 pub(super) struct TerminalLifecycleOwner {
     state: Arc<StdMutex<TerminalLifecycleState>>,
     tx: watch::Sender<TerminalLifecycleEvent>,
+    task_id: TerminalTaskId,
+    /// RFC-0062 14.1: task-scoped scratch lease released when the task reaches a terminal
+    /// state, so the session namespace becomes TTL-eligible even when the model never
+    /// waits/reads the settled task again.
+    scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
 }
 
 struct TerminalLifecycleState {
@@ -45,7 +50,7 @@ impl TerminalLifecycleOwner {
             kind => TerminalReadinessStatus::Waiting { kind },
         };
         let event = TerminalLifecycleEvent {
-            task_id,
+            task_id: task_id.clone(),
             execution_backend,
             sandbox_profile,
             generation: 0,
@@ -62,7 +67,24 @@ impl TerminalLifecycleOwner {
                 output_window: Vec::new(),
             })),
             tx,
+            task_id,
+            scratch_leases: None,
         })
+    }
+
+    /// Binds the shared task-scoped scratch lease registry to this task lifecycle.
+    pub(super) fn with_scratch_leases(
+        mut self,
+        scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
+    ) -> Self {
+        self.scratch_leases = scratch_leases;
+        self
+    }
+
+    fn release_scratch_lease(&self) {
+        if let Some(leases) = &self.scratch_leases {
+            leases.release(self.task_id.as_str());
+        }
     }
 
     pub(super) fn mark_running(&self) {
@@ -107,6 +129,7 @@ impl TerminalLifecycleOwner {
                 state.readiness_matcher = None;
             }
         });
+        self.release_scratch_lease();
     }
 
     pub(super) fn prepare_terminal(
@@ -120,7 +143,10 @@ impl TerminalLifecycleOwner {
             .expect("terminal lifecycle state lock poisoned");
         let mut event = state.event.clone();
         apply_terminal_transition(&mut event, status, total_output_bytes);
-        if event != state.event {
+        let changed = event != state.event;
+        drop(state);
+        self.release_scratch_lease();
+        if changed {
             event.generation = event.generation.saturating_add(1);
             event.emitted_at_ms = current_epoch_ms();
         }

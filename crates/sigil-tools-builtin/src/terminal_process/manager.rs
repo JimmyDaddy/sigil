@@ -17,6 +17,8 @@ pub struct TerminalProcessManager {
     preview_limit_bytes: usize,
     artifact_limits: TerminalArtifactLimits,
     cancel_grace: Duration,
+    /// RFC-0062 14.1: shared task-scoped scratch leases; released when a task terminalizes.
+    scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
 }
 
 impl TerminalProcessManager {
@@ -78,7 +80,17 @@ impl TerminalProcessManager {
             preview_limit_bytes: DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES,
             artifact_limits: TerminalArtifactLimits::default(),
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
+            scratch_leases: None,
         })
+    }
+
+    /// Binds the shared task-scoped scratch lease registry to every task lifecycle.
+    pub fn with_scratch_task_leases(
+        mut self,
+        scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
+    ) -> Self {
+        self.scratch_leases = scratch_leases;
+        self
     }
 
     pub fn with_preview_limit_bytes(mut self, preview_limit_bytes: usize) -> Self {
@@ -138,7 +150,8 @@ impl TerminalProcessManager {
             plan.initial_entry.handle.execution_backend,
             plan.initial_entry.handle.sandbox_profile,
             &readiness,
-        )?;
+        )?
+        .with_scratch_leases(self.scratch_leases.clone());
         let lifecycle_route_baseline = lifecycle.snapshot();
         let lifecycle_route_receiver = lifecycle.subscribe();
 
@@ -274,7 +287,8 @@ impl TerminalProcessManager {
             plan.initial_entry.handle.execution_backend,
             plan.initial_entry.handle.sandbox_profile,
             &readiness,
-        )?;
+        )?
+        .with_scratch_leases(self.scratch_leases.clone());
         let lifecycle_route_baseline = lifecycle.snapshot();
         let lifecycle_route_receiver = lifecycle.subscribe();
         let pty_runtime = spawn_pty_runtime(

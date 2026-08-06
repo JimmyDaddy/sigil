@@ -169,11 +169,12 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
         terminal_execution_config.with_default_shell(default_shell.clone());
+    let scratch_control = external_scratch_control.unwrap_or_default();
     let terminal_managers = Arc::new(
         TerminalProcessManagers::new(terminal_execution_config)
-            .with_lifecycle_route(terminal_lifecycle_route),
+            .with_lifecycle_route(terminal_lifecycle_route)
+            .with_scratch_task_leases(Some(Arc::clone(&scratch_control.tasks))),
     );
-    let scratch_control = external_scratch_control.unwrap_or_default();
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     let terminal_control = TerminalTaskControlHandle::new(

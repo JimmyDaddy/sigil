@@ -28,7 +28,7 @@ use sigil_kernel::{
     ToolProgressSink, ToolRegistry, ToolResult, ToolResultMeta, ToolResultRecordedV3,
     ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
@@ -5065,6 +5065,83 @@ async fn terminal_start_holds_and_releases_session_scratch_lease() -> Result<()>
         !handles.scratch.tasks.is_leased("terminal-scratch-lease"),
         "settled terminal task must release its scratch lease"
     );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_scratch_lease_is_released_on_natural_exit_without_wait() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let session = "terminal-natural-exit-0000-0000-0000-000000000105";
+    let shell = test_shell(&workspace)?;
+    let ctx = ToolContext::new(workspace.clone(), 5).with_session_scope_id(session);
+    let mut registry = ToolRegistry::new();
+    let handles = register_builtin_tools_with_paths(
+        &mut registry,
+        BuiltinToolPaths {
+            changesets_root: workspace.join("state/artifacts/changesets"),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: workspace.join("state/artifacts/tasks"),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root: scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+        },
+    );
+
+    let start = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-natural-exit",
+                    "command": "sleep 0.3; printf done",
+                    "mode": "background",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(start.status, ToolResultStatus::Ok));
+    assert!(
+        handles.scratch.tasks.is_leased("terminal-natural-exit"),
+        "a live terminal task must hold its scratch lease"
+    );
+
+    // RFC-0062 14.1: the lease is released when the child exits even if the model never
+    // waits or reads the settled task again.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if !handles.scratch.tasks.is_leased("terminal-natural-exit") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal scratch lease must be released after natural exit"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    // The released namespace becomes TTL-eligible and can be reclaimed by GC.
+    let namespace = crate::scratch_namespace::session_scratch_dir(&scratch_root, Some(session));
+    assert!(namespace.exists());
+    let report = crate::scratch_namespace::gc_scratch_namespaces(
+        &scratch_root,
+        &handles.scratch,
+        &crate::scratch_namespace::ScratchGcConfig { ttl_ms: 0 },
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_millis() as u64
+            + 10_000,
+    )?;
+    assert_eq!(report.deleted, 1);
+    assert!(!namespace.exists());
     Ok(())
 }
 

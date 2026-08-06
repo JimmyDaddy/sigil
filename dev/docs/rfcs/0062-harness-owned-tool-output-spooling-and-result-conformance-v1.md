@@ -33,14 +33,18 @@ R62.5 的 `$SIGIL_SCRATCH_DIR` 生命周期与隔离部分已在独立 worktree 
   拒绝、quota 到达/释放、workspace 硬上限、GC lease 并发、task lease、delete lease、unix owner-only、
   Windows ACL、锁内删除）+ 工具级测试（bash/terminal env 注入与隔离、quota 结构化错误、description 与
   env 一致、terminal lease 生命周期）+ runtime paths 推导测试；`cargo test --workspace` 5491 passed。
-- 已知残留：terminal task 自然退出但模型不再 wait/read 时，进程内 lease 直到进程退出才释放（只影响同一
-  进程内 GC 跳过，重启后 TTL 正常回收）。serve 进程的 scratch lease 已统一：启动时创建一个
-  process-scoped `ScratchNamespaceControl`，同时注入 `LocalSessionLifecycleService.with_scratch_cleanup`
+- 生命周期收口：serve 进程的 scratch lease 已统一——启动时创建一个 process-scoped
+  `ScratchNamespaceControl`，同时注入 `LocalSessionLifecycleService.with_scratch_cleanup`
   与 `HttpProductionRunDriverOptions.with_scratch_control`，经 `ApplicationRunServices` 穿过 run
   preparation 链到达每次 `assemble_application_tool_surface`，tools-builtin 注册函数接受
   `Option<ScratchNamespaceControl>`（Some 共享、None 新建），因此 serve 的 per-run tool/terminal
   lease、session-delete 清理与 TTL GC 观察同一注册表；TUI worker 继续使用单 surface 自建实例。
   测试 `registration_shares_external_scratch_control_across_surfaces` 覆盖共享语义。
+  terminal task 的 scratch lease 释放下沉到 `TerminalLifecycleOwner`：`mark_terminal` /
+  `prepare_terminal`（child exit、cancel、capture failed、readiness 失败、lifecycle route 失败的全部
+  终态收敛点）自动释放 task lease，模型不再 wait/read 已退出任务也不会泄漏；
+  测试 `terminal_scratch_lease_is_released_on_natural_exit_without_wait` 覆盖自然退出 + 随后 TTL GC
+  回收。
 
 ### 2026-08-04 partial implementation status
 

@@ -169,6 +169,7 @@ impl TerminalTaskControlHandle {
 pub(crate) struct TerminalProcessManagers {
     terminal_execution_config: TerminalExecutionConfig,
     lifecycle_route: Option<TerminalLifecycleRoute>,
+    scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
     terminal_read_guards: StdMutex<TerminalReadGuardState>,
 }
@@ -284,6 +285,7 @@ impl TerminalProcessManagers {
         Self {
             terminal_execution_config,
             lifecycle_route: None,
+            scratch_leases: None,
             terminal_read_guards: StdMutex::new(TerminalReadGuardState::default()),
             managers: StdMutex::new(BTreeMap::new()),
         }
@@ -294,6 +296,15 @@ impl TerminalProcessManagers {
         lifecycle_route: Option<TerminalLifecycleRoute>,
     ) -> Self {
         self.lifecycle_route = lifecycle_route;
+        self
+    }
+
+    /// RFC-0062 14.1: shares the task-scoped scratch lease registry with every spawned task.
+    pub(crate) fn with_scratch_task_leases(
+        mut self,
+        scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
+    ) -> Self {
+        self.scratch_leases = scratch_leases;
         self
     }
 
@@ -364,7 +375,8 @@ impl TerminalProcessManagers {
                 artifact_root,
                 artifact_label_root.to_path_buf(),
                 self.terminal_execution_config.clone(),
-            )?,
+            )?
+            .with_scratch_task_leases(self.scratch_leases.clone()),
         );
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)
