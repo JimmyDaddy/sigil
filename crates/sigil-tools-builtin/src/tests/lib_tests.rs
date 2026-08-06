@@ -37,6 +37,7 @@ use super::{
     ReadToolArtifactTool, TerminalInputTool, TerminalProcessManagers, TerminalReadResult,
     TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
     register_builtin_tools_with_paths,
+    register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle,
 };
 
 use serial_test::serial;
@@ -4911,6 +4912,48 @@ async fn bash_scratch_quota_exceeded_is_structured_tool_error() -> Result<()> {
         .execute(ctx, tool_call("bash", json!({ "command": "printf ok" })))
         .await?;
     assert!(matches!(result.status, ToolResultStatus::Ok));
+    Ok(())
+}
+
+#[test]
+fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let external = crate::scratch_namespace::ScratchNamespaceControl::new();
+    let mut registry = ToolRegistry::new();
+    let handles =
+        register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
+            &mut registry,
+            BuiltinToolPaths {
+                changesets_root: workspace.join("state/artifacts/changesets"),
+                changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+                terminal_tasks_root: workspace.join("state/artifacts/tasks"),
+                terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+                scratch_root: workspace.join("cache/tmp"),
+                scratch_label: "cache/tmp".to_owned(),
+                scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+            },
+            Arc::new(LocalExecutionBackend),
+            &sigil_kernel::ExecutionConfig::default(),
+            None,
+            Some(external.clone()),
+        );
+
+    // RFC-0062 14.1: a shared external control means leases acquired through the tool surface
+    // are visible to session-delete cleanup and TTL GC that hold the same registry.
+    assert!(std::sync::Arc::ptr_eq(
+        &external.namespaces,
+        &handles.scratch.namespaces
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &external.tasks,
+        &handles.scratch.tasks
+    ));
+    let lease = handles.scratch.namespaces.acquire("shared-session");
+    assert!(external.namespaces.is_leased("shared-session"));
+    drop(lease);
+    assert!(!external.namespaces.is_leased("shared-session"));
     Ok(())
 }
 

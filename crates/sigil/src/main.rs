@@ -1240,15 +1240,15 @@ async fn serve_command(
         protocol_journal,
     ));
     let lifecycle = build_session_lifecycle_service(&paths);
-    // RFC-0062 14.1: serve-side session deletion also reclaims the session-scoped scratch
-    // namespace through the shared runtime lifecycle service.
-    let lifecycle = lifecycle.with_scratch_cleanup(
-        paths.scratch_root.clone(),
-        sigil_runtime::RuntimeScratchNamespaceControl::new(),
-    );
+    // RFC-0062 14.1: one process-scoped scratch lease registry shared by session-delete
+    // cleanup, TTL GC and every run tool surface, so leases are observed consistently.
+    let scratch_control = sigil_runtime::RuntimeScratchNamespaceControl::new();
+    let lifecycle =
+        lifecycle.with_scratch_cleanup(paths.scratch_root.clone(), scratch_control.clone());
     let driver = std::sync::Arc::new(HttpProductionRunDriver::new(
         HttpProductionRunDriverOptions::new(config_path, launch_cwd)
-            .with_session_lifecycle(lifecycle.clone()),
+            .with_session_lifecycle(lifecycle.clone())
+            .with_scratch_control(scratch_control),
         std::sync::Arc::clone(&disclosure_journal),
         std::sync::Arc::clone(&event_bus),
         tokio::runtime::Handle::current(),

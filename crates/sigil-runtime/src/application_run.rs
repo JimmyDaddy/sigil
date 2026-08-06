@@ -643,6 +643,9 @@ pub struct ApplicationRunServices {
     task_role_provider_builder:
         Option<Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>>,
     terminal_lifecycle_handler: Option<Arc<dyn crate::ApplicationTerminalLifecycleHandler>>,
+    /// RFC-0062 14.1: process-scoped scratch lease registry shared by every run surface so
+    /// tool/terminal leases, session-delete cleanup and TTL GC observe the same authority.
+    scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 }
 
 /// Process-local typed control for persistent terminal tasks admitted by one prepared run.
@@ -723,6 +726,7 @@ impl ApplicationRunServices {
             session_leases: Arc::new(ApplicationSessionLeaseManager::new()),
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
+            scratch_control: None,
         }
     }
 
@@ -737,6 +741,7 @@ impl ApplicationRunServices {
             session_leases,
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
+            scratch_control: None,
         }
     }
 
@@ -758,6 +763,22 @@ impl ApplicationRunServices {
     ) -> Self {
         self.terminal_lifecycle_handler = Some(handler);
         self
+    }
+
+    /// Shares the process-scoped scratch lease registry with every run tool surface.
+    #[must_use]
+    pub fn with_scratch_control(
+        mut self,
+        scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+    ) -> Self {
+        self.scratch_control = scratch_control;
+        self
+    }
+
+    /// Returns the process-scoped scratch lease registry, when the adapter shared one.
+    #[must_use]
+    pub fn scratch_control(&self) -> Option<&sigil_tools_builtin::ScratchNamespaceControl> {
+        self.scratch_control.as_ref()
     }
 
     /// Reports whether this adapter can execute an accepted durable task handoff.
@@ -2407,6 +2428,7 @@ async fn assemble_application_tool_surface(
             false,
         ),
         terminal_lifecycle_sink,
+        services.scratch_control().cloned(),
     )
     .await?;
     // RFC-0062 14.1: one TTL sweep over the workspace scratch namespaces per application run

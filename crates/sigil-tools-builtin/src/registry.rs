@@ -97,6 +97,7 @@ pub fn register_builtin_tools_with_paths_and_execution_backend(
         execution_backend,
         TerminalExecutionConfig::default(),
         None,
+        None,
     )
 }
 
@@ -112,16 +113,21 @@ pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
         execution_backend,
         execution_config,
         None,
+        None,
     )
 }
 
 /// Registers built-ins with a session-bound terminal lifecycle route.
+///
+/// `external_scratch_control` shares the process-scoped scratch lease registry across repeated
+/// surface assemblies (Desktop serve); `None` creates a fresh registry (TUI worker).
 pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
     execution_backend: Arc<dyn ExecutionBackend>,
     execution_config: &ExecutionConfig,
     terminal_lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
 ) -> BuiltinToolHandles {
     register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         registry,
@@ -129,6 +135,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
         execution_backend,
         TerminalExecutionConfig::from_execution_config(execution_config),
         terminal_lifecycle_sink.map(TerminalLifecycleRoute::Bound),
+        external_scratch_control,
     )
 }
 
@@ -139,6 +146,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
     execution_backend: Arc<dyn ExecutionBackend>,
     execution_config: &ExecutionConfig,
     terminal_lifecycle_factory: Arc<dyn sigil_kernel::TerminalLifecycleSinkFactory>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
 ) -> BuiltinToolHandles {
     register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         registry,
@@ -146,6 +154,7 @@ pub fn register_builtin_tools_with_paths_execution_backend_execution_config_and_
         execution_backend,
         TerminalExecutionConfig::from_execution_config(execution_config),
         Some(TerminalLifecycleRoute::Factory(terminal_lifecycle_factory)),
+        external_scratch_control,
     )
 }
 
@@ -155,6 +164,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     execution_backend: Arc<dyn ExecutionBackend>,
     terminal_execution_config: TerminalExecutionConfig,
     terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    external_scratch_control: Option<ScratchNamespaceControl>,
 ) -> BuiltinToolHandles {
     let default_shell = ResolvedShell::detect_default();
     let terminal_execution_config =
@@ -163,7 +173,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         TerminalProcessManagers::new(terminal_execution_config)
             .with_lifecycle_route(terminal_lifecycle_route),
     );
-    let scratch_control = ScratchNamespaceControl::new();
+    let scratch_control = external_scratch_control.unwrap_or_default();
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     let terminal_control = TerminalTaskControlHandle::new(

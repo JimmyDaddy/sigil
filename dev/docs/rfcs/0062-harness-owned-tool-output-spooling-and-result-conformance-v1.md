@@ -34,12 +34,13 @@ R62.5 的 `$SIGIL_SCRATCH_DIR` 生命周期与隔离部分已在独立 worktree 
   Windows ACL、锁内删除）+ 工具级测试（bash/terminal env 注入与隔离、quota 结构化错误、description 与
   env 一致、terminal lease 生命周期）+ runtime paths 推导测试；`cargo test --workspace` 5491 passed。
 - 已知残留：terminal task 自然退出但模型不再 wait/read 时，进程内 lease 直到进程退出才释放（只影响同一
-  进程内 GC 跳过，重启后 TTL 正常回收）；Desktop serve 的 session delete 钩子已按用户决策在 runtime 层
-  收口（`LocalSessionLifecycleService.with_scratch_cleanup`，serve 入口注入 process-scoped control，
-  `SessionCatalogProjectionService.delete_session` 委托同一路径），但 serve 进程内 per-run tool 的
-  lease 注册在 per-run control 实例上，与 delete/GC 使用的启动 control 不共享——删除一个仍被同进程
-  terminal 使用的 namespace 的窗口极小（run 已结束但 terminal 未收尾），由 TTL GC 与 run cleanup 兜底；
-  完整共享需要把启动 control 穿过 run preparation 链注入 tool surface assembly，留给后续 slice。
+  进程内 GC 跳过，重启后 TTL 正常回收）。serve 进程的 scratch lease 已统一：启动时创建一个
+  process-scoped `ScratchNamespaceControl`，同时注入 `LocalSessionLifecycleService.with_scratch_cleanup`
+  与 `HttpProductionRunDriverOptions.with_scratch_control`，经 `ApplicationRunServices` 穿过 run
+  preparation 链到达每次 `assemble_application_tool_surface`，tools-builtin 注册函数接受
+  `Option<ScratchNamespaceControl>`（Some 共享、None 新建），因此 serve 的 per-run tool/terminal
+  lease、session-delete 清理与 TTL GC 观察同一注册表；TUI worker 继续使用单 surface 自建实例。
+  测试 `registration_shares_external_scratch_control_across_surfaces` 覆盖共享语义。
 
 ### 2026-08-04 partial implementation status
 

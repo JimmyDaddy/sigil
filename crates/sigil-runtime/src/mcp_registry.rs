@@ -331,6 +331,7 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
         Some(terminal_lifecycle_sink),
         workspace_trust,
         network_admission,
+        None,
     )
     .await?
     .registry)
@@ -365,6 +366,7 @@ pub async fn build_tool_surface_with_mutation_recorder_and_workspace_trust_and_n
         workspace_trust,
         network_admission,
         terminal_lifecycle_sink,
+        None,
     )
     .await
 }
@@ -379,6 +381,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
     terminal_lifecycle_sink: Arc<dyn sigil_kernel::TerminalLifecycleSink>,
+    scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 ) -> Result<RuntimeToolSurface> {
     build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
@@ -390,6 +393,7 @@ pub async fn build_tool_surface_with_terminal_lifecycle(
         Some(terminal_lifecycle_sink),
         workspace_trust,
         network_admission,
+        scratch_control,
     )
     .await
 }
@@ -460,6 +464,7 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         None,
         workspace_trust,
         network_admission,
+        None,
     )
     .await?
     .registry)
@@ -476,6 +481,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
     terminal_lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
+    external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 ) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
@@ -486,6 +492,7 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         workspace_root.clone(),
         workspace_trust,
         terminal_lifecycle_sink.map(RuntimeTerminalLifecycleRoute::Bound),
+        external_scratch_control,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -693,6 +700,7 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         workspace_root.clone(),
         workspace_trust,
         terminal_lifecycle_route,
+        None,
     )?;
     let mut context_resolver =
         crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
@@ -1034,6 +1042,7 @@ fn register_local_tools(
     workspace_root: PathBuf,
     workspace_trust: WorkspaceTrust,
     terminal_lifecycle_route: Option<RuntimeTerminalLifecycleRoute>,
+    external_scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
 ) -> Result<(
     Option<sigil_code_intel::CodeIntelligenceService>,
     sigil_tools_builtin::TerminalTaskControlHandle,
@@ -1058,6 +1067,7 @@ fn register_local_tools(
                 execution_backend,
                 &root_config.execution,
                 factory,
+                external_scratch_control.clone(),
             )
         }
         route => {
@@ -1072,6 +1082,7 @@ fn register_local_tools(
                 execution_backend,
                 &root_config.execution,
                 sink,
+                external_scratch_control,
             )
         }
     };
