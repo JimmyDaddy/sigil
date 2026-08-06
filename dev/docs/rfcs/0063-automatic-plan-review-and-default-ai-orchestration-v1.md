@@ -1,6 +1,6 @@
 # RFC-0063 Automatic Plan Review and Default AI Orchestration V1
 
-状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5；修复后需复核，real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
+状态：implementation-in-progress（第三轮审计见 §13.3；第四轮审计见 §13.4；第五轮审计 2 项 P1、1 项 P2 见 §13.5，2026-08-06 复核通过——修复均在 main，§14 targeted gates、desktop contract drift check 与 `pnpm --dir apps/desktop check` 全绿；real-model campaign 与 current-source Desktop E2E 未通过前不得标记 implemented，见 §12 门槛）
 
 创建日期：2026-08-03
 
@@ -1110,6 +1110,17 @@ release 复验未在本机完成，按 §15 acceptance criteria 与 §12.2 门�
   identity，`record_plan_decision` 允许在 `RevisionFailed` 后执行 Run/Save/Reject。
   `production_revision_duplicate_registration_never_blocks_the_session` 扩展：断言 durable
   `RevisionFailed` 已持久化、原 plan 的 Save 决策成功（plan 决策恢复路径，而非仅 slot 可用）。
+
+## 13.6 Fifth-audit review（2026-08-06）
+
+第五轮审计修复复核通过：三项修复（`revision_run_id` 端到端投影、无草稿 attempt 的 public projection、
+`RevisionFailed` 恢复路径）均已在 main 合入；按 §14 的 targeted gates 执行
+`cargo test -p sigil-kernel conversation_route / plan_review`、`cargo test -p sigil-runtime
+conversation_coordinator / plan_review`、`cargo test -p sigil-tui plan / routing`、
+`cargo test -p sigil-http plan_review` 全部通过（115 passed），`./scripts/generate-desktop-contract.sh
+--check` 与 `pnpm --dir apps/desktop check` 通过。剩余 release 门槛不变：real-model campaign
+（§12.2 三路 eval，消耗真实额度）与 current-source Desktop E2E（需 CI 复验）未通过前不得标记
+implemented。
 
 ## 14. Validation plan
 
