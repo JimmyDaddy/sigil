@@ -2463,7 +2463,7 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         }
                         let Some(binding) = plan_review_binding.as_ref() else {
@@ -2482,7 +2482,7 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
                         accepted_plan_review = handle_request_plan_review_call(
@@ -2558,7 +2558,7 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
+                            assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
                         let now_ms = SystemTime::now()

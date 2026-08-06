@@ -30,12 +30,13 @@ use crate::{
     ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
     MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
     PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
-    PlanPermissionGrantedEntry, PlanReviewHandoffBinding, PreparedToolExecution, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
-    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
-    ProviderRequestRejection, REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort,
-    ReasoningStreamSupport, ResponseHandle, RunCancellationOwner, RunEvent,
-    RuntimeContextCandidates, SecretString, Session, SessionLogEntry, SessionRef,
+    PlanPermissionGrantedEntry, PlanReviewHandoffBinding, PlanReviewPurposeContext,
+    PreparedToolExecution, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptStartedEntry,
+    ProviderPhysicalAttemptTerminalEntry, ProviderRequestRejection, REQUEST_PLAN_REVIEW_TOOL_NAME,
+    REQUEST_TASK_PLANNING_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    ResponseHandle, RunCancellationOwner, RunEvent, RuntimeContextCandidates,
+    SUBMIT_PLAN_DRAFT_TOOL_NAME, SecretString, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, SourceCacheStatus, SourceFreshness, TASK_GUIDANCE_APPLY_TOOL_NAME,
     TASK_PLAN_UPDATE_TOOL_NAME, TOOL_ARTIFACT_READ_SCHEMA_VERSION, TaskGuidanceApplyReason,
     TaskGuidanceAssessmentContext, TaskHandoffId, TaskId, TaskParticipantAttemptId,
@@ -10776,5 +10777,610 @@ fn assistant_batch_settlement_keeps_provider_previews_within_budget() -> Result<
     }
     assert!(preview_total <= 64 * 1024);
     assert_eq!(order, vec!["call-0", "call-1", "call-2", "call-3"]);
+    Ok(())
+}
+
+/// Scripted provider: each turn pops the next declared (call_id, tool name, args) batch; once the
+/// script is exhausted the provider answers with a plain final text turn.
+struct ScriptedTurnToolProvider {
+    turns: Mutex<std::collections::VecDeque<Vec<(String, String, String)>>>,
+}
+
+impl ScriptedTurnToolProvider {
+    fn new(turns: Vec<Vec<(String, String, String)>>) -> Self {
+        Self {
+            turns: Mutex::new(turns.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ScriptedTurnToolProvider {
+    fn name(&self) -> &str {
+        "mock-scripted-tool"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let turn = self
+            .turns
+            .lock()
+            .expect("scripted turns lock should not be poisoned")
+            .pop_front();
+        let Some(calls) = turn else {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("ordinary answer".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])));
+        };
+        let mut chunks = Vec::new();
+        for (id, name, args) in calls {
+            chunks.push(Ok(ProviderChunk::ToolCallStart {
+                id: id.clone(),
+                name: name.clone(),
+            }));
+            chunks.push(Ok(ProviderChunk::ToolCallArgsDelta {
+                id: id.clone(),
+                delta: args.clone(),
+            }));
+            chunks.push(Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id,
+                name,
+                args_json: args,
+            })));
+        }
+        chunks.push(Ok(ProviderChunk::Done));
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+}
+
+fn scripted_run_options(max_turns: usize) -> AgentRunOptions {
+    AgentRunOptions {
+        workspace_root: std::env::temp_dir(),
+        max_turns: Some(max_turns),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig::with_enabled(false),
+        compaction_config: CompactionConfig::default(),
+    }
+}
+
+fn conversation_run_purpose(
+    logical_run_id: &str,
+    source_turn: ConversationTurnRef,
+    routing_policy: TaskRoutingPolicy,
+    route_capability: AutomaticRouteCapability,
+    plan_review: Option<PlanReviewHandoffBinding>,
+    task_handoff: Option<TaskPlanningHandoffBinding>,
+) -> AgentRunPurpose {
+    AgentRunPurpose::Conversation(Box::new(ConversationPurposeContext {
+        root_run_id: logical_run_id.to_owned(),
+        source_turn,
+        routing_policy,
+        route_capability,
+        plan_review,
+        task_handoff,
+    }))
+}
+
+fn settled_tool_results(session: &Session) -> Vec<(String, String)> {
+    session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::ToolResultV3(result) => Some((
+                result.call_id.clone(),
+                result.initial_model_view.preview.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_result_event_count(handler: &RecordingEventHandler, call_id: &str) -> usize {
+    handler
+        .events
+        .iter()
+        .filter(|event| matches!(event, RunEvent::ToolResult(result) if result.call_id == call_id))
+        .count()
+}
+
+fn assert_single_settled_result(session: &Session, call_id: &str, preview_contains: &str) {
+    let settled = settled_tool_results(session);
+    let matching = settled
+        .iter()
+        .filter(|(id, _)| id == call_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching.len(),
+        1,
+        "call {call_id} must settle exactly once, got {matching:?}"
+    );
+    assert!(
+        matching[0].1.contains(preview_contains),
+        "preview {:?} must contain {preview_contains:?}",
+        matching[0].1
+    );
+}
+
+#[tokio::test]
+async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Result<()> {
+    // RFC-0062 11.2/11.5: every model-issued special-tool call that cannot be accepted settles in
+    // the same assistant tool-call batch as ordinary results (exactly one durable record, one
+    // provider-visible event), never through a per-tool emit outside the allocator.
+
+    // (a) request_plan_review after the routing microturn: no routing decision is pending.
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![(
+            "call-plan-review".to_owned(),
+            REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+            r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
+        )]]),
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-plan-review-late", "mock-model");
+    let prompt = "explain the routing contract";
+    let logical_run_id = "plan-review-late-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(conversation_run_purpose(
+                logical_run_id,
+                source_turn,
+                TaskRoutingPolicy::Manual,
+                AutomaticRouteCapability::Unsupported,
+                None,
+                None,
+            ));
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
+        .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_single_settled_result(
+        &session,
+        "call-plan-review",
+        "not available after the routing microturn",
+    );
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
+    assert!(
+        output
+            .outcome
+            .tool_errors
+            .iter()
+            .any(|error| error.kind == ToolErrorKind::Unsupported)
+    );
+
+    // (b) routing microturn with only a task handoff binding: request_plan_review has no plan
+    // review binding, so it is rejected into the batch; the microturn filter still suppresses the
+    // model surface and the run retries with a typed decision.
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![
+            vec![(
+                "call-plan-review".to_owned(),
+                REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
+            )],
+            vec![(
+                "call-chat".to_owned(),
+                CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                r#"{"reason":"does_not_meet_task_planning_criteria"}"#.to_owned(),
+            )],
+        ]),
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-plan-review-unbound", "mock-model");
+    let prompt = "ship the cross-crate orchestration change";
+    let logical_run_id = "plan-review-unbound-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let task_handoff = TaskPlanningHandoffBinding {
+        handoff_id: TaskHandoffId::new("handoff-unbound-1")?,
+        task_id: TaskId::new("task-unbound-1")?,
+        source_turn: source_turn.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: prompt.to_owned(),
+        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
+        requested_at_ms: 42,
+        decided_at_ms: 43,
+    };
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(conversation_run_purpose(
+            logical_run_id,
+            source_turn,
+            TaskRoutingPolicy::Auto,
+            AutomaticRouteCapability::DirectTask,
+            None,
+            Some(task_handoff),
+        ))
+        .with_cancellation(RunCancellationOwner::new().handle());
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(4), &mut handler)
+        .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_single_settled_result(&session, "call-plan-review", "not available for this run");
+    assert_eq!(
+        tool_result_event_count(&handler, "call-plan-review"),
+        0,
+        "routing microturn must suppress the rejected result from the model surface"
+    );
+    let decisions = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(decision)) => {
+                Some(decision.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].route, ConversationRoute::Chat);
+
+    // (c) plan review run without a draft binding: submit_plan_draft is rejected into the batch.
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![(
+            "call-draft".to_owned(),
+            SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            "{}".to_owned(),
+        )]]),
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-plan-review-no-draft", "mock-model");
+    let prompt = "propose how to restructure the coordinator";
+    let logical_run_id = "plan-review-no-draft-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let binding = test_plan_review_handoff_binding(&source_turn, prompt);
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::PlanReview(PlanReviewPurposeContext {
+                plan_review_id: binding.plan_review_id.clone(),
+                attempt_id: binding.attempt_id.clone(),
+                plan_id: binding.plan_id.clone(),
+                source_turn: source_turn.clone(),
+                route_decision_id: Some(binding.decision_id.clone()),
+            }));
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
+        .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_single_settled_result(
+        &session,
+        "call-draft",
+        "submit_plan_draft is not available for this run",
+    );
+    assert_eq!(tool_result_event_count(&handler, "call-draft"), 1);
+    assert!(
+        output
+            .outcome
+            .tool_errors
+            .iter()
+            .any(|error| error.kind == ToolErrorKind::Unsupported)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mixed_special_and_ordinary_results_settle_in_declaration_order() -> Result<()> {
+    // RFC-0062 11.2: one assistant response mixing a rejected special tool with an ordinary tool
+    // persists both through the single batch settlement in assistant declaration order.
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![
+            (
+                "call-plan-review".to_owned(),
+                REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
+            ),
+            (
+                "call-echo".to_owned(),
+                "echo".to_owned(),
+                r#"{"value":"declared second"}"#.to_owned(),
+            ),
+        ]]),
+        registry,
+    );
+    let mut session = Session::new("mock-mixed-batch", "mock-model");
+    let prompt = "explain the routing contract";
+    let logical_run_id = "mixed-batch-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(conversation_run_purpose(
+                logical_run_id,
+                source_turn,
+                TaskRoutingPolicy::Manual,
+                AutomaticRouteCapability::Unsupported,
+                None,
+                None,
+            ));
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
+        .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    let settled = settled_tool_results(&session);
+    assert_eq!(
+        settled
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call-plan-review", "call-echo"]
+    );
+    assert!(
+        settled[0]
+            .1
+            .contains("not available after the routing microturn")
+    );
+    assert!(settled[1].1.contains("declared second"));
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
+    assert_eq!(tool_result_event_count(&handler, "call-echo"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settlement() -> Result<()>
+{
+    // RFC-0063 6.1: once a plan review decision is accepted, every other call in the same response
+    // gets an explicit terminal result (audited Cancelled) and every call settles exactly once.
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![
+            (
+                "call-plan-review".to_owned(),
+                REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
+            ),
+            (
+                "call-extra".to_owned(),
+                REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
+                r#"{"reason_codes":["target_requires_task_planning"]}"#.to_owned(),
+            ),
+        ]]),
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-plan-review-accepted", "mock-model");
+    let prompt = "design the migration path first";
+    let logical_run_id = "plan-review-accepted-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
+    let task_handoff = TaskPlanningHandoffBinding {
+        handoff_id: TaskHandoffId::new("handoff-accepted-1")?,
+        task_id: TaskId::new("task-accepted-1")?,
+        source_turn: source_turn.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: prompt.to_owned(),
+        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
+        requested_at_ms: 42,
+        decided_at_ms: 43,
+    };
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_run_purpose(conversation_run_purpose(
+            logical_run_id,
+            source_turn,
+            TaskRoutingPolicy::Auto,
+            AutomaticRouteCapability::DirectTask,
+            Some(plan_review_binding),
+            Some(task_handoff),
+        ))
+        .with_cancellation(RunCancellationOwner::new().handle());
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
+        .await?;
+    assert!(matches!(
+        output.disposition,
+        AgentRunDisposition::StartPlanReview(_)
+    ));
+    assert_single_settled_result(&session, "call-plan-review", "accepted");
+    assert_single_settled_result(&session, "call-extra", "ignored");
+    // The routing microturn suppresses the model surface: neither call produces a live
+    // ToolResult event, while each call is durably settled exactly once in the session.
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 0);
+    assert_eq!(tool_result_event_count(&handler, "call-extra"), 0);
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-extra"
+                && execution.status == ToolExecutionStatus::Cancelled
+    )));
+    assert_eq!(
+        output.outcome.tool_call_ids,
+        vec!["call-plan-review".to_owned(), "call-extra".to_owned()]
+    );
+    assert!(
+        output
+            .outcome
+            .tool_errors
+            .iter()
+            .any(|error| error.kind == ToolErrorKind::Unsupported)
+    );
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::PlanReviewHandoff
+    );
+    Ok(())
+}
+
+#[test]
+fn assistant_batch_floor_and_cap_hold_at_128_results() -> Result<()> {
+    // RFC-0062 11.2 worst case: 128 results each with safe text keep their deterministic 512 B
+    // minimum preview, the batch stays within the 64 KiB cap, and declaration order is preserved.
+    let mut session = Session::new("test", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut outcome = AgentRunOutcome::default();
+    let batch = (0..128)
+        .map(|index| {
+            let call = crate::ToolCall {
+                id: format!("call-{index}"),
+                name: "shell".to_owned(),
+                args_json: "{}".to_owned(),
+            };
+            let result = ToolResult::ok(
+                format!("call-{index}"),
+                "shell",
+                "x".repeat(1024),
+                ToolResultMeta::default(),
+            );
+            (call, result)
+        })
+        .collect::<Vec<_>>();
+    crate::agent::tool_results::emit_tool_result_batch(
+        &mut session,
+        &mut handler,
+        &mut outcome,
+        batch,
+    )?;
+
+    let settled = settled_tool_results(&session);
+    assert_eq!(settled.len(), 128);
+    assert_eq!(
+        settled
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        (0..128)
+            .map(|index| format!("call-{index}"))
+            .collect::<Vec<_>>()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    let preview_total = settled
+        .iter()
+        .map(|(_, preview)| preview.len())
+        .sum::<usize>();
+    assert!(settled.iter().all(|(_, preview)| preview.len() >= 512));
+    assert!(preview_total <= 64 * 1024);
+    assert_eq!(outcome.tool_call_ids.len(), 128);
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_outcome_reflects_error_cancelled_and_completed_tool_states() -> Result<()> {
+    // RFC-0062 11.5: batch settlement folds every result into the run outcome; an ordinary tool
+    // error inside the batch must not fail the run, and the outcome keeps error and completed
+    // states distinct. (The cancelled state is asserted by
+    // accepted_plan_review_terminates_extra_calls_with_explicit_single_settlement.)
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![
+            (
+                "call-echo".to_owned(),
+                "echo".to_owned(),
+                r#"{"value":"ok"}"#.to_owned(),
+            ),
+            (
+                "call-plan-review".to_owned(),
+                REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
+            ),
+        ]]),
+        registry,
+    );
+    let mut session = Session::new("mock-outcome-batch", "mock-model");
+    let prompt = "explain the routing contract";
+    let logical_run_id = "outcome-batch-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(conversation_run_purpose(
+                logical_run_id,
+                source_turn,
+                TaskRoutingPolicy::Manual,
+                AutomaticRouteCapability::Unsupported,
+                None,
+                None,
+            ));
+    let mut handler = RecordingEventHandler::default();
+    let output = agent
+        .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
+        .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(
+        output.outcome.tool_call_ids,
+        vec!["call-echo".to_owned(), "call-plan-review".to_owned()]
+    );
+    assert!(
+        output
+            .outcome
+            .tool_errors
+            .iter()
+            .any(|error| error.kind == ToolErrorKind::Unsupported)
+    );
+    assert!(output.outcome.tool_errors.iter().all(|error| {
+        error.kind != ToolErrorKind::ApprovalDenied && error.kind != ToolErrorKind::Interrupted
+    }));
+    assert_eq!(output.outcome.approval_denials, 0);
+    assert!(output.outcome.interrupted_tool_calls.is_empty());
+    assert_eq!(settled_tool_results(&session).len(), 2);
     Ok(())
 }
