@@ -7727,6 +7727,7 @@ fn approval_requests_and_decisions_are_routed_in_order() {
             run_id: run.id.clone(),
             call_id: "call-a".to_owned(),
             decision: ToolApprovalUserDecision::Approved,
+            family_pattern: None,
             reason: Some("read-only".to_owned()),
         }
     );
@@ -7818,6 +7819,7 @@ fn approval_command_deduplicates_retries_and_audits_client_fields() {
                 call_id: "call-1".to_owned(),
                 decision: ToolApprovalUserDecision::Approved,
                 reason: None,
+                family_pattern: None
             },
             route_state: HttpApprovalRouteState::DecisionAccepted,
             registry_revision: waiting.stream_sequence + 1,
@@ -8432,6 +8434,7 @@ fn approval_decision(
         policy_version: policy_version(),
         expires_at_ms: u64::MAX,
         decision,
+        family_pattern: None,
         reason,
     }
 }
@@ -9714,4 +9717,98 @@ async fn http_raw_exchange(address: SocketAddr, request: String) -> (u16, String
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().expect("test lock should not be poisoned")
+}
+
+#[test]
+fn approve_for_family_persists_the_rule_and_records_the_pattern() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+config_version = 2
+
+[agent]
+connection = "deepseek-default"
+model = "deepseek-v4-flash"
+
+[connections.deepseek-default]
+label = "DeepSeek"
+provider = "deepseek"
+protocol = "deepseek"
+base_url = "https://api.deepseek.com"
+credential = { source = "environment", name = "SIGIL_API_KEY" }
+"#,
+    )
+    .expect("config should write");
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = HttpSessionRunRegistry::with_in_memory_command_capacity(driver, 256)
+        .with_config_path(config_path.clone());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("needs tools", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-bash", "bash"))
+        .expect("approval should be registered");
+
+    let mut request = approval_decision(
+        "call-bash",
+        HttpApprovalDecision::ApproveForFamily,
+        Some("allow cargo test family".to_owned()),
+    );
+    request.family_pattern = Some("cargo test*".to_owned());
+    let approved = registry
+        .submit_approval_decision(&run.id, "call-bash", request)
+        .expect("family approval should route");
+
+    assert_eq!(approved.decision, ToolApprovalUserDecision::Approved);
+    assert_eq!(approved.family_pattern.as_deref(), Some("cargo test*"));
+    let persisted = sigil_kernel::RootConfig::load(&config_path).expect("config should reload");
+    assert!(
+        persisted
+            .permission
+            .commands
+            .allow
+            .iter()
+            .any(|pattern| pattern == "cargo test*")
+    );
+}
+
+#[test]
+fn approve_for_family_fails_closed_without_a_pattern_or_config_path() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("needs tools", HttpPermissionMode::Manual),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-bash", "bash"))
+        .expect("approval should be registered");
+
+    let mut request = approval_decision("call-bash", HttpApprovalDecision::ApproveForFamily, None);
+    request.family_pattern = Some("cargo test*".to_owned());
+    let error = registry
+        .submit_approval_decision(&run.id, "call-bash", request)
+        .expect_err("unbound config path must fail closed");
+    assert!(matches!(
+        error,
+        HttpRegistryError::InvalidApprovalRequest { .. }
+    ));
+    // The pending approval must survive the failed persist attempt: a follow-up plain approve
+    // still routes.
+    let retry = registry
+        .submit_approval_decision(
+            &run.id,
+            "call-bash",
+            approval_decision("call-bash", HttpApprovalDecision::Approve, None),
+        )
+        .expect("pending approval must survive the failed family persist");
+    assert_eq!(retry.decision, ToolApprovalUserDecision::Approved);
 }

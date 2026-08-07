@@ -2434,6 +2434,7 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
                 call_id: "call-1".to_owned(),
                 decision: ToolApprovalUserDecision::Approved,
                 reason: None,
+                family_pattern: None,
             },
         )
         .expect("decision should resolve");
@@ -2482,6 +2483,7 @@ fn approval_broker_keeps_an_idle_request_pending_until_an_explicit_decision() {
                 call_id: "call-1".to_owned(),
                 decision: ToolApprovalUserDecision::Denied,
                 reason: Some("explicit denial".to_owned()),
+                family_pattern: None,
             },
         )
         .expect("explicit decision should resolve");
@@ -2520,6 +2522,7 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
                 call_id: "call-1".to_owned(),
                 decision: ToolApprovalUserDecision::Approved,
                 reason: None,
+                family_pattern: None,
             },
         )
         .expect("decision should resolve");
@@ -2565,6 +2568,7 @@ fn approval_handler_preserves_bounded_session_decisions() {
                 call_id: "call-1".to_owned(),
                 decision: ToolApprovalUserDecision::ApprovedForSession,
                 reason: None,
+                family_pattern: None,
             },
         )
         .expect("session decision should resolve");

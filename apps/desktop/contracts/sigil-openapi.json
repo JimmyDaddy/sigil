@@ -645,6 +645,7 @@
         "enum": [
           "approve",
           "approve_for_session",
+          "approve_for_family",
           "deny"
         ],
         "type": "string"
@@ -708,6 +709,13 @@
           "expires_at_ms": {
             "format": "uint64",
             "type": "integer"
+          },
+          "family_pattern": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "policy_version": {
             "type": "string"
@@ -4400,6 +4408,13 @@
           "analysis_status": {
             "maxLength": 2048,
             "type": "string"
+          },
+          "command_family_allow_pattern": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "containment": {
             "items": {

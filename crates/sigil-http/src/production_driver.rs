@@ -777,10 +777,10 @@ impl HttpProductionRunDriver {
         command_store: Arc<HttpDurableCommandStore>,
     ) -> Result<Arc<HttpSessionRunRegistry>, HttpRunDriverError> {
         let driver: Arc<dyn HttpRunDriver> = self.clone();
-        let registry = Arc::new(HttpSessionRunRegistry::with_durable_command_store(
-            driver,
-            command_store,
-        ));
+        let registry = Arc::new(
+            HttpSessionRunRegistry::with_durable_command_store(driver, command_store)
+                .with_config_path(self.options.config_path.clone()),
+        );
         self.registry
             .set(Arc::downgrade(&registry))
             .map_err(|_| HttpRunDriverError::new("production driver registry already attached"))?;
@@ -5113,6 +5113,9 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     *operation,
                     *risk,
                     *snapshot_required,
+                    session_grant_available
+                        .then(|| sigil_kernel::derive_command_family_allow_pattern_for_call(call))
+                        .flatten(),
                 );
                 let pending = self
                     .broker
@@ -5438,6 +5441,7 @@ fn pending_approval_display(
     operation: Option<ToolOperation>,
     risk: Option<PermissionRisk>,
     snapshot_required: bool,
+    command_family_allow_pattern: Option<String>,
 ) -> HttpPendingApprovalDisplay {
     let (analysis_status, analysis_reason_facts) = match analysis {
         ToolAnalysisStatus::Complete => ("complete", Vec::new()),
@@ -5501,6 +5505,7 @@ fn pending_approval_display(
         operation: operation.map(|value| value.as_str().to_owned()),
         risk: risk.map(|value| stable_enum_label(&value)),
         snapshot_required,
+        command_family_allow_pattern,
     }
 }
 

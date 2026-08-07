@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
@@ -31,28 +31,29 @@ use crate::{
         HttpSessionOpenBindingError, HttpToolArtifactReadDriverError,
     },
     dto::{
-        HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecisionRecord,
-        HttpApprovalDecisionRequest, HttpApprovalLifecycleState, HttpApprovalLifecycleView,
-        HttpApprovalRouteState, HttpCheckpointRestoreRequest, HttpCheckpointRestoreReview,
-        HttpCompactionReview, HttpContinuityRecoveryAction, HttpConversationDisplayPage,
-        HttpConversationQueueBlockedReason, HttpConversationQueueCommandAction,
-        HttpConversationQueueCommandReceipt, HttpConversationQueueCommandRequest,
-        HttpConversationQueuePromptMaterial, HttpConversationQueueView,
-        HttpConversationRecoveryCommandAction, HttpConversationRecoveryCommandReceipt,
-        HttpConversationRecoveryView, HttpForegroundRunOwner, HttpIntentDropCommandReceipt,
-        HttpIntentDropPreview, HttpIntentDropPreviewRequest, HttpIntentDropRequest,
-        HttpIntentStackView, HttpPendingApproval, HttpPermissionMode,
-        HttpPlanDecisionCommandReceipt, HttpPlanDecisionRequest, HttpReasoningEffort,
-        HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot,
-        HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome,
-        HttpSessionBinding, HttpSessionContinuityView, HttpSessionCreateRequest,
-        HttpSessionOpenRequest, HttpSessionRouteRecoveryAction, HttpSessionRouteRecoveryCode,
-        HttpSessionRouteRecoveryView, HttpSessionSnapshot, HttpSessionTranscriptPage,
-        HttpTaskIntegrationAcceptanceCommandReceipt, HttpTaskIntegrationReviewRequest,
-        HttpTaskIntegrationReviewView, HttpTaskPauseCommandReceipt, HttpTaskPauseRequest,
-        HttpTerminalLifecycleView, HttpTerminalTaskCancelCommandReceipt,
-        HttpTerminalTaskCancelRequest, HttpToolArtifactPage, HttpToolArtifactReadRequest,
-        HttpVerificationRerunCommandReceipt, HttpVerificationRerunRequest, HttpVerificationView,
+        HttpAgentActivityView, HttpApprovalCommandReceipt, HttpApprovalDecision,
+        HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpApprovalLifecycleState,
+        HttpApprovalLifecycleView, HttpApprovalRouteState, HttpCheckpointRestoreRequest,
+        HttpCheckpointRestoreReview, HttpCompactionReview, HttpContinuityRecoveryAction,
+        HttpConversationDisplayPage, HttpConversationQueueBlockedReason,
+        HttpConversationQueueCommandAction, HttpConversationQueueCommandReceipt,
+        HttpConversationQueueCommandRequest, HttpConversationQueuePromptMaterial,
+        HttpConversationQueueView, HttpConversationRecoveryCommandAction,
+        HttpConversationRecoveryCommandReceipt, HttpConversationRecoveryView,
+        HttpForegroundRunOwner, HttpIntentDropCommandReceipt, HttpIntentDropPreview,
+        HttpIntentDropPreviewRequest, HttpIntentDropRequest, HttpIntentStackView,
+        HttpPendingApproval, HttpPermissionMode, HttpPlanDecisionCommandReceipt,
+        HttpPlanDecisionRequest, HttpReasoningEffort, HttpRunCancelCommandReceipt,
+        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
+        HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionContinuityView,
+        HttpSessionCreateRequest, HttpSessionOpenRequest, HttpSessionRouteRecoveryAction,
+        HttpSessionRouteRecoveryCode, HttpSessionRouteRecoveryView, HttpSessionSnapshot,
+        HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceCommandReceipt,
+        HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView,
+        HttpTaskPauseCommandReceipt, HttpTaskPauseRequest, HttpTerminalLifecycleView,
+        HttpTerminalTaskCancelCommandReceipt, HttpTerminalTaskCancelRequest, HttpToolArtifactPage,
+        HttpToolArtifactReadRequest, HttpVerificationRerunCommandReceipt,
+        HttpVerificationRerunRequest, HttpVerificationView,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -166,6 +167,9 @@ pub enum HttpRegistryError {
     /// The caller's opaque foreground owner revision is stale.
     #[error("http run {run_id} foreground owner changed for session {session_id}")]
     RunOwnerChanged { session_id: String, run_id: String },
+    /// The approval request is malformed or the family rule could not be persisted.
+    #[error("http approval request invalid: {message}")]
+    InvalidApprovalRequest { message: String },
     /// The approval call id is not currently pending for the run.
     #[error("http approval not pending for run {run_id} call {call_id}")]
     ApprovalNotPending { run_id: String, call_id: String },
@@ -334,6 +338,8 @@ pub struct HttpSessionRunRegistry {
     queue_command_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     driver: Arc<dyn HttpRunDriver>,
     command_store: Option<Arc<HttpDurableCommandStore>>,
+    /// Persisted config path used to append `permission.commands.allow` family rules.
+    config_path: Option<PathBuf>,
     in_memory_command_capacity: usize,
 }
 
@@ -359,8 +365,18 @@ impl HttpSessionRunRegistry {
             queue_command_locks: Mutex::new(BTreeMap::new()),
             driver,
             command_store: None,
+            config_path: None,
             in_memory_command_capacity: DEFAULT_IN_MEMORY_COMMAND_CAPACITY,
         }
+    }
+
+    /// Binds the persisted config path so `approve_for_family` decisions can append durable
+    /// `permission.commands.allow` rules. Unit-test registries leave it unset and reject the
+    /// family decision.
+    #[must_use]
+    pub fn with_config_path(mut self, config_path: PathBuf) -> Self {
+        self.config_path = Some(config_path);
+        self
     }
 
     /// Creates a production registry backed by a crash-safe command identity store.
@@ -375,6 +391,7 @@ impl HttpSessionRunRegistry {
             queue_command_locks: Mutex::new(BTreeMap::new()),
             driver,
             command_store: Some(command_store),
+            config_path: None,
             in_memory_command_capacity: 0,
         }
     }
@@ -389,6 +406,7 @@ impl HttpSessionRunRegistry {
             queue_command_locks: Mutex::new(BTreeMap::new()),
             driver,
             command_store: None,
+            config_path: None,
             in_memory_command_capacity: capacity,
         }
     }
@@ -3091,6 +3109,24 @@ impl HttpSessionRunRegistry {
         call_id: &str,
         request: HttpApprovalDecisionRequest,
     ) -> Result<HttpApprovalRouteOutcome, HttpRegistryError> {
+        // An `approve_for_family` decision persists the durable rule BEFORE the pending approval
+        // is consumed, so a persist failure leaves the approval pending and recoverable.
+        if request.decision == HttpApprovalDecision::ApproveForFamily {
+            let pattern = request.family_pattern.clone().ok_or_else(|| {
+                HttpRegistryError::InvalidApprovalRequest {
+                    message: "approve_for_family requires a family_pattern".to_owned(),
+                }
+            })?;
+            let config_path = self.config_path.clone().ok_or_else(|| {
+                HttpRegistryError::InvalidApprovalRequest {
+                    message: "approve_for_family requires a bound config path".to_owned(),
+                }
+            })?;
+            sigil_runtime::command_permission::append_command_allow_pattern(&config_path, &pattern)
+                .map_err(|error| HttpRegistryError::InvalidApprovalRequest {
+                    message: format!("failed to persist command family rule: {error}"),
+                })?;
+        }
         let (session_id, record) = {
             let mut state = self.lock_state();
             let run = state
@@ -3121,6 +3157,7 @@ impl HttpSessionRunRegistry {
                 run_id: run_id.to_owned(),
                 call_id: call_id.to_owned(),
                 decision: request.decision.to_user_decision(),
+                family_pattern: request.family_pattern.clone(),
                 reason: request.reason,
             };
             (run.session_id.clone(), record)

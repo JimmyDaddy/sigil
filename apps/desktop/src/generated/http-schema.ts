@@ -2270,7 +2270,7 @@ export interface components {
             session_id: string;
         };
         /** @enum {string} */
-        ApprovalDecision: "approve" | "approve_for_session" | "deny";
+        ApprovalDecision: "approve" | "approve_for_session" | "approve_for_family" | "deny";
         ApprovalDecisionCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["ApprovalDecisionRequest"];
         };
@@ -2286,6 +2286,7 @@ export interface components {
             decision: components["schemas"]["ApprovalDecision"];
             /** Format: uint64 */
             expires_at_ms: number;
+            family_pattern?: string | null;
             policy_version: string;
             reason?: string | null;
             tool_call_hash: string;
@@ -3111,6 +3112,7 @@ export interface components {
             analysis_reason_codes: ("unknown_program" | "dynamic_command" | "unsupported_syntax" | "invalid_syntax" | "analysis_limit_exceeded" | "unresolved_path" | "unresolved_executable" | "unproven_containment")[];
             analysis_reasons: string[];
             analysis_status: string;
+            command_family_allow_pattern?: string | null;
             containment: string[];
             decision_reasons: string[];
             effects: string[];

@@ -1942,6 +1942,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::RunNotActive { .. }
         | HttpRegistryError::RunNoLongerForeground { .. }
         | HttpRegistryError::RunOwnerChanged { .. }
+        | HttpRegistryError::InvalidApprovalRequest { .. }
         | HttpRegistryError::ApprovalNotPending { .. }
         | HttpRegistryError::ApprovalCapacityExceeded { .. }
         | HttpRegistryError::ApprovalRequestChanged { .. }

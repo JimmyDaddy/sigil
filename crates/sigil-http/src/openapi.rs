@@ -3184,12 +3184,13 @@ pub fn http_openapi_document() -> Value {
                         "policy_version": { "type": "string" },
                         "expires_at_ms": { "type": "integer", "format": "uint64" },
                         "decision": { "$ref": "#/components/schemas/ApprovalDecision" },
+                        "family_pattern": { "type": ["string", "null"], "maxLength": 2048 },
                         "reason": { "type": ["string", "null"] }
                     }
                 },
                 "ApprovalDecision": {
                     "type": "string",
-                    "enum": ["approve", "approve_for_session", "deny"]
+                    "enum": ["approve", "approve_for_session", "approve_for_family", "deny"]
                 },
                 "ApprovalCommandReceipt": {
                     "type": "object",
@@ -3895,7 +3896,8 @@ fn public_event_schemas() -> Map<String, Value> {
                 "safe_summary_detail": { "type": "string", "maxLength": 2048 },
                 "operation": { "type": ["string", "null"], "maxLength": 2048 },
                 "risk": { "type": ["string", "null"], "maxLength": 2048 },
-                "snapshot_required": { "type": "boolean" }
+                "snapshot_required": { "type": "boolean" },
+                "command_family_allow_pattern": { "type": ["string", "null"], "maxLength": 2048 }
             }
         }),
     );

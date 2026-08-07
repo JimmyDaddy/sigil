@@ -3192,6 +3192,9 @@ pub struct HttpPendingApprovalDisplay {
     pub risk: Option<String>,
     #[serde(default)]
     pub snapshot_required: bool,
+    /// Derived durable allow pattern (`cargo test*`) offered as the "Allow family" decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_family_allow_pattern: Option<String>,
 }
 
 /// One path-safe approval subject. External identities are represented only by kind and scope.
@@ -3218,6 +3221,9 @@ pub struct HttpApprovalDecisionRequest {
     pub expires_at_ms: u64,
     /// Explicit decision for the pending approval.
     pub decision: HttpApprovalDecision,
+    /// Derived durable allow pattern required when `decision` is `approve_for_family`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_pattern: Option<String>,
     /// Optional user-facing reason for audit and display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -3231,6 +3237,8 @@ pub enum HttpApprovalDecision {
     Approve,
     /// Allow this call and equivalent bounded calls for the current session.
     ApproveForSession,
+    /// Allow this call and persist a `permission.commands.allow` family rule for future runs.
+    ApproveForFamily,
     /// Deny the pending tool call.
     Deny,
 }
@@ -3240,7 +3248,7 @@ impl HttpApprovalDecision {
     #[must_use]
     pub fn to_user_decision(self) -> ToolApprovalUserDecision {
         match self {
-            Self::Approve => ToolApprovalUserDecision::Approved,
+            Self::Approve | Self::ApproveForFamily => ToolApprovalUserDecision::Approved,
             Self::ApproveForSession => ToolApprovalUserDecision::ApprovedForSession,
             Self::Deny => ToolApprovalUserDecision::Denied,
         }
@@ -3257,6 +3265,9 @@ pub struct HttpApprovalDecisionRecord {
     pub call_id: String,
     /// Kernel-compatible user decision.
     pub decision: ToolApprovalUserDecision,
+    /// Durable `permission.commands.allow` pattern persisted for `approve_for_family`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_pattern: Option<String>,
     /// Optional user-facing reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
