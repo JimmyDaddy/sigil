@@ -227,7 +227,8 @@ required = true
 fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
-    let backend = TestBackend::new(112, 42);
+    // Tall enough to fit the full keyboard help including the new approval family hints.
+    let backend = TestBackend::new(112, 46);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;

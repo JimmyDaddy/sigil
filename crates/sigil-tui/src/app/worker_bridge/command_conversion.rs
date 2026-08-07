@@ -139,6 +139,15 @@ impl AppState {
                 call_id,
                 approval_request_id,
             }),
+            AppAction::ApprovalFamilyDecision {
+                call_id,
+                approval_request_id,
+                pattern,
+            } => self.approval_worker_command(WorkerApprovalCommand::DecisionForFamily {
+                call_id,
+                approval_request_id,
+                pattern,
+            }),
             AppAction::ApprovalDecisionWithArgs {
                 call_id,
                 approval_request_id,
@@ -367,6 +376,18 @@ fn stable_approval_command_id(session_id: &str, payload: &WorkerApprovalCommand)
             hasher.update(call_id.as_bytes());
             hasher.update(b"\0");
             hasher.update(approval_request_id.as_bytes());
+        }
+        WorkerApprovalCommand::DecisionForFamily {
+            call_id,
+            approval_request_id,
+            pattern,
+        } => {
+            hasher.update(b"decision_for_family\0");
+            hasher.update(call_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(approval_request_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(pattern.as_bytes());
         }
         WorkerApprovalCommand::DecisionWithArgs {
             call_id,

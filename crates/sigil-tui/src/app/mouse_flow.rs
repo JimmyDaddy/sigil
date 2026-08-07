@@ -283,6 +283,19 @@ impl AppState {
                             approval_request_id,
                         }
                     }
+                    crate::app::ApprovalAction::AllowFamily => {
+                        let pattern = self
+                            .approval
+                            .pending
+                            .as_ref()
+                            .and_then(|pending| pending.command_family_allow_pattern.clone())
+                            .expect("family action requires a derived pattern");
+                        crate::app::AppAction::ApprovalFamilyDecision {
+                            call_id,
+                            approval_request_id,
+                            pattern,
+                        }
+                    }
                     crate::app::ApprovalAction::Deny => crate::app::AppAction::ApprovalDecision {
                         call_id,
                         approval_request_id,

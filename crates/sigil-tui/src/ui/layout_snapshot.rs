@@ -137,6 +137,7 @@ pub struct ApprovalModalHitAreas {
     pub file_rows: Vec<ApprovalFileRowHitArea>,
     pub allow_once_action: Rect,
     pub allow_session_action: Rect,
+    pub allow_family_action: Rect,
     pub deny_action: Rect,
 }
 
@@ -360,6 +361,11 @@ impl LayoutSnapshot {
             if contains(areas.allow_session_action, column, row) {
                 return HitTarget::ApprovalAction {
                     action: ApprovalAction::AllowSession,
+                };
+            }
+            if contains(areas.allow_family_action, column, row) {
+                return HitTarget::ApprovalAction {
+                    action: ApprovalAction::AllowFamily,
                 };
             }
             if contains(areas.deny_action, column, row) {
@@ -1207,7 +1213,7 @@ fn approval_modal_hit_areas(
 
     let sections = approval_modal_sections(inner, view);
     let footer_inner = inset_rect(sections.footer, 1, 1);
-    let (allow_once_action, allow_session_action, deny_action) =
+    let (allow_once_action, allow_session_action, allow_family_action, deny_action) =
         approval_action_hit_areas(footer_inner, view);
     let diff_area = approval_diff_area(sections.body, view);
     let diff_inner = inset_rect(diff_area, 1, 1);
@@ -1229,6 +1235,7 @@ fn approval_modal_hit_areas(
         file_rows: approval_file_row_hit_areas(sections.body, view),
         allow_once_action,
         allow_session_action,
+        allow_family_action,
         deny_action,
     })
 }
@@ -1468,17 +1475,29 @@ fn approval_status_badge_rect(y: u16, cursor: &mut u16, end: u16, label: &str) -
     rect
 }
 
-fn approval_action_hit_areas(footer_inner: Rect, view: &ApprovalModalView) -> (Rect, Rect, Rect) {
+fn approval_action_hit_areas(
+    footer_inner: Rect,
+    view: &ApprovalModalView,
+) -> (Rect, Rect, Rect, Rect) {
     if footer_inner.width == 0 || footer_inner.height == 0 {
-        return (Rect::default(), Rect::default(), Rect::default());
+        return (
+            Rect::default(),
+            Rect::default(),
+            Rect::default(),
+            Rect::default(),
+        );
     }
 
     let mut cursor = footer_inner.x;
     let end = footer_inner.x.saturating_add(footer_inner.width);
     let mut allow_once = Rect::default();
     let mut allow_session = Rect::default();
+    let mut allow_family = Rect::default();
     let mut deny = Rect::default();
-    for action in ApprovalAction::order(view.session_grant_available) {
+    for action in ApprovalAction::order(
+        view.session_grant_available,
+        view.command_family_allow_pattern.is_some(),
+    ) {
         if cursor >= end {
             break;
         }
@@ -1492,11 +1511,12 @@ fn approval_action_hit_areas(footer_inner: Rect, view: &ApprovalModalView) -> (R
         match action {
             ApprovalAction::AllowOnce => allow_once = rect,
             ApprovalAction::AllowSession => allow_session = rect,
+            ApprovalAction::AllowFamily => allow_family = rect,
             ApprovalAction::Deny => deny = rect,
         }
         cursor = cursor.saturating_add(width).saturating_add(1);
     }
-    (allow_once, allow_session, deny)
+    (allow_once, allow_session, allow_family, deny)
 }
 
 fn approval_action_badge_width(label: &str, selected: bool) -> u16 {

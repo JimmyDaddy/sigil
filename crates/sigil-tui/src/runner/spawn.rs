@@ -40,12 +40,14 @@ pub(crate) struct SpawnedAgentWorker {
 
 pub fn spawn_agent_worker(
     root_config: RootConfig,
+    config_path: PathBuf,
     session_log_path: PathBuf,
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
 ) -> Result<(WorkerCommandSender, mpsc::Receiver<WorkerMessage>)> {
     let worker = spawn_agent_worker_with_route_directive(
         root_config,
+        config_path,
         session_log_path,
         workspace_root,
         interaction_mode,
@@ -62,6 +64,7 @@ pub fn spawn_agent_worker(
 
 pub(crate) fn spawn_agent_worker_with_route_directive(
     root_config: RootConfig,
+    config_path: PathBuf,
     session_log_path: PathBuf,
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
@@ -69,6 +72,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive(
 ) -> Result<SpawnedAgentWorker> {
     spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
+        config_path,
         session_log_path,
         workspace_root,
         interaction_mode,
@@ -79,6 +83,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive(
 
 pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     root_config: RootConfig,
+    config_path: PathBuf,
     session_log_path: PathBuf,
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
@@ -298,6 +303,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 runtime,
                 agent,
                 root_config,
+                config_path,
                 workspace_root,
                 WorkerLoopSessionAttachment::from_shared(session_log_path, attachment_lease),
                 options,

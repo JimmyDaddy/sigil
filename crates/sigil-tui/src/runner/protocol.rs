@@ -175,6 +175,11 @@ pub enum WorkerApprovalCommand {
         call_id: String,
         approval_request_id: String,
     },
+    DecisionForFamily {
+        call_id: String,
+        approval_request_id: String,
+        pattern: String,
+    },
     DecisionWithArgs {
         call_id: String,
         approval_request_id: String,
@@ -186,6 +191,7 @@ pub enum WorkerApprovalCommand {
 pub enum WorkerApprovalDecision {
     ApproveOnce,
     ApproveForSession,
+    ApproveForFamily,
     ApproveWithArgs,
     Deny,
 }

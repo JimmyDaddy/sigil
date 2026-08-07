@@ -182,6 +182,7 @@ fn spawn_agent_worker_rejects_unconfigured_route_before_worker_thread() -> Resul
 
     let error = spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -203,6 +204,7 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
 
     let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -223,6 +225,7 @@ fn second_worker_for_the_same_session_reports_attachment_busy() -> Result<()> {
     let root_config = deepseek_root_config(&workspace_root);
     let (owner_tx, owner_rx) = spawn_agent_worker(
         root_config.clone(),
+        workspace_root.join("sigil.toml"),
         session_log_path.clone(),
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
@@ -234,6 +237,7 @@ fn second_worker_for_the_same_session_reports_attachment_busy() -> Result<()> {
 
     let contender = spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -273,6 +277,7 @@ fn worker_rebinds_same_origin_route_after_endpoint_correction() -> Result<()> {
     let corrected_config = deepseek_root_config(&workspace_root);
     let (command_tx, message_rx) = spawn_agent_worker(
         corrected_config,
+        workspace_root.join("sigil.toml"),
         session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -319,6 +324,7 @@ fn spawn_agent_worker_initializes_v2_route_after_workspace_trust_prelude() -> Re
 
     let (command_tx, message_rx) = spawn_agent_worker(
         v2_loopback_root_config(&workspace_root)?,
+        workspace_root.join("sigil.toml"),
         session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -367,6 +373,7 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
 
     let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path,
         PathBuf::from(&workspace_root),
         sigil_kernel::InteractionMode::Interactive,
@@ -441,6 +448,7 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
 
     let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,

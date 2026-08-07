@@ -19,6 +19,7 @@ pub(in crate::runner) struct WorkerCommandContext<'a, P> {
     pub(in crate::runner) runtime: &'a tokio::runtime::Runtime,
     pub(in crate::runner) agent: &'a mut Arc<Agent<P>>,
     pub(in crate::runner) root_config: &'a RootConfig,
+    pub(in crate::runner) config_path: &'a PathBuf,
     pub(in crate::runner) provider_capabilities: &'a ProviderCapabilities,
     pub(in crate::runner) workspace_root: &'a PathBuf,
     pub(in crate::runner) options: &'a AgentRunOptions,

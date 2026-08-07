@@ -854,6 +854,7 @@ fn spawn_agent_worker_rejects_provider_configuration_error_before_thread_start()
 
     let error = match spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -894,6 +895,7 @@ fn spawn_agent_worker_reports_eager_mcp_failure_without_stopping_worker() -> Res
 
     let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
@@ -1317,6 +1319,7 @@ fn spawn_agent_worker_rejects_missing_provider_route_before_thread_start() -> Re
 
     let error = match spawn_agent_worker(
         root_config,
+        workspace_root.join("sigil.toml"),
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,

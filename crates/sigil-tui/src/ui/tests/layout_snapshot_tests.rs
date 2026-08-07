@@ -229,6 +229,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
             code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
         }),
+        command_family_allow_pattern: None,
         preview: None,
         presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
@@ -397,6 +398,7 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
             code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
         }),
+        command_family_allow_pattern: None,
         preview: Some(sigil_kernel::ToolPreview {
             title: "Update files".to_owned(),
             summary: "summary".to_owned(),
@@ -702,6 +704,7 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
         session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
             code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
         }),
+        command_family_allow_pattern: None,
         preview: None,
         presentation_state: crate::app::ApprovalPresentationState::Pending,
     });
@@ -773,7 +776,12 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     assert!(approval_file_row_hit_areas(Rect::new(0, 0, 20, 1), &view).is_empty());
     assert_eq!(
         approval_action_hit_areas(Rect::new(0, 0, 0, 0), &view),
-        (Rect::default(), Rect::default(), Rect::default())
+        (
+            Rect::default(),
+            Rect::default(),
+            Rect::default(),
+            Rect::default()
+        )
     );
     assert_eq!(
         approval_diff_control_hit_areas(Rect::new(0, 0, 0, 0), &view),

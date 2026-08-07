@@ -102,10 +102,12 @@ impl WorkerLoopSessionAttachment {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
     mut agent: Arc<Agent<P>>,
     root_config: RootConfig,
+    config_path: PathBuf,
     workspace_root: PathBuf,
     session_attachment: WorkerLoopSessionAttachment,
     options: AgentRunOptions,
@@ -328,6 +330,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         runtime: &runtime,
                         agent: &mut agent,
                         root_config: &root_config,
+                        config_path: &config_path,
                         provider_capabilities: &provider_capabilities,
                         workspace_root: &workspace_root,
                         options: &options,
@@ -378,6 +381,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         runtime: &runtime,
                         agent: &mut agent,
                         root_config: &root_config,
+                        config_path: &config_path,
                         provider_capabilities: &provider_capabilities,
                         workspace_root: &workspace_root,
                         options: &options,

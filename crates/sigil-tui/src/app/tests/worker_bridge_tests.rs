@@ -1513,6 +1513,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         session_grant_unavailable_reason: Some(sigil_kernel::ToolApprovalSessionGrantUnavailableReason {
             code: sigil_kernel::ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
         }),
+        command_family_allow_pattern: None,
         preview: None,
         presentation_state: crate::app::ApprovalPresentationState::Pending,
     });

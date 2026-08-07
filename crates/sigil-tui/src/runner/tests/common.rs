@@ -334,6 +334,7 @@ where
                 runtime,
                 agent,
                 root_config,
+                workspace_root.join("sigil.toml"),
                 workspace_root,
                 WorkerLoopSessionAttachment::new(session_log_path, attachment_lease),
                 options,

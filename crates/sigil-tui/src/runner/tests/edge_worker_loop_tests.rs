@@ -1832,6 +1832,7 @@ fn spawn_loop_with_shared_agent(
                 runtime,
                 agent_for_loop,
                 root_config,
+                workspace_root.join("sigil.toml"),
                 workspace_root,
                 WorkerLoopSessionAttachment::new(session_log_path, attachment_lease),
                 options,

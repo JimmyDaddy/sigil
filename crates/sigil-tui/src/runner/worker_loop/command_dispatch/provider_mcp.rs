@@ -11,6 +11,7 @@ where
         runtime,
         agent,
         root_config,
+        config_path: _,
         provider_capabilities,
         workspace_root: _,
         options,

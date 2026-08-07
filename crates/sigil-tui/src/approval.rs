@@ -12,6 +12,7 @@ use sigil_kernel::{
 pub enum ApprovalAction {
     AllowOnce,
     AllowSession,
+    AllowFamily,
     Deny,
 }
 
@@ -20,31 +21,45 @@ impl ApprovalAction {
         match self {
             Self::AllowOnce => "Allow once",
             Self::AllowSession => "Allow session",
+            Self::AllowFamily => "Allow family",
             Self::Deny => "Deny",
         }
     }
 
-    pub(crate) fn order(session_grant_available: bool) -> &'static [Self] {
-        if session_grant_available {
-            &[Self::AllowOnce, Self::AllowSession, Self::Deny]
-        } else {
-            &[Self::AllowOnce, Self::Deny]
+    pub(crate) fn order(session_grant_available: bool, family_available: bool) -> &'static [Self] {
+        match (session_grant_available, family_available) {
+            (true, true) => &[
+                Self::AllowOnce,
+                Self::AllowSession,
+                Self::AllowFamily,
+                Self::Deny,
+            ],
+            (true, false) => &[Self::AllowOnce, Self::AllowSession, Self::Deny],
+            (false, true) => &[Self::AllowOnce, Self::AllowFamily, Self::Deny],
+            (false, false) => &[Self::AllowOnce, Self::Deny],
         }
     }
 
-    pub(crate) fn normalized(self, session_grant_available: bool) -> Self {
-        if self == Self::AllowSession && !session_grant_available {
-            Self::AllowOnce
-        } else {
-            self
+    pub(crate) fn normalized(self, session_grant_available: bool, family_available: bool) -> Self {
+        match self {
+            Self::AllowSession if !session_grant_available => Self::AllowOnce,
+            Self::AllowFamily if !family_available => Self::AllowOnce,
+            _ => self,
         }
     }
 
-    pub(crate) fn next(self, session_grant_available: bool, forward: bool) -> Self {
-        let order = Self::order(session_grant_available);
+    pub(crate) fn next(
+        self,
+        session_grant_available: bool,
+        family_available: bool,
+        forward: bool,
+    ) -> Self {
+        let order = Self::order(session_grant_available, family_available);
         let current = order
             .iter()
-            .position(|action| *action == self.normalized(session_grant_available))
+            .position(|action| {
+                *action == self.normalized(session_grant_available, family_available)
+            })
             .unwrap_or(0);
         let len = order.len();
         let next = if forward {
@@ -55,10 +70,14 @@ impl ApprovalAction {
         order[next]
     }
 
-    pub(crate) fn default_for(risk: PermissionRisk, session_grant_available: bool) -> Self {
+    pub(crate) fn default_for(
+        risk: PermissionRisk,
+        session_grant_available: bool,
+        family_available: bool,
+    ) -> Self {
         match risk {
             PermissionRisk::Low | PermissionRisk::Medium => {
-                Self::AllowOnce.normalized(session_grant_available)
+                Self::AllowOnce.normalized(session_grant_available, family_available)
             }
             PermissionRisk::High if session_grant_available => Self::AllowOnce,
             PermissionRisk::High | PermissionRisk::Destructive | PermissionRisk::Protected => {
@@ -69,7 +88,10 @@ impl ApprovalAction {
 
     #[cfg(test)]
     pub(crate) fn approved(self) -> bool {
-        matches!(self, Self::AllowOnce | Self::AllowSession)
+        matches!(
+            self,
+            Self::AllowOnce | Self::AllowSession | Self::AllowFamily
+        )
     }
 
     #[cfg(test)]
@@ -150,6 +172,7 @@ pub(crate) struct ApprovalModalView {
     pub selected_action: ApprovalAction,
     pub session_grant_available: bool,
     pub session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
+    pub command_family_allow_pattern: Option<String>,
 }
 
 #[cfg(test)]
@@ -184,6 +207,7 @@ impl Default for ApprovalModalView {
             session_grant_unavailable_reason: Some(ToolApprovalSessionGrantUnavailableReason {
                 code: ToolApprovalSessionGrantUnavailableReasonCode::NoReusableApprovalFacet,
             }),
+            command_family_allow_pattern: None,
         }
     }
 }
@@ -211,8 +235,17 @@ pub struct PendingApproval {
     pub command_permission_matches: Vec<CommandPermissionMatch>,
     pub session_grant_available: bool,
     pub session_grant_unavailable_reason: Option<ToolApprovalSessionGrantUnavailableReason>,
+    /// Derived durable allow pattern (`cargo test*`) shown as the "Allow family" action, when
+    /// the command can be safely widened into a command-family rule.
+    pub command_family_allow_pattern: Option<String>,
     pub preview: Option<ToolPreview>,
     pub presentation_state: ApprovalPresentationState,
+}
+
+/// Derives the durable command-family allow pattern for a shell tool call, or `None` when the
+/// tool does not take a shell command or the command must not be widened.
+pub(crate) fn command_family_pattern_for_call(call: &ToolCall) -> Option<String> {
+    sigil_kernel::derive_command_family_allow_pattern_for_call(call)
 }
 
 pub(crate) fn session_grant_unavailable_reason_label(

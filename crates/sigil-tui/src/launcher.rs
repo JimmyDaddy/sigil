@@ -1929,6 +1929,7 @@ impl WorkerMessageInbox {
 fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime> {
     let spawned = runner::spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
+        app.config_path.clone(),
         app.session_log_path.clone(),
         app.workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,

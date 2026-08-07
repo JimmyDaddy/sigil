@@ -119,7 +119,10 @@ fn approval_uses_kernel_session_grant_availability_without_recomputing_facets() 
     let pending = app.approval.pending.as_ref().expect("pending approval");
     assert!(!pending.session_grant_available);
     assert_eq!(
-        ApprovalAction::order(pending.session_grant_available),
+        ApprovalAction::order(
+            pending.session_grant_available,
+            pending.command_family_allow_pattern.is_some()
+        ),
         &[ApprovalAction::AllowOnce, ApprovalAction::Deny]
     );
     Ok(())
@@ -1200,5 +1203,175 @@ fn slash_prefix_during_pending_approval_returns_to_composer() -> Result<()> {
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.composer.input, "/");
     assert!(app.approval.pending.is_some());
+    Ok(())
+}
+
+fn inject_bash_approval(
+    app: &mut AppState,
+    command: &str,
+    session_grant_available: bool,
+) -> Result<()> {
+    let args_json = serde_json::json!({ "command": command }).to_string();
+    app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-bash"),
+        effects: std::collections::BTreeSet::from([
+            sigil_kernel::ToolPermissionEffect::ExecuteWorkspaceCode,
+        ]),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available,
+        session_grant_unavailable_reason: None,
+        call: ToolCall {
+            id: "call-bash".to_owned(),
+            name: "bash".to_owned(),
+            args_json,
+        },
+        spec: ToolSpec {
+            name: "bash".to_owned(),
+            description: "Run a command".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: vec![sigil_kernel::ToolSubject::command(command, command)],
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        operation: sigil_kernel::ToolOperation::ExecuteWorkspaceCheckCommand,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: vec![sigil_kernel::PathTrustZone::Unknown],
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        preview: None,
+    })
+}
+
+#[test]
+fn approval_derives_command_family_pattern_for_shell_commands() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_bash_approval(&mut app, "cargo test -p sigil-kernel 2>&1 | tail -60", true)?;
+    let pending = app.approval.pending.as_ref().expect("pending approval");
+    assert_eq!(
+        pending.command_family_allow_pattern.as_deref(),
+        Some("cargo test*")
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_hides_family_action_when_grant_unavailable_or_not_derivable() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    // No session grant: the family rule gate reuses grant availability, so no family action.
+    inject_bash_approval(&mut app, "cargo test -p sigil-kernel", false)?;
+    assert!(
+        app.approval
+            .pending
+            .as_ref()
+            .expect("pending approval")
+            .command_family_allow_pattern
+            .is_none()
+    );
+    assert_eq!(
+        super::super::ApprovalAction::order(false, false),
+        &[
+            super::super::ApprovalAction::AllowOnce,
+            super::super::ApprovalAction::Deny
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_f_key_dispatches_family_decision() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_bash_approval(&mut app, "cargo test -p sigil-kernel", true)?;
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE))
+        .expect("family key must dispatch");
+    assert!(matches!(
+        &action,
+        Some(AppAction::ApprovalFamilyDecision {
+            call_id,
+            approval_request_id,
+            pattern,
+        }) if call_id == "call-bash" && pattern == "cargo test*" && !approval_request_id.is_empty()
+    ));
+    Ok(())
+}
+
+#[test]
+fn approval_enter_selects_family_action_when_highlighted() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_bash_approval(&mut app, "cargo test -p sigil-kernel", true)?;
+    // Cycle AllowOnce -> AllowSession -> AllowFamily -> Deny, stop at AllowFamily.
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.approval.selected_action,
+        super::super::ApprovalAction::AllowFamily
+    );
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .expect("enter must dispatch");
+    assert!(matches!(
+        action,
+        Some(AppAction::ApprovalFamilyDecision { pattern, .. }) if pattern == "cargo test*"
+    ));
+    Ok(())
+}
+
+#[test]
+fn approval_family_pattern_ignores_non_shell_calls() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        approval_identity: test_approval_identity("call-write"),
+        effects: std::collections::BTreeSet::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: sigil_kernel::ExecutionContainmentRequest::default(),
+        safe_summary: sigil_kernel::ToolPermissionSummary::default(),
+        decision_reasons: Vec::new(),
+        session_grant_available: true,
+        session_grant_unavailable_reason: None,
+        call: ToolCall {
+            id: "call-write".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: r#"{"path":"note.txt"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write a file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            network_effect: None,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: vec![sigil_kernel::PathTrustZone::Unknown],
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        preview: None,
+    })?;
+    assert!(
+        app.approval
+            .pending
+            .as_ref()
+            .expect("pending approval")
+            .command_family_allow_pattern
+            .is_none()
+    );
     Ok(())
 }

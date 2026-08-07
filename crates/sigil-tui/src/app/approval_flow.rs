@@ -133,6 +133,11 @@ impl AppState {
         lines.push(String::new());
         if spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json).is_some() {
             lines.push("Shortcuts: Y allow once · B background · N deny".to_owned());
+        } else if pending.command_family_allow_pattern.is_some() {
+            lines.push(
+                "Shortcuts: Tab switch · Enter select · Y allow once · F allow family · N deny"
+                    .to_owned(),
+            );
         } else if pending.session_grant_available {
             lines.push("Shortcuts: Tab switch · Enter select · Y allow once · N deny".to_owned());
         } else {
@@ -175,11 +180,21 @@ impl AppState {
                         }));
                     }
                 }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    if let Some(pattern) = pending.command_family_allow_pattern.clone() {
+                        return Some(Some(AppAction::ApprovalFamilyDecision {
+                            call_id: pending.call.id.clone(),
+                            approval_request_id: pending.approval_request_id.clone(),
+                            pattern,
+                        }));
+                    }
+                }
                 KeyCode::Enter if key.modifiers.is_empty() => {
+                    let family_available = pending.command_family_allow_pattern.is_some();
                     let selected = self
                         .approval
                         .selected_action
-                        .normalized(pending.session_grant_available);
+                        .normalized(pending.session_grant_available, family_available);
                     return Some(Some(match selected {
                         super::ApprovalAction::AllowOnce => AppAction::ApprovalDecision {
                             call_id: pending.call.id.clone(),
@@ -190,6 +205,17 @@ impl AppState {
                             call_id: pending.call.id.clone(),
                             approval_request_id: pending.approval_request_id.clone(),
                         },
+                        super::ApprovalAction::AllowFamily => {
+                            let pattern = pending
+                                .command_family_allow_pattern
+                                .clone()
+                                .expect("family action requires a derived pattern");
+                            AppAction::ApprovalFamilyDecision {
+                                call_id: pending.call.id.clone(),
+                                approval_request_id: pending.approval_request_id.clone(),
+                                pattern,
+                            }
+                        }
                         super::ApprovalAction::Deny => AppAction::ApprovalDecision {
                             call_id: pending.call.id.clone(),
                             approval_request_id: pending.approval_request_id.clone(),
@@ -253,10 +279,16 @@ impl AppState {
                     .pending
                     .as_ref()
                     .is_some_and(|pending| pending.session_grant_available);
-                self.approval.selected_action = self
+                let family_available = self
                     .approval
-                    .selected_action
-                    .next(session_grant_available, forward);
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.command_family_allow_pattern.is_some());
+                self.approval.selected_action = self.approval.selected_action.next(
+                    session_grant_available,
+                    family_available,
+                    forward,
+                );
                 self.push_event("approval:action", self.approval.selected_action.label());
                 Some(None)
             }
@@ -339,12 +371,13 @@ impl AppState {
                     kind: ApprovalDiffLineKind::Context,
                     active_hunk: false,
                 }],
-                selected_action: self
-                    .approval
-                    .selected_action
-                    .normalized(pending.session_grant_available),
+                selected_action: self.approval.selected_action.normalized(
+                    pending.session_grant_available,
+                    pending.command_family_allow_pattern.is_some(),
+                ),
                 session_grant_available: pending.session_grant_available,
                 session_grant_unavailable_reason: pending.session_grant_unavailable_reason,
+                command_family_allow_pattern: pending.command_family_allow_pattern.clone(),
             });
         };
 
@@ -470,12 +503,13 @@ impl AppState {
             hunk_total: hunk_positions.len(),
             diff_label,
             diff_lines,
-            selected_action: self
-                .approval
-                .selected_action
-                .normalized(pending.session_grant_available),
+            selected_action: self.approval.selected_action.normalized(
+                pending.session_grant_available,
+                pending.command_family_allow_pattern.is_some(),
+            ),
             session_grant_available: pending.session_grant_available,
             session_grant_unavailable_reason: pending.session_grant_unavailable_reason,
+            command_family_allow_pattern: pending.command_family_allow_pattern.clone(),
         })
     }
 

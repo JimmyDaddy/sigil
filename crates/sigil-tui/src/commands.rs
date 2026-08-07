@@ -465,6 +465,8 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         String::new(),
         "Approval".to_owned(),
         "Y/N: Allow or deny the pending tool call.".to_owned(),
+        "Tab/Enter: Cycle and select Allow session or Allow family when offered.".to_owned(),
+        "F: Allow this command family and persist a matching permission.commands rule.".to_owned(),
         "V: Inspect the pending diff or preview when available.".to_owned(),
         "Esc: Dismiss plan approval or return to the active run when allowed.".to_owned(),
         String::new(),

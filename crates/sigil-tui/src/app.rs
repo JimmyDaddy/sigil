@@ -447,6 +447,11 @@ pub enum AppAction {
         call_id: String,
         approval_request_id: String,
     },
+    ApprovalFamilyDecision {
+        call_id: String,
+        approval_request_id: String,
+        pattern: String,
+    },
     ApprovalDecisionWithArgs {
         call_id: String,
         approval_request_id: String,

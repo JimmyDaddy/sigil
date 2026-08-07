@@ -15,6 +15,7 @@ where
         runtime,
         agent,
         root_config,
+        config_path,
         provider_capabilities,
         workspace_root,
         options,
@@ -672,46 +673,60 @@ where
                 let command_id = command.command_id;
                 let envelope_matches = command.protocol_version == WORKER_COMMAND_PROTOCOL_VERSION
                     && command.session_id == state.session.log_path.display().to_string();
-                let (call_id, approval_request_id, decision, approval) = match command.payload {
-                    WorkerApprovalCommand::Decision {
-                        call_id,
-                        approval_request_id,
-                        approved,
-                    } => {
-                        let approval = if approved {
-                            ToolApproval::Approve
-                        } else {
-                            ToolApproval::Deny {
-                                reason: "denied in TUI".to_owned(),
-                            }
-                        };
-                        let decision = if approved {
-                            WorkerApprovalDecision::ApproveOnce
-                        } else {
-                            WorkerApprovalDecision::Deny
-                        };
-                        (call_id, approval_request_id, decision, approval)
-                    }
-                    WorkerApprovalCommand::DecisionForSession {
-                        call_id,
-                        approval_request_id,
-                    } => (
-                        call_id,
-                        approval_request_id,
-                        WorkerApprovalDecision::ApproveForSession,
-                        ToolApproval::ApproveForSession,
-                    ),
-                    WorkerApprovalCommand::DecisionWithArgs {
-                        call_id,
-                        approval_request_id,
-                        args_json,
-                    } => (
-                        call_id,
-                        approval_request_id,
-                        WorkerApprovalDecision::ApproveWithArgs,
-                        ToolApproval::ApproveWithArgs { args_json },
-                    ),
-                };
+                let (call_id, approval_request_id, decision, approval, family_pattern) =
+                    match command.payload {
+                        WorkerApprovalCommand::Decision {
+                            call_id,
+                            approval_request_id,
+                            approved,
+                        } => {
+                            let approval = if approved {
+                                ToolApproval::Approve
+                            } else {
+                                ToolApproval::Deny {
+                                    reason: "denied in TUI".to_owned(),
+                                }
+                            };
+                            let decision = if approved {
+                                WorkerApprovalDecision::ApproveOnce
+                            } else {
+                                WorkerApprovalDecision::Deny
+                            };
+                            (call_id, approval_request_id, decision, approval, None)
+                        }
+                        WorkerApprovalCommand::DecisionForSession {
+                            call_id,
+                            approval_request_id,
+                        } => (
+                            call_id,
+                            approval_request_id,
+                            WorkerApprovalDecision::ApproveForSession,
+                            ToolApproval::ApproveForSession,
+                            None,
+                        ),
+                        WorkerApprovalCommand::DecisionForFamily {
+                            call_id,
+                            approval_request_id,
+                            pattern,
+                        } => (
+                            call_id,
+                            approval_request_id,
+                            WorkerApprovalDecision::ApproveForFamily,
+                            ToolApproval::Approve,
+                            Some(pattern),
+                        ),
+                        WorkerApprovalCommand::DecisionWithArgs {
+                            call_id,
+                            approval_request_id,
+                            args_json,
+                        } => (
+                            call_id,
+                            approval_request_id,
+                            WorkerApprovalDecision::ApproveWithArgs,
+                            ToolApproval::ApproveWithArgs { args_json },
+                            None,
+                        ),
+                    };
 
                 let receipt = if !envelope_matches {
                     WorkerApprovalCommandReceipt {
@@ -771,6 +786,25 @@ where
                 // those receipts must remain replayable instead of delivering the decision twice.
                 if receipt.route_state != WorkerApprovalRouteState::Rejected {
                     state.remember_approval_command_receipt(receipt.clone());
+                }
+                if envelope_matches && let Some(pattern) = family_pattern {
+                    // The family rule is durable best-effort: the current command is already
+                    // approved, and a persist failure only surfaces a notice. The rule applies to
+                    // subsequent runs because the run options were assembled before this write.
+                    let config_path = config_path.clone();
+                    let notice_tx = message_tx.clone();
+                    runtime.spawn_blocking(move || {
+                        if let Err(error) =
+                            sigil_runtime::command_permission::append_command_allow_pattern(
+                                &config_path,
+                                &pattern,
+                            )
+                        {
+                            let _ = notice_tx.send(WorkerMessage::Notice(format!(
+                                "could not persist command family rule {pattern:?}: {error}"
+                            )));
+                        }
+                    });
                 }
                 let _ = message_tx.send(WorkerMessage::ApprovalCommandReceipt(receipt));
             }

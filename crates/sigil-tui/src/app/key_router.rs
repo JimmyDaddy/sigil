@@ -268,10 +268,10 @@ impl AppState {
         if !pending.actions_available() {
             return None;
         }
-        let selected = self
-            .approval
-            .selected_action
-            .normalized(pending.session_grant_available);
+        let selected = self.approval.selected_action.normalized(
+            pending.session_grant_available,
+            pending.command_family_allow_pattern.is_some(),
+        );
         Some(match selected {
             ApprovalAction::AllowOnce => AppAction::ApprovalDecision {
                 call_id: pending.call.id.clone(),
@@ -282,6 +282,17 @@ impl AppState {
                 call_id: pending.call.id.clone(),
                 approval_request_id: pending.approval_request_id.clone(),
             },
+            ApprovalAction::AllowFamily => {
+                let pattern = pending
+                    .command_family_allow_pattern
+                    .clone()
+                    .expect("family action requires a derived pattern");
+                AppAction::ApprovalFamilyDecision {
+                    call_id: pending.call.id.clone(),
+                    approval_request_id: pending.approval_request_id.clone(),
+                    pattern,
+                }
+            }
             ApprovalAction::Deny => AppAction::ApprovalDecision {
                 call_id: pending.call.id.clone(),
                 approval_request_id: pending.approval_request_id.clone(),
@@ -296,10 +307,15 @@ impl AppState {
             .pending
             .as_ref()
             .is_some_and(|pending| pending.session_grant_available);
-        self.approval.selected_action = self
+        let family_available = self
             .approval
-            .selected_action
-            .next(session_grant_available, forward);
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.command_family_allow_pattern.is_some());
+        self.approval.selected_action =
+            self.approval
+                .selected_action
+                .next(session_grant_available, family_available, forward);
         self.push_event("approval:action", self.approval.selected_action.label());
     }
 

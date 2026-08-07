@@ -128,9 +128,13 @@ impl EventHandler for AppState {
                     confirmation,
                     snapshot_required,
                     command_permission_matches,
+                    command_family_allow_pattern: session_grant_available
+                        .then(|| crate::approval::command_family_pattern_for_call(&call))
+                        .flatten(),
                     preview,
                     presentation_state: super::super::ApprovalPresentationState::Pending,
                 };
+                let family_available = pending.command_family_allow_pattern.is_some();
                 let activity_label = approval_activity_label(&pending);
                 self.approval.pending = Some(pending);
                 self.active_pane = PaneFocus::Activity;
@@ -139,7 +143,7 @@ impl EventHandler for AppState {
                 self.approval.selected_file_index = 0;
                 self.approval.selected_hunk_index = 0;
                 self.approval.selected_action =
-                    ApprovalAction::default_for(risk, session_grant_available);
+                    ApprovalAction::default_for(risk, session_grant_available, family_available);
                 self.last_notice = Some(format!("approve {}", call.name));
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(
@@ -168,9 +172,10 @@ impl EventHandler for AppState {
                 let resolved_presentation = self.approval.pending.as_ref().map(|pending| {
                     (
                         approval_activity_label(pending),
-                        self.approval
-                            .selected_action
-                            .normalized(pending.session_grant_available),
+                        self.approval.selected_action.normalized(
+                            pending.session_grant_available,
+                            pending.command_family_allow_pattern.is_some(),
+                        ),
                     )
                 });
                 let approved_agent_profile = approved.then(|| {

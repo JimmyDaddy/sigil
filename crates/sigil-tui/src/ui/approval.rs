@@ -508,6 +508,15 @@ fn approval_permission_metadata_lines(
             Span::styled(hint, Style::default().fg(palette.accent_info)),
         ]));
     }
+    if let Some(pattern) = &view.command_family_allow_pattern {
+        lines.push(Line::from(vec![
+            Span::styled("family ", Style::default().fg(palette.text_muted)),
+            Span::styled(
+                format!("allow future {pattern} commands"),
+                Style::default().fg(palette.accent_info),
+            ),
+        ]));
+    }
     lines
 }
 
@@ -806,10 +815,19 @@ fn approval_footer_lines_with_palette(
     } else {
         "M hide details"
     };
-    let action_hint = if view.has_diff_preview {
-        format!("Tab switch · Enter select · Y allow · N deny · {details_hint} · V view")
+    let family_hint = if view.command_family_allow_pattern.is_some() {
+        " · F allow family"
     } else {
-        format!("Tab switch · Enter select · Y allow · N deny · {details_hint} · ↑/↓ scroll")
+        ""
+    };
+    let action_hint = if view.has_diff_preview {
+        format!(
+            "Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · V view"
+        )
+    } else {
+        format!(
+            "Tab switch · Enter select · Y allow · N deny{family_hint} · {details_hint} · ↑/↓ scroll"
+        )
     };
     let navigation_hint = if view.has_diff_preview {
         format!(" · [/] hunk{file_hint} · ↑/↓ scroll")
@@ -827,15 +845,20 @@ fn approval_footer_lines_with_palette(
 
 fn approval_action_badges(view: &ApprovalModalView, palette: &ThemePalette) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for (index, action) in ApprovalAction::order(view.session_grant_available)
-        .iter()
-        .enumerate()
+    for (index, action) in ApprovalAction::order(
+        view.session_grant_available,
+        view.command_family_allow_pattern.is_some(),
+    )
+    .iter()
+    .enumerate()
     {
         if index > 0 {
             spans.push(Span::raw(" "));
         }
         let color = match action {
-            ApprovalAction::AllowOnce | ApprovalAction::AllowSession => palette.approval_allow_bg,
+            ApprovalAction::AllowOnce
+            | ApprovalAction::AllowSession
+            | ApprovalAction::AllowFamily => palette.approval_allow_bg,
             ApprovalAction::Deny => palette.approval_deny_bg,
         };
         spans.push(approval_action_badge_with_palette(
