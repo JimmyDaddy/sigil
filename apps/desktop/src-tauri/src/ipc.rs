@@ -1862,6 +1862,8 @@ pub(crate) struct DesktopApprovalDecisionInput {
     pub(crate) policy_version: String,
     pub(crate) expires_at_ms: u64,
     pub(crate) decision: DesktopApprovalActionInput,
+    #[serde(default, rename = "familyPattern")]
+    pub(crate) family_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1869,6 +1871,7 @@ pub(crate) struct DesktopApprovalDecisionInput {
 pub(crate) enum DesktopApprovalActionInput {
     ApproveOnce,
     ApproveSession,
+    ApproveFamily,
     Deny,
 }
 

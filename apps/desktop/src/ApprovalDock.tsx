@@ -143,6 +143,9 @@ export function ApprovalDock({
       {expired ? <div className="approval-expired" role="alert">{t("approvalExpired")}</div> : null}
       <div className="approval-actions">
         <Button variant="danger" type="button" disabled={busy || expired} onClick={() => onDecision("deny")}>{t("deny")}</Button>
+        {approval.commandFamilyAllowPattern ? (
+          <Button variant="quiet" type="button" disabled={busy || expired} onClick={() => onDecision("approve_family")}>{t("approveFamily")}</Button>
+        ) : null}
         {approval.sessionGrantAvailable ? (
           <Button variant="quiet" type="button" disabled={busy || expired} onClick={() => onDecision("approve_session")}>{t("approveSession")}</Button>
         ) : null}

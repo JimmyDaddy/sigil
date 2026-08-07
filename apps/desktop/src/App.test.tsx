@@ -5061,6 +5061,82 @@ describe("desktop workspace and history shell", () => {
     }
   });
 
+  it("submits an approve_family decision with the derived pattern", async () => {
+    const user = userEvent.setup();
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let approvedCall = "";
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      subscribeRunEvents: async (listener) => {
+        eventListener = listener;
+        return () => undefined;
+      },
+      resolveApproval: async (_workspaceId, sessionId, runId, approval, decision) => {
+        approvedCall = `${runId}:${approval.approvalRequestId}:${decision}`;
+        return {
+          commandId: "approval-command-family",
+          clientId: "desktop-test",
+          sessionId,
+          runId,
+          callId: approval.callId,
+          approvalRequestId: approval.approvalRequestId,
+          expectedStreamSequence: 3,
+          decision: "approved",
+          routeState: "decision_accepted",
+          registryRevision: 4,
+          replayed: false,
+        };
+      },
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await user.type(await readyComposer(), "Run tests");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(eventListener).toBeDefined());
+    await readyComposer();
+    act(() => {
+      eventListener?.({
+        workspaceId: workspace.id,
+        sessionId: "http-session-new",
+        runId: "run-1",
+        sequence: 3, runSequence: "3",
+        provisionalId: "live-approval-call-1",
+        replayable: true,
+        kind: "approval_requested",
+        itemId: "call-1",
+        toolName: "bash",
+        approval: {
+          callId: "call-1",
+          toolName: "bash",
+          approvalRequestId: "approval-1",
+          toolCallHash: "hash-1",
+          policyVersion: "policy-1",
+          expiresAtMs: 4_102_444_800_000,
+          sessionGrantAvailable: true,
+          commandFamilyAllowPattern: "cargo test*",
+          analysisStatus: "complete",
+          containment: ["filesystem=workspace_read", "network=deny"],
+          safeSummaryTitle: "Run cargo test",
+          safeSummaryDetail: "Workspace validation",
+          operation: "execute_workspace_check_command",
+          risk: "medium",
+          snapshotRequired: false,
+        },
+      });
+    });
+
+    await screen.findByText("Run cargo test");
+    await user.click(screen.getByRole("button", { name: "Allow family" }));
+    expect(approvedCall).toBe("run-1:approval-1:approve_family");
+    expect(await screen.findByText("Approval accepted")).toBeTruthy();
+  });
+
   it("submits the exact approval guard and requests cooperative cancellation", async () => {
     const user = userEvent.setup();
     let eventListener: ((event: TimelineEvent) => void) | undefined;

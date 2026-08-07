@@ -2305,6 +2305,7 @@ pub struct DesktopPendingApprovalSubject {
 pub enum DesktopApprovalDecision {
     Approve,
     ApproveForSession,
+    ApproveForFamily,
     Deny,
 }
 
@@ -2324,6 +2325,8 @@ pub struct DesktopApprovalDecisionRecord {
     pub run_id: String,
     pub call_id: String,
     pub decision: DesktopApprovalRecordedDecision,
+    #[serde(default)]
+    pub family_pattern: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -2346,6 +2349,8 @@ pub struct DesktopApprovalDecisionRequest {
     pub policy_version: String,
     pub expires_at_ms: u64,
     pub decision: DesktopApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_pattern: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

@@ -1512,6 +1512,7 @@ export interface TimelineApproval {
   expiresAtMs: number;
   sessionGrantAvailable?: boolean;
   sessionGrantUnavailableReason?: SessionGrantUnavailableReason;
+  commandFamilyAllowPattern?: string;
   effects?: string[];
   subjects?: string[];
   analysisStatus?: string;
@@ -1673,7 +1674,7 @@ export interface TimelineToolExecution {
   status: "started" | "completed" | "failed" | "cancelled" | "interrupted";
 }
 
-export type ApprovalAction = "approve_once" | "approve_session" | "deny";
+export type ApprovalAction = "approve_once" | "approve_session" | "approve_family" | "deny";
 
 export type RunStreamState =
   | "connecting"

@@ -1398,13 +1398,23 @@ pub(crate) async fn desktop_resolve_approval(
                     DesktopApprovalActionInput::ApproveSession => {
                         DesktopApprovalDecision::ApproveForSession
                     }
+                    DesktopApprovalActionInput::ApproveFamily => {
+                        DesktopApprovalDecision::ApproveForFamily
+                    }
                     DesktopApprovalActionInput::Deny => DesktopApprovalDecision::Deny,
+                },
+                family_pattern: match input.decision {
+                    DesktopApprovalActionInput::ApproveFamily => input.family_pattern,
+                    _ => None,
                 },
                 reason: Some(
                     match input.decision {
                         DesktopApprovalActionInput::ApproveOnce => "Approved once in Sigil Desktop",
                         DesktopApprovalActionInput::ApproveSession => {
                             "Approved for this session in Sigil Desktop"
+                        }
+                        DesktopApprovalActionInput::ApproveFamily => {
+                            "Approved command family in Sigil Desktop"
                         }
                         DesktopApprovalActionInput::Deny => "Denied in Sigil Desktop",
                     }

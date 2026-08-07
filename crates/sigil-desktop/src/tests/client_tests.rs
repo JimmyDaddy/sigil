@@ -1568,6 +1568,7 @@ async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response(
                 "run_id": "run-1",
                 "call_id": "call-1",
                 "decision": "approved",
+                "family_pattern": "cargo test*",
                 "reason": "approved in Desktop"
             },
             "route_state": "decision_accepted",
@@ -1602,6 +1603,7 @@ async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response(
                 policy_version: "permission-policy-v2".to_owned(),
                 expires_at_ms: 10_000,
                 decision: crate::DesktopApprovalDecision::Approve,
+                family_pattern: None,
                 reason: Some("approved in Desktop".to_owned()),
             },
         )
@@ -1610,7 +1612,32 @@ async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response(
 
     assert!(receipt.replayed);
     assert_eq!(receipt.registry_revision, 8);
+    assert_eq!(
+        receipt.decision.family_pattern.as_deref(),
+        Some("cargo test*")
+    );
     server.await.expect("server task should complete");
+}
+
+#[test]
+fn approval_decision_contract_decodes_approve_for_family() {
+    // The desktop typed client must decode a real server receipt for an approve_for_family
+    // decision, including the persisted pattern.
+    let record = serde_json::from_str::<crate::DesktopApprovalDecisionRecord>(
+        r#"{
+            "run_id": "run-1",
+            "call_id": "call-1",
+            "decision": "approved",
+            "family_pattern": "cargo test*",
+            "reason": "approved command family"
+        }"#,
+    )
+    .expect("record should decode");
+    assert_eq!(
+        record.decision,
+        crate::DesktopApprovalRecordedDecision::Approved
+    );
+    assert_eq!(record.family_pattern.as_deref(), Some("cargo test*"));
 }
 
 #[test]

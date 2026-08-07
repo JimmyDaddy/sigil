@@ -440,6 +440,8 @@ export const desktopBridge: DesktopBridge = {
         policyVersion: approval.policyVersion,
         expiresAtMs: approval.expiresAtMs,
         decision,
+        familyPattern:
+          decision === "approve_family" ? approval.commandFamilyAllowPattern : undefined,
       },
     }),
   verification: (workspaceId, sessionId) =>
