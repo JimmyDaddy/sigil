@@ -90,6 +90,7 @@ pub mod application_intent_stack;
 pub mod application_queue;
 pub mod application_recovery;
 pub mod application_run;
+pub mod command_permission;
 pub mod context;
 pub mod context_window;
 pub mod conversation_coordinator;
