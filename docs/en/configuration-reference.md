@@ -122,7 +122,7 @@ Missing, invalid, stale, or non-matching manifests fail closed to
 | Section / field | Default | Purpose |
 | --- | --- | --- |
 | `[permission].mode` | `"manual"` | `read-only`, `manual`, `auto-edit`, or `danger-full-access`. |
-| `[permission.commands].allow` / `.ask` / `.deny` | `[]` | Shell-command patterns. |
+| `[permission.commands].allow` / `.ask` / `.deny` | `[]` | Shell-command patterns; the approval prompt's **Allow family** action appends derived `allow` patterns. |
 | `[permission.tools].<tool>` | unset | Per-tool `allow`, `ask`, or `deny` override. |
 | `[[permission.rules]].tool_name` / `.subject_glob` / `.mode` | `[]` | Fine-grained tool and subject rule. |
 | `[permission.external_directory].enabled` | `false` | Enables consideration of workspace-external paths. |

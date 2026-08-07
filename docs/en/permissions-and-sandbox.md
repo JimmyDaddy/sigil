@@ -49,6 +49,8 @@ deny = ["git push*", "rm *"]
 
 Prefer a few narrow patterns. When several rules match, deny wins over ask, and ask wins over allow. A raw command pattern records user intent; it is not a sandbox. An `allow` pattern cannot override a protected target, dynamic or invalid Shell analysis, unresolved destinations, privilege escalation, or missing mandatory containment.
 
+In the interactive approval prompt, **Allow family** derives a conservative first-two-token pattern (`cargo test -p x 2>&1 | tail -60` becomes `cargo test*`) and appends it to `permission.commands.allow` for future runs. The action is offered only when the same bounded grant conditions hold (complete analysis, grantable risk and effects); it refuses destructive programs, `git` mutating subcommands, redirections, and command chains. **Allow session** covers argument variants of the same command family for the current session without writing configuration; unknown-family commands share the derived first-two-token prefix.
+
 <!-- public-doc-topic: external-directory -->
 
 Workspace-external paths are disabled by default:
