@@ -142,7 +142,7 @@ pub(super) fn session_grant_covers_decision(
         && (grant.policy_version == policy_version
             || session_grant_policy_fingerprint(decision)
                 .is_ok_and(|fingerprint| fingerprint == grant.policy_version))
-        && match grant.scope {
+        && match &grant.scope {
             ToolApprovalSessionGrantScope::ExactSubjects => {
                 grant_subjects_match_decision(&grant.subjects, &decision.subjects)
             }
@@ -157,14 +157,45 @@ pub(super) fn session_grant_covers_decision(
                             && !subject.normalized.trim().is_empty()
                     })
             }
+            ToolApprovalSessionGrantScope::CommandFamily { prefix } => decision
+                .subjects
+                .iter()
+                .any(|subject| command_subject_matches_family_prefix(subject, prefix.as_str())),
         }
 }
 
+/// A `CommandFamily` grant covers an unknown-family command subject whose whitespace-normalized
+/// command shares the grant's first-two-token prefix on a token boundary. Known `family:`
+/// subjects are never matched here; they keep the exact-subject path.
+fn command_subject_matches_family_prefix(subject: &ToolSubject, prefix: &str) -> bool {
+    subject.kind == ToolSubjectKind::Command
+        && !subject.normalized.starts_with("family:")
+        && crate::permission::command_family_prefix_matches(prefix, &subject.original)
+}
+
 pub(super) fn session_grant_policy_fingerprint(decision: &PermissionDecision) -> Result<String> {
+    // A CommandFamily grant must be stable across argument variants: the command subject is
+    // projected to its derived first-two-token prefix so `python3 script.py` and
+    // `python3 script.py --flag` share one policy version.
+    let family_prefix =
+        tool_approval_session_grant_shape(decision).and_then(|shape| match shape.scope {
+            ToolApprovalSessionGrantScope::CommandFamily { prefix } => Some(prefix),
+            _ => None,
+        });
     let subjects = decision
         .subjects
         .iter()
-        .map(ToolSubjectAudit::from)
+        .map(|subject| {
+            let mut audit = ToolSubjectAudit::from(subject);
+            if let Some(prefix) = family_prefix.as_ref()
+                && subject.kind == ToolSubjectKind::Command
+                && crate::permission::command_family_prefix(&subject.original).as_deref()
+                    == Some(prefix.as_str())
+            {
+                audit.identity_sha256 = crate::stable_event_hash(prefix.as_bytes());
+            }
+            audit
+        })
         .collect::<Vec<_>>();
     stable_json_hash(&json!({
         "schema_version": 1,

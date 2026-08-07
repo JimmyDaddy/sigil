@@ -11384,3 +11384,259 @@ async fn run_outcome_reflects_error_cancelled_and_completed_tool_states() -> Res
     assert_eq!(settled_tool_results(&session).len(), 2);
     Ok(())
 }
+
+struct BashUnknownFamilyTool {
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for BashUnknownFamilyTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "bash".to_owned(),
+            description: "bash".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"}
+                },
+                "required": ["command"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_plan(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        let command = args
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing command"))?;
+        Ok(crate::ToolPermissionPlanDraft {
+            access: ToolAccess::Read,
+            operation: crate::ToolOperation::ExecuteReadOnlyCommand,
+            effects: BTreeSet::from([crate::ToolPermissionEffect::FileRead]),
+            // Unknown command family: the normalized subject is the command itself, not a
+            // `family:` stable subject, so the grant must use the CommandFamily scope.
+            subjects: vec![ToolSubject::command(command, command)],
+            analysis: crate::ToolAnalysisStatus::Complete,
+            containment: crate::ExecutionContainmentRequest {
+                filesystem: crate::FilesystemContainment::WorkspaceAndScratch,
+                network: crate::NetworkContainment::Deny,
+                process: crate::ProcessContainment::OwnedTree,
+                environment: crate::EnvironmentContainment::Restricted,
+                persistent_process: false,
+            },
+            semantic_scope: Some(crate::ToolSemanticScope::new("workspace_read", 1)),
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::from([
+                ("containment_proven".to_owned(), "true".to_owned()),
+                (
+                    "execution_backend".to_owned(),
+                    "test-owned-process".to_owned(),
+                ),
+                ("execution_profile".to_owned(), "read-offline".to_owned()),
+                (
+                    "environment_binding".to_owned(),
+                    "test-restricted-v1".to_owned(),
+                ),
+            ]),
+            safe_summary: crate::ToolPermissionSummary {
+                title: "Run python3 script".to_owned(),
+                detail: "workspace read".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+        })
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        let command = args
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Ok(ToolResult::ok(
+            call_id,
+            "bash",
+            command,
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+struct SessionGrantUnknownFamilyProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for SessionGrantUnknownFamilyProvider {
+    fn name(&self) -> &str {
+        "mock-session-grant-unknown-family"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        match call_index {
+            0 | 2 => {
+                let call_number = (call_index / 2) + 1;
+                let call_id = format!("call-python-{call_number}");
+                let command = if call_number == 1 {
+                    "python3 scripts/check.py"
+                } else {
+                    "python3 scripts/check.py --strict"
+                };
+                let args_json = serde_json::json!({ "command": command }).to_string();
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderChunk::ToolCallStart {
+                        id: call_id.clone(),
+                        name: "bash".to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallArgsDelta {
+                        id: call_id.clone(),
+                        delta: args_json.clone(),
+                    }),
+                    Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                        id: call_id,
+                        name: "bash".to_owned(),
+                        args_json,
+                    })),
+                    Ok(ProviderChunk::Done),
+                ])))
+            }
+            _ => Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ]))),
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_family_command_variants_share_command_family_session_grant() -> Result<()> {
+    // RFC-0062: an unknown-family command (no `family:` stable subject) approved for session
+    // must create a CommandFamily grant so argument variants within the same first-two-token
+    // family stop prompting, mirroring the known-family cargo check test.
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(BashUnknownFamilyTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(
+        SessionGrantUnknownFamilyProvider {
+            calls: Arc::clone(&provider_calls),
+        },
+        registry,
+    );
+    let workspace = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let run_options = || AgentRunOptions {
+        workspace_root: workspace.path().to_path_buf(),
+        max_turns: Some(4),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig {
+            tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Ask)]),
+            ..PermissionConfig::default()
+        },
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig::with_enabled(false),
+        compaction_config: CompactionConfig::default(),
+    };
+    let mut session = Session::load_from_store(
+        "mock-session-grant-unknown-family",
+        "mock-model",
+        store.clone(),
+    )?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = ApproveForSessionHandler {
+        approvals: Arc::clone(&approvals),
+    };
+
+    let first = agent
+        .run_with_approval(
+            &mut session,
+            "run the check script",
+            run_options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+    drop(session);
+    let mut session =
+        Session::load_from_store("mock-session-grant-unknown-family", "mock-model", store)?;
+    let second = agent
+        .run_with_approval(
+            &mut session,
+            "run the check script with strict flags",
+            run_options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(first.final_text, "done");
+    assert_eq!(second.final_text, "done");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+            .count(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
+                if grant.source_call_id == "call-python-1"
+                    && grant.scope == crate::ToolApprovalSessionGrantScope::CommandFamily {
+                        prefix: "python3 scripts/check.py".to_owned()
+                    }
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-python-2"
+                    && approval.action == ToolApprovalAuditAction::Requested
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolPermissionDecisionV2(decision))
+                if decision.call_id == "call-python-2"
+                    && decision.policy_decision == ApprovalMode::Allow
+                    && decision.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
+                    && decision.grant_id.is_some()
+        )
+    }));
+    Ok(())
+}

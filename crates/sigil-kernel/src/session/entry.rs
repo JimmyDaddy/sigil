@@ -876,6 +876,11 @@ impl ToolApprovalSessionGrantEntry {
             "session grant environment binding hash",
             &self.containment_binding.environment_binding_hash,
         )?;
+        if let ToolApprovalSessionGrantScope::CommandFamily { prefix } = &self.scope
+            && (prefix.trim().is_empty() || prefix.contains('\n') || prefix.contains('\r'))
+        {
+            anyhow::bail!("session grant command family prefix must be non-empty and one line");
+        }
         validate_serialized_tool_control_size(self)
     }
 }

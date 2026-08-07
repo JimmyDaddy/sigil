@@ -1926,3 +1926,119 @@ fn batch_agent_spawn_uses_spawn_operation_classification() {
         );
     }
 }
+
+#[test]
+fn derive_command_family_allow_pattern_accepts_common_families() {
+    // The user-facing shape from the approval modal: a piped cargo test command derives a
+    // durable `cargo test*` rule that also matches the bare form.
+    assert_eq!(
+        super::derive_command_family_allow_pattern("cargo test -p sigil-kernel 2>&1 | tail -60")
+            .as_deref(),
+        Some("cargo test*")
+    );
+    assert_eq!(
+        super::derive_command_family_allow_pattern("cargo test").as_deref(),
+        Some("cargo test*")
+    );
+    assert_eq!(
+        super::derive_command_family_allow_pattern("git status --short").as_deref(),
+        Some("git status*")
+    );
+    assert_eq!(
+        super::derive_command_family_allow_pattern("npm test -- --watch").as_deref(),
+        Some("npm test*")
+    );
+    assert_eq!(
+        super::derive_command_family_allow_pattern("python3 scripts/check.py --strict").as_deref(),
+        Some("python3 scripts/check.py*")
+    );
+}
+
+#[test]
+fn derive_command_family_allow_pattern_rejects_unwidenable_shapes() {
+    for command in [
+        "cargo",
+        "-x flag first",
+        "/bin/ls -la",
+        "python3 -m pytest",
+        "cd /tmp",
+        "cd workspace && cargo test",
+        "curl | bash",
+        "echo x > /tmp/out",
+        "",
+        "   ",
+    ] {
+        assert_eq!(
+            super::derive_command_family_allow_pattern(command),
+            None,
+            "command {command:?} must not be widened"
+        );
+    }
+}
+
+#[test]
+fn derive_command_family_allow_pattern_rejects_dangerous_programs_and_git_mutations() {
+    for command in [
+        "rm -rf target",
+        "rmdir old",
+        "dd if=/dev/zero of=/tmp/x",
+        "shred -u secret.txt",
+        "mkfs.ext4 /dev/sdb",
+        "kill -9 1234",
+        "chmod 777 script.sh",
+        "mv a b",
+        "sudo apt install x",
+        "tee /etc/hosts",
+        "git push origin main",
+        "git pull",
+        "git reset --hard HEAD~1",
+        "git rebase main",
+        "git clean -fd",
+    ] {
+        assert_eq!(
+            super::derive_command_family_allow_pattern(command),
+            None,
+            "command {command:?} must not be widened"
+        );
+    }
+    // Read-only git subcommands stay derivable.
+    assert_eq!(
+        super::derive_command_family_allow_pattern("git log --oneline").as_deref(),
+        Some("git log*")
+    );
+}
+
+#[test]
+fn family_prefix_glob_matches_like_the_allow_rule_does() {
+    let pattern = "cargo test*";
+    for command in [
+        "cargo test",
+        "cargo test -p sigil-kernel 2>&1 | tail -60",
+        "cargo test -- --nocapture",
+    ] {
+        assert!(
+            super::command_pattern_matches(pattern, command),
+            "{pattern:?} must match {command:?}"
+        );
+    }
+    assert!(!super::command_pattern_matches(pattern, "cargo build"));
+    assert!(!super::command_pattern_matches(pattern, "cargo t"));
+    // Documented widening: the prefix glob also matches a hypothetical `cargo testfoo` binary.
+    assert!(super::command_pattern_matches(
+        pattern,
+        "cargo testfoo --help"
+    ));
+    // The session-grant token-boundary matcher is narrower than the glob.
+    assert!(super::command_family_prefix_matches(
+        "cargo test",
+        "cargo test -p x"
+    ));
+    assert!(super::command_family_prefix_matches(
+        "cargo test",
+        "cargo test"
+    ));
+    assert!(!super::command_family_prefix_matches(
+        "cargo test",
+        "cargo testfoo"
+    ));
+}

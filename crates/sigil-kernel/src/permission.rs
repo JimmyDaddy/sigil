@@ -61,13 +61,16 @@ impl ToolApprovalSessionGrantFacet {
 }
 
 /// Subject matching scope for one durable session-local tool grant.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolApprovalSessionGrantScope {
     #[default]
     ExactSubjects,
     /// Same tool and read-only network operation; destination controls still run per call.
     NetworkReadTool,
+    /// Unknown-family shell commands sharing the derived first-two-token prefix; the prefix is
+    /// the whitespace-normalized `program subcommand` pair and matches on token boundaries.
+    CommandFamily { prefix: String },
 }
 
 /// Stable, provider-neutral reason why a bounded session-local grant is unavailable.
@@ -133,10 +136,11 @@ impl ToolApprovalSessionGrantAvailability {
 }
 
 impl ToolApprovalSessionGrantScope {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::ExactSubjects => "exact_subjects",
             Self::NetworkReadTool => "network_read_tool",
+            Self::CommandFamily { .. } => "command_family",
         }
     }
 }
@@ -2416,8 +2420,30 @@ fn tool_approval_session_grant_shape_for_facets(
     )?;
     Ok(ToolApprovalSessionGrantShape {
         facets,
-        scope: ToolApprovalSessionGrantScope::ExactSubjects,
+        scope: command_family_grant_scope(subjects)
+            .unwrap_or(ToolApprovalSessionGrantScope::ExactSubjects),
     })
+}
+
+/// Derives a `CommandFamily` grant scope for shell commands whose family is not statically
+/// known. Known families already carry a `family:`-prefixed stable subject and keep the exact
+/// `ExactSubjects` path so the existing family grants are unchanged. The stored prefix is the
+/// plain first-two-token pair without the trailing glob `*`.
+fn command_family_grant_scope(subjects: &[ToolSubject]) -> Option<ToolApprovalSessionGrantScope> {
+    subjects.iter().find_map(|subject| {
+        if subject.kind != ToolSubjectKind::Command || subject.normalized.starts_with("family:") {
+            return None;
+        }
+        command_family_prefix(&subject.original)
+            .map(|prefix| ToolApprovalSessionGrantScope::CommandFamily { prefix })
+    })
+}
+
+/// The plain first-two-token family prefix (`cargo test`) derived from a command, or `None`
+/// when the command must not be widened.
+pub(crate) fn command_family_prefix(command: &str) -> Option<String> {
+    derive_command_family_allow_pattern(command)
+        .map(|pattern| pattern.strip_suffix('*').unwrap_or(&pattern).to_owned())
 }
 
 fn network_read_session_grant_scope_result(
@@ -2812,6 +2838,99 @@ fn command_pattern_matches(pattern: &str, command: &str) -> bool {
     }
 
     pattern_index == pattern_chars.len()
+}
+
+/// First tokens that must never be widened into a durable allow pattern, regardless of the
+/// remaining command text. `rm`/`sudo` style programs are destructive by themselves; `git`
+/// mutating subcommands are rejected separately on the second token so read-only git families
+/// stay derivable.
+const NEVER_DERIVE_FAMILY_PROGRAMS: [&str; 22] = [
+    "rm", "rmdir", "dd", "shred", "mkfs", "fdisk", "parted", "mount", "umount", "kill", "pkill",
+    "killall", "chmod", "chown", "chgrp", "mv", "cp", "ln", "sudo", "tee", "truncate", "cd",
+];
+
+/// `git` subcommands that mutate remote or branch state; deriving a durable allow pattern from
+/// them would silently authorize future pushes, merges, or resets.
+const NEVER_DERIVE_GIT_MUTATING_SUBCOMMANDS: [&str; 11] = [
+    "push",
+    "pull",
+    "fetch",
+    "merge",
+    "rebase",
+    "reset",
+    "clean",
+    "cherry-pick",
+    "revert",
+    "tag",
+    "switch",
+];
+
+/// Derives a conservative `program subcommand*` allow pattern for a whitespace-normalized shell
+/// command, or `None` when the command must not be widened into a durable family rule.
+///
+/// The pattern is a prefix glob over the first two tokens (`cargo test -p x 2>&1 | tail -60` ->
+/// `cargo test*`), which also matches the bare `cargo test` form. The glob semantics of
+/// [`command_pattern_matches`] are prefix-based, so `cargo test*` additionally matches
+/// hypothetical `cargo testfoo ...` commands; the derived pattern is always shown verbatim in
+/// the approval UI and the derivation refuses destructive programs, flags as the second token,
+/// shell operators, and path-like tokens.
+#[must_use]
+pub fn derive_command_family_allow_pattern(command: &str) -> Option<String> {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    let [program, subcommand, ..] = tokens.as_slice() else {
+        return None;
+    };
+    if program.starts_with('-') || program.contains('/') {
+        return None;
+    }
+    if NEVER_DERIVE_FAMILY_PROGRAMS.contains(program) {
+        return None;
+    }
+    if subcommand.starts_with('-')
+        || subcommand.starts_with('/')
+        || subcommand.starts_with('.')
+        || subcommand
+            .chars()
+            .next()
+            .is_some_and(|character| matches!(character, '|' | '&' | ';' | '<' | '>'))
+    {
+        return None;
+    }
+    if *program == "git" && NEVER_DERIVE_GIT_MUTATING_SUBCOMMANDS.contains(subcommand) {
+        return None;
+    }
+    if tokens.iter().skip(2).any(|token| {
+        token.starts_with('>') || token.starts_with('<') || matches!(*token, "&&" | "||" | ";")
+    }) {
+        // Redirection writes and command chains hidden in the tail would be silently widened by
+        // the prefix glob; `2>&1` fd-duplication and `| <read filter>` pipes stay allowed.
+        return None;
+    }
+    Some(format!("{program} {subcommand}*"))
+}
+
+/// Token-boundary match for a derived command-family prefix against a whitespace-normalized
+/// command: exact equality or the prefix followed by a space.
+pub(crate) fn command_family_prefix_matches(prefix: &str, command: &str) -> bool {
+    command == prefix || command.starts_with(&format!("{prefix} "))
+}
+
+/// Derives the durable command-family allow pattern for a shell-style tool call, or `None` when
+/// the tool does not take a shell command or the command must not be widened. Accepts the bash
+/// `{"command": "..."}` argument shape and a bare JSON string command.
+#[must_use]
+pub fn derive_command_family_allow_pattern_for_call(call: &crate::ToolCall) -> Option<String> {
+    let command = serde_json::from_str::<serde_json::Value>(&call.args_json)
+        .ok()
+        .and_then(|args| match args {
+            serde_json::Value::String(command) => Some(command),
+            serde_json::Value::Object(fields) => fields
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })?;
+    derive_command_family_allow_pattern(&command)
 }
 
 struct CompiledPermissionRule<'a> {
