@@ -79,6 +79,96 @@ HANDOFF_ARGS = json.dumps(
     {"reason_codes": ["parallel_research", "multi_stage_change"]},
     separators=(",", ":"),
 )
+PLAN_REVIEW_ARGS = json.dumps(
+    {"reason_codes": ["architectural_tradeoff"]},
+    separators=(",", ":"),
+)
+def plan_draft_args(scenario: int) -> str:
+    steps_by_scenario = {
+        1: [
+            {
+                "step_id": READ_STEP_IDS[0],
+                "title": READ_STEP_TITLES[0],
+                "role": "subagent_read",
+                "mode": "read",
+                "isolation": "shared_read_only",
+            },
+            {
+                "step_id": READ_STEP_IDS[1],
+                "title": READ_STEP_TITLES[1],
+                "role": "subagent_read",
+                "mode": "read",
+                "isolation": "shared_read_only",
+            },
+        ],
+        2: [
+            {
+                "step_id": "write_note",
+                "title": "Write approved note",
+                "role": "executor",
+                "mode": "write",
+                "isolation": "sequential_workspace_write",
+            }
+        ],
+        3: [
+            {
+                "step_id": "continue_after_crash",
+                "title": "Continue after crash",
+                "role": "executor",
+                "mode": "read",
+                "isolation": "shared_read_only",
+            }
+        ],
+        4: [
+            {
+                "step_id": "cancel_in_flight",
+                "title": "Cancel in-flight task",
+                "role": "executor",
+                "mode": "read",
+                "isolation": "shared_read_only",
+            }
+        ],
+        5: [
+            {
+                "step_id": "integrate_a",
+                "title": "Propose integration A",
+                "role": "subagent_write",
+                "mode": "write",
+                "isolation": "worktree",
+            },
+            {
+                "step_id": "integrate_b",
+                "title": "Propose integration B",
+                "role": "subagent_write",
+                "mode": "write",
+                "isolation": "worktree",
+            },
+        ],
+        6: [
+            {
+                "step_id": "terminal_lifecycle",
+                "title": "Exercise persistent terminal lifecycle",
+                "role": "executor",
+                "mode": "write",
+                "isolation": "sequential_workspace_write",
+            }
+        ],
+    }
+    steps = steps_by_scenario.get(scenario)
+    if steps is None:
+        raise AcceptanceError(f"unexpected plan review scenario {scenario}")
+    return json.dumps(
+        {
+            "schema_version": 2,
+            "summary": f"Review scenario {scenario} before execution",
+            "steps": steps,
+            "target_paths": [],
+            "suggested_checks": [],
+            "risk": None,
+            "notes": [],
+        },
+        separators=(",", ":"),
+    )
 APPROVAL_PLAN_ARGS = json.dumps(
     {
         "plan_version": 1,
@@ -319,6 +409,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     f"handoff-call-{request_number}",
                     "request_task_planning",
                     HANDOFF_ARGS,
+                )
+            elif kind == "routing:plan_review":
+                self._send_tool_call(
+                    f"plan-review-call-{request_number}",
+                    "request_plan_review",
+                    PLAN_REVIEW_ARGS,
+                )
+            elif kind == "plan_review":
+                self._send_tool_call(
+                    f"plan-draft-call-{request_number}",
+                    "submit_plan_draft",
+                    plan_draft_args(request_number),
                 )
             elif kind == "planner":
                 arguments = {
@@ -569,6 +671,10 @@ def classify_request(payload: object) -> str:
         and "Generate a concise semantic title for a coding-agent conversation" in text
     ):
         return "title"
+    if "request_plan_review" in names:
+        return "routing:plan_review"
+    if "submit_plan_draft" in names:
+        return "plan_review"
     if "request_task_planning" in names:
         return "conversation"
     if "task_plan_update" in names:
@@ -884,16 +990,10 @@ def wait_for_audit(
 
 
 def validate_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    expected_events = {
-        "task_handoff_requested": 1,
-        "task_handoff_resolved": 1,
-    }
-    for event_type, count in expected_events.items():
-        if audit.event_counts.get(event_type) != count:
-            raise AcceptanceError(
-                f"expected {count} {event_type} event(s), got "
-                f"{audit.event_counts.get(event_type, 0)}"
-            )
+    if audit.event_counts.get("plan_draft_created", 0) != 1:
+        raise AcceptanceError(
+            "review-first baseline did not durably record one plan draft"
+        )
     if audit.event_counts.get("orchestration_route_disabled", 0) != 0:
         raise AcceptanceError("healthy orchestration unexpectedly triggered the route kill switch")
     if tuple(sorted(audit.completed_steps)) != tuple(sorted(READ_STEP_IDS)):
@@ -904,8 +1004,8 @@ def validate_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         raise AcceptanceError("orchestration run finalized with a failure")
 
     expected_requests = {
-        "conversation": 1,
-        "planner": 1,
+        "routing:plan_review": 1,
+        "plan_review": 1,
         f"read:{READ_STEP_IDS[0]}": 1,
         f"read:{READ_STEP_IDS[1]}": 1,
         "synthesis": 1,
@@ -926,10 +1026,8 @@ def validate_audit(audit: SessionAudit, fixture: FixtureState) -> None:
 
 
 def validate_approval_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.event_counts.get("task_handoff_requested") != 2:
-        raise AcceptanceError("approval phase did not append its model-owned handoff")
-    if audit.event_counts.get("task_handoff_resolved") != 2:
-        raise AcceptanceError("approval phase did not resolve its task handoff")
+    if audit.event_counts.get("plan_draft_created", 0) != 2:
+        raise AcceptanceError("approval phase did not durably record both plan drafts")
     if audit.completed_steps.count("write_note") != 1:
         raise AcceptanceError("approved write step did not complete exactly once")
     if (
@@ -944,8 +1042,8 @@ def validate_approval_audit(audit: SessionAudit, fixture: FixtureState) -> None:
     if audit.task_final_count != 2 or audit.failed_run_count != 0:
         raise AcceptanceError("approval task did not complete through the shared root terminal")
     expected_requests = {
-        "conversation": 2,
-        "planner": 2,
+        "routing:plan_review": 2,
+        "plan_review": 2,
         f"read:{READ_STEP_IDS[0]}": 1,
         f"read:{READ_STEP_IDS[1]}": 1,
         "write:request": 1,
@@ -1013,10 +1111,8 @@ def validate_integration_audit(audit: SessionAudit, fixture: FixtureState) -> No
 
 
 def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.event_counts.get("task_handoff_requested") != 6:
-        raise AcceptanceError("terminal phase did not append its model-owned handoff")
-    if audit.event_counts.get("task_handoff_resolved") != 6:
-        raise AcceptanceError("terminal phase did not resolve its task handoff")
+    if audit.event_counts.get("plan_draft_created", 0) != 6:
+        raise AcceptanceError("terminal phase did not durably record all six plan drafts")
     if audit.completed_steps.count("terminal_lifecycle") != 1:
         raise AcceptanceError("terminal lifecycle step did not complete exactly once")
     if (
@@ -1049,8 +1145,8 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
     if audit.cancelled_run_count != 1:
         raise AcceptanceError("terminal phase lost the prior user-cancelled run terminal")
     expected_requests = {
-        "conversation": 6,
-        "planner": 6,
+        "routing:plan_review": 6,
+        "plan_review": 6,
         f"read:{READ_STEP_IDS[0]}": 1,
         f"read:{READ_STEP_IDS[1]}": 1,
         "write:request": 1,
@@ -1237,6 +1333,15 @@ def main() -> int:
         runner.start()
         SUPPORT.wait_for_main_tui(runner, deadline.remaining())
         submit_user_prompt(runner, USER_PROMPT)
+        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
+        # route reviews a plan before any task starts; approve it with Enter.
+        runner.wait_until(
+            lambda text: "Plan ready" in text,
+            deadline.remaining(),
+            "review-first plan card",
+            final_screen=True,
+        )
+        runner.send("\r")
         session_path, audit = wait_for_audit(
             session_dir,
             runner,
@@ -1260,8 +1365,18 @@ def main() -> int:
         validate_audit(audit, fixture)
 
         submit_user_prompt(runner, APPROVAL_USER_PROMPT)
+        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
+        # route reviews a plan before any task starts; approve it with Enter.
         runner.wait_until(
-            lambda text: "Review Tool Call" in text
+            lambda text: "Plan ready" in text,
+            deadline.remaining(),
+            "review-first plan card",
+            final_screen=True,
+        )
+        runner.send("\r")
+
+        runner.wait_until(
+            lambda text: ("Approve action?" in text or "Review file changes" in text)
             and "write_file" in text
             and APPROVAL_PATH in text,
             deadline.remaining(),
@@ -1292,6 +1407,16 @@ def main() -> int:
         checkpoint_workspace(workspace, env, "record approved write fixture")
 
         submit_user_prompt(runner, CONTINUE_USER_PROMPT)
+        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
+        # route reviews a plan before any task starts; approve it with Enter.
+        runner.wait_until(
+            lambda text: "Plan ready" in text,
+            deadline.remaining(),
+            "review-first plan card",
+            final_screen=True,
+        )
+        runner.send("\r")
+
         wait_for_fixture_request(
             fixture,
             "continue:step",
@@ -1348,6 +1473,16 @@ def main() -> int:
         validate_continue_audit(continue_audit, fixture)
 
         submit_user_prompt(runner, CANCEL_USER_PROMPT)
+        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
+        # route reviews a plan before any task starts; approve it with Enter.
+        runner.wait_until(
+            lambda text: "Plan ready" in text,
+            deadline.remaining(),
+            "review-first plan card",
+            final_screen=True,
+        )
+        runner.send("\r")
+
         wait_for_fixture_request(
             fixture,
             "cancel:step",
@@ -1378,6 +1513,16 @@ def main() -> int:
         )
 
         submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
+        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
+        # route reviews a plan before any task starts; approve it with Enter.
+        runner.wait_until(
+            lambda text: "Plan ready" in text,
+            deadline.remaining(),
+            "review-first plan card",
+            final_screen=True,
+        )
+        runner.send("\r")
+
         session_path, review_audit = wait_for_audit(
             session_dir,
             runner,
@@ -1436,8 +1581,18 @@ def main() -> int:
                 raise AcceptanceError(f"reviewed integration did not promote {path}")
 
         submit_user_prompt(runner, TERMINAL_USER_PROMPT)
+        # RFC-0063 ReviewFirst baseline: without a qualified release manifest the automatic
+        # route reviews a plan before any task starts; approve it with Enter.
         runner.wait_until(
-            lambda text: "Review Tool Call" in text
+            lambda text: "Plan ready" in text,
+            deadline.remaining(),
+            "review-first plan card",
+            final_screen=True,
+        )
+        runner.send("\r")
+
+        runner.wait_until(
+            lambda text: ("Approve action?" in text or "Review file changes" in text)
             and "terminal_start" in text
             and TERMINAL_READY_CANARY in text,
             deadline.remaining(),

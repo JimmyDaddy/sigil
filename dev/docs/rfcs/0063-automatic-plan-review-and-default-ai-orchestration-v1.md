@@ -1111,6 +1111,18 @@ release 复验未在本机完成，按 §15 acceptance criteria 与 §12.2 门�
   `production_revision_duplicate_registration_never_blocks_the_session` 扩展：断言 durable
   `RevisionFailed` 已持久化、原 plan 的 Save 决策成功（plan 决策恢复路径，而非仅 slot 可用）。
 
+## 13.7 Orchestration PTY acceptance ReviewFirst adaptation（2026-08-07）
+
+`scripts/tui-orchestration-pty-acceptance.py` 适配 RFC-0063 的 ReviewFirst 基线：无发布资格
+manifest 时自动路由降级为 ReviewFirst（工具集为 `request_plan_review` / `continue_without_task_planning`，
+不含 `request_task_planning`），fixture 相应改为：routing 微轮返回 `request_plan_review`，新增
+`plan_review` 请求分支按场景返回 `submit_plan_draft`（draft 即可执行计划，plan accepted 后 task
+直接按 draft 执行，不再经过 `task_plan_update` planner 阶段），每个场景在 TUI 的 "Plan ready" 卡片
+按 Enter 批准，approval 卡片匹配放宽到 "Approve action?" / "Review file changes"，断言从
+`task_handoff_requested/resolved` 改为 `plan_draft_created` 计数与新的请求分布。本地
+`python3 scripts/tui-orchestration-pty-acceptance.py --binary target/debug/sigil` 通过；
+CI 的 real-PTY acceptance 此前自 2026-08-03 memory 合并后持续失败，本次适配后应恢复。
+
 ## 13.6 Fifth-audit review（2026-08-06）
 
 第五轮审计修复复核通过：三项修复（`revision_run_id` 端到端投影、无草稿 attempt 的 public projection、
