@@ -319,8 +319,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
     def test_valid_audit_requires_provider_overlap_and_unique_final(self) -> None:
         audit = MODULE.SessionAudit(
             event_counts={
-                "task_handoff_requested": 1,
-                "task_handoff_resolved": 1,
+                "plan_draft_created": 1,
             },
             completed_steps=MODULE.READ_STEP_IDS,
             final_answer_count=1,
@@ -350,8 +349,8 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
         )
         fixture = MODULE.FixtureState(
             request_counts={
-                "conversation": 1,
-                "planner": 1,
+                "routing:plan_review": 1,
+                "plan_review": 1,
                 f"read:{MODULE.READ_STEP_IDS[0]}": 1,
                 f"read:{MODULE.READ_STEP_IDS[1]}": 1,
                 "synthesis": 1,
@@ -368,8 +367,7 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
     def test_valid_terminal_audit_requires_approval_readiness_progress_and_cancel(self) -> None:
         audit = MODULE.SessionAudit(
             event_counts={
-                "task_handoff_requested": 6,
-                "task_handoff_resolved": 6,
+                "plan_draft_created": 6,
             },
             completed_steps=("terminal_lifecycle",),
             final_answer_count=1,
@@ -403,8 +401,8 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
         )
         fixture = MODULE.FixtureState(
             request_counts={
-                "conversation": 6,
-                "planner": 6,
+                "routing:plan_review": 6,
+                "plan_review": 6,
                 f"read:{MODULE.READ_STEP_IDS[0]}": 1,
                 f"read:{MODULE.READ_STEP_IDS[1]}": 1,
                 "write:request": 1,
