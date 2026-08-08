@@ -5850,7 +5850,6 @@ dependencies = [
  "tracing",
  "two-face",
  "unicode-segmentation",
- "unicode-width",
  "url",
  "uuid",
 ]

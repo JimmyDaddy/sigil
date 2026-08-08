@@ -26,7 +26,6 @@ sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 sigil-updater = { path = "../sigil-updater" }
 two-face.workspace = true
 unicode-segmentation.workspace = true
-unicode-width.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
