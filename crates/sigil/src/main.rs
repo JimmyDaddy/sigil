@@ -323,7 +323,8 @@ enum UpdateCommand {
 
 #[cfg(not(test))]
 fn main() -> ExitCode {
-    tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
+    init_tracing(&cli);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -334,7 +335,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(run_main());
+    let result = runtime.block_on(run_main(cli));
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     match result {
         Ok(code) => ExitCode::from(code),
@@ -345,9 +346,27 @@ fn main() -> ExitCode {
     }
 }
 
+fn interactive_tui_requested(cli: &Cli) -> bool {
+    !cli.show_version && matches!(cli.command.as_ref(), None | Some(Commands::Resume { .. }))
+}
+
 #[cfg(not(test))]
-async fn run_main() -> Result<u8> {
-    let cli = Cli::parse();
+fn init_tracing(cli: &Cli) {
+    if interactive_tui_requested(cli) {
+        // The TUI owns the terminal byte stream. A formatting subscriber writing to stderr can
+        // interleave arbitrary bytes with Ratatui's stdout paint and permanently corrupt the
+        // inline viewport, so interactive runs deliberately keep tracing off the terminal.
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(io::sink)
+            .init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+}
+
+#[cfg(not(test))]
+async fn run_main(cli: Cli) -> Result<u8> {
     let build = BuildInfo::current();
     if cli.show_version {
         print!("{}", render_version(build));

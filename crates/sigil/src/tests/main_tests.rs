@@ -31,11 +31,11 @@ use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
     RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
-    cli_application_run_request, drain_provider_stream, load_serve_root_config,
-    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
-    render_serve_startup_json, render_serve_startup_plan, render_update_apply, render_update_check,
-    render_version, run_machine_command_with_cancellation, run_machine_command_with_writer,
-    session_catalog_projection_error_code,
+    cli_application_run_request, drain_provider_stream, interactive_tui_requested,
+    load_serve_root_config, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
+    render_run_event, render_serve_startup_json, render_serve_startup_plan, render_update_apply,
+    render_update_check, render_version, run_machine_command_with_cancellation,
+    run_machine_command_with_writer, session_catalog_projection_error_code,
 };
 
 fn boxed_chunk_stream(
@@ -1243,6 +1243,19 @@ fn cli_without_subcommand_defaults_to_tui() -> Result<()> {
 
     assert!(!cli.show_version);
     assert!(cli.command.is_none());
+    assert!(interactive_tui_requested(&cli));
+    Ok(())
+}
+
+#[test]
+fn only_interactive_tui_commands_suppress_terminal_tracing() -> Result<()> {
+    let version = Cli::try_parse_from(["sigil", "--version"])?;
+    let resume = Cli::try_parse_from(["sigil", "resume", "session-123"])?;
+    let doctor = Cli::try_parse_from(["sigil", "doctor"])?;
+
+    assert!(!interactive_tui_requested(&version));
+    assert!(interactive_tui_requested(&resume));
+    assert!(!interactive_tui_requested(&doctor));
     Ok(())
 }
 
