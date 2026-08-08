@@ -495,6 +495,7 @@ fn command_conflicts_with_artifact_gc(command: &WorkerCommand) -> bool {
         WorkerCommand::ReadToolArtifactPage { .. }
             | WorkerCommand::InspectLocalSession { .. }
             | WorkerCommand::ForkLocalSession { .. }
+            | WorkerCommand::ForkConversationAtCheckpoint { .. }
             | WorkerCommand::ExportLocalSession { .. }
             | WorkerCommand::SetLocalSessionPin { .. }
             | WorkerCommand::PreviewLocalSessionDelete { .. }
@@ -1182,6 +1183,15 @@ mod reactor_tests {
     #[test]
     fn active_artifact_gc_defers_conflicting_session_commands_without_reordering() {
         let mut readiness = WorkerReadiness::new();
+        readiness.ingest(WorkerEvent::Command(
+            WorkerCommand::ForkConversationAtCheckpoint {
+                request_id: 7,
+                request: ControlledCheckpointRestoreRequest {
+                    checkpoint_id: "checkpoint-1".to_owned(),
+                    checkpoint_digest: "digest-1".to_owned(),
+                },
+            },
+        ));
         readiness.ingest(WorkerEvent::Command(WorkerCommand::SetLocalSessionPin {
             request_id: 7,
             source_path: PathBuf::from("session.jsonl"),
@@ -1192,6 +1202,10 @@ mod reactor_tests {
         }));
 
         assert!(pop_next_ordinary_command(&mut readiness, false, true).is_none());
+        assert!(matches!(
+            pop_next_ordinary_command(&mut readiness, false, false),
+            Some(WorkerCommand::ForkConversationAtCheckpoint { request_id: 7, .. })
+        ));
         assert!(matches!(
             pop_next_ordinary_command(&mut readiness, false, false),
             Some(WorkerCommand::SetLocalSessionPin { request_id: 7, .. })
