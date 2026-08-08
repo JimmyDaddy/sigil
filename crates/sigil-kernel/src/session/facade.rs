@@ -358,8 +358,6 @@ impl Session {
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover_from_records(&records)
             .context("failed to recover provider continuation payload lifecycle")?;
-        crate::EgressAuditRecorder::new(store.clone())
-            .reconcile_interrupted_from_records(&records)?;
         let durable_session_entry_count = Some(
             store
                 .active_projection_snapshot()?
@@ -1226,6 +1224,19 @@ impl Session {
             .as_ref()
             .ok_or(DurableAuditError::MissingDurableStore)?;
         Ok(crate::EgressAuditRecorder::new(store.clone()))
+    }
+
+    /// Closes every durable egress authorization/query start left without a terminal outcome.
+    ///
+    /// This MUST run at a run-lifecycle boundary where no hosted turn can be in flight (agent run
+    /// start), never on session load: a load during an active hosted turn would falsely mark an
+    /// in-flight request `Interrupted`, and the real terminal outcome would then be rejected as a
+    /// conflicting terminal. Idempotent; returns the number of terminal records appended.
+    pub fn reconcile_egress_lifecycle(&self) -> Result<usize> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(0);
+        };
+        Ok(crate::EgressAuditRecorder::new(store.clone()).reconcile_interrupted()?)
     }
 
     /// Returns a store-backed mutation recorder for tool contexts when this session is durable.

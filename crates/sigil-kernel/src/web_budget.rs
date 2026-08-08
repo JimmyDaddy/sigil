@@ -18,7 +18,7 @@ const BUDGET_HOST_MAX_BYTES: usize = 253;
 pub struct WebTaskTreeBudgetLimits {
     pub max_fetch_calls: u64,
     pub max_client_search_calls: u64,
-    pub max_hosted_requests: u64,
+    pub max_hosted_requests: Option<u64>,
     pub max_network_attempts: u64,
     pub max_wire_bytes: u64,
     pub max_decoded_bytes: u64,
@@ -31,7 +31,7 @@ impl WebTaskTreeBudgetLimits {
     fn validate(self) -> Result<Self, WebBudgetError> {
         if self.max_fetch_calls == 0
             || self.max_client_search_calls == 0
-            || self.max_hosted_requests == 0
+            || self.max_hosted_requests == Some(0)
             || self.max_network_attempts == 0
             || self.max_wire_bytes == 0
             || self.max_decoded_bytes == 0
@@ -40,7 +40,7 @@ impl WebTaskTreeBudgetLimits {
             || self.max_attempts_per_host == 0
         {
             return Err(WebBudgetError::InvalidRequest(
-                "all web task-tree budget limits must be non-zero".to_owned(),
+                "all web task-tree budget limits must be non-zero or absent".to_owned(),
             ));
         }
         Ok(self)
@@ -181,7 +181,18 @@ impl WebTaskTreeBudget {
         request: WebBudgetReservationRequest,
     ) -> Result<WebBudgetReservation, WebBudgetError> {
         validate_reservation_request(&request)?;
-        if self.exhausted.load(Ordering::SeqCst) {
+        // A dimension the user left unlimited must not be blocked by the global exhausted latch
+        // set when a DIFFERENT dimension hits its cap: the unlimited budget stays usable even
+        // after fetch/search/byte limits exhaust.
+        let unlimited_dimension = match request.kind {
+            WebBudgetReservationKind::HostedProviderRequest => {
+                self.limits.max_hosted_requests.is_none()
+            }
+            WebBudgetReservationKind::FetchCall
+            | WebBudgetReservationKind::ClientSearchCall
+            | WebBudgetReservationKind::TransportLifecycle => false,
+        };
+        if !unlimited_dimension && self.exhausted.load(Ordering::SeqCst) {
             return Err(WebBudgetError::Exhausted {
                 dimension: "task_tree",
             });
@@ -208,12 +219,12 @@ impl WebTaskTreeBudget {
         let limited_dimension = match request.kind {
             WebBudgetReservationKind::FetchCall => (
                 state.fetch_calls,
-                self.limits.max_fetch_calls,
+                Some(self.limits.max_fetch_calls),
                 "fetch_calls",
             ),
             WebBudgetReservationKind::ClientSearchCall => (
                 state.client_search_calls,
-                self.limits.max_client_search_calls,
+                Some(self.limits.max_client_search_calls),
                 "client_search_calls",
             ),
             WebBudgetReservationKind::HostedProviderRequest => (
@@ -221,9 +232,13 @@ impl WebTaskTreeBudget {
                 self.limits.max_hosted_requests,
                 "hosted_requests",
             ),
-            WebBudgetReservationKind::TransportLifecycle => (0, u64::MAX, "transport_lifecycle"),
+            WebBudgetReservationKind::TransportLifecycle => {
+                (0, Some(u64::MAX), "transport_lifecycle")
+            }
         };
-        if limited_dimension.0.saturating_add(provisional_same_kind) >= limited_dimension.1 {
+        if let Some(limit) = limited_dimension.1
+            && limited_dimension.0.saturating_add(provisional_same_kind) >= limit
+        {
             drop(state);
             self.trigger_exhaustion();
             return Err(WebBudgetError::Exhausted {

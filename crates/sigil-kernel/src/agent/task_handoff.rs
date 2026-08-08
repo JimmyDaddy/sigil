@@ -416,6 +416,7 @@ where
             task_id: binding.task_id.clone(),
             parent_session_ref: binding.parent_session_ref.clone(),
             objective: binding.objective.clone(),
+            title: Some(crate::task_semantic_title(&binding.objective)),
             status: TaskRunStatus::Started,
             reason: Some("admitted from conversation handoff".to_owned()),
         }),

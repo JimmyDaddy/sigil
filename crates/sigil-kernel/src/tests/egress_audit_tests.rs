@@ -146,8 +146,24 @@ fn recovery_appends_interrupted_once_for_hosted_and_query_without_replay() {
         .append_query_started(&query_started())
         .expect("query start");
 
-    Session::load_from_store("fallback", "fallback", store.clone()).expect("first recovery");
-    Session::load_from_store("fallback", "fallback", store.clone()).expect("second recovery");
+    let session =
+        Session::load_from_store("fallback", "fallback", store.clone()).expect("first recovery");
+    assert_eq!(
+        session
+            .reconcile_egress_lifecycle()
+            .expect("first recovery"),
+        2,
+        "run start closes both open egress lifecycles"
+    );
+    let session =
+        Session::load_from_store("fallback", "fallback", store.clone()).expect("second recovery");
+    assert_eq!(
+        session
+            .reconcile_egress_lifecycle()
+            .expect("second recovery"),
+        0,
+        "repeated recovery must be idempotent"
+    );
 
     let events = store.read_event_records_writer().expect("events");
     let hosted_outcomes = events
@@ -180,6 +196,55 @@ fn recovery_appends_interrupted_once_for_hosted_and_query_without_replay() {
 }
 
 #[test]
+fn session_load_never_marks_an_in_flight_hosted_authorization_interrupted() {
+    // Regression: a concurrent session load (display/control/GC) during an active hosted turn
+    // used to reconcile Interrupted for the in-flight authorization, after which the real
+    // finalizer terminal was rejected as "already has a different terminal outcome" and the
+    // whole run failed. Loads must never append egress terminals; only run start may.
+    let (_temp, store, recorder) = durable_session();
+    let authorization = hosted_authorization();
+    recorder
+        .append_hosted_authorization(&authorization)
+        .expect("hosted authorization");
+
+    // An unrelated load happens while the hosted request is still in flight; the load itself
+    // must not append any terminal outcome.
+    let _session =
+        Session::load_from_store("fallback", "fallback", store.clone()).expect("concurrent load");
+    let events = store.read_event_records_writer().expect("events");
+    assert!(
+        !events.iter().any(|record| {
+            matches!(record, crate::SessionStreamRecord::Stored(event)
+            if event.event_kind() == Some(crate::DurableEventType::HostedToolOutcome))
+        }),
+        "no outcome may exist while the turn is in flight"
+    );
+
+    // The finalizer's real terminal is still accepted after the concurrent load.
+    recorder
+        .append_hosted_outcome(&HostedToolOutcome {
+            record_id: "hosted-outcome-observed".to_owned(),
+            root_run_id: authorization.root_run_id,
+            correlation_id: authorization.correlation_id,
+            authorization_id: authorization.authorization_id,
+            hosted_request_fingerprint: authorization.hosted_request_fingerprint,
+            status: HostedToolTerminalStatus::Observed,
+        })
+        .expect("real terminal outcome must still be accepted");
+
+    // A later run start sees the authorization terminal and appends nothing new.
+    let session =
+        Session::load_from_store("fallback", "fallback", store.clone()).expect("next run start");
+    assert_eq!(
+        session
+            .reconcile_egress_lifecycle()
+            .expect("next run start"),
+        0,
+        "terminal lifecycle must not be re-reconciled"
+    );
+}
+
+#[test]
 fn durable_sync_failure_returns_no_permit_and_recovery_closes_visible_start() {
     let (_temp, store, recorder) = durable_session();
     store
@@ -192,7 +257,11 @@ fn durable_sync_failure_returns_no_permit_and_recovery_closes_visible_start() {
                 _
             )))
     ));
-    Session::load_from_store("fallback", "fallback", store.clone()).expect("recovery");
+    let session =
+        Session::load_from_store("fallback", "fallback", store.clone()).expect("recovery");
+    session
+        .reconcile_egress_lifecycle()
+        .expect("run-start recovery closes the visible query start");
     let events = store
         .read_event_records_writer()
         .expect("recovered records");

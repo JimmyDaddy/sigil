@@ -279,6 +279,8 @@ fn compaction_extraction_builds_task_memory_from_structured_durable_events() -> 
         task_id: crate::TaskId::new("task-1")?,
         parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
         objective: "Fix plugin trust projection".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }));
@@ -369,6 +371,8 @@ fn compaction_extraction_keeps_active_task_objective_and_accepted_plan() -> Resu
                 task_id: task_id.clone(),
                 parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
                 objective: "Ship the durable compaction contract".to_owned(),
+                title: None,
+
                 status: TaskRunStatus::Running,
                 reason: None,
             })),
@@ -483,6 +487,8 @@ fn compaction_extraction_handles_failed_task_blocked_step_and_changeset() -> Res
         task_id: crate::TaskId::new("task-durable")?,
         parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
         objective: "Recover failed task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Failed,
         reason: Some("planner failed".to_owned()),
     }));

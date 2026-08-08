@@ -254,6 +254,8 @@ fn sample_task_run_entry() -> Result<TaskRunEntry> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("session-parent.jsonl")?,
         objective: "fix selector projection".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("needs verification".to_owned()),
     })

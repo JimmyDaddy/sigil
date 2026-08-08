@@ -87,6 +87,8 @@ fn seed_completed_synthesis_prefix(
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: "recover final answer".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -301,6 +303,8 @@ fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
         task_id: task_id.clone(),
         parent_session_ref: task_request.parent_session_ref.clone(),
         objective: task_request.objective.clone(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("waiting for verification".to_owned()),
     }))?;
@@ -1012,6 +1016,8 @@ fn seed_dependency_handoff(
         task_id: task_id.clone(),
         parent_session_ref,
         objective: "review parser and formatter".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -1419,6 +1425,8 @@ async fn read_step_rate_limit_schedules_new_attempt_and_completes() -> Result<()
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: "finish after provider pressure".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -2018,6 +2026,8 @@ async fn read_step_rate_limit_stops_after_bounded_retry_budget() -> Result<()> {
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: "stop retry storm".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -2103,6 +2113,8 @@ async fn continue_consumes_one_durable_retry_schedule_after_restart() -> Result<
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: objective.to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -2880,6 +2892,8 @@ async fn admitted_task_with_accepted_plan_resumes_without_duplicate_start_or_rep
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: objective.clone(),
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: Some("admitted by conversation coordinator".to_owned()),
     }))?;
@@ -3126,6 +3140,8 @@ fn final_answer_recovery_never_overrides_a_cancelled_task() -> Result<()> {
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "recover final answer".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Cancelled,
         reason: Some("user cancelled before parent commit".to_owned()),
     }))?;
@@ -4046,6 +4062,8 @@ async fn intent_bound_changeset_steps_persist_exact_attempt_and_proposal_lineage
         task_id: task_id.clone(),
         parent_session_ref: request.parent_session_ref.clone(),
         objective: request.objective.clone(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -5065,6 +5083,8 @@ async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "delegate read".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -5810,6 +5830,8 @@ async fn subagent_step_error_marks_child_session_failed() -> Result<()> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "delegate read".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -6022,6 +6044,8 @@ async fn proposed_plan_is_not_executable() -> Result<()> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "inspect implementation".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -6391,6 +6415,8 @@ fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<
         task_id: request.task_id.clone(),
         parent_session_ref: request.parent_session_ref.clone(),
         objective: request.objective.clone(),
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: None,
     }))?;
@@ -8436,6 +8462,7 @@ fn seed_two_step_task(
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "inspect implementation".to_owned(),
+        title: None,
         status,
         reason: None,
     }))?;
@@ -8521,6 +8548,7 @@ fn seed_task_with_steps(
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "inspect implementation".to_owned(),
+        title: None,
         status,
         reason: None,
     }))?;
@@ -8571,6 +8599,8 @@ fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Resul
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "inspect implementation".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -8664,6 +8694,7 @@ fn options() -> AgentRunOptions {
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: crate::CompactionConfig::default(),
+        permission_mode_override: None,
     }
 }
 

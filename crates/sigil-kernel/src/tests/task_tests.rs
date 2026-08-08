@@ -55,6 +55,7 @@ fn run_entry(status: TaskRunStatus) -> Result<ControlEntry> {
         task_id: task_id("task_1")?,
         parent_session_ref: session_ref("parent.jsonl")?,
         objective: "ship planner".to_owned(),
+        title: None,
         status,
         reason: None,
     }))
@@ -1267,6 +1268,8 @@ fn task_projection_tracks_latest_task_by_replay_order() -> Result<()> {
             task_id: task_id("task_z")?,
             parent_session_ref: session_ref("parent.jsonl")?,
             objective: "first".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Started,
             reason: None,
         })),
@@ -1274,6 +1277,8 @@ fn task_projection_tracks_latest_task_by_replay_order() -> Result<()> {
             task_id: task_id("task_a")?,
             parent_session_ref: session_ref("parent.jsonl")?,
             objective: "second".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Started,
             reason: None,
         })),
@@ -1373,6 +1378,8 @@ fn task_projection_tracks_latest_unfinished_task_by_replay_order() -> Result<()>
             task_id: task_id("task_1")?,
             parent_session_ref: session_ref("parent.jsonl")?,
             objective: "first".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Failed,
             reason: None,
         })),
@@ -1380,6 +1387,8 @@ fn task_projection_tracks_latest_unfinished_task_by_replay_order() -> Result<()>
             task_id: task_id("task_2")?,
             parent_session_ref: session_ref("parent.jsonl")?,
             objective: "second".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Completed,
             reason: None,
         })),
@@ -1406,6 +1415,8 @@ fn task_projection_returns_none_when_latest_tasks_are_final() -> Result<()> {
             task_id: task_id("task_1")?,
             parent_session_ref: session_ref("parent.jsonl")?,
             objective: "first".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Completed,
             reason: None,
         })),
@@ -1413,6 +1424,8 @@ fn task_projection_returns_none_when_latest_tasks_are_final() -> Result<()> {
             task_id: task_id("task_2")?,
             parent_session_ref: session_ref("parent.jsonl")?,
             objective: "second".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Cancelled,
             reason: None,
         })),

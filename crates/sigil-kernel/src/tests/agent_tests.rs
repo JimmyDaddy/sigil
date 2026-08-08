@@ -61,7 +61,8 @@ use crate::{
 use super::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
-    TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, emit_tool_result,
+    PendingConversationInputProvider, TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT,
+    emit_tool_result,
 };
 
 /// Host-shaped plan review binding for routing tests; identity is derived from the source turn.
@@ -466,10 +467,6 @@ struct LateTaskHandoffProvider {
     calls: Arc<AtomicUsize>,
 }
 
-struct InvalidRoutingProvider {
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-}
-
 #[async_trait]
 impl Provider for CapturingTextProvider {
     fn name(&self) -> &str {
@@ -640,10 +637,14 @@ impl Provider for LateTaskHandoffProvider {
     }
 }
 
+struct DegradingRoutingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
 #[async_trait]
-impl Provider for InvalidRoutingProvider {
+impl Provider for DegradingRoutingProvider {
     fn name(&self) -> &str {
-        "mock-invalid-routing"
+        "mock-degrading-routing"
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -655,27 +656,30 @@ impl Provider for InvalidRoutingProvider {
 
     async fn stream(
         &self,
-        request: CompletionRequest,
+        _request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        self.captured
-            .lock()
-            .expect("captured requests lock should not be poisoned")
-            .push(request);
+        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+        if turn < 2 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("captured".to_owned())),
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-invalid-routing-tool".to_owned(),
+                    name: "handoff_side_effect".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-invalid-routing-tool".to_owned(),
+                    delta: "{}".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-invalid-routing-tool".to_owned(),
+                    name: "handoff_side_effect".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
         Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::TextDelta("captured".to_owned())),
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-invalid-routing-tool".to_owned(),
-                name: "handoff_side_effect".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-invalid-routing-tool".to_owned(),
-                delta: "{}".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-invalid-routing-tool".to_owned(),
-                name: "handoff_side_effect".to_owned(),
-                args_json: "{}".to_owned(),
-            })),
+            Ok(ProviderChunk::TextDelta("final answer".to_owned())),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -802,6 +806,7 @@ async fn agent_run_input_applies_output_token_ceiling_to_provider_request() -> R
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -2878,6 +2883,7 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -2960,6 +2966,7 @@ async fn final_answer_context_is_injected_before_the_post_tool_provider_request(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3032,6 +3039,7 @@ async fn agent_tool_delegate_receives_root_logical_run_identity() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3069,6 +3077,7 @@ async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messag
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3145,6 +3154,7 @@ async fn agent_waits_for_foreground_terminal_result_before_next_provider_request
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3219,6 +3229,7 @@ async fn agent_injects_durable_recorder_and_exact_route_into_tool_context() -> R
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3270,6 +3281,7 @@ async fn required_agent_delegation_blocks_direct_final_answer() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3327,6 +3339,7 @@ async fn required_agent_delegation_fails_before_provider_without_agent_tools() -
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3386,6 +3399,7 @@ async fn required_agent_delegation_ignores_failed_agent_tool_before_final_answer
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3461,6 +3475,7 @@ async fn required_agent_delegation_accepts_terminal_agent_tool_result() -> Resul
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3514,6 +3529,7 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3678,6 +3694,7 @@ async fn agent_initial_frozen_request_is_dispatched_without_rebuilding_or_duplic
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3770,6 +3787,7 @@ async fn agent_initial_frozen_request_binds_only_its_first_physical_attempt() ->
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3826,6 +3844,7 @@ async fn agent_provider_turn_records_synced_physical_attempt_lifecycle() -> Resu
                 traffic_partition_key: Some("partition-secret".to_owned()),
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3915,6 +3934,7 @@ async fn agent_final_answer_appends_not_applicable_readiness_for_read_only_run()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -3986,6 +4006,7 @@ async fn agent_final_answer_appends_inconclusive_readiness_for_external_process_
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4048,6 +4069,7 @@ async fn agent_final_answer_appends_missing_readiness_after_workspace_mutation()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4128,6 +4150,7 @@ async fn agent_max_turns_appends_run_lifecycle_durable_events() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4214,6 +4237,7 @@ async fn required_agent_delegation_ignores_spawn_agent_without_terminal_result()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4290,6 +4314,7 @@ async fn required_agent_delegation_ignores_non_terminal_agent_tool_result() -> R
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4358,6 +4383,7 @@ async fn agent_persists_text_before_tool_call_on_assistant_message() -> Result<(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4416,6 +4442,7 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4480,6 +4507,7 @@ async fn agent_reconciles_terminal_start_mutation_when_terminal_cancel_finishes_
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4543,6 +4571,7 @@ async fn agent_run_input_transient_context_does_not_append_user_message() -> Res
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4600,6 +4629,7 @@ async fn agent_run_input_preserves_consecutive_same_content_as_distinct_user_ent
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4661,6 +4691,7 @@ async fn safe_persistence_retry_reuses_durable_user_id_without_duplicate_append(
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_mode_override: None,
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
@@ -4713,6 +4744,7 @@ async fn safe_persistence_user_url_is_exact_once_in_request_but_never_in_session
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -4773,6 +4805,7 @@ async fn safe_persistence_uses_session_url_registrar_across_distinct_turns_and_o
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_mode_override: None,
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
@@ -5028,6 +5061,7 @@ async fn safe_persistence_follow_up_request_sees_source_id_without_raw_url_mater
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_mode_override: None,
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
@@ -5096,6 +5130,7 @@ async fn agent_run_output_reports_approval_denials() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5142,6 +5177,7 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5209,6 +5245,7 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5319,6 +5356,7 @@ async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()>
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5406,6 +5444,7 @@ async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5494,6 +5533,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5580,6 +5620,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_mode_override: None,
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
@@ -5734,6 +5775,7 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5786,6 +5828,7 @@ async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5857,6 +5900,7 @@ async fn task_participant_forces_toolless_finalization_after_post_mutation_read_
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5931,6 +5975,7 @@ async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -5959,16 +6004,17 @@ async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -
 }
 
 #[tokio::test]
-async fn automatic_task_routing_blocks_after_two_untyped_decisions() -> Result<()> {
-    let captured = Arc::new(Mutex::new(Vec::new()));
+async fn automatic_task_routing_degrades_to_ordinary_conversation_after_two_untyped_decisions()
+-> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(0));
     let executions = Arc::new(AtomicUsize::new(0));
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(TaskHandoffSideEffectTool {
         executions: Arc::clone(&executions),
     }));
     let agent = Agent::new(
-        InvalidRoutingProvider {
-            captured: Arc::clone(&captured),
+        DegradingRoutingProvider {
+            calls: Arc::clone(&calls),
         },
         tools,
     );
@@ -6022,6 +6068,7 @@ async fn automatic_task_routing_blocks_after_two_untyped_decisions() -> Result<(
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
                 permission_context: crate::PermissionEvaluationContext::default(),
+                permission_mode_override: None,
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
             },
@@ -6029,34 +6076,252 @@ async fn automatic_task_routing_blocks_after_two_untyped_decisions() -> Result<(
         )
         .await?;
 
-    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
     assert_eq!(
         output.outcome.terminal_reason,
-        AgentRunTerminalReason::TaskRoutingUnsatisfied
+        AgentRunTerminalReason::FinalAnswer
     );
+    assert_eq!(output.result.final_text, "final answer");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "two routing microturns then one degraded ordinary turn"
+    );
+    assert!(session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant && message.content.as_deref() == Some("final answer")
+    }));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert!(
+        session.entries().iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(_))
+        )),
+        "the degraded conversation must record the chat route decision"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_conversation()
+-> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-pure-free-text-routing", "mock-model");
+    let prompt = "hello";
+    let logical_run_id = "pure-free-text-routing-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+                ConversationPurposeContext {
+                    root_run_id: logical_run_id.to_owned(),
+                    source_turn: source_turn.clone(),
+                    routing_policy: TaskRoutingPolicy::Auto,
+                    route_capability: AutomaticRouteCapability::DirectTask,
+                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
+                    task_handoff: Some(TaskPlanningHandoffBinding {
+                        handoff_id: TaskHandoffId::new("handoff-pure-free-text")?,
+                        task_id: TaskId::new("task-pure-free-text")?,
+                        source_turn,
+                        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+                        objective: prompt.to_owned(),
+                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
+                        requested_at_ms: 42,
+                        decided_at_ms: 43,
+                    }),
+                },
+            )));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(3),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                permission_mode_override: None,
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::FinalAnswer
+    );
+    assert_eq!(output.result.final_text, "captured");
     assert_eq!(
         captured
             .lock()
             .expect("captured requests lock should not be poisoned")
             .len(),
-        2
+        3,
+        "two routing microturns then one degraded ordinary turn"
     );
-    assert!(!session.messages().iter().any(|message| {
+    assert!(session.messages().iter().any(|message| {
         message.role == MessageRole::Assistant && message.content.as_deref() == Some("captured")
     }));
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-    assert!(handler.events.iter().all(|event| {
-        !matches!(
-            event,
-            RunEvent::TextDelta(_)
-                | RunEvent::ReasoningDelta(_)
-                | RunEvent::ToolCallStarted(_)
-                | RunEvent::ToolCallArgsDelta { .. }
-                | RunEvent::ToolCallCompleted(_)
-                | RunEvent::ToolProgress(_)
-                | RunEvent::ToolResult(_)
-                | RunEvent::AssistantMessage(_)
+    assert!(
+        session.entries().iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(_))
+        )),
+        "the degraded conversation must record the chat route decision"
+    );
+    Ok(())
+}
+
+struct QueuedFollowUpTextProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for QueuedFollowUpTextProvider {
+    fn name(&self) -> &str {
+        "mock-queued-follow-up"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        CapturingTextProvider {
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+        .capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+        let text = if turn == 0 {
+            "first answer"
+        } else {
+            "answer to the follow-up"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(text.to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+struct OneShotPendingInputProvider {
+    remaining: AtomicUsize,
+}
+
+#[async_trait]
+impl PendingConversationInputProvider for OneShotPendingInputProvider {
+    async fn promote_next_pending_input(
+        &self,
+        session: &mut Session,
+        _logical_run_id: &str,
+    ) -> Result<Option<String>> {
+        if self.remaining.fetch_sub(1, Ordering::SeqCst) != 1 {
+            return Ok(None);
+        }
+        session.append_user_message(ModelMessage::user("queued follow-up"))?;
+        Ok(Some("queued follow-up".to_owned()))
+    }
+}
+
+#[tokio::test]
+async fn queued_follow_up_is_injected_at_the_final_answer_gate_without_interrupting() -> Result<()>
+{
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        QueuedFollowUpTextProvider {
+            calls: Arc::clone(&calls),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-follow-up-injection", "mock-model");
+    let prompt = "original question";
+    let logical_run_id = "follow-up-injection-run";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let input = input
+        .with_logical_run_id(logical_run_id)
+        .with_pending_input_provider(Arc::new(OneShotPendingInputProvider {
+            remaining: AtomicUsize::new(1),
+        }))
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: logical_run_id.to_owned(),
+                source_turn,
+                routing_policy: TaskRoutingPolicy::Manual,
+                route_capability: AutomaticRouteCapability::Unsupported,
+                plan_review: None,
+                task_handoff: None,
+            },
+        )));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                permission_mode_override: None,
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
         )
+        .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(output.result.final_text, "answer to the follow-up");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let messages = session.messages();
+    assert!(messages.iter().any(|message| {
+        message.role == MessageRole::User && message.content.as_deref() == Some("queued follow-up")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.content.as_deref() == Some("first answer")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message.content.as_deref() == Some("answer to the follow-up")
     }));
     Ok(())
 }
@@ -6119,6 +6384,7 @@ async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -6202,6 +6468,7 @@ async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Resu
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -6287,6 +6554,7 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -6419,6 +6687,7 @@ async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Re
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -6526,6 +6795,7 @@ async fn automatic_routing_plan_review_decision_records_route_and_starts_review(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -6626,6 +6896,7 @@ async fn review_first_capability_hides_the_direct_task_decision() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -6703,6 +6974,7 @@ async fn chat_decision_records_route_decision_without_effect_authority() -> Resu
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -7296,6 +7568,7 @@ fn task_bound_plan_permission_grant_expires_after_task_terminal_status() -> Resu
         task_id: grant.task_id.clone(),
         parent_session_ref: crate::SessionRef::new_relative("session.jsonl")?,
         objective: "test task".to_owned(),
+        title: None,
         status: TaskRunStatus::Completed,
         reason: Some("done".to_owned()),
     }))?;
@@ -7339,6 +7612,7 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -7413,6 +7687,7 @@ async fn expired_approval_has_no_user_decision_receipt_and_never_executes() -> R
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -7494,6 +7769,7 @@ async fn execution_replan_rejects_symlink_retargeted_to_protected_path_after_app
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -7550,6 +7826,7 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
             tools: BTreeMap::from([("read_path".to_owned(), ApprovalMode::Ask)]),
             ..PermissionConfig::default()
         },
+        permission_mode_override: None,
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
@@ -7661,6 +7938,7 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
             tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Ask)]),
             ..PermissionConfig::default()
         },
+        permission_mode_override: None,
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
@@ -7766,6 +8044,7 @@ async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Resul
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8019,6 +8298,7 @@ async fn prepared_execution_rejects_approval_time_argument_changes() -> Result<(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8077,6 +8357,8 @@ async fn agent_stops_after_max_turns_without_failing_the_run() -> Result<()> {
                     mode: crate::PermissionMode::AutoEdit,
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8116,6 +8398,7 @@ async fn agent_returns_tool_error_when_permission_subject_is_invalid() -> Result
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8164,6 +8447,7 @@ async fn agent_returns_approval_required_in_headless_ask_mode() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8213,6 +8497,7 @@ async fn agent_tool_default_permission_mode_cannot_relax_local_baseline() -> Res
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8275,6 +8560,8 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
                     }],
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8331,6 +8618,7 @@ async fn agent_requests_approval_for_external_directory_when_disabled_interactiv
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8386,6 +8674,7 @@ async fn agent_returns_external_directory_required_when_disabled_headless() -> R
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8443,6 +8732,8 @@ async fn agent_requests_approval_for_external_directory_default_ask() -> Result<
                     },
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8505,6 +8796,8 @@ async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
                     },
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8543,6 +8836,7 @@ async fn agent_tracks_response_handles_background_tasks_and_continuation_state()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8625,6 +8919,7 @@ async fn agent_restores_previous_response_handle_from_durable_control_state() ->
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8670,6 +8965,7 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -8978,6 +9274,7 @@ async fn agent_returns_internal_tool_result_for_unknown_registered_name() -> Res
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9027,6 +9324,7 @@ async fn agent_records_failed_execution_when_tool_returns_error() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9076,6 +9374,8 @@ async fn agent_returns_invalid_input_when_egress_payload_audit_fails() -> Result
                     tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9123,6 +9423,7 @@ async fn agent_returns_invalid_input_when_permission_plan_fails() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9174,6 +9475,8 @@ async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
                     mode: crate::PermissionMode::AutoEdit,
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9220,6 +9523,8 @@ async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> 
                     mode: crate::PermissionMode::AutoEdit,
                     ..PermissionConfig::default()
                 },
+
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9275,6 +9580,7 @@ async fn agent_retries_confirmed_pre_dispatch_connect_failures_with_frozen_reque
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9379,6 +9685,7 @@ async fn agent_bounds_confirmed_pre_dispatch_connect_retries() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9446,6 +9753,7 @@ async fn agent_cancellation_during_connect_backoff_starts_no_new_attempt() -> Re
             traffic_partition_key: None,
             interaction_mode: InteractionMode::Interactive,
             permission_config: PermissionConfig::default(),
+            permission_mode_override: None,
             permission_context: crate::PermissionEvaluationContext::default(),
             memory_config: MemoryConfig::with_enabled(false),
             compaction_config: CompactionConfig::default(),
@@ -9527,6 +9835,7 @@ async fn agent_never_retries_an_unclassified_pre_stream_transport_error() -> Res
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9585,6 +9894,7 @@ async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9669,6 +9979,7 @@ async fn agent_persists_exact_pre_generation_context_rejection() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9723,6 +10034,7 @@ async fn agent_never_marks_a_rejection_after_durable_output_as_pre_generation() 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -9779,6 +10091,7 @@ async fn agent_never_marks_a_rejection_after_observed_generation_as_pre_generati
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -10408,6 +10721,7 @@ async fn agent_binds_text_only_continuation_state_to_final_assistant_message() -
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -10458,6 +10772,7 @@ async fn agent_binds_tool_continuation_state_without_reasoning_to_assistant_mess
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -10568,6 +10883,7 @@ async fn agent_surfaces_invalid_permission_plan_with_usage_snapshot() -> Result<
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -10645,6 +10961,7 @@ async fn agent_surfaces_invalid_tool_default_mode_and_egress_audit_errors() -> R
                     traffic_partition_key: None,
                     interaction_mode: InteractionMode::Interactive,
                     permission_config: PermissionConfig::default(),
+                    permission_mode_override: None,
                     permission_context: crate::PermissionEvaluationContext::default(),
                     memory_config: MemoryConfig::with_enabled(false),
                     compaction_config: CompactionConfig::default(),
@@ -10709,6 +11026,7 @@ async fn agent_wraps_execute_errors_as_internal_tool_results() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
@@ -10850,6 +11168,7 @@ fn scripted_run_options(max_turns: usize) -> AgentRunOptions {
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
         permission_context: crate::PermissionEvaluationContext::default(),
+        permission_mode_override: None,
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
     }
@@ -11030,8 +11349,8 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
     assert_single_settled_result(&session, "call-plan-review", "not available for this run");
     assert_eq!(
         tool_result_event_count(&handler, "call-plan-review"),
-        0,
-        "routing microturn must suppress the rejected result from the model surface"
+        1,
+        "routing microturn keeps the rejected result visible on the model surface"
     );
     let decisions = session
         .entries()
@@ -11232,10 +11551,10 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
     ));
     assert_single_settled_result(&session, "call-plan-review", "accepted");
     assert_single_settled_result(&session, "call-extra", "ignored");
-    // The routing microturn suppresses the model surface: neither call produces a live
-    // ToolResult event, while each call is durably settled exactly once in the session.
-    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 0);
-    assert_eq!(tool_result_event_count(&handler, "call-extra"), 0);
+    // The routing microturn keeps the model surface live: each call settles exactly one
+    // ToolResult event so the user can see the routing activity.
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
+    assert_eq!(tool_result_event_count(&handler, "call-extra"), 1);
     assert!(session.entries().iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))

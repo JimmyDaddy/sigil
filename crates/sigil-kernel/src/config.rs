@@ -161,9 +161,9 @@ pub struct WebConfig {
     #[serde(default = "default_web_max_client_searches_per_run")]
     pub max_client_searches_per_run: u32,
     #[serde(default = "default_web_max_hosted_requests_per_run")]
-    pub max_hosted_enabled_provider_requests_per_run: u32,
+    pub max_hosted_enabled_provider_requests_per_run: Option<u32>,
     #[serde(default = "default_web_provider_hosted_max_uses")]
-    pub provider_hosted_max_uses_per_request: u32,
+    pub provider_hosted_max_uses_per_request: Option<u32>,
     #[serde(default = "default_web_max_network_attempts_per_run")]
     pub max_network_attempts_per_run: u32,
     #[serde(default = "default_web_max_total_wire_bytes_per_run")]
@@ -336,7 +336,7 @@ pub struct EffectiveWebPolicy {
     pub max_query_chars: usize,
     pub max_query_bytes: usize,
     pub max_client_searches_per_run: u32,
-    pub max_hosted_enabled_provider_requests_per_run: u32,
+    pub max_hosted_enabled_provider_requests_per_run: Option<u32>,
     pub max_network_attempts_per_run: u32,
     pub max_concurrent_requests: u32,
 }
@@ -387,7 +387,7 @@ impl WebConfig {
                 self.max_client_searches_per_run,
                 cap.max_client_searches_per_run,
             ),
-            max_hosted_enabled_provider_requests_per_run: min_cap(
+            max_hosted_enabled_provider_requests_per_run: min_optional_cap(
                 self.max_hosted_enabled_provider_requests_per_run,
                 cap.max_hosted_enabled_provider_requests_per_run,
             ),
@@ -428,6 +428,16 @@ fn stricter_network_policy(base: NetworkPolicy, cap: Option<NetworkPolicy>) -> N
 
 fn min_cap<T: Ord + Copy>(base: T, cap: Option<T>) -> T {
     cap.map_or(base, |value| base.min(value))
+}
+
+/// Tightens an optional limit: a parent cap applies even when the base is unlimited (None);
+/// without a cap the base is kept unchanged.
+fn min_optional_cap(base: Option<u32>, cap: Option<u32>) -> Option<u32> {
+    match (base, cap) {
+        (None, cap) => cap,
+        (base, None) => base,
+        (Some(base), Some(cap)) => Some(base.min(cap)),
+    }
 }
 
 /// Controls the runtime-private bundled stable search profile.
@@ -500,11 +510,11 @@ const fn default_web_max_fetches_per_run() -> u32 {
 const fn default_web_max_client_searches_per_run() -> u32 {
     3
 }
-const fn default_web_max_hosted_requests_per_run() -> u32 {
-    4
+const fn default_web_max_hosted_requests_per_run() -> Option<u32> {
+    None
 }
-const fn default_web_provider_hosted_max_uses() -> u32 {
-    3
+const fn default_web_provider_hosted_max_uses() -> Option<u32> {
+    None
 }
 const fn default_web_max_network_attempts_per_run() -> u32 {
     12

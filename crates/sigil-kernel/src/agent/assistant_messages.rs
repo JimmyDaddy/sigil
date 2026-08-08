@@ -110,7 +110,7 @@ where
     Ok(final_message_id)
 }
 
-fn save_continuation_states<H>(
+pub(super) fn save_continuation_states<H>(
     session: &mut Session,
     handler: &mut H,
     mut pending_states: Vec<ProviderContinuationState>,

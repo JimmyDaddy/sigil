@@ -557,7 +557,7 @@ where
     let finalized = processor
         .finalize(context, &buffer)
         .await
-        .map_err(|_| crate::HostedTurnError::FinalizationFailed)?;
+        .map_err(|error| crate::HostedTurnError::FinalizationFailed(format!("{error:#}")))?;
 
     for usage in buffer.usages() {
         let mut usage = usage.clone();

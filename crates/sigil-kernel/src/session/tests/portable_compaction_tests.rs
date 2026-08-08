@@ -542,6 +542,7 @@ fn idle_auto_compaction_preserves_task_list_memory_and_executable_projection() -
         task_id: task_id.clone(),
         parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
         objective: "Preserve the active task across automatic compaction".to_owned(),
+        title: None,
         status: crate::TaskRunStatus::Paused,
         reason: Some("waiting for continuation".to_owned()),
     }))?;
@@ -1395,6 +1396,7 @@ fn continuity_anchor_does_not_reactivate_terminal_task_permissions() -> Result<(
         task_id,
         parent_session_ref: crate::SessionRef::new_relative("parent.jsonl")?,
         objective: "Implement the scoped task".to_owned(),
+        title: None,
         status: crate::TaskRunStatus::Completed,
         reason: Some("done".to_owned()),
     }))?;

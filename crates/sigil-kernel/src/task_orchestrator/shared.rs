@@ -57,6 +57,7 @@ where
             task_id: request.task_id.clone(),
             parent_session_ref: request.parent_session_ref.clone(),
             objective: crate::safe_persistence_text(&request.objective),
+            title: Some(crate::task_semantic_title(&request.objective)),
             status,
             reason: reason.as_deref().map(crate::safe_persistence_text),
         }),

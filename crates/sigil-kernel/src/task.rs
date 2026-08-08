@@ -1201,6 +1201,10 @@ pub struct TaskRunEntry {
     pub task_id: TaskId,
     pub parent_session_ref: SessionRef,
     pub objective: String,
+    /// User-facing semantic title (e.g. the approved plan summary or the routed objective);
+    /// absent for legacy or internal-only runs, which fall back to the task id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub status: TaskRunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -2040,6 +2044,8 @@ pub struct TaskRunProjection {
     pub task_id: TaskId,
     pub parent_session_ref: SessionRef,
     pub objective: String,
+    /// User-facing semantic title from the durable task run entry.
+    pub title: Option<String>,
     pub status: TaskRunStatus,
     pub reason: Option<String>,
     pub latest_plan_version: Option<u32>,
@@ -2071,6 +2077,7 @@ impl TaskRunProjection {
             task_id: entry.task_id.clone(),
             parent_session_ref: entry.parent_session_ref.clone(),
             objective: entry.objective.clone(),
+            title: entry.title.clone(),
             status: entry.status,
             reason: entry.reason.clone(),
             latest_plan_version: None,
@@ -2101,6 +2108,7 @@ impl TaskRunProjection {
                 path: "unknown.jsonl".to_owned(),
             },
             objective: String::new(),
+            title: None,
             status: TaskRunStatus::Started,
             reason: None,
             latest_plan_version: None,
@@ -2798,3 +2806,29 @@ fn validate_relative_session_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 #[path = "tests/task_tests.rs"]
 mod tests;
+
+/// Maximum characters of a generated user-facing task title.
+pub const TASK_SEMANTIC_TITLE_MAX_CHARS: usize = 64;
+
+/// Builds a bounded, persistence-safe user-facing task title from a semantic source (approved
+/// plan summary or routed objective). Falls back to a stable neutral label when the source is
+/// empty after safe projection.
+#[must_use]
+pub fn task_semantic_title(source: &str) -> String {
+    let safe = crate::safe_persistence_text(source);
+    let mut title = safe.trim().to_owned();
+    if title.chars().count() > TASK_SEMANTIC_TITLE_MAX_CHARS {
+        title = format!(
+            "{}…",
+            title
+                .chars()
+                .take(TASK_SEMANTIC_TITLE_MAX_CHARS)
+                .collect::<String>()
+        );
+    }
+    if title.is_empty() {
+        "task".to_owned()
+    } else {
+        title
+    }
+}

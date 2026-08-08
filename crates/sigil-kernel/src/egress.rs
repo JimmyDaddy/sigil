@@ -574,7 +574,7 @@ pub enum EgressAuditError {
     LifecycleConflict(String),
     #[error("failed to encode or decode durable egress record")]
     Serialization(#[from] serde_json::Error),
-    #[error("failed to read or append durable egress lifecycle")]
+    #[error("failed to read or append durable egress lifecycle: {0}")]
     Store(#[from] anyhow::Error),
 }
 

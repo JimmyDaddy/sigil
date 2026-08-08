@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 
 use crate::{
-    Agent, AgentRunInput, AgentRunOptions, CompactionConfig, CompletionRequest, EventHandler,
-    FinalizedHostedTurn, HostedCitationCandidate, HostedFinalizationContext, HostedSourceCandidate,
-    HostedToolLimits, HostedToolRequest, HostedToolSupport, InteractionMode, MemoryConfig,
-    PermissionConfig, Provider, ProviderCapabilities, ReasoningStreamSupport, RunCancellationOwner,
-    RunEvent, SecretString, Session, ToolRegistry,
+    Agent, AgentHostedTurn, AgentHostedTurnPreparer, AgentRunInput, AgentRunOptions,
+    CompactionConfig, CompletionRequest, EventHandler, FinalizedHostedTurn,
+    HostedCitationCandidate, HostedFinalizationContext, HostedSourceCandidate, HostedToolLimits,
+    HostedToolRequest, HostedToolSupport, InteractionMode, MemoryConfig, PermissionConfig,
+    Provider, ProviderCapabilities, ReasoningStreamSupport, RunCancellationOwner, RunEvent,
+    SecretString, Session, ToolRegistry,
 };
 
 fn hosted_request() -> HostedToolRequest {
@@ -343,6 +344,7 @@ async fn hosted_tool_agent_emits_and_persists_only_finalized_text() {
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                permission_mode_override: None,
             },
             &mut handler,
         )
@@ -372,7 +374,108 @@ fn hosted_options(workspace_root: &std::path::Path) -> AgentRunOptions {
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig::with_enabled(false),
         compaction_config: CompactionConfig::default(),
+        permission_mode_override: None,
     }
+}
+
+struct SkipHostedTurnPreparer;
+
+#[async_trait]
+impl AgentHostedTurnPreparer for SkipHostedTurnPreparer {
+    async fn prepare_turn(&self) -> Result<Option<AgentHostedTurn>> {
+        Ok(None)
+    }
+}
+
+struct PlainProvider;
+
+#[async_trait]
+impl Provider for PlainProvider {
+    fn name(&self) -> &str {
+        "plain"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: false,
+            supports_tool_stream: false,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_agent_background_resume: false,
+            supports_agent_thread_usage: false,
+            supports_agent_result_replay: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("plain answer".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+struct NoticeRecordingHandler {
+    notices: Arc<Mutex<Vec<String>>>,
+}
+
+impl EventHandler for NoticeRecordingHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if let RunEvent::Notice(message) = event {
+            self.notices.lock().expect("notice lock").push(message);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn hosted_turn_preparer_soft_skip_continues_without_hosted_tools() {
+    // When the hosted-turn preparer reports the capability is unavailable for this request
+    // (e.g. the run's web budget is exhausted), the run must continue WITHOUT hosted tools and
+    // surface a bounded notice instead of failing.
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let mut handler = NoticeRecordingHandler {
+        notices: Arc::clone(&notices),
+    };
+    let mut session = Session::new("plain", "model");
+    let agent = Agent::new(PlainProvider, ToolRegistry::new());
+    let input =
+        AgentRunInput::user("search").with_hosted_turn_preparer(Arc::new(SkipHostedTurnPreparer));
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            hosted_options(workspace.path()),
+            &mut handler,
+        )
+        .await
+        .expect("a skipped hosted turn must not fail the run");
+    assert_eq!(output.result.final_text, "plain answer");
+    let recorded = notices.lock().expect("notice lock");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "one bounded notice about the skipped hosted turn"
+    );
+    assert!(
+        recorded[0].contains("web budget"),
+        "notice must explain the skip, got: {}",
+        recorded[0]
+    );
 }
 
 struct FailingProcessor;
@@ -384,7 +487,9 @@ impl HostedEvidenceProcessor for FailingProcessor {
         _context: HostedFinalizationContext,
         _buffer: &HostedTurnBuffer,
     ) -> Result<FinalizedHostedTurn, HostedTurnError> {
-        Err(HostedTurnError::FinalizationFailed)
+        Err(HostedTurnError::FinalizationFailed(
+            "test processor failed".to_owned(),
+        ))
     }
 }
 
@@ -505,4 +610,100 @@ async fn hosted_tool_cancel_discards_buffer_before_finalizer_visibility() {
     assert!(events.lock().expect("event lock").is_empty());
     let durable = serde_json::to_string(session.entries()).expect("session should serialize");
     assert!(!durable.contains("raw private cancellation text"));
+}
+
+struct DefaultCapProvider {
+    expected_max_tokens: Option<u32>,
+}
+
+#[async_trait]
+impl Provider for DefaultCapProvider {
+    fn name(&self) -> &str {
+        "default-cap"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: false,
+            supports_tool_stream: false,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_agent_background_resume: false,
+            supports_agent_thread_usage: false,
+            supports_agent_result_replay: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    fn default_max_output_tokens(&self, _model_name: &str) -> Option<u32> {
+        Some(12_345)
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        assert_eq!(
+            request.max_tokens, self.expected_max_tokens,
+            "the run boundary must resolve the provider default cap"
+        );
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("capped answer".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn run_boundary_resolves_provider_default_output_cap_and_defers_to_explicit() {
+    // A run without explicit output constraints must carry the provider's canonical default cap;
+    // an explicit constraint always wins over the default.
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+
+    let mut session = Session::new("default-cap", "model");
+    let agent = Agent::new(
+        DefaultCapProvider {
+            expected_max_tokens: Some(12_345),
+        },
+        ToolRegistry::new(),
+    );
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("no explicit cap"),
+            hosted_options(workspace.path()),
+            &mut NoticeRecordingHandler {
+                notices: Arc::new(Mutex::new(Vec::new())),
+            },
+        )
+        .await
+        .expect("run resolves the provider default cap");
+
+    let mut session = Session::new("default-cap", "model");
+    let agent = Agent::new(
+        DefaultCapProvider {
+            expected_max_tokens: Some(777),
+        },
+        ToolRegistry::new(),
+    );
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("explicit cap").with_max_output_tokens(777),
+            hosted_options(workspace.path()),
+            &mut NoticeRecordingHandler {
+                notices: Arc::new(Mutex::new(Vec::new())),
+            },
+        )
+        .await
+        .expect("explicit cap overrides the provider default");
 }

@@ -373,6 +373,76 @@ fn submit_plan_draft_validates_strict_schema() -> Result<()> {
 }
 
 #[test]
+fn submit_plan_draft_accepts_schema_conformant_intents_and_rejects_legacy_shape() -> Result<()> {
+    // Regression: the advertised tool schema and the host-side IntentProposalUnitV1 parser drifted
+    // (intent_id/description/string criteria vs intent_alias/statement/criterion objects), so a
+    // model submitting intents exactly as the schema advertised was always rejected. The schema
+    // and the strict parser must accept the same shape.
+    let session = Session::new("mock", "mock");
+    let turn = source_turn(&session, "msg-1");
+    let review_id = plan_review_id_for_source(&turn);
+    let attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let plan_id = plan_review_plan_id_for_attempt(&review_id, &attempt_id);
+    let source = PlanSourceRef {
+        source_turn: Some(turn.clone()),
+        ..PlanSourceRef::default()
+    };
+    let conformant = r#"{
+        "schema_version": 2,
+        "summary": "Refactor the coordinator",
+        "steps": [
+            {"step_id": "s1", "title": "Update coordinator", "role": "executor", "depends_on": [], "mode": "write", "isolation": "sequential_workspace_write", "target_paths": ["src/coordinator.rs"], "intent_aliases": ["coordinator-refactor"]}
+        ],
+        "intents": [{
+            "intent_alias": "coordinator-refactor",
+            "title": "Refactor coordinator",
+            "statement": "Extract the coordinator into bounded modules",
+            "acceptance_criteria": [
+                {"criterion_alias": "c1", "statement": "coordinator compiles", "required": true}
+            ],
+            "depends_on_aliases": []
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    let entry = submit_plan_draft_entry(conformant, plan_id.clone(), source.clone(), 42, None)?
+        .expect("schema-conformant intents must materialize");
+    assert_eq!(entry.steps.len(), 1);
+    let proposal = entry.intent_proposal.as_ref().expect("intent proposal");
+    assert_eq!(proposal.intents.len(), 1);
+    assert_eq!(proposal.intents[0].intent_alias, "coordinator-refactor");
+    assert_eq!(proposal.intents[0].acceptance_criteria.len(), 1);
+    assert_eq!(
+        proposal.intents[0].acceptance_criteria[0].criterion_alias,
+        "c1"
+    );
+
+    // The legacy mismatched shape (what the old schema advertised) must stay fail-closed.
+    let legacy = r#"{
+        "schema_version": 2,
+        "summary": "Refactor the coordinator",
+        "steps": [
+            {"step_id": "s1", "title": "Update coordinator", "role": "executor", "depends_on": [], "mode": "write", "isolation": "sequential_workspace_write", "target_paths": ["src/coordinator.rs"]}
+        ],
+        "intents": [{
+            "intent_id": "intent-1",
+            "title": "Refactor coordinator",
+            "description": "Extract the coordinator",
+            "acceptance_criteria": ["coordinator compiles"]
+        }],
+        "target_paths": ["src/coordinator.rs"],
+        "suggested_checks": ["cargo test"]
+    }"#;
+    let error = submit_plan_draft_entry(legacy, plan_id, source, 42, None)
+        .expect_err("legacy intent shape must fail closed");
+    assert!(
+        format!("{error:#}").contains("unknown field `intent_id`"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn reconcile_closes_started_attempts_and_promotes_durable_drafts() -> Result<()> {
     let mut session = Session::new("mock", "mock");
     let turn = source_turn(&session, "msg-1");

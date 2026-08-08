@@ -1088,10 +1088,54 @@ impl PermissionDecision {
     }
 }
 
+/// Runtime-mutable permission mode consulted at decision time.
+///
+/// The agent loop builds the policy chain once per run; this override lets the host switch the
+/// primary permission mode while the run is active without rebuilding the chain. `None` means the
+/// configured mode applies.
+#[derive(Debug, Clone, Default)]
+pub struct PermissionModeOverride {
+    inner: std::sync::Arc<std::sync::Mutex<Option<PermissionMode>>>,
+}
+
+impl PermissionModeOverride {
+    /// Creates an override that starts with the configured mode (no override).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the effective primary mode for subsequent decisions.
+    pub fn set(&self, mode: PermissionMode) {
+        *self
+            .inner
+            .lock()
+            .expect("permission mode override lock poisoned") = Some(mode);
+    }
+
+    /// Clears the override; the configured mode applies again.
+    pub fn clear(&self) {
+        *self
+            .inner
+            .lock()
+            .expect("permission mode override lock poisoned") = None;
+    }
+
+    /// Returns the currently effective override, if any.
+    #[must_use]
+    pub fn current(&self) -> Option<PermissionMode> {
+        *self
+            .inner
+            .lock()
+            .expect("permission mode override lock poisoned")
+    }
+}
+
 /// Policy evaluator that resolves allow/ask/deny for one tool call.
 pub struct PermissionPolicy<'a> {
     config: &'a PermissionConfig,
     context: Option<&'a PermissionEvaluationContext>,
+    mode_override: Option<&'a PermissionModeOverride>,
     command_patterns: Vec<CompiledCommandPermissionPattern<'a>>,
     rules: Vec<CompiledPermissionRule<'a>>,
     external_rules: Vec<CompiledExternalDirectoryRule<'a>>,
@@ -1106,6 +1150,7 @@ pub struct PermissionPolicy<'a> {
 pub struct PermissionPolicyChain<'a> {
     policies: Vec<PermissionPolicy<'a>>,
     primary_mode: PermissionMode,
+    mode_override: Option<&'a PermissionModeOverride>,
 }
 
 impl<'a> PermissionPolicyChain<'a> {
@@ -1114,18 +1159,38 @@ impl<'a> PermissionPolicyChain<'a> {
         config: &'a PermissionConfig,
         context: &'a PermissionEvaluationContext,
     ) -> Self {
+        Self::new_with_context_and_mode_override(config, context, None)
+    }
+
+    /// Creates a decision-time policy chain with a runtime-mutable primary mode override.
+    pub fn new_with_context_and_mode_override(
+        config: &'a PermissionConfig,
+        context: &'a PermissionEvaluationContext,
+        mode_override: Option<&'a PermissionModeOverride>,
+    ) -> Self {
         let mut policies =
             Vec::with_capacity(context.delegated_policy_constraints.len().saturating_add(1));
-        policies.push(PermissionPolicy::new_with_context(config, context));
+        policies.push(PermissionPolicy::new_with_context_and_mode_override(
+            config,
+            Some(context),
+            mode_override,
+        ));
         policies.extend(
             context
                 .delegated_policy_constraints
                 .iter()
-                .map(|constraint| PermissionPolicy::new_with_context(constraint, context)),
+                .map(|constraint| {
+                    PermissionPolicy::new_with_context_and_mode_override(
+                        constraint,
+                        Some(context),
+                        None,
+                    )
+                }),
         );
         Self {
             policies,
             primary_mode: config.mode,
+            mode_override,
         }
     }
 
@@ -1170,11 +1235,17 @@ impl<'a> PermissionPolicyChain<'a> {
             )?;
             decision.restrict_with(constraint);
         }
-        if self.primary_mode == PermissionMode::DangerFullAccess {
+        if self.effective_primary_mode() == PermissionMode::DangerFullAccess {
             decision.danger_full_access = true;
             decision.suppress_danger_full_access_asks();
         }
         Ok(decision)
+    }
+
+    fn effective_primary_mode(&self) -> PermissionMode {
+        self.mode_override
+            .and_then(PermissionModeOverride::current)
+            .unwrap_or(self.primary_mode)
     }
 
     /// Resolves a V2 plan and applies analysis safety after all delegated policies are combined.
@@ -1202,9 +1273,28 @@ impl<'a> PermissionPolicyChain<'a> {
 impl<'a> PermissionPolicy<'a> {
     /// Creates a policy evaluator from shared configuration.
     pub fn new(config: &'a PermissionConfig) -> Self {
+        Self::new_with_context_and_mode_override(config, None, None)
+    }
+
+    /// Creates a policy evaluator with the resolved runtime path context.
+    pub fn new_with_context(
+        config: &'a PermissionConfig,
+        context: &'a PermissionEvaluationContext,
+    ) -> Self {
+        Self::new_with_context_and_mode_override(config, Some(context), None)
+    }
+
+    /// Creates a policy evaluator with the resolved runtime path context and a runtime-mutable
+    /// primary mode override.
+    pub fn new_with_context_and_mode_override(
+        config: &'a PermissionConfig,
+        context: Option<&'a PermissionEvaluationContext>,
+        mode_override: Option<&'a PermissionModeOverride>,
+    ) -> Self {
         Self {
             config,
-            context: None,
+            context,
+            mode_override,
             command_patterns: compile_command_permission_patterns(&config.commands),
             rules: config
                 .rules
@@ -1220,27 +1310,12 @@ impl<'a> PermissionPolicy<'a> {
         }
     }
 
-    /// Creates a policy evaluator with the resolved runtime path context.
-    pub fn new_with_context(
-        config: &'a PermissionConfig,
-        context: &'a PermissionEvaluationContext,
-    ) -> Self {
-        Self {
-            config,
-            context: Some(context),
-            command_patterns: compile_command_permission_patterns(&config.commands),
-            rules: config
-                .rules
-                .iter()
-                .map(CompiledPermissionRule::new)
-                .collect(),
-            external_rules: config
-                .external_directory
-                .rules
-                .iter()
-                .map(CompiledExternalDirectoryRule::new)
-                .collect(),
-        }
+    /// Returns the effective primary mode: the runtime override when present, else the configured
+    /// mode.
+    fn effective_mode(&self) -> PermissionMode {
+        self.mode_override
+            .and_then(PermissionModeOverride::current)
+            .unwrap_or(self.config.mode)
     }
 
     /// Resolves one tool call decision from the tool spec, stable name, and subjects.
@@ -1523,7 +1598,7 @@ impl<'a> PermissionPolicy<'a> {
         subject: Option<&ToolSubject>,
         zone: Option<PathTrustZone>,
     ) -> Result<ApprovalMode> {
-        let mut mode = self.config.mode.baseline_for(access, operation, zone);
+        let mut mode = self.effective_mode().baseline_for(access, operation, zone);
 
         let tool_mode = self.config.tools.get(tool_name).copied();
         if let Some(tool_mode) = tool_mode {

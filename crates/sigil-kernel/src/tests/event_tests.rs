@@ -2328,6 +2328,8 @@ fn task_run_entry() -> TaskRunEntry {
         task_id: task_id(),
         parent_session_ref: session_ref(),
         objective: "implement public events".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }

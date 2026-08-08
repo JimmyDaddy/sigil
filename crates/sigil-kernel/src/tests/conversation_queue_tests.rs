@@ -528,6 +528,8 @@ fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("session.jsonl")?,
             objective: "finish the task safely".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Paused,
             reason: Some("safe point".to_owned()),
         },
@@ -615,6 +617,8 @@ fn task_guidance_promotion_rejects_stale_or_unaccepted_plan_without_writing() ->
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("session.jsonl")?,
             objective: "continue an accepted plan".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Failed,
             reason: None,
         },

@@ -110,6 +110,14 @@ model = "deepseek-v4-pro"
     assert!(defaults.web.bundled_search.enabled);
     assert_eq!(defaults.web.search_route, WebSearchRoute::Auto);
     assert_eq!(defaults.web.allowed_ports, vec![80, 443]);
+    assert_eq!(
+        defaults.web.max_hosted_enabled_provider_requests_per_run, None,
+        "hosted requests per run default to unlimited"
+    );
+    assert_eq!(
+        defaults.web.provider_hosted_max_uses_per_request, None,
+        "hosted max uses per request default to unlimited"
+    );
 
     let configured: RootConfig = toml::from_str(
         r#"
@@ -127,6 +135,7 @@ proxy_mode = "direct"
 redirect_policy = "deny"
 search_route = "disabled"
 max_query_chars = 128
+max_hosted_enabled_provider_requests_per_run = 4
 allowed_domains = ["docs.example.com"]
 blocked_domains = ["private.example.com"]
 
@@ -142,6 +151,11 @@ enabled = false
     assert_eq!(configured.web.search_route, WebSearchRoute::Disabled);
     assert_eq!(configured.web.max_query_chars, 128);
     assert!(!configured.web.bundled_search.enabled);
+    assert_eq!(
+        configured.web.max_hosted_enabled_provider_requests_per_run,
+        Some(4),
+        "an explicit advanced-config hosted cap is honored"
+    );
 
     let rendered = toml::to_string_pretty(&configured).expect("root config should serialize");
     assert!(rendered.contains("[web]"));
@@ -182,7 +196,10 @@ fn web_policy_cap_only_tightens_the_root_policy() {
     assert_eq!(effective.max_query_chars, 128);
     assert_eq!(effective.max_query_bytes, 256);
     assert_eq!(effective.max_client_searches_per_run, 1);
-    assert_eq!(effective.max_hosted_enabled_provider_requests_per_run, 2);
+    assert_eq!(
+        effective.max_hosted_enabled_provider_requests_per_run,
+        Some(2)
+    );
     assert_eq!(effective.max_network_attempts_per_run, 3);
     assert_eq!(effective.max_concurrent_requests, 1);
 }

@@ -78,7 +78,9 @@ use approval_policy::{
     active_plan_approval_authority, interactive_external_directory_approval_override,
     plan_approval_decision_override, tool_session_grant_decision_override,
 };
-use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
+use assistant_messages::{
+    append_final_answer_message, append_tool_preamble_message, save_continuation_states,
+};
 use plan_draft::{
     append_tool_ignored_after_plan_draft, handle_submit_plan_draft_call,
     submit_plan_draft_call_is_accepted,
@@ -184,6 +186,7 @@ pub struct AgentRunOptions {
     pub interaction_mode: InteractionMode,
     pub permission_config: PermissionConfig,
     pub permission_context: PermissionEvaluationContext,
+    pub permission_mode_override: Option<crate::PermissionModeOverride>,
     pub memory_config: MemoryConfig,
     pub compaction_config: CompactionConfig,
 }
@@ -361,6 +364,7 @@ pub struct AgentRunInput {
     hosted_tools: Vec<crate::HostedToolRequest>,
     hosted_evidence_processor: Option<Arc<dyn crate::HostedEvidenceProcessor>>,
     hosted_turn_preparer: Option<Arc<dyn AgentHostedTurnPreparer>>,
+    pending_input_provider: Option<Arc<dyn PendingConversationInputProvider>>,
     initial_frozen_provider_request: Option<FrozenProviderRequestMaterial>,
     max_output_tokens: Option<u32>,
     suppressed_tool_names: Vec<String>,
@@ -470,6 +474,7 @@ impl AgentRunInput {
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
+            pending_input_provider: None,
             initial_frozen_provider_request: None,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
@@ -501,6 +506,7 @@ impl AgentRunInput {
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
+            pending_input_provider: None,
             initial_frozen_provider_request: None,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
@@ -531,6 +537,7 @@ impl AgentRunInput {
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
+            pending_input_provider: None,
             initial_frozen_provider_request: None,
             max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
@@ -669,6 +676,16 @@ impl AgentRunInput {
     #[must_use]
     pub fn with_hosted_turn_preparer(mut self, preparer: Arc<dyn AgentHostedTurnPreparer>) -> Self {
         self.hosted_turn_preparer = Some(preparer);
+        self
+    }
+
+    /// Installs a runtime-owned hook that may inject queued follow-ups at safe turn boundaries.
+    #[must_use]
+    pub fn with_pending_input_provider(
+        mut self,
+        provider: Arc<dyn PendingConversationInputProvider>,
+    ) -> Self {
+        self.pending_input_provider = Some(provider);
         self
     }
 
@@ -1056,6 +1073,76 @@ fn claim_natural_run_terminal(
     Ok(())
 }
 
+/// Consults the pending-input provider at a safe turn boundary and emits the follow-up
+/// injection notice when one was promoted.
+async fn promote_pending_follow_up<H>(
+    provider: &dyn PendingConversationInputProvider,
+    session: &mut Session,
+    logical_run_id: &str,
+    handler: &mut H,
+) -> Result<bool>
+where
+    H: EventHandler + Send,
+{
+    if provider
+        .promote_next_pending_input(session, logical_run_id)
+        .await?
+        .is_some()
+    {
+        handler.handle(RunEvent::Notice(
+            "queued follow-up injected at a safe point".to_owned(),
+        ))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Records the durable chat route decision for a routing microturn whose free text was delivered
+/// as an ordinary conversation answer, keeping the source-turn decision projection consistent.
+fn record_fallback_chat_route_decision<H>(
+    session: &mut Session,
+    handler: &mut H,
+    purpose: Option<&AgentRunPurpose>,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let Some(AgentRunPurpose::Conversation(context)) = purpose else {
+        return Ok(());
+    };
+    let conversation = context.as_ref();
+    let fingerprint = conversation
+        .plan_review
+        .as_ref()
+        .map(|binding| binding.route_contract_fingerprint.clone())
+        .or_else(|| {
+            conversation
+                .task_handoff
+                .as_ref()
+                .map(|binding| binding.route_contract_fingerprint.clone())
+        })
+        .ok_or_else(|| anyhow!("fallback chat decision requires a route contract fingerprint"))?;
+    let decided_at_ms = conversation
+        .plan_review
+        .as_ref()
+        .map(|binding| binding.decided_at_ms)
+        .or_else(|| {
+            conversation
+                .task_handoff
+                .as_ref()
+                .map(|binding| binding.decided_at_ms)
+        })
+        .unwrap_or_default();
+    append_chat_route_decision(
+        session,
+        handler,
+        &conversation.source_turn,
+        conversation.route_capability,
+        &fingerprint,
+        decided_at_ms,
+    )
+}
+
 /// Model-visible context that should be injected before accepting a final answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalAnswerContext {
@@ -1112,6 +1199,7 @@ pub enum AgentRunTerminalReason {
     MaxTurns,
     DelegationUnsatisfied,
     TaskRoutingUnsatisfied,
+    RoutingFreeTextFallback,
     TaskHandoff,
     PlanReviewHandoff,
 }
@@ -1123,6 +1211,7 @@ impl AgentRunTerminalReason {
             Self::MaxTurns => "max_turns",
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
             Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
+            Self::RoutingFreeTextFallback => "routing_free_text_fallback",
             Self::TaskHandoff => "task_handoff",
             Self::PlanReviewHandoff => "plan_review_handoff",
         }
@@ -1311,7 +1400,26 @@ pub struct AgentHostedTurn {
 /// Runtime hook invoked immediately before every provider request in a multi-turn run.
 #[async_trait]
 pub trait AgentHostedTurnPreparer: Send + Sync {
-    async fn prepare_turn(&self) -> Result<AgentHostedTurn>;
+    /// Returns the authorized hosted turn, or `None` when the hosted capability is unavailable
+    /// for this request (soft skip, e.g. the run's web budget is exhausted). Hard failures
+    /// (denied egress, invalid configuration) still return an error and fail the run.
+    async fn prepare_turn(&self) -> Result<Option<AgentHostedTurn>>;
+}
+
+/// Runtime hook consulted at safe turn boundaries while a conversation run is active.
+///
+/// The host durably promotes the next queued follow-up, appends its user message to the
+/// session, and returns the prompt text. The kernel then continues the same run with that
+/// message as the next user turn instead of interrupting or finalizing.
+#[async_trait]
+pub trait PendingConversationInputProvider: Send + Sync {
+    /// Durably promotes the next queued follow-up for this logical run and returns its
+    /// prompt text, or `None` when no follow-up is ready to inject.
+    async fn promote_next_pending_input(
+        &self,
+        session: &mut Session,
+        logical_run_id: &str,
+    ) -> Result<Option<String>>;
 }
 
 /// Provider-backed agent loop with a registered tool surface.
@@ -1578,6 +1686,20 @@ where
                 None => input,
             }
         };
+        // Resolve the provider's canonical default output cap at the run boundary when the run
+        // carries no explicit constraint, so requests are deterministic for providers whose wire
+        // protocol requires max_tokens or pins a canonical output budget.
+        let input = if input.max_output_tokens.is_some() {
+            input
+        } else {
+            match self
+                .provider
+                .default_max_output_tokens(session.model_name())
+            {
+                Some(default) => input.with_max_output_tokens(default),
+                None => input,
+            }
+        };
         let AgentRunInput {
             persisted_user_message,
             persisted_user_message_id,
@@ -1599,6 +1721,7 @@ where
             hosted_tools,
             hosted_evidence_processor,
             hosted_turn_preparer,
+            pending_input_provider,
             mut initial_frozen_provider_request,
             max_output_tokens,
             suppressed_tool_names,
@@ -1791,6 +1914,7 @@ where
 
         session.reconcile_prepared_mutations(&options.workspace_root)?;
         session.reconcile_unfinished_write_tool_executions(&options.workspace_root)?;
+        session.reconcile_egress_lifecycle()?;
 
         let mut current_run_overlays = Vec::new();
         if let Some(message) = persisted_user_message {
@@ -1883,9 +2007,10 @@ where
             current_run_overlays.push(projection.overlay);
         }
 
-        let permission_policy = PermissionPolicyChain::new_with_context(
+        let permission_policy = PermissionPolicyChain::new_with_context_and_mode_override(
             &options.permission_config,
             &options.permission_context,
+            options.permission_mode_override.as_ref(),
         );
         let logical_run_id =
             logical_run_id.unwrap_or_else(|| format!("agent-run-{}", uuid::Uuid::new_v4()));
@@ -1915,6 +2040,7 @@ where
         let tool_artifact_read_budget = tool_artifact_read_budget.unwrap_or_default();
 
         let mut model_turns = 0usize;
+        let mut hosted_unavailable_noticed = false;
         loop {
             // RFC-0059 §10.3: per-model-turn window; no-op for delegated children.
             tool_artifact_read_budget.reset_turn();
@@ -1989,6 +2115,24 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
+            // Safe-point follow-up injection: after the first provider turn, a queued
+            // follow-up is promoted into the session and answered by the same run, without
+            // interrupting it. Routing microturns and non-conversation runs are exempt.
+            if model_turns >= 2
+                && !task_routing_decision_pending
+                && matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_)))
+                && let Some(provider) = pending_input_provider.as_ref()
+                && promote_pending_follow_up(
+                    provider.as_ref(),
+                    &mut *session,
+                    &logical_run_id,
+                    handler,
+                )
+                .await?
+            {
+                continue;
+            }
+
             let participant_finalization_turn =
                 participant_finalization_pending && !participant_finalization_dispatched;
             let mut tool_specs = if participant_finalization_turn {
@@ -2055,11 +2199,26 @@ where
                             runtime_context.clone(),
                             &current_run_overlays,
                         )?;
-                    let prepared_hosted_turn =
-                        match (participant_finalization_turn, hosted_turn_preparer.as_ref()) {
-                            (true, _) | (false, None) => None,
-                            (false, Some(preparer)) => Some(preparer.prepare_turn().await?),
-                        };
+                    let prepared_hosted_turn = match (
+                        participant_finalization_turn,
+                        hosted_turn_preparer.as_ref(),
+                    ) {
+                        (true, _) | (false, None) => None,
+                        (false, Some(preparer)) => match preparer.prepare_turn().await? {
+                            Some(turn) => Some(turn),
+                            None => {
+                                // The run-wide hosted budget stays exhausted for the rest of the
+                                // run; surface the soft skip once instead of every provider turn.
+                                if !hosted_unavailable_noticed {
+                                    hosted_unavailable_noticed = true;
+                                    handler.handle(RunEvent::Notice(
+                                        "hosted web search is unavailable for this request (web budget exhausted)".to_owned(),
+                                    ))?;
+                                }
+                                None
+                            }
+                        },
+                    };
                     let current_hosted_tools = if participant_finalization_turn {
                         &[][..]
                     } else {
@@ -2098,8 +2257,7 @@ where
                     }
                 };
             let provider_turn_result = {
-                let mut provider_event_handler =
-                    RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending);
+                let mut provider_event_handler = RoutingMicroturnEventFilter::new(handler, false);
                 match initial_frozen_request {
                     Some(frozen_request) => {
                         provider_stream::collect_frozen_provider_turn(
@@ -2199,7 +2357,7 @@ where
                 total_tool_calls += completed_calls.len();
                 let tool_preamble_overlay = append_tool_preamble_message(
                     session,
-                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
+                    &mut RoutingMicroturnEventFilter::new(handler, false),
                     tools,
                     &assistant_text,
                     &completed_calls,
@@ -2433,7 +2591,7 @@ where
                         };
                         accepted_task_handoff = handle_task_planning_request_call(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut RoutingMicroturnEventFilter::new(handler, false),
                             &mut outcome,
                             &call,
                             binding,
@@ -2488,7 +2646,7 @@ where
                         };
                         accepted_plan_review = handle_request_plan_review_call(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, true),
+                            &mut RoutingMicroturnEventFilter::new(handler, false),
                             &mut outcome,
                             &call,
                             binding,
@@ -2666,7 +2824,7 @@ where
                 // failure: join dependencies are aborted before the error propagates.
                 if let Err(error) = emit_tool_result_batch(
                     session,
-                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
+                    &mut RoutingMicroturnEventFilter::new(handler, false),
                     &mut outcome,
                     std::mem::take(&mut assistant_batch_results),
                 ) {
@@ -2771,32 +2929,18 @@ where
                             conversation_route_routing_contract_material(),
                         ));
                     } else {
+                        // The model twice failed to produce a typed routing decision. Degrade to
+                        // an ordinary conversation instead of blocking: the user message is
+                        // answered by the same run under the direct-conversation contract.
                         handler.handle(RunEvent::Notice(
-                            "routing decision remained invalid; no user-visible answer was recorded"
+                            "routing decision was not produced; continuing as an ordinary conversation"
                                 .to_owned(),
                         ))?;
-                        outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
-                        outcome.tool_calls = total_tool_calls;
-                        claim_natural_run_terminal(
-                            cancellation.as_ref(),
-                            cancellation_terminal_authority,
-                        )?;
-                        append_run_lifecycle_events(
-                            session,
-                            "blocked",
-                            outcome.terminal_reason,
-                            None,
-                            total_tool_calls,
-                        )?;
-                        return Ok(AgentRunOutput {
-                            result: AgentRunResult {
-                                final_text: String::new(),
-                                tool_calls: total_tool_calls,
-                                final_message_id: None,
-                            },
-                            outcome,
-                            disposition: AgentRunDisposition::Blocked,
-                        });
+                        record_fallback_chat_route_decision(session, handler, purpose.as_ref())?;
+                        task_routing_decision_pending = false;
+                        transient_context.push(ModelMessage::system(
+                            direct_conversation_continuation_prompt_contract_material(),
+                        ));
                     }
                 }
                 if accepted_task_plan {
@@ -2897,29 +3041,19 @@ where
                     ));
                     continue;
                 }
+                // The model twice failed to produce a typed routing decision. Degrade to an
+                // ordinary conversation instead of blocking: the user message is answered by
+                // the same run under the direct-conversation contract.
                 handler.handle(RunEvent::Notice(
-                    "routing microturn did not return a typed decision; no user-visible answer was recorded"
+                    "routing decision was not produced; continuing as an ordinary conversation"
                         .to_owned(),
                 ))?;
-                outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
-                outcome.tool_calls = total_tool_calls;
-                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
-                append_run_lifecycle_events(
-                    session,
-                    "blocked",
-                    outcome.terminal_reason,
-                    None,
-                    total_tool_calls,
-                )?;
-                return Ok(AgentRunOutput {
-                    result: AgentRunResult {
-                        final_text: String::new(),
-                        tool_calls: total_tool_calls,
-                        final_message_id: None,
-                    },
-                    outcome,
-                    disposition: AgentRunDisposition::Blocked,
-                });
+                record_fallback_chat_route_decision(session, handler, purpose.as_ref())?;
+                task_routing_decision_pending = false;
+                transient_context.push(ModelMessage::system(
+                    direct_conversation_continuation_prompt_contract_material(),
+                ));
+                continue;
             }
 
             if let Some(requirement) = agent_delegation_enforced.as_ref()
@@ -2994,6 +3128,34 @@ where
                     outcome,
                     disposition: AgentRunDisposition::Interrupted,
                 });
+            }
+            // Final-answer gate: a queued follow-up keeps the run alive instead of finalizing.
+            // The pending assistant text is persisted so the follow-up answer continues the
+            // transcript instead of replacing it.
+            if !task_routing_decision_pending
+                && matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_)))
+                && let Some(provider) = pending_input_provider.as_ref()
+                && promote_pending_follow_up(
+                    provider.as_ref(),
+                    &mut *session,
+                    &logical_run_id,
+                    handler,
+                )
+                .await?
+            {
+                if !assistant_text.trim().is_empty() {
+                    let exact_message = ModelMessage::assistant_with_kind(
+                        Some(assistant_text),
+                        Vec::new(),
+                        crate::AssistantMessageKind::FinalAnswer,
+                    );
+                    let (message, _) = crate::project_message_for_persistence(exact_message)?;
+                    let message_id = message.id.clone();
+                    session.append_assistant_message(message.clone())?;
+                    handler.handle(RunEvent::AssistantMessage(message))?;
+                    save_continuation_states(session, handler, pending_states, &message_id)?;
+                }
+                continue;
             }
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let mut hosted_finalized = hosted_finalized;

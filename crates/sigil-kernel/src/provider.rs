@@ -1208,6 +1208,16 @@ pub trait Provider: Send + Sync {
         ProviderContextCapabilities::unknown()
     }
 
+    /// Returns the canonical default output cap for one model on this route.
+    ///
+    /// Providers whose wire protocol requires `max_tokens` (Anthropic-compatible Messages) or
+    /// that pin a canonical output budget must return `Some`; the agent loop resolves it onto a
+    /// run that carries no explicit output constraint, so every provider request is
+    /// deterministic. `None` means the provider accepts an omitted cap (server-side default).
+    fn default_max_output_tokens(&self, _model_name: &str) -> Option<u32> {
+        None
+    }
+
     /// Returns trusted, exact-model pricing evidence for usage accounting.
     ///
     /// Unknown or compatible routes return `None`; callers must never treat absence as zero cost.

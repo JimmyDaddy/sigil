@@ -533,7 +533,7 @@ pub fn request_plan_review_tool_spec() -> ToolSpec {
 pub fn submit_plan_draft_tool_spec() -> ToolSpec {
     ToolSpec {
         name: SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
-        description: "Submit the read-only plan review draft for this request. The draft must use schema_version 2 with a summary, at least one executable step (each with a stable step_id, title, role, depends_on, mode and isolation), target paths relative to the workspace, and suggested checks. Optional intents remain unaccepted proposals. The host validates the schema, stable ids, paths, checks and intent proposal; the host owns the plan identity, hash, timestamps and the durable artifact. Do not call this tool when the request cannot be expressed as executable steps."
+        description: "Submit the read-only plan review draft for this request. The draft must use schema_version 2 with a summary, at least one executable step (each with a stable step_id, title, role, depends_on, mode and isolation), target paths relative to the workspace, and suggested checks. Optional intents remain unaccepted proposals: when intents are provided, every write-mode step must bind exactly one intent via intent_aliases, and every alias must reference a top-level intent_alias. The host validates the schema, stable ids, paths, checks and intent proposal; the host owns the plan identity, hash, timestamps and the durable artifact. Do not call this tool when the request cannot be expressed as executable steps."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -573,12 +573,25 @@ pub fn submit_plan_draft_tool_spec() -> ToolSpec {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "intent_id": {"type": "string"},
+                            "intent_alias": {"type": "string"},
                             "title": {"type": "string"},
-                            "description": {"type": "string"},
-                            "acceptance_criteria": {"type": "array", "items": {"type": "string"}}
+                            "statement": {"type": "string"},
+                            "acceptance_criteria": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "criterion_alias": {"type": "string"},
+                                        "statement": {"type": "string"},
+                                        "required": {"type": "boolean"}
+                                    },
+                                    "required": ["criterion_alias", "statement", "required"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "depends_on_aliases": {"type": "array", "items": {"type": "string"}}
                         },
-                        "required": ["intent_id", "title"],
+                        "required": ["intent_alias", "title", "statement", "acceptance_criteria"],
                         "additionalProperties": false
                     }
                 },

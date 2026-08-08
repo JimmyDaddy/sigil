@@ -133,6 +133,7 @@ fn interactive_options(network_policy: NetworkPolicy) -> AgentRunOptions {
         },
         memory_config: MemoryConfig::default(),
         compaction_config: CompactionConfig::default(),
+        permission_mode_override: None,
     }
 }
 

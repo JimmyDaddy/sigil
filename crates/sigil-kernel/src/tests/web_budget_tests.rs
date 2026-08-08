@@ -9,7 +9,7 @@ fn limits() -> WebTaskTreeBudgetLimits {
     WebTaskTreeBudgetLimits {
         max_fetch_calls: 3,
         max_client_search_calls: 3,
-        max_hosted_requests: 2,
+        max_hosted_requests: Some(2),
         max_network_attempts: 4,
         max_wire_bytes: 10,
         max_decoded_bytes: 20,
@@ -230,4 +230,85 @@ fn fetch_and_client_search_limits_are_independent() {
             dimension: "client_search_calls"
         })
     ));
+}
+
+#[test]
+fn unlimited_hosted_requests_never_exhaust_the_hosted_dimension() {
+    // The hosted-request cap is optional (None = unlimited by default); only an explicit
+    // advanced-configuration cap can exhaust it.
+    let budget = WebTaskTreeBudget::new(
+        "root-run",
+        WebTaskTreeBudgetLimits {
+            max_hosted_requests: None,
+            ..limits()
+        },
+        None,
+    )
+    .expect("budget");
+    for index in 0..64 {
+        let mut reservation = budget
+            .reserve(WebBudgetReservationRequest {
+                correlation_id: format!("hosted-{index}"),
+                attempt_id: format!("attempt-{index}"),
+                route_lease_id: format!("lease-{index}"),
+                route_fingerprint: "route-fingerprint".to_owned(),
+                kind: WebBudgetReservationKind::HostedProviderRequest,
+            })
+            .expect("unlimited hosted requests must keep reserving");
+        reservation
+            .commit_call()
+            .expect("hosted call commits without a cap");
+    }
+    assert!(!budget.snapshot().expect("snapshot").exhausted);
+    assert_eq!(budget.snapshot().expect("snapshot").hosted_requests, 64);
+}
+
+#[test]
+fn unlimited_hosted_survives_exhaustion_of_other_dimensions() {
+    // A user-chosen unlimited hosted budget must stay usable even after another dimension (e.g.
+    // client search calls) hits its cap and latches the global exhausted flag.
+    let budget = WebTaskTreeBudget::new(
+        "root-run",
+        WebTaskTreeBudgetLimits {
+            max_client_search_calls: 1,
+            max_hosted_requests: None,
+            ..limits()
+        },
+        None,
+    )
+    .expect("budget");
+    let mut search = budget
+        .reserve(WebBudgetReservationRequest {
+            correlation_id: "search-1".to_owned(),
+            attempt_id: "attempt-search-1".to_owned(),
+            route_lease_id: "lease-1".to_owned(),
+            route_fingerprint: "route-fingerprint".to_owned(),
+            kind: WebBudgetReservationKind::ClientSearchCall,
+        })
+        .expect("first client search");
+    search.commit_call().expect("client search commits");
+    assert!(matches!(
+        budget.reserve(WebBudgetReservationRequest {
+            correlation_id: "search-2".to_owned(),
+            attempt_id: "attempt-search-2".to_owned(),
+            route_lease_id: "lease-1".to_owned(),
+            route_fingerprint: "route-fingerprint".to_owned(),
+            kind: WebBudgetReservationKind::ClientSearchCall,
+        }),
+        Err(WebBudgetError::Exhausted {
+            dimension: "client_search_calls"
+        })
+    ));
+    assert!(budget.snapshot().expect("snapshot").exhausted);
+
+    let mut hosted = budget
+        .reserve(WebBudgetReservationRequest {
+            correlation_id: "hosted-1".to_owned(),
+            attempt_id: "attempt-hosted-1".to_owned(),
+            route_lease_id: "lease-1".to_owned(),
+            route_fingerprint: "route-fingerprint".to_owned(),
+            kind: WebBudgetReservationKind::HostedProviderRequest,
+        })
+        .expect("unlimited hosted requests must survive other-dimension exhaustion");
+    hosted.commit_call().expect("hosted call commits");
 }

@@ -30,6 +30,7 @@ fn task_entries() -> Result<Vec<SessionLogEntry>> {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "verify the workspace".to_owned(),
+            title: None,
             status: TaskRunStatus::Started,
             reason: None,
         })),

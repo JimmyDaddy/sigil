@@ -456,7 +456,7 @@ impl Default for HostedTurnBufferLimits {
 }
 
 /// Typed fail-closed hosted buffering/finalization failure.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum HostedTurnError {
     #[error("hosted turn buffer limit exceeded")]
     BufferLimitExceeded,
@@ -464,8 +464,8 @@ pub enum HostedTurnError {
     UnsupportedLocalToolChunk,
     #[error("hosted evidence processor is required")]
     MissingProcessor,
-    #[error("hosted evidence finalization failed")]
-    FinalizationFailed,
+    #[error("hosted evidence finalization failed: {0}")]
+    FinalizationFailed(String),
     #[error("hosted provider reported a terminal search failure")]
     ProviderFailed,
     #[error("hosted provider emitted invalid invocation correlation")]
