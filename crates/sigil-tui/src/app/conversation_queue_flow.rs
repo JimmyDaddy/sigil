@@ -110,6 +110,17 @@ impl AppState {
         self.refresh_conversation_queue_selection();
     }
 
+    pub(super) fn push_optimistic_conversation_timeline_entry(
+        &mut self,
+        prompt: String,
+        target: &ConversationInputTarget,
+    ) {
+        if !matches!(target, ConversationInputTarget::AgentThread { .. }) {
+            self.push_timeline(TimelineRole::User, prompt);
+        };
+        self.timeline_scroll_back = 0;
+    }
+
     pub(super) fn reconcile_optimistic_conversation_queue_items(&mut self) {
         if self.composer.optimistic_queue_items.is_empty() {
             return;

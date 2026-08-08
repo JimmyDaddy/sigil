@@ -4,7 +4,7 @@ use anyhow::Result;
 use sigil_kernel::{SkillDescriptor, SkillRunMode, SkillTrustState};
 
 use super::session_flow::current_focus_label;
-use super::{AppAction, AppState, ComposerMode, PaneFocus, RunPhase, TimelineRole};
+use super::{AgentView, AppAction, AppState, ComposerMode, PaneFocus, RunPhase, TimelineRole};
 use crate::slash::ResolvedSlashCommand;
 
 impl AppState {
@@ -22,6 +22,17 @@ impl AppState {
                 || self.composer.mode == ComposerMode::Plan)
         {
             self.reject_non_build_attachment_submission();
+            return Ok(None);
+        }
+        if self.runtime.is_busy
+            && self.composer.queue_edit_target.is_none()
+            && !prompt.starts_with('/')
+            && !prompt.trim_start().starts_with('@')
+            && matches!(&self.agent_panel.active_view, AgentView::Child { .. })
+        {
+            self.last_notice =
+                Some("child agent follow-ups cannot be queued; input kept".to_owned());
+            self.push_event("agent:follow-up-unavailable", "active run");
             return Ok(None);
         }
         self.discard_cleared_input_draft();
@@ -80,8 +91,8 @@ impl AppState {
             let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
             // Show the follow-up in the conversation immediately; it is delivered by the
             // active run's safe-point injection (or the next idle dispatch).
-            self.push_timeline(TimelineRole::User, safe_prompt.clone());
-            self.push_optimistic_conversation_queue_item(safe_prompt, kind, target.clone());
+            self.push_optimistic_conversation_queue_item(safe_prompt.clone(), kind, target.clone());
+            self.push_optimistic_conversation_timeline_entry(safe_prompt, &target);
             self.composer.input.clear();
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();

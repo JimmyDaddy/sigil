@@ -1,7 +1,9 @@
 use sigil_kernel::{RootConfig, TerminalKeyboardEnhancement};
 use sigil_runtime::support::SupportBuildInfo;
 
-use super::{AppState, ComposerMode, formatting::sidebar_width_for_terminal};
+use super::{
+    AppState, ComposerMode, EGRESS_DISCLOSURE_HEIGHT, formatting::sidebar_width_for_terminal,
+};
 
 impl AppState {
     pub(crate) fn set_support_build_info(&mut self, build_info: SupportBuildInfo) {
@@ -221,8 +223,7 @@ impl AppState {
         self.terminal_height = next_height;
         self.clamp_input_cursor();
         if width_changed {
-            self.rebuild_timeline_render_store();
-            self.rerender_active_agent_child_transcript();
+            self.rebuild_timeline_render_surfaces();
         }
         self.timeline_scroll_back = self
             .timeline_scroll_back
@@ -234,7 +235,31 @@ impl AppState {
         let desired = self
             .composer_height()
             .saturating_add(self.composer_agent_panel_rows());
-        desired.min(self.terminal_height.saturating_sub(2).max(4))
+        let minimum_live_content_height = self.minimum_live_panel_content_height();
+        let sidebar_width = if self.info_rail_visible() {
+            sidebar_width_for_terminal(self.terminal_width as usize) as u16
+        } else {
+            0
+        };
+        let live_panel_width = self.terminal_width.saturating_sub(sidebar_width);
+        let disclosure_height = self.egress_disclosure_reserved_rows(
+            live_panel_width,
+            EGRESS_DISCLOSURE_HEIGHT.saturating_add(minimum_live_content_height),
+        );
+        let minimum_live_panel_height =
+            minimum_live_content_height.saturating_add(disclosure_height);
+        let maximum_footer_strip = self
+            .terminal_height
+            .saturating_sub(1)
+            .saturating_sub(minimum_live_panel_height);
+        desired.min(maximum_footer_strip)
+    }
+
+    pub(crate) fn minimum_live_panel_content_height(&self) -> u16 {
+        let actionable_status = self.composer.pending_plan_approval.is_some()
+            || self.is_composer_queue_panel_focused()
+            || self.verification_card_focused();
+        if actionable_status { 4 } else { 1 }
     }
 
     pub(crate) fn composer_mode_label(&self) -> &'static str {
@@ -258,6 +283,11 @@ impl AppState {
 
     pub(crate) fn toggle_info_rail_visibility(&mut self) {
         self.info_rail_visible = !self.info_rail_visible;
+        self.rebuild_timeline_render_surfaces();
+        self.timeline_scroll_back = self
+            .timeline_scroll_back
+            .min(self.max_timeline_scroll_back());
+        self.clamp_input_cursor();
         let (mode, notice) = if !self.info_rail_visible {
             ("hidden", "info rail: hidden")
         } else if sidebar_width_for_terminal(self.terminal_width.into()) == 0 {

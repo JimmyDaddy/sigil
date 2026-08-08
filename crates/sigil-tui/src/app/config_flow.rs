@@ -2242,7 +2242,7 @@ impl AppState {
             config_state.set_plugin_discovery(plugins, plugin_warnings);
         }
         if appearance_changed {
-            self.rebuild_timeline_render_store();
+            self.rebuild_timeline_render_surfaces();
         }
     }
 
