@@ -5,7 +5,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::{view_model::InfoRailViewModel, workspace_git::WorkspaceGitStatus};
 
@@ -13,7 +12,7 @@ use super::{
     geometry::inset_rect,
     primitives::section_badge_with_palette,
     status_indicator::{indicator_styles_with_palette, render_marker_symbol},
-    text::truncate_display_width,
+    text::{terminal_cell_width, truncate_display_width},
     theme::Theme,
 };
 
@@ -156,7 +155,7 @@ fn render_workspace_git_status(
 ) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(2).max(1);
     let suffix = format!(" · {}", status.change_label());
-    let fixed_width = UnicodeWidthStr::width("git: ") + UnicodeWidthStr::width(suffix.as_str());
+    let fixed_width = terminal_cell_width("git: ") + terminal_cell_width(&suffix);
     let branch_budget = content_width.saturating_sub(fixed_width);
     let mut lines = if branch_budget >= 4 {
         let branch = truncate_display_width(&status.branch, branch_budget);
@@ -168,7 +167,7 @@ fn render_workspace_git_status(
     } else {
         let branch = truncate_display_width(
             &status.branch,
-            content_width.saturating_sub(UnicodeWidthStr::width("git: ")),
+            content_width.saturating_sub(terminal_cell_width("git: ")),
         );
         vec![
             render_info_line_with_theme(&format!("git: {branch}"), width, theme),
@@ -218,7 +217,7 @@ fn pack_workspace_git_details(details: &[String], width: usize, separator: &str)
         } else {
             format!("{current}{separator}{detail}")
         };
-        if UnicodeWidthStr::width(candidate.as_str()) <= width {
+        if terminal_cell_width(&candidate) <= width {
             current = candidate;
             continue;
         }

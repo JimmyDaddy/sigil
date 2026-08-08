@@ -501,12 +501,12 @@ fn markdown_table_options_compact_or_preserve_widths() {
 
     let compact_widest = compact
         .iter()
-        .map(|line| UnicodeWidthStr::width(plain_text(std::slice::from_ref(line)).as_str()))
+        .map(|line| terminal_cell_width(&plain_text(std::slice::from_ref(line))))
         .max()
         .unwrap_or(0);
     let preserve_widest = preserve
         .iter()
-        .map(|line| UnicodeWidthStr::width(plain_text(std::slice::from_ref(line)).as_str()))
+        .map(|line| terminal_cell_width(&plain_text(std::slice::from_ref(line))))
         .max()
         .unwrap_or(0);
 
@@ -643,8 +643,8 @@ fn markdown_render_options_normalize_surface_widths() {
     let modal = MarkdownRenderOptions::modal(19);
 
     assert_eq!(timeline.max_content_width, 80);
-    assert_eq!(preview.max_content_width, 20);
-    assert_eq!(modal.max_content_width, 20);
+    assert_eq!(preview.max_content_width, 3);
+    assert_eq!(modal.max_content_width, 19);
     assert_eq!(preview.code_wrap, CodeWrapMode::Preserve);
     assert!(preview.highlight_code);
     assert!(preview.show_link_urls);

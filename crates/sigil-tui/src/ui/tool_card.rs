@@ -4,7 +4,6 @@ use ratatui::{
 };
 use serde_json::Value;
 use sigil_kernel::SyntaxThemeId;
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
     agent_display::{AgentDisplayNameInput, resolve_agent_display_name},
@@ -27,7 +26,7 @@ use super::{
     },
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     syntax_highlight::highlight_code_to_spans_with_theme,
-    text::truncate_inline_text,
+    text::{terminal_cell_width, truncate_inline_text},
     theme::ThemePalette,
 };
 

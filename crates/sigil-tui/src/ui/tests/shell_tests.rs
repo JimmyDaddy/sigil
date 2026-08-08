@@ -10,8 +10,9 @@ use ratatui::{Terminal, backend::TestBackend, style::Color};
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
-    CheckSpecRecordedEntry, CompactionConfig, ControlEntry, EventHandler, EvidenceScope,
-    JsonlSessionStore, MemoryConfig, ModelMessage, PermissionConfig, ReadinessEvaluatedEntry,
+    CheckSpecRecordedEntry, CompactionConfig, ControlEntry, EgressDataCategory,
+    EgressDisclosureKind, EgressNetworkRoute, EventHandler, EvidenceScope, JsonlSessionStore,
+    MemoryConfig, ModelMessage, PermissionConfig, PreEgressDisclosure, ReadinessEvaluatedEntry,
     ReadinessEvaluation, RequiredAction, RootConfig, RunEvent, RunStatus, SessionConfig,
     SessionLogEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
     TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall,
@@ -21,7 +22,7 @@ use sigil_kernel::{
 };
 use tempfile::tempdir;
 
-use crate::app::AppState;
+use crate::app::{AppState, PendingPlanApproval};
 use crate::config_panel::ConfigSection;
 use crate::runner::{
     V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview, WorkerMessage,
@@ -397,6 +398,131 @@ fn render_main_screen_places_cursor_on_new_composer_line() -> anyhow::Result<()>
     terminal.draw(|frame| render(frame, &app))?;
 
     terminal.backend_mut().assert_cursor_position((3, 10));
+    Ok(())
+}
+
+#[test]
+fn short_shell_reserves_the_pending_plan_action_above_a_tall_composer() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 8);
+    app.composer.input = "\n\n\n\n".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    app.composer.pending_plan_approval = Some(PendingPlanApproval {
+        plan_id: Some("plan_1".to_owned()),
+        plan_text: "Inspect, edit, and verify.".to_owned(),
+        plan_hash: "sha256:plan".to_owned(),
+        summary: "Inspect, edit, and verify".to_owned(),
+        steps: vec!["Inspect".to_owned()],
+        target_paths: vec!["src/lib.rs".to_owned()],
+        suggested_checks: vec!["cargo test".to_owned()],
+        target_path_count: 1,
+        suggested_check_count: 1,
+        workspace_snapshot_id: None,
+        stale: false,
+        stale_reason: None,
+        rendered_text_row_counts: Default::default(),
+    });
+
+    let layout = crate::ui::LayoutSnapshot::from_app(ratatui::layout::Rect::new(0, 0, 80, 8), &app);
+    assert!(layout.live_panel.height >= 4);
+
+    let backend = TestBackend::new(80, 8);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Enter"));
+    assert!(rendered.contains("run"));
+    Ok(())
+}
+
+#[test]
+fn short_shell_reserves_action_and_egress_disclosure_without_overlap() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 10);
+    app.composer.input = "\n\n\n\n".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    app.composer.pending_plan_approval = Some(PendingPlanApproval {
+        plan_id: Some("plan_egress".to_owned()),
+        plan_text: "Inspect network usage before running.".to_owned(),
+        plan_hash: "sha256:plan-egress".to_owned(),
+        summary: "Inspect network usage".to_owned(),
+        steps: vec!["Inspect".to_owned()],
+        target_paths: vec!["src/lib.rs".to_owned()],
+        suggested_checks: vec!["cargo test".to_owned()],
+        target_path_count: 1,
+        suggested_check_count: 1,
+        workspace_snapshot_id: None,
+        stale: false,
+        stale_reason: None,
+        rendered_text_row_counts: Default::default(),
+    });
+    let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::EgressDisclosureRequested {
+        disclosure: PreEgressDisclosure::new(
+            EgressDisclosureKind::Query,
+            Some("query-short-shell".to_owned()),
+            "builtin-search",
+            "tui",
+            "Web search",
+            "route-fingerprint",
+            "profile-fingerprint",
+            "https://example.com/",
+            "https://example.com/",
+            EgressNetworkRoute::Direct,
+            vec![EgressDataCategory::SearchQuery],
+        )?,
+        receipt_tx,
+    })?;
+
+    let screen = ratatui::layout::Rect::new(0, 0, 80, 10);
+    let layout = crate::ui::LayoutSnapshot::from_app(screen, &app);
+    let disclosure = layout
+        .egress_disclosure
+        .expect("short shell should still render the disclosure");
+    assert_eq!(disclosure.height, crate::app::EGRESS_DISCLOSURE_HEIGHT);
+    assert!(
+        layout.live_panel.height.saturating_sub(disclosure.height) >= 4,
+        "actionable live content must retain its minimum height"
+    );
+
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Network disclosure"));
+    assert!(rendered.contains("Enter"));
+    assert!(rendered.contains("run"));
+
+    app.set_terminal_size(80, 8);
+    let compact_screen = ratatui::layout::Rect::new(0, 0, 80, 8);
+    let compact_layout = crate::ui::LayoutSnapshot::from_app(compact_screen, &app);
+    assert!(
+        compact_layout.egress_disclosure.is_none(),
+        "an unrenderable disclosure must wait instead of starving the active action"
+    );
+    let mut compact_terminal = Terminal::new(TestBackend::new(80, 8))?;
+    compact_terminal.draw(|frame| render(frame, &app))?;
+    let compact_rendered = rendered_content(&compact_terminal);
+    assert!(!compact_rendered.contains("Network disclosure"));
+    assert!(compact_rendered.contains("Enter"));
+    assert!(compact_rendered.contains("run"));
+    assert!(!app.acknowledge_active_egress_disclosure_frame());
+    assert!(matches!(
+        receipt_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    app.composer.pending_plan_approval = None;
+    app.set_terminal_size(23, 8);
+    let narrow_screen = ratatui::layout::Rect::new(0, 0, 23, 8);
+    let narrow_layout = crate::ui::LayoutSnapshot::from_app(narrow_screen, &app);
+    assert!(narrow_layout.egress_disclosure.is_none());
+    assert!(
+        narrow_layout.composer.height >= 3,
+        "an unrenderable narrow disclosure must not consume the composer budget"
+    );
     Ok(())
 }
 

@@ -5,7 +5,6 @@ use ratatui::{
 use serde_json::Value;
 use sigil_kernel::SyntaxThemeId;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 mod block;
 mod inline;
@@ -19,7 +18,10 @@ pub(crate) use projection::MarkdownPhase;
 use super::{
     primitives::{timeline_content_line, timeline_section_line_with_palette},
     syntax_highlight::highlight_code_to_spans_with_theme,
-    text::{pad_display_width, truncate_display_width, wrap_display_width},
+    text::{
+        pad_display_width, sanitize_terminal_text, terminal_cell_width, terminal_grapheme_width,
+        truncate_display_width, wrap_display_width,
+    },
     theme::{self, ThemePalette},
 };
 
@@ -90,7 +92,7 @@ impl MarkdownRenderOptions {
     }
 
     fn normalized(mut self) -> Self {
-        self.max_content_width = self.max_content_width.max(20);
+        self.max_content_width = self.max_content_width.max(1);
         self
     }
 
@@ -535,10 +537,11 @@ fn code_block_render_rows(line: &str, options: MarkdownRenderOptions) -> Vec<Str
     let width = options.max_content_width.saturating_sub(2).max(1);
     match options.code_wrap {
         CodeWrapMode::Preserve => {
-            if UnicodeWidthStr::width(line) > width {
-                wrap_display_width(line, width)
+            let sanitized = sanitize_terminal_text(line);
+            if terminal_cell_width(&sanitized) > width {
+                wrap_display_width(&sanitized, width)
             } else {
-                vec![line.to_owned()]
+                vec![sanitized]
             }
         }
         #[cfg(test)]
@@ -750,7 +753,9 @@ fn wrap_prefixed_spans(
 
     for span in content {
         for grapheme in span.content.as_ref().graphemes(true) {
-            let grapheme_width = UnicodeWidthStr::width(grapheme).max(1);
+            let Some(grapheme_width) = terminal_grapheme_width(grapheme) else {
+                continue;
+            };
             if current_has_content && current_width + grapheme_width > max_width {
                 rows.push(current);
                 current = continuation_prefix.clone();
@@ -797,7 +802,7 @@ fn quote_prefix_spans(palette: &ThemePalette) -> Vec<Span<'static>> {
 fn spans_display_width(spans: &[Span<'static>]) -> usize {
     spans
         .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .map(|span| terminal_cell_width(span.content.as_ref()))
         .sum()
 }
 
@@ -834,7 +839,7 @@ fn render_markdown_heading_block_with_palette(
     let mut lines = vec![Line::from(title_spans)];
     if level <= 2 {
         let underline_width =
-            UnicodeWidthStr::width(content).clamp(8, options.max_content_width.max(8));
+            terminal_cell_width(content).clamp(8, options.max_content_width.max(8));
         lines.push(Line::from(vec![Span::styled(
             "─".repeat(underline_width),
             Style::default().fg(palette.markdown_rule),
@@ -894,7 +899,7 @@ fn render_markdown_table_block_with_palette(
                 .iter()
                 .filter_map(|row| row.get(column))
                 .filter(|cell| !markdown_table_divider_cell(cell))
-                .map(|cell| UnicodeWidthStr::width(cell.as_str()))
+                .map(|cell| terminal_cell_width(cell))
                 .max()
                 .unwrap_or(3)
                 .max(3)
@@ -1008,7 +1013,7 @@ fn markdown_table_row(cells: &[String], widths: &[usize]) -> String {
         let cell = cells.get(index).map(String::as_str).unwrap_or("");
         out.push(' ');
         out.push_str(cell);
-        let cell_width = UnicodeWidthStr::width(cell);
+        let cell_width = terminal_cell_width(cell);
         if *width > cell_width {
             out.push_str(&" ".repeat(*width - cell_width));
         }
@@ -1236,7 +1241,7 @@ pub(crate) fn render_inline_markdown_spans_with_palette(
             if options.show_link_urls {
                 let url_width = options
                     .max_content_width
-                    .saturating_sub(UnicodeWidthStr::width(label))
+                    .saturating_sub(terminal_cell_width(label))
                     .saturating_sub(4)
                     .max(12);
                 spans.push(Span::styled(

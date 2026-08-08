@@ -170,7 +170,7 @@ pub(super) fn tool_card_selected_line(
 pub(super) fn spans_display_width(spans: &[Span<'static>]) -> usize {
     spans
         .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .map(|span| terminal_cell_width(span.content.as_ref()))
         .sum()
 }
 

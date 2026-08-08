@@ -11,7 +11,7 @@ use crate::app::{AppState, EGRESS_DISCLOSURE_HEIGHT};
 use super::{geometry::inset_rect, theme::Theme};
 
 pub(crate) fn egress_disclosure_layout(area: Rect, app: &AppState) -> (Option<Rect>, Rect) {
-    let reserved_rows = app.egress_disclosure_reserved_rows(area.height);
+    let reserved_rows = app.egress_disclosure_reserved_rows(area.width, area.height);
     if reserved_rows == 0 {
         return (None, area);
     }

@@ -7,7 +7,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AppState, PaneFocus};
 use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
@@ -15,19 +14,17 @@ use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 use super::{
     approval::render_approval_modal,
     checkpoint_restore::render_checkpoint_restore_modal,
-    composer::{composer_cursor_origin, render_agent_panel_with_theme, render_input_with_theme},
+    composer::{composer_cursor_position, render_agent_panel_with_theme, render_input_with_theme},
     egress_disclosure::{egress_disclosure_layout, render_active_egress_disclosure_card},
     geometry::inset_rect,
     info_rail::render_info_rail_with_theme,
     intent_stack::render_intent_stack_modal,
-    layout_snapshot::shell_layout,
-    live_panel::{
-        LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, render_live_panel_with_theme,
-    },
+    layout_snapshot::{live_transcript_rows_for_app, shell_layout},
+    live_panel::render_live_panel_with_theme,
     modal::render_modal,
     setup_config::{render_config, render_setup},
     slash_overlay::render_slash_selector_overlay_with_theme,
-    text::truncate_display_width,
+    text::{terminal_cell_width, truncate_display_width},
     theme::{self, styles},
 };
 
@@ -61,12 +58,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
 
     let view_model = UiViewModel::from_app(app);
     let (egress_disclosure, live_panel) = egress_disclosure_layout(shell.live_panel, app);
-    let live_inner = inset_rect(live_panel, 1, 0);
-    let live_transcript_rows = live_inner
-        .height
-        .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
-        .saturating_sub(live_status_rows_for_app(app, live_inner.width as usize))
-        .max(1) as usize;
+    let live_transcript_rows = live_transcript_rows_for_app(frame.area(), app);
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
     if let Some(area) = egress_disclosure {
@@ -89,13 +81,10 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         && !app.has_modal()
         && !app.is_composer_queue_panel_focused()
         && !app.is_composer_agent_panel_focused()
+        && let Some(cursor_position) =
+            composer_cursor_position(shell.composer, &view_model.composer)
     {
-        let (cursor_col, _) = view_model.composer.cursor_position;
-        if let Some((cursor_x, cursor_y)) =
-            composer_cursor_origin(shell.composer, &view_model.composer)
-        {
-            frame.set_cursor_position((cursor_x.saturating_add(cursor_col), cursor_y));
-        }
+        frame.set_cursor_position(cursor_position);
     }
 
     if app.checkpoint_restore_modal_open() {
@@ -177,7 +166,7 @@ fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {
     if footer.context_label.is_empty() || available_width < 24 {
         return 0;
     }
-    let preferred = UnicodeWidthStr::width(footer.context_label.as_str()) as u16;
+    let preferred = terminal_cell_width(&footer.context_label) as u16;
     preferred.min(available_width / 2).min(42)
 }
 

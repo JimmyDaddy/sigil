@@ -81,6 +81,38 @@ fn active_disclosure_reserves_a_non_overlapping_top_strip() {
 }
 
 #[test]
+fn narrow_disclosure_waits_without_reserving_or_acknowledging_an_unrenderable_card() {
+    let mut app = AppState::from_setup(PathBuf::from("sigil.toml"), PathBuf::from("."), None);
+    let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::EgressDisclosureRequested {
+        disclosure: disclosure("query-narrow"),
+        receipt_tx,
+    })
+    .expect("disclosure request");
+
+    let narrow = ratatui::layout::Rect::new(0, 0, 23, 24);
+    let (strip, content) = egress_disclosure_layout(narrow, &app);
+    assert!(strip.is_none());
+    assert_eq!(content, narrow);
+    let mut narrow_terminal = Terminal::new(TestBackend::new(23, 24)).expect("test terminal");
+    assert!(!render_disclosure_frame(&app, &mut narrow_terminal));
+    assert!(!app.acknowledge_active_egress_disclosure_frame());
+    assert!(matches!(
+        receipt_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let wide_enough = ratatui::layout::Rect::new(0, 0, 24, 24);
+    assert!(egress_disclosure_layout(wide_enough, &app).0.is_some());
+    let mut wide_terminal = Terminal::new(TestBackend::new(24, 24)).expect("test terminal");
+    assert!(render_disclosure_frame(&app, &mut wide_terminal));
+    assert!(app.acknowledge_active_egress_disclosure_frame());
+    futures::executor::block_on(receipt_rx)
+        .expect("receipt")
+        .expect("rendered disclosure should be acknowledged");
+}
+
+#[test]
 fn card_renders_before_the_tui_acks_the_matching_receipt() {
     let mut app = AppState::from_setup(PathBuf::from("sigil.toml"), PathBuf::from("."), None);
     let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();

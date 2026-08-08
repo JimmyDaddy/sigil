@@ -24,10 +24,15 @@ mod tool_card;
 
 pub use shell::render;
 
+pub(crate) use layout_snapshot::live_transcript_rows_for_app;
 pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
 
 pub(crate) use markdown::MarkdownRenderCursor;
 pub(crate) use markdown::contains_mermaid_diagram as markdown_contains_mermaid_diagram;
+pub(crate) use text::{
+    sanitize_terminal_text, terminal_cell_width, terminal_grapheme_width,
+    visual_position_for_char_cursor, wrap_terminal_lines,
+};
 pub(crate) use timeline::{
     TimelineRenderOptions, render_timeline_entry_lines_with_options,
     render_timeline_entry_lines_with_options_and_cursor, thinking_has_collapsed_content,
@@ -35,7 +40,7 @@ pub(crate) use timeline::{
 pub(crate) use tool_card::tool_activity_view;
 
 pub(crate) use checkpoint_restore::checkpoint_restore_max_scroll;
-pub(crate) use live_panel::live_status_rows_for_app;
+pub(crate) use live_panel::LIVE_PANEL_BOTTOM_PADDING;
 pub(crate) use status_indicator::{
     FocusKind, StatusKind, focus_symbol, status_kind_from_label, status_symbol,
 };

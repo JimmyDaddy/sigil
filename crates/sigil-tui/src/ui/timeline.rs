@@ -45,6 +45,7 @@ pub(crate) struct TimelineRenderOptions {
     pub collapsed_tool_activity_keys: BTreeSet<String>,
     pub tool_activity_visible_rows: BTreeMap<String, usize>,
     pub max_content_width: usize,
+    pub max_render_width: usize,
     pub streaming_assistant_index: Option<usize>,
     pub intermediate_assistant_indices: BTreeSet<usize>,
     pub expanded_thinking_entry_indices: BTreeSet<usize>,

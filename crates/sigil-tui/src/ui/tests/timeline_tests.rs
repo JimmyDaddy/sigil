@@ -2,7 +2,6 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::ui::theme::Theme;
 
@@ -1082,7 +1081,7 @@ fn render_timeline_entry_lines_wrap_markdown_tables_to_panel_width() {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        UnicodeWidthStr::width(plain.as_str()) <= 50
+        crate::ui::terminal_cell_width(&plain) <= 50
     }));
     assert!(lines.iter().all(|line| {
         let plain = line
