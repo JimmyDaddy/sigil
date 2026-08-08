@@ -144,7 +144,8 @@ task-config digest 与 binary build 全部精确匹配 qualified release manifes
 | `[web].timeout_secs` / `.connect_timeout_secs` / `.max_url_bytes` / `.max_domains` | `15` / `5` / `2048` / `10` | 请求、连接、URL 长度和域名数量上限。 |
 | `[web].max_url_capabilities_per_session` / `.url_capability_ttl_secs` | `256` / `3600` | 每个会话可授权的 URL 数量和授权有效期上限。 |
 | `[web].max_wire_response_bytes` / `.max_decoded_response_bytes` / `.max_model_content_bytes` / `.max_hosted_turn_buffer_bytes` | `2097152` / `1048576` / `24000` / `262144` | 单次响应、解码内容、模型内容和托管轮次缓冲区的字节上限。 |
-| `[web].max_fetches_per_run` / `.max_client_searches_per_run` / `.max_hosted_enabled_provider_requests_per_run` / `.provider_hosted_max_uses_per_request` | `5` / `3` / `4` / `3` | 每次运行允许的抓取、客户端搜索和模型服务托管搜索次数。 |
+| `[web].max_fetches_per_run` / `.max_client_searches_per_run` | `5` / `3` | 每次运行允许的抓取和客户端搜索次数。 |
+| `[web].max_hosted_enabled_provider_requests_per_run` / `.provider_hosted_max_uses_per_request` | 不限 | 可选的高级托管搜索上限（每次运行的请求数、每次请求的最大使用次数）。不配置即不限制。 |
 | `[web].max_network_attempts_per_run` / `.max_concurrent_requests` / `.per_host_rate_limit_per_minute` | `12` / `2` / `10` | 每次运行的网络尝试次数、并发请求数，以及单个主机每分钟的请求上限。 |
 | `[web].max_total_wire_bytes_per_run` / `.max_total_decoded_bytes_per_run` / `.max_total_model_bytes_per_run` | `8388608` / `4194304` / `98304` | 每次运行的网络响应、解码内容和模型内容累计字节上限。 |
 | `[web].allowed_ports` | `[80, 443]` | 允许的目标端口。 |

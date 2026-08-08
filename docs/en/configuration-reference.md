@@ -148,7 +148,8 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[web].timeout_secs` / `.connect_timeout_secs` / `.max_url_bytes` / `.max_domains` | `15` / `5` / `2048` / `10` | Request, connection, URL, and domain-list bounds. |
 | `[web].max_url_capabilities_per_session` / `.url_capability_ttl_secs` | `256` / `3600` | Session URL grant count and lifetime bounds. |
 | `[web].max_wire_response_bytes` / `.max_decoded_response_bytes` / `.max_model_content_bytes` / `.max_hosted_turn_buffer_bytes` | `2097152` / `1048576` / `24000` / `262144` | Per-response and hosted-turn byte limits. |
-| `[web].max_fetches_per_run` / `.max_client_searches_per_run` / `.max_hosted_enabled_provider_requests_per_run` / `.provider_hosted_max_uses_per_request` | `5` / `3` / `4` / `3` | Per-run Web call limits. |
+| `[web].max_fetches_per_run` / `.max_client_searches_per_run` | `5` / `3` | Per-run client-side Web call limits. |
+| `[web].max_hosted_enabled_provider_requests_per_run` / `.provider_hosted_max_uses_per_request` | unlimited | Optional advanced caps for provider-hosted search (per-run request count and per-request max uses). Omit for no limit. |
 | `[web].max_network_attempts_per_run` / `.max_concurrent_requests` / `.per_host_rate_limit_per_minute` | `12` / `2` / `10` | Attempt, concurrency, and per-host rate limits. |
 | `[web].max_total_wire_bytes_per_run` / `.max_total_decoded_bytes_per_run` / `.max_total_model_bytes_per_run` | `8388608` / `4194304` / `98304` | Aggregate per-run byte limits. |
 | `[web].allowed_ports` | `[80, 443]` | Permitted destination ports. |
