@@ -39,8 +39,44 @@ ORIGINAL_CONTENT = "stateful checkpoint original\n"
 MUTATED_CONTENT = "stateful checkpoint mutated\n"
 EDIT_PATH = "stateful-checkpoint.txt"
 TOOL_CALL_ID = "stateful-write-call"
+PLAN_TOOL_CALL_ID = "stateful-plan-draft-call"
+PLAN_PROMPT = "review the stateful TUI rendering path without modifying files"
+PLAN_SUMMARY_CANARY = "STATEFUL-PLAN-PREVIEW-CANARY-5821"
+PLAN_MODE_MARKER = "Plan mode is active for this turn."
+QUEUED_FOLLOW_UP_PROMPT = "STATEFUL-QUEUED-FOLLOW-UP-PROMPT-7346"
+QUEUED_FOLLOW_UP_REPLY = "STATEFUL-QUEUED-FOLLOW-UP-REPLY-8462"
+PLAN_DRAFT_ARGUMENTS = json.dumps(
+    {
+        "schema_version": 2,
+        "summary": PLAN_SUMMARY_CANARY,
+        "steps": [
+            {
+                "step_id": "inspect_tui_rendering",
+                "title": "Inspect stateful TUI rendering",
+                "role": "subagent_read",
+                "mode": "read",
+                "isolation": "shared_read_only",
+                "target_paths": [EDIT_PATH],
+            }
+        ],
+        "target_paths": [EDIT_PATH],
+        "suggested_checks": [],
+        "risk": None,
+        "notes": [],
+    },
+    separators=(",", ":"),
+)
+PLAN_DRAFT_TEXT = f"```sigil-plan-v2\n{PLAN_DRAFT_ARGUMENTS}\n```"
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{12,40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+CURSOR_POSITION_QUERY = b"\x1b[6n"
+CURSOR_POSITION_RESPONSE = b"\x1b[1;1R"
+# Use Crossterm's complete CSI-u encoding for Escape. Unlike a lone ESC byte, it cannot remain
+# buffered as the prefix of a later key while the PTY is being resized or redrawn.
+ESCAPE_KEY_SEQUENCE = b"\x1b[27u"
+SCROLL_REGION_UP_PATTERN = re.compile(rb"\x1b\[\d+;\d+r\x1b\[\d+S\x1b\[r")
+DEFAULT_PTY_ROWS = 42
+DEFAULT_PTY_COLS = 140
 MACH_O_MAGICS = {
     b"\xca\xfe\xba\xbe",
     b"\xca\xfe\xba\xbf",
@@ -90,6 +126,13 @@ class SessionAudit:
     event_counts: dict[str, int]
     final_canary_count: int
     failed_run_count: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TerminalResize:
+    output_offset: int
+    rows: int
+    cols: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -297,33 +340,86 @@ def install_tokenizer(
     return {"model": MODEL_NAME, "snapshot": snapshot, "sha256": expected_sha256}
 
 
+def advertises_tool(payload: object, name: str) -> bool:
+    request = payload if isinstance(payload, dict) else {}
+    tools = request.get("tools")
+    if not isinstance(tools, list):
+        return False
+    return any(
+        isinstance(tool, dict)
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name") == name
+        for tool in tools
+    )
+
+
+def is_plan_mode_request(payload: object) -> bool:
+    request = payload if isinstance(payload, dict) else {}
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), str)
+        and PLAN_MODE_MARKER in message["content"]
+        for message in messages
+    )
+
+
 @dataclasses.dataclass
 class FixtureState:
     provider_requests: list[dict[str, bool]] = dataclasses.field(default_factory=list)
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
     semantic_summary_requests: int = 0
     semantic_title_requests: int = 0
+    plan_requests: int = 0
+    response_release_events: dict[int, threading.Event] = dataclasses.field(
+        default_factory=lambda: {1: threading.Event(), 3: threading.Event()}
+    )
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
     def record_request(self, payload: object) -> int:
         request = payload if isinstance(payload, dict) else {}
         messages = request.get("messages")
-        tools = request.get("tools")
-        has_tool = any(
-            isinstance(tool, dict)
-            and isinstance(tool.get("function"), dict)
-            and tool["function"].get("name") == "write_file"
-            for tool in tools if isinstance(tools, list)
-        )
+        message_items = messages if isinstance(messages, list) else []
+        has_tool = advertises_tool(payload, "write_file")
         has_result = any(
             isinstance(message, dict)
             and message.get("role") == "tool"
             and message.get("tool_call_id") == TOOL_CALL_ID
-            for message in messages if isinstance(messages, list)
+            for message in message_items
+        )
+        has_queued_follow_up = any(
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and isinstance(message.get("content"), str)
+            and QUEUED_FOLLOW_UP_PROMPT in message["content"]
+            for message in message_items
         )
         with self.lock:
-            self.provider_requests.append({"has_write_file": has_tool, "has_tool_result": has_result})
+            self.provider_requests.append(
+                {
+                    "has_write_file": has_tool,
+                    "has_tool_result": has_result,
+                    "has_queued_follow_up": has_queued_follow_up,
+                }
+            )
             return len(self.provider_requests)
+
+    def record_plan_request(self) -> None:
+        with self.lock:
+            self.plan_requests += 1
+
+    def wait_for_response_release(self, request_index: int) -> None:
+        release = self.response_release_events.get(request_index)
+        if release is not None and not release.wait(timeout=30):
+            raise TimeoutError(f"conversation response {request_index} was not released")
+
+    def release_response(self, request_index: int) -> None:
+        release = self.response_release_events.get(request_index)
+        if release is None:
+            raise AcceptanceError(f"conversation response {request_index} is not gated")
+        release.set()
 
     def record_error(self, error: Exception) -> None:
         with self.lock:
@@ -463,11 +559,44 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
+            if is_plan_mode_request(payload):
+                self.fixture.record_plan_request()
+                if advertises_tool(payload, "submit_plan_draft"):
+                    self._send_sse(
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": PLAN_TOOL_CALL_ID,
+                                        "type": "function",
+                                        "function": {
+                                            "name": "submit_plan_draft",
+                                            "arguments": PLAN_DRAFT_ARGUMENTS,
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    )
+                else:
+                    self._send_sse(
+                        {
+                            "delta": {"content": PLAN_DRAFT_TEXT},
+                            "finish_reason": "stop",
+                        }
+                    )
+                return
             request_index = self.fixture.record_request(payload)
             if request_index <= 3:
+                self.fixture.wait_for_response_release(request_index)
                 # Keep the campaign above the real RFC-0057 economics floor even after the
                 # provider/tool schema prefix and the billed semantic-summary usage are counted.
-                body = ("verified-history " * 4000) + f"STATEFUL-HISTORY-{request_index}"
+                suffix = f"STATEFUL-HISTORY-{request_index}"
+                if request_index == 2:
+                    suffix = f"{suffix} {QUEUED_FOLLOW_UP_REPLY}"
+                body = ("verified-history " * 4000) + suffix
                 self._send_sse({"delta": {"content": body}, "finish_reason": "stop"})
             elif request_index == 4:
                 self._send_sse(
@@ -549,48 +678,95 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 
 class VtScreen:
-    """Small deterministic VT screen sufficient for ratatui's alternate-screen output."""
+    """Small deterministic VT screen for ratatui inline and alternate-screen output."""
 
     def __init__(self, rows: int = 42, cols: int = 140) -> None:
         self.rows = rows
         self.cols = cols
         self.cells = [[" " for _ in range(cols)] for _ in range(rows)]
+        self.history: list[list[str]] = []
         self.row = 0
         self.col = 0
         self.saved = (0, 0)
+        self.scroll_top = 0
+        self.scroll_bottom = rows
+        self.autowrap = True
+        self.wrap_pending = False
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._pending_text = ""
 
     def text(self) -> str:
         return "\n".join("".join(row).rstrip() for row in self.cells)
 
+    def history_text(self) -> str:
+        return "\n".join("".join(row).rstrip() for row in self.history)
+
+    def full_text(self) -> str:
+        parts = [text for text in (self.history_text(), self.text()) if text]
+        return "\n".join(parts)
+
+    def resize(self, rows: int, cols: int) -> None:
+        if rows <= 0 or cols <= 0:
+            raise ValueError("terminal dimensions must be positive")
+
+        old_rows = self.rows
+        old_full_region = self.scroll_top == 0 and self.scroll_bottom == old_rows
+        # Terminal reflow on resize is emulator-specific. Keep this model deterministic and only
+        # treat explicit top-anchored scroll commands as native scrollback ownership changes.
+        resized = [row[:cols] + [" "] * max(0, cols - len(row)) for row in self.cells[:rows]]
+        resized.extend([[" " for _ in range(cols)] for _ in range(rows - len(resized))])
+        self.rows = rows
+        self.cols = cols
+        self.cells = resized
+        self.row = min(self.row, rows - 1)
+        self.col = min(self.col, cols - 1)
+        self.saved = (min(self.saved[0], rows - 1), min(self.saved[1], cols - 1))
+        if old_full_region:
+            self.scroll_top = 0
+            self.scroll_bottom = rows
+        else:
+            self.scroll_top = min(self.scroll_top, rows - 1)
+            self.scroll_bottom = min(max(self.scroll_top + 1, self.scroll_bottom), rows)
+        self.wrap_pending = False
+
     def feed(self, data: bytes) -> None:
-        text = codecs.decode(data, "utf-8", errors="replace")
+        text = self._pending_text + self._decoder.decode(data, final=False)
+        self._pending_text = ""
         index = 0
         while index < len(text):
             character = text[index]
             if character == "\x1b":
-                index = self._escape(text, index + 1)
+                next_index = self._escape(text, index + 1)
+                if next_index is None:
+                    self._pending_text = text[index:]
+                    return
+                index = next_index
                 continue
             if character == "\r":
                 self.col = 0
+                self.wrap_pending = False
             elif character == "\n":
-                self.row = min(self.rows - 1, self.row + 1)
+                self._line_feed()
+                self.wrap_pending = False
             elif character == "\b":
                 self.col = max(0, self.col - 1)
+                self.wrap_pending = False
             elif character == "\t":
                 self.col = min(self.cols - 1, (self.col // 8 + 1) * 8)
+                self.wrap_pending = False
             elif ord(character) >= 32 and character != "\x7f":
                 self._write(character)
             index += 1
 
-    def _escape(self, text: str, index: int) -> int:
+    def _escape(self, text: str, index: int) -> int | None:
         if index >= len(text):
-            return index
+            return None
         if text[index] == "[":
             end = index + 1
             while end < len(text) and not ("@" <= text[end] <= "~"):
                 end += 1
             if end >= len(text):
-                return len(text)
+                return None
             self._csi(text[index + 1 : end], text[end])
             return end + 1
         if text[index] == "]":
@@ -601,14 +777,19 @@ class VtScreen:
                 if text[end] == "\x1b" and end + 1 < len(text) and text[end + 1] == "\\":
                     return end + 2
                 end += 1
-            return len(text)
+            return None
         if text[index] == "7":
             self.saved = (self.row, self.col)
         elif text[index] == "8":
             self.row, self.col = self.saved
+            self.wrap_pending = False
+        elif text[index] == "D":
+            self._line_feed()
+            self.wrap_pending = False
         elif text[index] == "E":
-            self.row = min(self.rows - 1, self.row + 1)
+            self._line_feed()
             self.col = 0
+            self.wrap_pending = False
         return index + 1
 
     def _csi(self, raw: str, command: str) -> None:
@@ -620,44 +801,109 @@ class VtScreen:
         if command in ("H", "f"):
             self.row = min(self.rows - 1, max(0, (values[0] if values else 1) - 1))
             self.col = min(self.cols - 1, max(0, (values[1] if len(values) > 1 else 1) - 1))
+            self.wrap_pending = False
         elif command == "A":
             self.row = max(0, self.row - amount)
+            self.wrap_pending = False
         elif command == "B":
             self.row = min(self.rows - 1, self.row + amount)
+            self.wrap_pending = False
         elif command == "C":
             self.col = min(self.cols - 1, self.col + amount)
+            self.wrap_pending = False
         elif command == "D":
             self.col = max(0, self.col - amount)
+            self.wrap_pending = False
         elif command == "E":
             self.row = min(self.rows - 1, self.row + amount)
             self.col = 0
+            self.wrap_pending = False
         elif command == "F":
             self.row = max(0, self.row - amount)
             self.col = 0
+            self.wrap_pending = False
         elif command in ("G", "`"):
             self.col = min(self.cols - 1, max(0, amount - 1))
+            self.wrap_pending = False
         elif command == "d":
             self.row = min(self.rows - 1, max(0, amount - 1))
+            self.wrap_pending = False
         elif command == "J":
             self._erase_display(first)
+            self.wrap_pending = False
         elif command == "K":
             self._erase_line(first)
+            self.wrap_pending = False
         elif command == "X":
             for column in range(self.col, min(self.cols, self.col + amount)):
                 self.cells[self.row][column] = " "
+            self.wrap_pending = False
+        elif command == "r" and not private:
+            self._set_scrolling_region(values)
+        elif command == "S" and not private:
+            self._scroll_up(amount)
+            self.wrap_pending = False
+        elif command == "T" and not private:
+            self._scroll_down(amount)
+            self.wrap_pending = False
         elif command == "s":
             self.saved = (self.row, self.col)
         elif command == "u":
             self.row, self.col = self.saved
+            self.wrap_pending = False
+        elif command in ("h", "l") and private and 7 in values:
+            self.autowrap = command == "h"
+            self.wrap_pending = False
         elif command in ("h", "l") and private and first in (47, 1047, 1049):
             if command == "h":
                 self._erase_display(2)
                 self.row = 0
                 self.col = 0
+                self.scroll_top = 0
+                self.scroll_bottom = self.rows
+                self.wrap_pending = False
+
+    def _set_scrolling_region(self, values: list[int]) -> None:
+        top = values[0] if values and values[0] else 1
+        bottom = values[1] if len(values) > 1 and values[1] else self.rows
+        if 1 <= top <= bottom <= self.rows:
+            self.scroll_top = top - 1
+            self.scroll_bottom = bottom
+            self.row = 0
+            self.col = 0
+            self.wrap_pending = False
+
+    def _scroll_up(self, amount: int) -> None:
+        height = self.scroll_bottom - self.scroll_top
+        amount = min(amount, height)
+        if amount <= 0:
+            return
+        if self.scroll_top == 0:
+            self.history.extend(row.copy() for row in self.cells[:amount])
+        retained = self.cells[self.scroll_top + amount : self.scroll_bottom]
+        blanks = [[" " for _ in range(self.cols)] for _ in range(amount)]
+        self.cells[self.scroll_top : self.scroll_bottom] = retained + blanks
+
+    def _scroll_down(self, amount: int) -> None:
+        height = self.scroll_bottom - self.scroll_top
+        amount = min(amount, height)
+        if amount <= 0:
+            return
+        retained = self.cells[self.scroll_top : self.scroll_bottom - amount]
+        blanks = [[" " for _ in range(self.cols)] for _ in range(amount)]
+        self.cells[self.scroll_top : self.scroll_bottom] = blanks + retained
+
+    def _line_feed(self) -> None:
+        if self.row == self.scroll_bottom - 1 and self.scroll_top <= self.row:
+            self._scroll_up(1)
+        elif self.row < self.rows - 1:
+            self.row += 1
 
     def _erase_display(self, mode: int) -> None:
         if mode in (2, 3):
             self.cells = [[" " for _ in range(self.cols)] for _ in range(self.rows)]
+            if mode == 3:
+                self.history.clear()
         elif mode == 0:
             self._erase_line(0)
             for row in range(self.row + 1, self.rows):
@@ -678,12 +924,21 @@ class VtScreen:
         if unicodedata.combining(character):
             return
         width = 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+        if self.autowrap and (
+            self.wrap_pending or (width > 1 and self.col + width > self.cols)
+        ):
+            self.col = 0
+            self._line_feed()
+            self.wrap_pending = False
         self.cells[self.row][self.col] = character
         if width == 2 and self.col + 1 < self.cols:
             self.cells[self.row][self.col + 1] = " "
-        self.col += width
-        if self.col >= self.cols:
+        if self.col + width >= self.cols:
             self.col = self.cols - 1
+            self.wrap_pending = self.autowrap
+        else:
+            self.col += width
+            self.wrap_pending = False
 
 
 def posix_descendant_pids(root_pid: int) -> set[int]:
@@ -754,14 +1009,30 @@ def wait_for_processes(process_ids: set[int], timeout: float) -> set[int]:
 
 
 class PtyRunner:
-    def __init__(self, command: list[str], cwd: Path, env: dict[str, str], raw_log: Path) -> None:
+    def __init__(
+        self,
+        command: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        raw_log: Path,
+        *,
+        rows: int = DEFAULT_PTY_ROWS,
+        cols: int = DEFAULT_PTY_COLS,
+    ) -> None:
+        if rows <= 0 or cols <= 0:
+            raise ValueError("terminal dimensions must be positive")
         self.command = command
         self.cwd = cwd
         self.env = env
         self.raw_log = raw_log
+        self.initial_rows = rows
+        self.initial_cols = cols
         self.master_fd: int | None = None
         self.process: subprocess.Popen[bytes] | None = None
         self.output = bytearray()
+        self._terminal_resizes: list[TerminalResize] = []
+        self.cpr_request_count = 0
+        self._terminal_query_tail = b""
         self._descendants: set[int] = set()
         self._descendants_lock = threading.Lock()
         self._monitor_stop = threading.Event()
@@ -769,7 +1040,7 @@ class PtyRunner:
 
     def start(self) -> None:
         master_fd, slave_fd = pty.openpty()
-        termios.tcsetwinsize(slave_fd, (42, 140))
+        termios.tcsetwinsize(slave_fd, (self.initial_rows, self.initial_cols))
         try:
             self.process = subprocess.Popen(
                 self.command,
@@ -826,7 +1097,40 @@ class PtyRunner:
             if not chunk:
                 return
             self.output.extend(chunk)
+            for response in self._terminal_query_responses(chunk):
+                os.write(self.master_fd, response)
             timeout = 0.0
+
+    def _terminal_query_responses(self, chunk: bytes) -> list[bytes]:
+        scanned = self._terminal_query_tail + chunk
+        count = scanned.count(CURSOR_POSITION_QUERY)
+        self.cpr_request_count += count
+        self._terminal_query_tail = scanned[-(len(CURSOR_POSITION_QUERY) - 1) :]
+        return [CURSOR_POSITION_RESPONSE] * count
+
+    def observed_native_inline_scrollback(self) -> bool:
+        return SCROLL_REGION_UP_PATTERN.search(bytes(self.output)) is not None
+
+    def resize(self, rows: int, cols: int) -> int:
+        if rows <= 0 or cols <= 0:
+            raise ValueError("terminal dimensions must be positive")
+        if self.master_fd is None or self.process is None:
+            raise AcceptanceError("PTY is not running")
+        if self.process.poll() is not None:
+            raise AcceptanceError("cannot resize an exited PTY process")
+
+        # Drain bytes emitted at the old size before recording the replay boundary. Bytes that
+        # arrive after the ioctl belong to the new geometry, even if the child redraw is delayed.
+        self.read_available(0.0)
+        termios.tcsetwinsize(self.master_fd, (rows, cols))
+        self._terminal_resizes.append(TerminalResize(len(self.output), rows, cols))
+        try:
+            os.killpg(self.process.pid, signal.SIGWINCH)
+        except OSError as error:
+            raise AcceptanceError(
+                f"failed to deliver SIGWINCH after PTY resize: {error}"
+            ) from error
+        return self._terminal_resizes[-1].output_offset
 
     def send(self, value: str | bytes) -> None:
         if self.master_fd is None:
@@ -839,9 +1143,25 @@ class PtyRunner:
             time.sleep(0.001)
 
     def screen(self) -> str:
-        screen = VtScreen()
-        screen.feed(bytes(self.output))
-        return screen.text()
+        return self.terminal().text()
+
+    def terminal(self) -> VtScreen:
+        screen = VtScreen(rows=self.initial_rows, cols=self.initial_cols)
+        output = bytes(self.output)
+        offset = 0
+        for resize in self._terminal_resizes:
+            boundary = min(max(offset, resize.output_offset), len(output))
+            screen.feed(output[offset:boundary])
+            screen.resize(resize.rows, resize.cols)
+            offset = boundary
+        screen.feed(output[offset:])
+        return screen
+
+    def history_text(self) -> str:
+        return self.terminal().history_text()
+
+    def full_text(self) -> str:
+        return self.terminal().full_text()
 
     def raw_text(self) -> str:
         return bytes(self.output).decode("utf-8", errors="replace")
@@ -925,6 +1245,83 @@ def looks_like_main_tui(text: str) -> bool:
     return "agent:" in lowered and ("build" in lowered or "session" in lowered)
 
 
+def looks_like_busy_tui(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in ("replying...", "thinking...", "receiving response")
+    )
+
+
+def looks_like_ready_plan_preview(text: str) -> bool:
+    return (
+        "Plan ready" in text
+        and PLAN_SUMMARY_CANARY in text
+        and not looks_like_busy_tui(text)
+    )
+
+
+def looks_like_dismissed_plan_preview(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        PLAN_SUMMARY_CANARY in text
+        and "Plan ready" not in text
+        and not looks_like_busy_tui(text)
+        and "build · agent:" in lowered
+    )
+
+
+def looks_like_visible_queued_follow_up(text: str) -> bool:
+    lowered = text.lower()
+    return count_on_screen(text, QUEUED_FOLLOW_UP_PROMPT) > 0 and any(
+        marker in lowered
+        for marker in (
+            "follow-up pending",
+            "pending · main · follow-up",
+        )
+    )
+
+
+def reject_visible_plan_preview(runner: PtyRunner, timeout: float) -> str:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for dismissed plan preview after rejection")
+        runner.send(ESCAPE_KEY_SEQUENCE)
+        try:
+            return runner.wait_until(
+                looks_like_dismissed_plan_preview,
+                min(0.75, remaining),
+                "dismissed plan preview after rejection",
+                final_screen=True,
+            )
+        except TimeoutError:
+            # A resize/redraw can race the first decoded key event. Retry the same complete key
+            # encoding without sending any printable input or bypassing the application's action.
+            continue
+
+
+def wait_for_busy_tui(runner: PtyRunner, timeout: float, description: str) -> str:
+    return runner.wait_until(
+        looks_like_busy_tui,
+        timeout,
+        description,
+        final_screen=True,
+    )
+
+
+def resize_while_busy(
+    runner: PtyRunner,
+    rows: int,
+    cols: int,
+    timeout: float,
+    description: str,
+) -> int:
+    wait_for_busy_tui(runner, timeout, description)
+    return runner.resize(rows, cols)
+
+
 def wait_for_main_tui(runner: PtyRunner, timeout: float) -> None:
     initial = runner.wait_until(
         lambda text: looks_like_trust_gate(text) or looks_like_main_tui(text),
@@ -934,6 +1331,10 @@ def wait_for_main_tui(runner: PtyRunner, timeout: float) -> None:
     if looks_like_trust_gate(initial):
         runner.send("\r")
         runner.wait_until(looks_like_main_tui, timeout, "trusted main TUI")
+    if runner.cpr_request_count == 0:
+        raise AcceptanceError(
+            "TUI did not request a cursor position; inline viewport coverage was not established"
+        )
 
 
 def write_config(
@@ -975,6 +1376,12 @@ mode = "auto-edit"
 
 [compaction]
 enabled = true
+
+[task]
+routing_policy = "manual"
+
+[web]
+enabled = false
 
 [terminal]
 keyboard_enhancement = "off"
@@ -1018,6 +1425,7 @@ def isolated_environment(root: Path, proxy_port: int | None = None) -> dict[str,
             "no_proxy": "127.0.0.1,localhost",
             "SSL_CERT_FILE": str(root / "tls-ca.pem"),
             "SIGIL_API_KEY": "stateful-fixture-key",
+            "RUST_LOG": "trace",
         }
     )
     for directory in ("home", "xdg-config", "xdg-state", "xdg-cache", "tmp"):
@@ -1190,7 +1598,9 @@ def wait_for_fork_path(
 
 
 def count_on_screen(screen: str, value: str) -> int:
-    return screen.count(value)
+    normalized_screen = "".join(screen.split())
+    normalized_value = "".join(value.split())
+    return normalized_screen.count(normalized_value)
 
 
 def session_display_token(path: Path) -> str:
@@ -1229,6 +1639,8 @@ def validate_passed_contract(
 ) -> None:
     expected = {
         "provider_request_count": 5,
+        "plan_request_count": 1,
+        "queued_follow_up_observed": True,
         "live_final_reply_screen_count": 1,
         "resumed_final_reply_screen_count": 1,
         "source_final_answer_count": 1,
@@ -1334,6 +1746,7 @@ def main() -> int:
     fixture_root: Path | None = None
     first_runner: PtyRunner | None = None
     resume_runner: PtyRunner | None = None
+    fixture: FixtureState | None = None
     server: FixtureServer | None = None
     server_thread: threading.Thread | None = None
     try:
@@ -1386,14 +1799,101 @@ def main() -> int:
         )
         first_runner.start()
         wait_for_main_tui(first_runner, deadline.remaining())
-        for turn in range(1, 4):
-            first_runner.type_text(f"stateful history turn {turn}")
-            first_runner.send("\r")
-            first_runner.wait_until(
-                lambda text, marker=f"STATEFUL-HISTORY-{turn}": marker in text,
-                deadline.remaining(),
-                f"history reply {turn}",
-            )
+
+        first_runner.type_text(f"/plan {PLAN_PROMPT}")
+        first_runner.send("\r")
+        first_runner.wait_until(
+            looks_like_ready_plan_preview,
+            deadline.remaining(),
+            "visible stateful plan preview",
+            final_screen=True,
+        )
+        plan_shrink_boundary = first_runner.resize(28, 100)
+        first_runner.wait_until(
+            lambda text: len(first_runner.output) > plan_shrink_boundary
+            and looks_like_ready_plan_preview(text),
+            deadline.remaining(),
+            "plan preview redraw after shrink",
+            final_screen=True,
+        )
+        plan_grow_boundary = first_runner.resize(42, 140)
+        first_runner.wait_until(
+            lambda text: len(first_runner.output) > plan_grow_boundary
+            and looks_like_ready_plan_preview(text),
+            deadline.remaining(),
+            "plan preview redraw after grow",
+            final_screen=True,
+        )
+        reject_visible_plan_preview(first_runner, deadline.remaining())
+
+        first_runner.type_text("stateful history turn 1")
+        first_runner.send("\r")
+        wait_for_busy_tui(first_runner, deadline.remaining(), "busy first history turn")
+        first_runner.type_text(QUEUED_FOLLOW_UP_PROMPT)
+        first_runner.send("\r")
+        first_runner.wait_until(
+            looks_like_visible_queued_follow_up,
+            deadline.remaining(),
+            "visible queued follow-up",
+            final_screen=True,
+        )
+        resize_while_busy(
+            first_runner,
+            24,
+            96,
+            deadline.remaining(),
+            "busy queued follow-up before shrink",
+        )
+        fixture.release_response(1)
+        first_runner.wait_until(
+            lambda text: count_on_screen(text, QUEUED_FOLLOW_UP_REPLY) > 0,
+            deadline.remaining(),
+            "queued follow-up reply",
+            final_screen=True,
+        )
+        first_runner.wait_until(
+            lambda text: looks_like_main_tui(text) and not looks_like_busy_tui(text),
+            deadline.remaining(),
+            "settled queued follow-up reply",
+            final_screen=True,
+        )
+        resize_boundary = first_runner.resize(36, 120)
+        first_runner.wait_until(
+            lambda text: len(first_runner.output) > resize_boundary and looks_like_main_tui(text),
+            deadline.remaining(),
+            "post-queue partial-grow redraw",
+            final_screen=True,
+        )
+
+        first_runner.type_text("stateful history turn 3")
+        first_runner.send("\r")
+        resize_while_busy(
+            first_runner,
+            20,
+            88,
+            deadline.remaining(),
+            "busy third history turn before shrink",
+        )
+        fixture.release_response(3)
+        first_runner.wait_until(
+            lambda text: count_on_screen(text, "STATEFUL-HISTORY-3") > 0,
+            deadline.remaining(),
+            "history reply 3",
+            final_screen=True,
+        )
+        first_runner.wait_until(
+            lambda text: looks_like_main_tui(text) and not looks_like_busy_tui(text),
+            deadline.remaining(),
+            "settled history reply 3",
+            final_screen=True,
+        )
+        resize_boundary = first_runner.resize(50, 160)
+        first_runner.wait_until(
+            lambda text: len(first_runner.output) > resize_boundary and looks_like_main_tui(text),
+            deadline.remaining(),
+            "post-history high-water grow redraw",
+            final_screen=True,
+        )
         first_runner.type_text(EDIT_PROMPT)
         first_runner.send("\r")
         first_runner.wait_until(
@@ -1412,9 +1912,11 @@ def main() -> int:
             source_path,
             lambda audit: audit.final_canary_count == 1
             and audit.event_counts.get("run_finalized", 0) == 4
+            and audit.event_counts.get("plan_draft_created", 0) == 1
+            and audit.event_counts.get("plan_decision_recorded", 0) == 1
             and audit.failed_run_count == 0,
             deadline.remaining(),
-            "four finalized turns and one durable final-answer canary",
+            "four finalized turns, rejected plan, and one durable final-answer canary",
         )
         live_screen = first_runner.wait_until(
             lambda text: FINAL_CANARY in text
@@ -1426,6 +1928,30 @@ def main() -> int:
         )
         if count_on_screen(live_screen, FINAL_CANARY) != 1:
             raise AcceptanceError("live completion screen rendered the final reply more than once")
+        if not first_runner.observed_native_inline_scrollback():
+            raise AcceptanceError(
+                "stateful flow did not exercise the native inline scrollback region"
+            )
+        terminal = first_runner.terminal()
+        native_history = terminal.history_text()
+        terminal_text = terminal.full_text()
+        if count_on_screen(native_history, "STATEFUL-HISTORY-1") == 0:
+            raise AcceptanceError(
+                "oldest completed turn was not retained in native terminal scrollback"
+            )
+        if count_on_screen(native_history, PLAN_SUMMARY_CANARY) == 0:
+            raise AcceptanceError("completed plan preview was not retained in native scrollback")
+        for turn in range(1, 4):
+            marker = f"STATEFUL-HISTORY-{turn}"
+            marker_count = count_on_screen(terminal_text, marker)
+            if marker_count != 1:
+                raise AcceptanceError(
+                    f"terminal history rendered {marker} {marker_count} times"
+                )
+        if count_on_screen(terminal_text, QUEUED_FOLLOW_UP_PROMPT) != 1:
+            raise AcceptanceError("delivered queued follow-up was not rendered exactly once")
+        if count_on_screen(terminal_text, QUEUED_FOLLOW_UP_REPLY) != 1:
+            raise AcceptanceError("queued follow-up reply was not rendered exactly once")
 
         first_runner.quit(timeout=deadline.remaining(10.0))
         first_runner.stop()
@@ -1591,6 +2117,7 @@ def main() -> int:
             if fixture.protocol_errors:
                 raise AcceptanceError(f"provider fixture errors: {fixture.protocol_errors}")
             requests = list(fixture.provider_requests)
+            plan_requests = fixture.plan_requests
             semantic_summary_requests = fixture.semantic_summary_requests
             semantic_title_requests = fixture.semantic_title_requests
         if len(requests) != 5:
@@ -1607,11 +2134,17 @@ def main() -> int:
                 "expected one semantic title request, observed "
                 f"{semantic_title_requests}"
             )
+        if plan_requests != 1:
+            raise AcceptanceError(f"expected one plan provider request, observed {plan_requests}")
+        if not requests[1]["has_queued_follow_up"]:
+            raise AcceptanceError("queued follow-up was not injected into the active provider run")
         if not requests[3]["has_write_file"] or not requests[4]["has_tool_result"]:
             raise AcceptanceError("write_file tool-call continuation contract was not observed")
 
         checks = {
             "provider_request_count": len(requests),
+            "plan_request_count": plan_requests,
+            "queued_follow_up_observed": requests[1]["has_queued_follow_up"],
             "live_final_reply_screen_count": 1,
             "resumed_final_reply_screen_count": 1,
             "source_final_answer_count": final_source_audit.final_canary_count,
@@ -1637,6 +2170,9 @@ def main() -> int:
         notes.append(f"{type(error).__name__}; inspect the local PTY logs")
         return_code = 1
     finally:
+        if fixture is not None:
+            for release in fixture.response_release_events.values():
+                release.set()
         if first_runner is not None:
             first_runner.stop()
         if resume_runner is not None:
