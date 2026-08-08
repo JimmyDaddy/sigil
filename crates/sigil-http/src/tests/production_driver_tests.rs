@@ -2642,6 +2642,7 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
             parent_session_ref: SessionRef::new_relative("parent.jsonl")
                 .expect("session ref should be valid"),
             objective: private_objective.to_owned(),
+            title: None,
             status: TaskRunStatus::Started,
             reason: None,
         }))
@@ -2683,6 +2684,7 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
             parent_session_ref: SessionRef::new_relative("parent.jsonl")
                 .expect("session ref should be valid"),
             objective: private_objective.to_owned(),
+            title: None,
             status: TaskRunStatus::Paused,
             reason: None,
         }))
@@ -3014,6 +3016,7 @@ async fn production_driver_projects_and_executes_real_verification_rerun() {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
             objective: "verify workspace".to_owned(),
+            title: None,
             status: TaskRunStatus::Paused,
             reason: None,
         }))

@@ -5355,7 +5355,7 @@ fn conversation_queue_interrupt_without_dispatchable_next_does_not_cancel() {
 }
 
 #[test]
-fn conversation_queue_interrupt_validation_and_cancel_exclude_concurrent_mutation() {
+fn conversation_queue_interrupt_validation_excludes_concurrent_mutation() {
     let driver = Arc::new(QueueTestDriver::new(true));
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
     let session = create_session(&registry, HttpSessionCreateRequest::default());
@@ -5374,7 +5374,7 @@ fn conversation_queue_interrupt_validation_and_cancel_exclude_concurrent_mutatio
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
-                    prompt: "run only after serialized cancellation".to_owned(),
+                    prompt: "run after the current turn".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
                 },
@@ -5395,17 +5395,10 @@ fn conversation_queue_interrupt_validation_and_cancel_exclude_concurrent_mutatio
         observer_entered.wait();
         observer_release.wait();
     }));
-    let wait_entered = Arc::new(Barrier::new(2));
-    let wait_release = Arc::new(Barrier::new(2));
-    let release_entered = Arc::clone(&wait_entered);
-    let release_continue = Arc::clone(&wait_release);
-    driver.observe_release_wait(Arc::new(move |_run_id, _timeout| {
-        release_entered.wait();
-        release_continue.wait();
-    }));
 
     let interrupt_registry = Arc::clone(&registry);
     let interrupt_session_id = session.id.clone();
+    let interrupt_owner_for_thread = owner.clone();
     let interrupt_thread = std::thread::spawn(move || {
         interrupt_registry.command_conversation_queue(
             &interrupt_session_id,
@@ -5415,8 +5408,8 @@ fn conversation_queue_interrupt_validation_and_cancel_exclude_concurrent_mutatio
                 &interrupt_session_id,
                 1,
                 HttpConversationQueueCommandAction::InterruptAndRunNext {
-                    foreground_run_id: owner.run_id,
-                    foreground_owner_revision: owner.owner_revision,
+                    foreground_run_id: interrupt_owner_for_thread.run_id,
+                    foreground_owner_revision: interrupt_owner_for_thread.owner_revision,
                 },
             ),
         )
@@ -5449,38 +5442,30 @@ fn conversation_queue_interrupt_validation_and_cancel_exclude_concurrent_mutatio
         pause_receiver
             .recv_timeout(Duration::from_millis(50))
             .is_err(),
-        "queue mutation must wait while interrupt validation has not committed cancellation"
+        "queue mutation must wait while interrupt validation holds the queue command lock"
     );
 
     validation_release.wait();
-    wait_entered.wait();
-    assert_eq!(driver.cancels().len(), 1);
-    let paused = pause_receiver
-        .recv_timeout(Duration::from_secs(1))
-        .expect("pause should proceed after cancellation acceptance")
-        .expect("pause should succeed against the still-current generation");
-    assert!(paused.queue.paused);
-    registry
-        .record_run_terminal(&foreground.id, HttpRunTerminalOutcome::Interrupted)
-        .expect("terminal event should release foreground ownership");
-    wait_release.wait();
-
     let interrupted = interrupt_thread
         .join()
         .expect("interrupt command thread should join")
-        .expect("interrupt should complete after release");
+        .expect("interrupt should complete after validation");
+    assert_eq!(interrupted.interrupt_owner, Some(owner));
+    let paused = pause_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("pause should proceed after validation completes")
+        .expect("pause should succeed");
+    assert!(paused.queue.paused);
     pause_thread.join().expect("pause thread should join");
-    assert!(interrupted.queue.paused);
-    assert_eq!(driver.queued_starts().len(), 0);
-    drop(
-        registry
-            .reserve_durable_session_mutation(&session.durable_session_scope_id)
-            .expect("durable mutation should become available after queue command completion"),
+    assert!(
+        driver.cancels().is_empty(),
+        "interrupt must never cancel the foreground run"
     );
+    assert_eq!(driver.queued_starts().len(), 0);
+    let _ = foreground;
 }
-
 #[test]
-fn conversation_queue_interrupt_waits_for_release_before_starting_next() {
+fn conversation_queue_interrupt_promotes_head_without_cancelling_the_foreground_run() {
     let driver = Arc::new(QueueTestDriver::new(true));
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
     let session = create_session(&registry, HttpSessionCreateRequest::default());
@@ -5499,7 +5484,7 @@ fn conversation_queue_interrupt_waits_for_release_before_starting_next() {
                 &session.id,
                 0,
                 HttpConversationQueueCommandAction::Enqueue {
-                    prompt: "run after release".to_owned(),
+                    prompt: "run after the current turn".to_owned(),
                     kind: HttpConversationQueueItemKind::Chat,
                     reasoning_effort: None,
                 },
@@ -5511,14 +5496,6 @@ fn conversation_queue_interrupt_waits_for_release_before_starting_next() {
         .expect("continuity should project")
         .foreground_owner
         .expect("foreground owner should exist");
-    let wait_entered = Arc::new(Barrier::new(2));
-    let wait_release = Arc::new(Barrier::new(2));
-    let observer_entered = Arc::clone(&wait_entered);
-    let observer_release = Arc::clone(&wait_release);
-    driver.observe_release_wait(Arc::new(move |_run_id, _timeout| {
-        observer_entered.wait();
-        observer_release.wait();
-    }));
 
     let interrupt = conversation_queue_command(
         "queue-command-interrupt",
@@ -5530,36 +5507,29 @@ fn conversation_queue_interrupt_waits_for_release_before_starting_next() {
             foreground_owner_revision: owner.owner_revision.clone(),
         },
     );
-    let command_registry = Arc::clone(&registry);
-    let command_session_id = session.id.clone();
-    let command_thread = std::thread::spawn(move || {
-        command_registry.command_conversation_queue(&command_session_id, interrupt)
-    });
-    wait_entered.wait();
-    assert_eq!(driver.cancels().len(), 1);
-    assert_eq!(driver.queued_starts().len(), 0);
-    registry
-        .record_run_terminal(&foreground.id, HttpRunTerminalOutcome::Interrupted)
-        .expect("supervisor terminal should release foreground ownership");
-    assert_eq!(driver.queued_starts().len(), 0);
-    wait_release.wait();
-
-    let receipt = command_thread
-        .join()
-        .expect("interrupt command thread should join")
-        .expect("interrupt command should succeed after release");
+    let receipt = registry
+        .command_conversation_queue(&session.id, interrupt)
+        .expect("interrupt should validate the head candidate");
     assert_eq!(receipt.interrupt_owner, Some(owner));
-    assert_eq!(driver.queued_starts().len(), 1);
+    assert!(
+        driver.cancels().is_empty(),
+        "interrupt must never cancel the foreground run"
+    );
+    assert_eq!(
+        driver.queued_starts().len(),
+        0,
+        "no queued run may start while the foreground run continues"
+    );
     assert_eq!(
         registry
             .get_session(&session.id)
             .expect("session should remain readable")
             .foreground_run_id
             .as_deref(),
-        Some("queued-run-queue-entry-1")
+        Some(foreground.id.as_str()),
+        "the foreground run must stay active"
     );
 }
-
 #[test]
 fn conversation_queue_durable_replay_downgrades_process_local_material() {
     let temp = tempfile::tempdir().expect("temporary directory should create");
@@ -8554,7 +8524,6 @@ impl QueueTestState {
     }
 }
 
-type QueueReleaseObserver = Arc<dyn Fn(&str, Duration) + Send + Sync>;
 type QueueInterruptValidationObserver = Arc<dyn Fn() + Send + Sync>;
 
 struct QueueTestDriver {
@@ -8564,7 +8533,6 @@ struct QueueTestDriver {
     queued_start_attempts: AtomicUsize,
     reject_next_queued_start_as_stale: AtomicUsize,
     release_barrier: bool,
-    release_observer: Mutex<Option<QueueReleaseObserver>>,
     interrupt_validation_observer: Mutex<Option<QueueInterruptValidationObserver>>,
 }
 
@@ -8583,7 +8551,6 @@ impl QueueTestDriver {
             queued_start_attempts: AtomicUsize::new(0),
             reject_next_queued_start_as_stale: AtomicUsize::new(0),
             release_barrier,
-            release_observer: Mutex::new(None),
             interrupt_validation_observer: Mutex::new(None),
         }
     }
@@ -8615,10 +8582,6 @@ impl QueueTestDriver {
 
     fn cancels(&self) -> Vec<HttpRunDriverCancel> {
         self.recording.cancels()
-    }
-
-    fn observe_release_wait(&self, observer: QueueReleaseObserver) {
-        *lock(&self.release_observer) = Some(observer);
     }
 
     fn observe_interrupt_validation(&self, observer: QueueInterruptValidationObserver) {
@@ -8799,12 +8762,9 @@ impl HttpRunDriver for QueueTestDriver {
 
     fn wait_for_run_release(
         &self,
-        run_id: &str,
-        timeout: Duration,
+        _run_id: &str,
+        _timeout: Duration,
     ) -> Result<(), HttpRunDriverError> {
-        if let Some(observer) = lock(&self.release_observer).clone() {
-            observer(run_id, timeout);
-        }
         Ok(())
     }
 }

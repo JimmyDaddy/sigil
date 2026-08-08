@@ -66,7 +66,6 @@ const MAX_CONVERSATION_QUEUE_ID_BYTES: usize = 512;
 const MAX_CONVERSATION_QUEUE_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_CONVERSATION_RECOVERY_ID_BYTES: usize = 512;
 const MAX_TASK_INTEGRATION_ID_BYTES: usize = 512;
-const QUEUE_INTERRUPT_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUEUE_STALE_START_RESCHEDULE_LIMIT: usize = 3;
 const MAX_PENDING_APPROVALS_PER_RUN: usize = 8;
 const MAX_APPROVAL_LIFECYCLES_PER_RUN: usize = 32;
@@ -1214,7 +1213,7 @@ impl HttpSessionRunRegistry {
             HttpConversationQueueCommandAction::InterruptAndRunNext { .. }
         );
         let queue_command_lock = self.queue_command_lock(session_id);
-        let mut queue_command_guard = Some(
+        let queue_command_guard = Some(
             queue_command_lock
                 .lock()
                 .expect("per-session queue command lock should not be poisoned"),
@@ -1255,7 +1254,8 @@ impl HttpSessionRunRegistry {
                     },
                 )
             };
-            let mut queue_session_guard = Some(queue_session_guard);
+            // Held until the closure ends so the per-session queue mutation lock stays exclusive.
+            let _queue_session_guard = queue_session_guard;
 
             let interrupt_owner = match &command.payload.action {
                 HttpConversationQueueCommandAction::InterruptAndRunNext {
@@ -1280,7 +1280,7 @@ impl HttpSessionRunRegistry {
                 client_id: command.client_id.clone(),
                 request: command.payload.clone(),
             };
-            let mut queue = catch_unwind(AssertUnwindSafe(|| {
+            let queue = catch_unwind(AssertUnwindSafe(|| {
                 self.driver.mutate_conversation_queue(
                     &session,
                     foreground_owner.as_ref(),
@@ -1293,36 +1293,9 @@ impl HttpSessionRunRegistry {
             })?
             .map_err(queue_driver_registry_error)?;
 
-            if let Some(owner) = interrupt_owner.as_ref() {
-                self.cancel_run_with_reason(
-                    &owner.run_id,
-                    Some("interrupt and run next queued prompt".to_owned()),
-                )
-                .map_err(|error| match error {
-                    HttpRegistryError::RunNotActive { .. }
-                    | HttpRegistryError::RunNoLongerForeground { .. }
-                    | HttpRegistryError::RunOwnerChanged { .. } => {
-                        HttpRegistryError::ConversationQueueOwnerLost
-                    }
-                    other => other,
-                })?;
-                // The exact queue candidate was validated and cancellation was accepted while
-                // excluding concurrent queue mutations. Subsequent edits may now update the
-                // latest revision while the cooperative terminal/release barrier completes.
-                drop(queue_session_guard.take());
-                drop(queue_command_guard.take());
-                catch_unwind(AssertUnwindSafe(|| {
-                    self.driver
-                        .wait_for_run_release(&owner.run_id, QUEUE_INTERRUPT_RELEASE_TIMEOUT)
-                }))
-                .map_err(|_| HttpRegistryError::DriverPanicked {
-                    operation: "queued interrupt release",
-                    run_id: owner.run_id.clone(),
-                })?
-                .map_err(|_| HttpRegistryError::ConversationQueueUnavailable)?;
-                let _ = self.record_run_released(&owner.run_id)?;
-                queue = self.conversation_queue(session_id)?;
-            }
+            // InterruptAndRunNext is non-destructive: the foreground run is never cancelled.
+            // The head queue item is delivered by the kernel's safe-point injection while the
+            // run continues, or by the next idle dispatch after it finishes.
 
             Ok(HttpConversationQueueCommandReceipt {
                 command_id: command.command_id.clone(),
