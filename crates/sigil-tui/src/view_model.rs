@@ -8,7 +8,7 @@ use sigil_kernel::{
 };
 
 use crate::{
-    app::{AppState, ComposerQueueAction, PaneFocus},
+    app::{AppState, ComposerQueueAction, PaneFocus, PlanTextRowCountCache},
     commands::{global_control_hints, tool_card_control_hints},
     timeline::{ComposerQueueRow, RunPhase, SidebarAgentRow},
     ui::StatusKind,
@@ -1136,6 +1136,7 @@ pub(crate) struct PlanApprovalViewModel {
     pub suggested_check_count: usize,
     pub stale: bool,
     pub stale_reason: Option<String>,
+    pub rendered_text_row_counts: PlanTextRowCountCache,
 }
 
 impl PlanApprovalViewModel {
@@ -1150,6 +1151,7 @@ impl PlanApprovalViewModel {
             suggested_check_count: pending.suggested_check_count,
             stale: pending.stale,
             stale_reason: pending.stale_reason.clone(),
+            rendered_text_row_counts: pending.rendered_text_row_counts.clone(),
         }
     }
 }

@@ -6,13 +6,15 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     command_text::known_slash_command_token,
     geometry::inset_rect,
     status_indicator::{FocusKind, StatusIndicator, focus_style_with_palette},
-    text::{pad_display_width, truncate_display_width, wrap_composer_input},
+    text::{
+        pad_display_width, sanitize_terminal_text, terminal_cell_width, truncate_display_width,
+        wrap_composer_input,
+    },
     theme::Theme,
 };
 
@@ -20,6 +22,31 @@ const COMPOSER_HORIZONTAL_INSET: u16 = 3;
 const COMPOSER_VERTICAL_INSET: u16 = 1;
 const COMPOSER_HEADER_HEIGHT: u16 = 1;
 const COMPOSER_AGENT_LABEL_WIDTH: usize = 22;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComposerAttachmentWindow {
+    pub(crate) item_indices: Vec<usize>,
+    pub(crate) show_overflow_row: bool,
+    pub(crate) inline_overflow: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComposerAgentWindow {
+    pub(crate) item_indices: Vec<usize>,
+    pub(crate) show_actions: bool,
+    pub(crate) hidden_count: usize,
+}
+
+impl ComposerAttachmentWindow {
+    fn rendered_rows(&self) -> u16 {
+        u16::try_from(
+            self.item_indices
+                .len()
+                .saturating_add(usize::from(self.show_overflow_row)),
+        )
+        .unwrap_or(u16::MAX)
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn render_input(frame: &mut Frame, area: Rect, view_model: &ComposerViewModel) {
@@ -122,8 +149,9 @@ pub(crate) fn render_input_with_theme(
 
 fn render_input_row(row: &str, width: usize, input_bg: Color, theme: &Theme) -> Line<'static> {
     let palette = &theme.palette;
-    let padded = pad_display_width(row, width);
-    let Some(command) = known_slash_command_token(row) else {
+    let sanitized = sanitize_terminal_text(row);
+    let padded = pad_display_width(&sanitized, width);
+    let Some(command) = known_slash_command_token(&sanitized) else {
         return Line::from(vec![Span::styled(
             padded,
             Style::default().fg(palette.text_primary).bg(input_bg),
@@ -172,15 +200,32 @@ pub(crate) fn composer_cursor_origin(
     ))
 }
 
+pub(crate) fn composer_cursor_position(
+    area: Rect,
+    view_model: &ComposerViewModel,
+) -> Option<(u16, u16)> {
+    let input_area = composer_input_area(
+        area,
+        view_model.input_rows,
+        view_model.image_attachments.len(),
+    );
+    let (origin_x, cursor_y) = composer_cursor_origin(area, view_model)?;
+    let cursor_x = origin_x
+        .saturating_add(view_model.cursor_position.0)
+        .min(input_area.right().saturating_sub(1));
+    Some((cursor_x, cursor_y))
+}
+
 pub(crate) fn composer_input_area(area: Rect, _input_rows: u16, attachment_count: usize) -> Rect {
     let inner = composer_content_area(area);
     if inner.width == 0 || inner.height == 0 {
         return Rect::default();
     }
     let input_gap = u16::from(area.height >= 5);
+    let attachment_rows = composer_attachment_window(area, attachment_count, 0).rendered_rows();
     let header_rows = COMPOSER_HEADER_HEIGHT
         .saturating_add(input_gap)
-        .saturating_add(attachment_count.min(u16::MAX as usize) as u16);
+        .saturating_add(attachment_rows);
     if inner.height <= header_rows {
         return Rect::default();
     }
@@ -192,6 +237,46 @@ pub(crate) fn composer_input_area(area: Rect, _input_rows: u16, attachment_count
         inner.width,
         input_height,
     )
+}
+
+pub(crate) fn composer_attachment_window(
+    area: Rect,
+    attachment_count: usize,
+    selected_index: usize,
+) -> ComposerAttachmentWindow {
+    let inner = composer_content_area(area);
+    let input_gap = u16::from(area.height >= 5);
+    let available_rows = inner
+        .height
+        .saturating_sub(COMPOSER_HEADER_HEIGHT)
+        .saturating_sub(input_gap)
+        .saturating_sub(1) as usize;
+    if attachment_count == 0 || available_rows == 0 {
+        return ComposerAttachmentWindow {
+            item_indices: Vec::new(),
+            show_overflow_row: false,
+            inline_overflow: false,
+        };
+    }
+    if attachment_count <= available_rows {
+        return ComposerAttachmentWindow {
+            item_indices: (0..attachment_count).collect(),
+            show_overflow_row: false,
+            inline_overflow: false,
+        };
+    }
+
+    let show_overflow_row = available_rows >= 2;
+    let item_capacity = available_rows.saturating_sub(usize::from(show_overflow_row));
+    let selected_index = selected_index.min(attachment_count - 1);
+    let window_start = selected_index
+        .saturating_sub(item_capacity / 2)
+        .min(attachment_count.saturating_sub(item_capacity));
+    ComposerAttachmentWindow {
+        item_indices: (window_start..window_start.saturating_add(item_capacity)).collect(),
+        show_overflow_row,
+        inline_overflow: !show_overflow_row,
+    }
 }
 
 fn composer_content_area(area: Rect) -> Rect {
@@ -221,44 +306,74 @@ fn render_image_attachments(
     if inner.width == 0 || inner.height <= COMPOSER_HEADER_HEIGHT {
         return;
     }
-    let available_rows = inner
-        .height
-        .saturating_sub(COMPOSER_HEADER_HEIGHT)
-        .min(view_model.image_attachments.len() as u16);
-    let width = inner.width as usize;
-    let lines = view_model
+    let selected_index = view_model
         .image_attachments
         .iter()
-        .take(available_rows as usize)
-        .map(|attachment| {
-            let marker = if attachment.selected { "◆" } else { "◇" };
-            let hint = if attachment.selected {
-                " · Backspace/Delete remove"
-            } else {
-                ""
-            };
-            let text =
-                truncate_display_width(&format!("{marker} {}{hint}", attachment.label), width);
-            let style = if attachment.selected {
-                Style::default()
-                    .fg(theme.palette.selection_fg)
-                    .bg(theme.palette.selection_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(theme.palette.text_secondary)
-                    .bg(theme.palette.surface_panel)
-            };
-            Line::from(Span::styled(pad_display_width(&text, width), style))
-        })
-        .collect::<Vec<_>>();
+        .position(|attachment| attachment.selected)
+        .unwrap_or(0);
+    let window =
+        composer_attachment_window(area, view_model.image_attachments.len(), selected_index);
+    let rendered_rows = window.rendered_rows();
+    if rendered_rows == 0 {
+        return;
+    }
+    let width = inner.width as usize;
+    let mut lines = Vec::with_capacity(usize::from(rendered_rows));
+    if window.show_overflow_row {
+        let hidden_count = view_model
+            .image_attachments
+            .len()
+            .saturating_sub(window.item_indices.len());
+        let label = if hidden_count == 1 {
+            "attachment hidden"
+        } else {
+            "attachments hidden"
+        };
+        let text = truncate_display_width(&format!("… {hidden_count} {label}"), width);
+        lines.push(Line::from(Span::styled(
+            pad_display_width(&text, width),
+            Style::default()
+                .fg(theme.palette.text_muted)
+                .bg(theme.palette.surface_panel),
+        )));
+    }
+    lines.extend(
+        window
+            .item_indices
+            .into_iter()
+            .filter_map(|index| view_model.image_attachments.get(index))
+            .map(|attachment| {
+                let marker = if attachment.selected { "◆" } else { "◇" };
+                let hint = if attachment.selected {
+                    " · Backspace/Delete remove"
+                } else {
+                    ""
+                };
+                let overflow = if window.inline_overflow { "… " } else { "" };
+                let text = truncate_display_width(
+                    &format!("{overflow}{marker} {}{hint}", attachment.label),
+                    width,
+                );
+                let style = if attachment.selected {
+                    Style::default()
+                        .fg(theme.palette.selection_fg)
+                        .bg(theme.palette.selection_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(theme.palette.text_secondary)
+                        .bg(theme.palette.surface_panel)
+                };
+                Line::from(Span::styled(pad_display_width(&text, width), style))
+            }),
+    );
     frame.render_widget(
         Paragraph::new(Text::from(lines)).style(Style::default().bg(theme.palette.surface_panel)),
         Rect::new(
             inner.x,
             inner.y.saturating_add(COMPOSER_HEADER_HEIGHT),
             inner.width,
-            available_rows,
+            rendered_rows,
         ),
     );
 }
@@ -293,14 +408,24 @@ pub(crate) fn render_agent_panel_with_theme(
         return;
     }
     let width = content.width as usize;
-    let mut lines = view_model
-        .agent_rows
+    let window = composer_agent_window(
+        &view_model.agent_rows,
+        content.height as usize,
+        view_model.agent_panel_focused,
+    );
+    let mut lines = window
+        .item_indices
         .iter()
-        .take(content.height as usize)
+        .filter_map(|index| view_model.agent_rows.get(*index))
         .map(|row| render_agent_row(row, width, view_model.agent_panel_focused, theme))
         .collect::<Vec<_>>();
-    if view_model.agent_panel_focused && lines.len() < content.height as usize {
-        lines.push(render_agent_actions(view_model, width, theme));
+    if window.show_actions {
+        lines.push(render_agent_actions(
+            view_model,
+            window.hidden_count,
+            width,
+            theme,
+        ));
     }
     let lines = lines
         .into_iter()
@@ -315,18 +440,60 @@ pub(crate) fn render_agent_panel_with_theme(
     );
 }
 
-fn agent_panel_line(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
-    let mut spans = line
-        .spans
-        .into_iter()
-        .map(|span| {
-            let mut style = span.style;
-            if style.bg.is_none() {
-                style.bg = Some(bg);
-            }
-            Span::styled(span.content, style)
-        })
+pub(crate) fn composer_agent_window(
+    rows: &[crate::timeline::SidebarAgentRow],
+    content_height: usize,
+    panel_focused: bool,
+) -> ComposerAgentWindow {
+    if rows.is_empty() || content_height == 0 {
+        return ComposerAgentWindow {
+            item_indices: Vec::new(),
+            show_actions: false,
+            hidden_count: rows.len(),
+        };
+    }
+    let show_actions = panel_focused && content_height >= 2;
+    let item_capacity = content_height.saturating_sub(usize::from(show_actions));
+    let anchor = rows
+        .iter()
+        .position(|row| row.selected)
+        .or_else(|| rows.iter().position(|row| row.active))
+        .unwrap_or(0);
+    let window_start = anchor
+        .saturating_add(1)
+        .saturating_sub(item_capacity)
+        .min(rows.len().saturating_sub(item_capacity));
+    let item_indices = (window_start..window_start.saturating_add(item_capacity).min(rows.len()))
         .collect::<Vec<_>>();
+    ComposerAgentWindow {
+        hidden_count: rows.len().saturating_sub(item_indices.len()),
+        item_indices,
+        show_actions,
+    }
+}
+
+fn agent_panel_line(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
+    let mut remaining = width;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let mut style = span.style;
+        if style.bg.is_none() {
+            style.bg = Some(bg);
+        }
+        let sanitized = sanitize_terminal_text(span.content.as_ref());
+        let content = if terminal_cell_width(&sanitized) > remaining {
+            truncate_display_width(&sanitized, remaining)
+        } else {
+            sanitized
+        };
+        remaining = remaining.saturating_sub(terminal_cell_width(&content));
+        if !content.is_empty() {
+            spans.push(Span::styled(content, style));
+        }
+    }
     let line_width = spans_display_width(&spans);
     if width > line_width {
         spans.push(Span::styled(
@@ -344,7 +511,7 @@ fn agent_panel_line(line: Line<'static>, width: usize, bg: Color) -> Line<'stati
 fn spans_display_width(spans: &[Span<'static>]) -> usize {
     spans
         .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .map(|span| terminal_cell_width(span.content.as_ref()))
         .sum()
 }
 
@@ -360,13 +527,25 @@ fn render_agent_row(
     let focus = row.focus_symbol(panel_focused);
     let label = &row.label;
     let detail = row.compact_detail();
-    let label_text = pad_display_width(
-        &truncate_display_width(label, COMPOSER_AGENT_LABEL_WIDTH),
-        COMPOSER_AGENT_LABEL_WIDTH,
-    );
     let status = StatusIndicator::animated(row.status_kind());
-    let reserved_width = 1 + 1 + COMPOSER_AGENT_LABEL_WIDTH + 1 + 1 + 1;
-    let detail_text = truncate_display_width(&detail, width.saturating_sub(reserved_width));
+    let chrome_width = terminal_cell_width(focus)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(terminal_cell_width(status.symbol()))
+        .saturating_add(1);
+    let label_width = COMPOSER_AGENT_LABEL_WIDTH.min(width.saturating_sub(chrome_width));
+    let label_text = if label_width == 0 {
+        String::new()
+    } else {
+        pad_display_width(&truncate_display_width(label, label_width), label_width)
+    };
+    let reserved_width = chrome_width.saturating_add(label_width);
+    let detail_width = width.saturating_sub(reserved_width);
+    let detail_text = if detail_width == 0 {
+        String::new()
+    } else {
+        truncate_display_width(&detail, detail_width)
+    };
     let style = if selected {
         Style::default()
             .fg(palette.selection_fg)
@@ -422,6 +601,7 @@ fn render_agent_row(
 
 fn render_agent_actions(
     view_model: &ComposerViewModel,
+    hidden_count: usize,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
@@ -432,7 +612,11 @@ fn render_agent_actions(
         .iter()
         .find(|row| row.selected)
         .is_some_and(|row| row.label != "main");
-    let mut text = "Actions  Enter switch".to_owned();
+    let mut text = if hidden_count == 0 {
+        "Actions  Enter switch".to_owned()
+    } else {
+        format!("Enter switch · +{hidden_count} hidden")
+    };
     if child_selected {
         text.push_str("  Alt-C close  Alt-M message");
     }

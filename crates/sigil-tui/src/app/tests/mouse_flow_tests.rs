@@ -5,7 +5,6 @@ use crate::{
     ui::{LayoutMode, LayoutSnapshot},
 };
 use ratatui::{layout::Rect, text::Line};
-use unicode_width::UnicodeWidthStr;
 
 fn mouse(kind: MouseInputKind, column: u16, row: u16) -> MouseInput {
     MouseInput {
@@ -219,7 +218,7 @@ fn live_text_point_at_text_offset(
         .timeline_plain_line(hit_area.line_index)
         .expect("expected plain timeline line");
     let text_start = line.find(expected_text).expect("expected text in line");
-    let text_start_width = UnicodeWidthStr::width(&line[..text_start]);
+    let text_start_width = crate::ui::terminal_cell_width(&line[..text_start]);
     (
         hit_area
             .area

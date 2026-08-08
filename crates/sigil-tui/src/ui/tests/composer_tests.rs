@@ -58,6 +58,17 @@ fn composer_input_row_highlights_slash_command_and_pads_tail() {
 }
 
 #[test]
+fn composer_input_row_sanitizes_controls_before_slash_token_offsets() {
+    let theme = Theme::default();
+    let line = render_input_row("\t/task", 5, theme.palette.surface_input, &theme);
+
+    assert_eq!(line.spans[0].content.as_ref(), "");
+    assert_eq!(line.spans[1].content.as_ref(), "/task");
+    assert_eq!(line.spans[2].content.as_ref(), "");
+    assert_eq!(terminal_cell_width("/task"), 5);
+}
+
+#[test]
 fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
@@ -134,6 +145,57 @@ fn composer_renders_selected_attachment_above_the_input() -> anyhow::Result<()> 
 }
 
 #[test]
+fn compact_composer_windows_attachments_around_selection_and_keeps_input_visible()
+-> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "openai".to_owned(),
+        model_name: "gpt-5".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: Vec::new(),
+        agent_panel_focused: false,
+        image_attachments: (0..4)
+            .map(|index| crate::view_model::ComposerAttachmentViewModel {
+                label: format!("image {} · PNG · 1×1 · 4 B", index + 1),
+                selected: index == 3,
+            })
+            .collect(),
+        input: "draft remains editable".to_owned(),
+        input_rows: 1,
+        cursor_position: (5, 0),
+    };
+    let area = ratatui::layout::Rect::new(0, 0, 40, 6);
+    let backend = TestBackend::new(40, 6);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_input(frame, area, &view_model))?;
+
+    let rows = (0..6)
+        .map(|y| {
+            (0..40)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(rows.iter().any(|row| row.contains("… ◆ image 4")));
+    assert!(!rows.iter().any(|row| row.contains("image 1")));
+    assert!(rows.iter().any(|row| row.contains("draft remains")));
+    let input_area = composer_input_area(area, 1, 4);
+    assert_eq!(input_area.height, 1);
+    assert_eq!(composer_cursor_origin(area, &view_model), Some((3, 4)));
+    assert_eq!(
+        composer_attachment_window(area, 4, 3),
+        ComposerAttachmentWindow {
+            item_indices: vec![3],
+            show_overflow_row: false,
+            inline_overflow: true,
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_panel_line_pads_tail_with_panel_background() {
     let theme = Theme::default();
     let bg = theme.palette.surface_agent_panel;
@@ -188,6 +250,28 @@ fn composer_cursor_origin_returns_none_when_input_area_disappears() {
     assert_eq!(
         composer_cursor_origin(ratatui::layout::Rect::new(0, 0, 4, 2), &view_model),
         None
+    );
+}
+
+#[test]
+fn composer_cursor_position_clamps_to_the_visible_input_width() {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: Vec::new(),
+        agent_panel_focused: false,
+        image_attachments: Vec::new(),
+        input: "abcdefgh".to_owned(),
+        input_rows: 8,
+        cursor_position: (8, 7),
+    };
+
+    assert_eq!(
+        composer_cursor_position(ratatui::layout::Rect::new(0, 0, 7, 5), &view_model),
+        Some((3, 3))
     );
 }
 
@@ -518,6 +602,114 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
     assert_eq!(
         selected_row_tail.style().bg,
         Some(theme.palette.selection_bg)
+    );
+    Ok(())
+}
+
+#[test]
+fn render_agent_panel_keeps_each_logical_row_single_line_at_24_columns() -> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build · agent: repo audit worker".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: vec![
+            SidebarAgentRow {
+                label: "main".to_owned(),
+                detail: "idle in current session".to_owned(),
+                selected: false,
+                active: true,
+                muted: false,
+            },
+            SidebarAgentRow {
+                label: "repo audit worker".to_owned(),
+                detail: "completed · subagent_read · v1:step_1".to_owned(),
+                selected: true,
+                active: false,
+                muted: false,
+            },
+        ],
+        agent_panel_focused: true,
+        image_attachments: Vec::new(),
+        input: String::new(),
+        input_rows: 1,
+        cursor_position: (0, 0),
+    };
+    let backend = TestBackend::new(24, 4);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_agent_panel(frame, frame.area(), &view_model))?;
+
+    let buffer = terminal.backend().buffer();
+    let rows = buffer
+        .content()
+        .chunks(24)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    assert!(rows[1].contains("main"));
+    assert!(rows[2].contains("repo audit"));
+    assert!(rows[3].contains("Actions"));
+    assert!(rows[3].contains("Enter"));
+    assert_eq!(
+        buffer[(23, 2)].style().bg,
+        Some(Theme::default().palette.selection_bg),
+        "selected agent row must occupy and style exactly one full content row"
+    );
+    Ok(())
+}
+
+#[test]
+fn compact_agent_panel_windows_late_selection_and_keeps_actions_visible() -> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build · agent: child 4".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: (0..5)
+            .map(|index| SidebarAgentRow {
+                label: if index == 0 {
+                    "main".to_owned()
+                } else {
+                    format!("child {index}")
+                },
+                detail: "completed · explorer".to_owned(),
+                selected: index == 4,
+                active: index == 0,
+                muted: false,
+            })
+            .collect(),
+        agent_panel_focused: true,
+        image_attachments: Vec::new(),
+        input: String::new(),
+        input_rows: 1,
+        cursor_position: (0, 0),
+    };
+    let backend = TestBackend::new(80, 3);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_agent_panel(frame, frame.area(), &view_model))?;
+
+    let rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(80)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>();
+    assert!(rows[1].contains("child 4"));
+    assert!(!rows.iter().any(|row| row.contains("main")));
+    assert!(rows[2].contains("Enter switch"));
+    assert!(rows[2].contains("+4 hidden"));
+    assert!(rows[2].contains("Alt-C close"));
+    assert_eq!(
+        composer_agent_window(&view_model.agent_rows, 2, true),
+        ComposerAgentWindow {
+            item_indices: vec![4],
+            show_actions: true,
+            hidden_count: 4,
+        }
     );
     Ok(())
 }

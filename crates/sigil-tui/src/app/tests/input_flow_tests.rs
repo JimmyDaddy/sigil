@@ -149,6 +149,18 @@ fn sync_child_agent(app: &mut AppState) -> Result<()> {
     Ok(())
 }
 
+fn transcript_text(app: &AppState) -> String {
+    app.transcript_lines(usize::MAX)
+        .into_iter()
+        .flat_map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .chain(std::iter::once("\n".to_owned()))
+        })
+        .collect()
+}
+
 #[test]
 fn cjk_input_cursor_visual_position_uses_display_width() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -156,6 +168,42 @@ fn cjk_input_cursor_visual_position_uses_display_width() {
     app.set_input_and_cursor("你好".to_owned());
 
     assert_eq!(app.input_cursor_visual_position(), (4, 0));
+}
+
+#[test]
+fn grapheme_input_cursor_matches_terminal_cell_width() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(40, 12);
+    app.set_input_and_cursor("👨‍👩‍👧‍👦".to_owned());
+    assert_eq!(app.input_cursor_visual_position(), (2, 0));
+
+    app.set_input_and_cursor("ｶﾞ".to_owned());
+    assert_eq!(app.input_cursor_visual_position(), (2, 0));
+}
+
+#[test]
+fn composer_horizontal_editing_stays_on_grapheme_boundaries() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let family = "👨‍👩‍👧‍👦";
+    let family_chars = family.chars().count();
+    app.set_input_and_cursor(format!("{family}x"));
+
+    app.move_input_cursor_left();
+    assert_eq!(app.composer.input_cursor, family_chars);
+    app.move_input_cursor_left();
+    assert_eq!(app.composer.input_cursor, 0);
+    app.move_input_cursor_right();
+    assert_eq!(app.composer.input_cursor, family_chars);
+
+    app.remove_input_character_before_cursor();
+    assert_eq!(app.composer.input, "x");
+    assert_eq!(app.composer.input_cursor, 0);
+
+    app.set_input_and_cursor(format!("{family}x"));
+    app.move_input_cursor_home();
+    app.remove_input_character_at_cursor();
+    assert_eq!(app.composer.input, "x");
+    assert_eq!(app.composer.input_cursor, 0);
 }
 
 #[test]
@@ -346,6 +394,30 @@ fn composer_word_shortcuts_move_delete_and_yank() -> Result<()> {
 }
 
 #[test]
+fn composer_word_deletion_never_splits_combining_or_zwj_graphemes() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let combining = "e\u{301}";
+    app.set_input_and_cursor(format!("{combining} tail"));
+    app.composer.input_cursor = 0;
+    app.remove_input_word_after_cursor();
+    assert_eq!(app.composer.input, " tail");
+
+    app.set_input_and_cursor(format!("head {combining}"));
+    app.remove_input_word_before_cursor();
+    assert_eq!(app.composer.input, "head ");
+
+    let family = "👨‍👩‍👧‍👦";
+    app.set_input_and_cursor(format!("{family} tail"));
+    app.composer.input_cursor = 0;
+    app.remove_input_word_after_cursor();
+    assert!(app.composer.input.is_empty());
+
+    app.set_input_and_cursor(format!("head {family}"));
+    app.remove_input_word_before_cursor();
+    assert!(app.composer.input.is_empty());
+}
+
+#[test]
 fn composer_ctrl_k_kills_to_line_end_and_ctrl_y_yanks() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_input_and_cursor("one\ntwo\nthree".to_owned());
@@ -394,6 +466,54 @@ fn composer_paste_inserts_multiline_text_without_submitting() {
     assert_eq!(app.composer.input_cursor, app.input_char_len());
     assert_eq!(app.timeline.len(), timeline_len);
     assert_eq!(app.composer_input_rows(), 3);
+}
+
+#[test]
+fn composer_paste_submits_the_same_visible_control_free_text() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle_paste_text("alpha\tbeta\u{0007}\u{200b}\r\ngamma\u{0085}");
+
+    let expected = "alpha    beta\ngamma";
+    assert_eq!(app.composer.input, expected);
+    assert_eq!(
+        crate::view_model::UiViewModel::from_app(&app)
+            .composer
+            .input,
+        expected
+    );
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == expected
+    ));
+    Ok(())
+}
+
+#[test]
+fn composer_typing_drops_standalone_zero_width_input_but_keeps_emoji_graphemes() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.insert_input_character('\u{200b}');
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.input_cursor, 0);
+
+    let family = "👨‍👩‍👧‍👦";
+    for character in family.chars() {
+        app.insert_input_character(character);
+    }
+    assert_eq!(app.composer.input, family);
+    assert_eq!(app.composer.input_cursor, family.chars().count());
+}
+
+#[test]
+fn composer_normalizes_hidden_joiners_out_of_command_tokens() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle_paste_text("/task\u{200d} inspect");
+
+    assert_eq!(app.composer.input, "/task inspect");
+    assert!(app.submit_input()?.is_some());
+    assert_ne!(app.last_notice(), Some("unknown slash command"));
+    Ok(())
 }
 
 fn write_test_png(path: &Path) -> Result<()> {
@@ -1584,7 +1704,8 @@ fn composer_down_at_bottom_row_navigates_history() -> Result<()> {
     app.active_pane = PaneFocus::Composer;
     app.set_terminal_size(6, 20);
     app.composer.input = "draft123".to_owned();
-    app.composer.input_cursor = 1;
+    app.composer.input_cursor = 0;
+    assert_eq!(app.composer_input_rows(), 9);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.composer.input, "second");
@@ -1939,9 +2060,10 @@ fn queue_focus_is_cleared_when_switching_to_agent_without_visible_queue() -> Res
 }
 
 #[test]
-fn busy_plain_prompt_queues_against_active_agent_view() -> Result<()> {
+fn busy_plain_prompt_to_child_fails_closed_without_false_queue() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
+    let main_timeline_len_before = app.timeline.len();
     assert!(app.activate_agent_view_at_index(1));
     app.runtime.is_busy = true;
     app.composer.input = "check this thread next".to_owned();
@@ -1949,22 +2071,48 @@ fn busy_plain_prompt_queues_against_active_agent_view() -> Result<()> {
 
     let action = app.submit_input()?;
 
-    assert!(matches!(
-        action,
-        Some(AppAction::QueueConversationInput {
-            prompt,
-            kind: sigil_kernel::ConversationInputKind::AgentMessage,
-            target: sigil_kernel::ConversationInputTarget::AgentThread { ref thread_id },
-        }) if prompt == "check this thread next" && thread_id.as_str() == "child_1"
-    ));
-    assert!(app.composer.input.is_empty());
-    let child_rows = app.composer_queue_rows();
-    assert_eq!(child_rows.len(), 1);
-    assert_eq!(child_rows[0].label, "check this thread next");
-    assert_eq!(child_rows[0].detail, "pending · agent child_1 · message");
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "check this thread next");
+    assert!(app.composer_queue_rows().is_empty());
+    assert!(!transcript_text(&app).contains("check this thread next"));
+    assert_eq!(
+        app.last_notice(),
+        Some("child agent follow-ups cannot be queued; input kept")
+    );
+    app.agent_panel.active_child_transcript = None;
+    assert!(!transcript_text(&app).contains("check this thread next"));
 
     let _ = app.activate_agent_from_command("main")?;
     assert!(app.composer_queue_rows().is_empty());
+    assert_eq!(app.timeline.len(), main_timeline_len_before);
+    assert!(!transcript_text(&app).contains("check this thread next"));
+    Ok(())
+}
+
+#[test]
+fn busy_plain_prompt_to_orphan_child_cannot_fall_back_to_main_queue() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: "orphan-child".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "children/task_1/step_1-orphan.jsonl",
+        )?,
+    };
+    app.runtime.is_busy = true;
+    app.composer.input = "do not leak this to main".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    let main_timeline_len_before = app.timeline.len();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "do not leak this to main");
+    assert!(app.composer.optimistic_queue_items.is_empty());
+    assert_eq!(app.timeline.len(), main_timeline_len_before);
+    assert_eq!(
+        app.last_notice(),
+        Some("child agent follow-ups cannot be queued; input kept")
+    );
     Ok(())
 }
 

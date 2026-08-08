@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     AppAction, AppState, ComposerPasteSpan, PaneFocus, char_to_byte_index,
@@ -28,11 +28,14 @@ impl AppState {
     pub fn composer_height(&self) -> u16 {
         let compact = self.terminal_height <= 14;
         let chrome_rows = if compact { 2 } else { 4 };
-        let minimum_rows = if compact { 3 } else { 5 };
         self.composer_input_rows()
             .saturating_add(chrome_rows)
             .saturating_add(self.composer.image_attachments.len() as u16)
-            .max(minimum_rows)
+            .max(self.minimum_composer_height())
+    }
+
+    pub(super) fn minimum_composer_height(&self) -> u16 {
+        if self.terminal_height <= 14 { 3 } else { 5 }
     }
 
     pub(super) fn input_char_len(&self) -> usize {
@@ -40,7 +43,7 @@ impl AppState {
     }
 
     pub(super) fn set_input_and_cursor(&mut self, input: String) {
-        self.composer.input = input;
+        self.composer.input = normalize_composer_text(&input);
         self.composer.input_cursor = self.input_char_len();
         self.composer.input_paste_spans.clear();
     }
@@ -70,11 +73,18 @@ impl AppState {
     }
 
     pub(super) fn insert_input_character(&mut self, character: char) {
+        if character.is_control() && character != '\n' {
+            return;
+        }
         self.composer.input_paste_spans.clear();
         self.discard_cleared_input_draft();
         let byte_index = char_to_byte_index(&self.composer.input, self.composer.input_cursor);
         self.composer.input.insert(byte_index, character);
         self.composer.input_cursor += 1;
+        let cursor_byte = char_to_byte_index(&self.composer.input, self.composer.input_cursor);
+        let normalized_prefix = normalize_composer_text(&self.composer.input[..cursor_byte]);
+        self.composer.input = normalize_composer_text(&self.composer.input);
+        self.composer.input_cursor = normalized_prefix.chars().count();
     }
 
     pub(super) fn insert_input_text(&mut self, text: &str) {
@@ -93,7 +103,7 @@ impl AppState {
     }
 
     pub fn handle_paste_text(&mut self, text: &str) {
-        let pasted = normalize_paste_text(text);
+        let pasted = normalize_composer_text(text);
         if pasted.is_empty() {
             return;
         }
@@ -449,7 +459,9 @@ impl AppState {
             return;
         }
         self.composer.input_paste_spans.clear();
-        self.remove_input_range(self.composer.input_cursor - 1..self.composer.input_cursor);
+        let end = grapheme_boundary_at_or_after(&self.composer.input, self.composer.input_cursor);
+        let start = previous_grapheme_boundary(&self.composer.input, end);
+        self.remove_input_range(start..end);
     }
 
     pub(super) fn remove_input_character_at_cursor(&mut self) {
@@ -457,33 +469,42 @@ impl AppState {
             return;
         }
         self.composer.input_paste_spans.clear();
-        self.remove_input_range(self.composer.input_cursor..self.composer.input_cursor + 1);
+        let start =
+            grapheme_boundary_at_or_before(&self.composer.input, self.composer.input_cursor);
+        let end = next_grapheme_boundary(&self.composer.input, start);
+        self.remove_input_range(start..end);
     }
 
     pub(super) fn remove_input_word_before_cursor(&mut self) {
-        let start = self.previous_input_word_start();
-        if start == self.composer.input_cursor {
+        let end = grapheme_boundary_at_or_after(&self.composer.input, self.composer.input_cursor);
+        let start =
+            grapheme_boundary_at_or_before(&self.composer.input, self.previous_input_word_start());
+        if start == end {
             return;
         }
-        self.kill_input_range(start..self.composer.input_cursor);
+        self.kill_input_range(start..end);
     }
 
     pub(super) fn remove_input_word_after_cursor(&mut self) {
-        let end = self.next_input_word_end();
-        if end == self.composer.input_cursor {
+        let start =
+            grapheme_boundary_at_or_before(&self.composer.input, self.composer.input_cursor);
+        let end = grapheme_boundary_at_or_after(&self.composer.input, self.next_input_word_end());
+        if start == end {
             return;
         }
-        self.kill_input_range(self.composer.input_cursor..end);
+        self.kill_input_range(start..end);
     }
 
     pub(super) fn move_input_cursor_left(&mut self) {
         self.composer.input_paste_spans.clear();
-        self.composer.input_cursor = self.composer.input_cursor.saturating_sub(1);
+        self.composer.input_cursor =
+            previous_grapheme_boundary(&self.composer.input, self.composer.input_cursor);
     }
 
     pub(super) fn move_input_cursor_right(&mut self) {
         self.composer.input_paste_spans.clear();
-        self.composer.input_cursor = (self.composer.input_cursor + 1).min(self.input_char_len());
+        self.composer.input_cursor =
+            next_grapheme_boundary(&self.composer.input, self.composer.input_cursor);
     }
 
     pub(super) fn move_input_cursor_home(&mut self) {
@@ -508,12 +529,14 @@ impl AppState {
 
     pub(super) fn move_input_cursor_word_left(&mut self) {
         self.composer.input_paste_spans.clear();
-        self.composer.input_cursor = self.previous_input_word_start();
+        self.composer.input_cursor =
+            grapheme_boundary_at_or_before(&self.composer.input, self.previous_input_word_start());
     }
 
     pub(super) fn move_input_cursor_word_right(&mut self) {
         self.composer.input_paste_spans.clear();
-        self.composer.input_cursor = self.next_input_word_end();
+        self.composer.input_cursor =
+            grapheme_boundary_at_or_after(&self.composer.input, self.next_input_word_end());
     }
 
     pub(super) fn kill_input_to_line_end(&mut self) {
@@ -593,7 +616,7 @@ impl AppState {
         let width = width.max(1);
         let mut best_index = self.input_char_len();
         let mut best_distance = usize::MAX;
-        for index in 0..=self.input_char_len() {
+        for index in grapheme_char_boundaries(&self.composer.input) {
             let (row, column) = self.visual_position_for_cursor(index, width);
             if row < target_row {
                 continue;
@@ -691,15 +714,31 @@ impl AppState {
     }
 
     fn composer_wrap_width(&self) -> usize {
-        let total_width = self.terminal_width.max(24) as usize;
-        let sidebar_width = sidebar_width_for_terminal(total_width);
-        let composer_width = total_width.saturating_sub(sidebar_width).max(12);
+        let total_width = usize::from(self.terminal_width.max(3));
+        let sidebar_width = if self.info_rail_visible() {
+            sidebar_width_for_terminal(total_width)
+        } else {
+            0
+        };
+        let composer_width = total_width.saturating_sub(sidebar_width);
         composer_width.saturating_sub(6).max(1)
     }
 }
 
-fn normalize_paste_text(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+fn normalize_composer_text(text: &str) -> String {
+    let normalized_line_endings = text.replace("\r\n", "\n").replace('\r', "\n");
+    normalized_line_endings
+        .graphemes(true)
+        .fold(String::new(), |mut normalized, grapheme| {
+            match grapheme {
+                "\n" => normalized.push('\n'),
+                "\t" => normalized.push_str("    "),
+                grapheme => {
+                    normalized.push_str(&crate::ui::sanitize_terminal_text(grapheme));
+                }
+            }
+            normalized
+        })
 }
 
 fn input_char_range(input: &str, range: Range<usize>) -> String {
@@ -715,31 +754,49 @@ fn paste_span_placeholder(index: usize, span: &ComposerPasteSpan) -> String {
     )
 }
 
-fn visual_position_for_cursor_in(input: &str, cursor: usize, width: usize) -> (usize, usize) {
-    let width = width.max(1);
-    let mut row = 0usize;
-    let mut column = 0usize;
-    for (index, character) in input.chars().enumerate() {
-        if index == cursor {
-            break;
-        }
-        if character == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-        let char_width = UnicodeWidthChar::width(character).unwrap_or(1).max(1);
-        if column + char_width > width {
-            row += 1;
-            column = 0;
-        }
-        column += char_width;
-        if column >= width {
-            row += column / width;
-            column %= width;
-        }
+fn grapheme_char_boundaries(input: &str) -> Vec<usize> {
+    let mut boundaries = Vec::with_capacity(input.graphemes(true).count().saturating_add(1));
+    boundaries.push(0);
+    let mut char_index = 0usize;
+    for grapheme in input.graphemes(true) {
+        char_index = char_index.saturating_add(grapheme.chars().count());
+        boundaries.push(char_index);
     }
-    (row, column)
+    boundaries
+}
+
+fn previous_grapheme_boundary(input: &str, cursor: usize) -> usize {
+    grapheme_char_boundaries(input)
+        .into_iter()
+        .take_while(|boundary| *boundary < cursor)
+        .last()
+        .unwrap_or(0)
+}
+
+fn next_grapheme_boundary(input: &str, cursor: usize) -> usize {
+    grapheme_char_boundaries(input)
+        .into_iter()
+        .find(|boundary| *boundary > cursor)
+        .unwrap_or_else(|| input.chars().count())
+}
+
+fn grapheme_boundary_at_or_before(input: &str, cursor: usize) -> usize {
+    grapheme_char_boundaries(input)
+        .into_iter()
+        .take_while(|boundary| *boundary <= cursor)
+        .last()
+        .unwrap_or(0)
+}
+
+fn grapheme_boundary_at_or_after(input: &str, cursor: usize) -> usize {
+    grapheme_char_boundaries(input)
+        .into_iter()
+        .find(|boundary| *boundary >= cursor)
+        .unwrap_or_else(|| input.chars().count())
+}
+
+fn visual_position_for_cursor_in(input: &str, cursor: usize, width: usize) -> (usize, usize) {
+    crate::ui::visual_position_for_char_cursor(input, cursor, width)
 }
 
 fn is_input_word_character(character: char) -> bool {

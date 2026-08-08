@@ -48,6 +48,8 @@ pub(crate) struct TimelineState {
     pub(in crate::app) defer_renders: bool,
     pub(in crate::app) deferred_render_indexes: BTreeSet<usize>,
     pub(in crate::app) tool_activity_cache: Vec<ToolActivityCacheEntry>,
+    pub(in crate::app) native_scrollback_session_id: Option<String>,
+    pub(in crate::app) native_scrollback_entry_count: usize,
 }
 
 #[derive(Debug, Default)]
