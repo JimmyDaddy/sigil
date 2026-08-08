@@ -189,7 +189,7 @@ fn fixture(
         WebTaskTreeBudgetLimits {
             max_fetch_calls: 4,
             max_client_search_calls: 4,
-            max_hosted_requests: 1,
+            max_hosted_requests: Some(1),
             max_network_attempts: 4,
             max_wire_bytes: 1024 * 1024,
             max_decoded_bytes: 1024 * 1024,

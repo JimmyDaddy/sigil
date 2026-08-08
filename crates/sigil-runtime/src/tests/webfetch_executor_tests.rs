@@ -464,7 +464,7 @@ fn budget() -> Arc<WebTaskTreeBudget> {
         WebTaskTreeBudgetLimits {
             max_fetch_calls: 4,
             max_client_search_calls: 4,
-            max_hosted_requests: 4,
+            max_hosted_requests: Some(4),
             max_network_attempts: 8,
             max_wire_bytes: 8 * 1024 * 1024,
             max_decoded_bytes: 8 * 1024 * 1024,

@@ -109,7 +109,7 @@ struct RuntimeHostedTurnPreparer {
 
 #[async_trait]
 impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
-    async fn prepare_turn(&self) -> Result<AgentHostedTurn> {
+    async fn prepare_turn(&self) -> Result<Option<AgentHostedTurn>> {
         let unique = uuid::Uuid::new_v4();
         let root_run_id = self.budget.root_run_id().to_owned();
         let correlation_id = format!("hosted-web-correlation-{unique}");
@@ -144,13 +144,20 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
         self.recorder
             .append_disclosure_presented(&validate_disclosure_receipt(&disclosure, receipt)?)?;
 
-        let reservation = self.budget.reserve(WebBudgetReservationRequest {
+        let reservation = match self.budget.reserve(WebBudgetReservationRequest {
             correlation_id: correlation_id.clone(),
             attempt_id: format!("hosted-web-attempt-{unique}"),
             route_lease_id: route_lease_id.clone(),
             route_fingerprint: request.request_fingerprint.clone(),
             kind: WebBudgetReservationKind::HostedProviderRequest,
-        })?;
+        }) {
+            Ok(reservation) => reservation,
+            // The run's hosted-request budget is a soft safety cap: once exhausted, this request
+            // continues WITHOUT the provider-hosted search (the agent notices and adapts) instead
+            // of failing the whole run.
+            Err(sigil_kernel::WebBudgetError::Exhausted { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         let authorization = HostedToolAuthorization {
             record_id: format!("hosted-web-authorization-record-{unique}"),
             root_run_id,
@@ -170,10 +177,10 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
             inner: HostedEvidenceFinalizer::new(crate::web_search_tool::current_rfc3339()),
             active: Mutex::new(Some(active)),
         });
-        Ok(AgentHostedTurn {
+        Ok(Some(AgentHostedTurn {
             hosted_tools: vec![request],
             evidence_processor: processor,
-        })
+        }))
     }
 }
 
@@ -243,7 +250,8 @@ fn safe_provider_origin(base_url: &str) -> Result<String> {
 
 fn hosted_limits(root: &RootConfig, capability: HostedWebSearchCapability) -> HostedToolLimits {
     let max_uses = (capability.max_uses_enforcement != HostedConstraintEnforcement::Unsupported)
-        .then_some(root.web.provider_hosted_max_uses_per_request);
+        .then_some(root.web.provider_hosted_max_uses_per_request)
+        .flatten();
     let (allowed_domains, blocked_domains) =
         if capability.domain_filter_enforcement == HostedConstraintEnforcement::Unsupported {
             (Vec::new(), Vec::new())
@@ -276,23 +284,41 @@ impl HostedEvidenceProcessor for AuthorizedHostedFinalizer {
         let mut active = self
             .active
             .lock()
-            .map_err(|_| HostedTurnError::FinalizationFailed)?
+            .map_err(|_| {
+                HostedTurnError::FinalizationFailed("hosted egress lock poisoned".to_owned())
+            })?
             .take()
-            .ok_or(HostedTurnError::FinalizationFailed)?;
+            .ok_or_else(|| {
+                HostedTurnError::FinalizationFailed(
+                    "hosted egress slot missing at finalization".to_owned(),
+                )
+            })?;
         match finalized {
             Ok(finalized) => {
                 active
                     .charge_model_chunk(finalized.assistant_text.len() as u64)
-                    .map_err(|_| HostedTurnError::FinalizationFailed)?;
+                    .map_err(|error| {
+                        HostedTurnError::FinalizationFailed(format!(
+                            "hosted egress model-chunk charge failed: {error:#}"
+                        ))
+                    })?;
                 active
                     .finish(hosted_terminal_status(&finalized))
-                    .map_err(|_| HostedTurnError::FinalizationFailed)?;
+                    .map_err(|error| {
+                        HostedTurnError::FinalizationFailed(format!(
+                            "hosted egress finish failed: {error:#}"
+                        ))
+                    })?;
                 Ok(finalized)
             }
             Err(error) => {
                 active
                     .finish(HostedToolTerminalStatus::RequestFailed)
-                    .map_err(|_| HostedTurnError::FinalizationFailed)?;
+                    .map_err(|finish_error| {
+                        HostedTurnError::FinalizationFailed(format!(
+                            "hosted egress finish failed: {finish_error:#}"
+                        ))
+                    })?;
                 Err(error)
             }
         }

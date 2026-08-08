@@ -5,6 +5,7 @@ pub fn build_run_options(
     root_config: &RootConfig,
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
+    permission_mode_override: Option<sigil_kernel::PermissionModeOverride>,
 ) -> AgentRunOptions {
     let workspace_root = canonical_workspace_root(workspace_root);
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
@@ -28,6 +29,7 @@ pub fn build_run_options(
         reasoning_effort: default_reasoning_effort(root_config),
         interaction_mode,
         permission_config: root_config.permission.clone(),
+        permission_mode_override,
         permission_context: permission_evaluation_context(
             &paths,
             if root_config.web.enabled {
@@ -85,7 +87,7 @@ pub fn build_role_run_options(
     if let Some(model) = role_config.model.as_ref() {
         resolved.agent.model.clone_from(model);
     }
-    let mut options = build_run_options(&resolved, workspace_root, interaction_mode);
+    let mut options = build_run_options(&resolved, workspace_root, interaction_mode, None);
     if let Some(reasoning_effort) = role_config.reasoning_effort.clone() {
         options.reasoning_effort = Some(reasoning_effort);
     }

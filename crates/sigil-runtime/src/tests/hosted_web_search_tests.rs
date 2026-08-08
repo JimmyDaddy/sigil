@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
-    HostedCustomToolCompatibility, HostedToolSupport, HostedWebSearchCapability, RootConfig,
-    WebSearchRoute,
+    AgentHostedTurnPreparer, HostedCustomToolCompatibility, HostedToolSupport,
+    HostedWebSearchCapability, JsonlSessionStore, RootConfig, Session, WebSearchRoute,
 };
 
 use super::{
@@ -83,5 +86,85 @@ fn hosted_route_falls_back_in_auto_and_rejects_forced_incompatible_composition()
         compatible,
         "anthropic"
     )?);
+    Ok(())
+}
+
+struct AcceptingDisclosurePresenter;
+
+#[async_trait]
+impl sigil_kernel::EgressDisclosurePresenter for AcceptingDisclosurePresenter {
+    async fn present(
+        &self,
+        disclosure: sigil_kernel::PreEgressDisclosure,
+    ) -> Result<
+        sigil_kernel::DisclosurePresentationReceipt,
+        sigil_kernel::DisclosurePresentationError,
+    > {
+        disclosure.presentation_receipt("deterministic-fake-sink-v1")
+    }
+}
+
+#[tokio::test]
+async fn hosted_preparer_skips_turn_when_hosted_budget_is_exhausted() -> Result<()> {
+    // A run whose hosted-request budget is already spent must skip the hosted turn softly
+    // (return None) so the run continues without web search instead of failing.
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let recorder = session.egress_audit_recorder()?;
+    let root: RootConfig = serde_json::from_value(json!({
+        "config_version": 2,
+        "agent": {
+            "connection": "deepseek-default",
+            "model": "deepseek-v4-flash",
+            "tool_timeout_secs": 30
+        },
+        "connections": {
+            "deepseek-default": {
+                "label": "DeepSeek",
+                "provider": "deepseek",
+                "protocol": "openai_compat",
+                "base_url": "https://api.deepseek.test",
+                "credential": {
+                    "source": "environment",
+                    "name": "SIGIL_API_KEY"
+                }
+            }
+        },
+        "web": {
+            "enabled": true,
+            "search_route": "provider_hosted",
+            "max_hosted_enabled_provider_requests_per_run": 1
+        }
+    }))?;
+    let budget = sigil_kernel::WebTaskTreeBudget::new(
+        "web-run-exhausted",
+        super::super::remote_mcp::web_budget_limits(&root),
+        None,
+    )?;
+    let mut reservation = budget.reserve(sigil_kernel::WebBudgetReservationRequest {
+        correlation_id: "hosted-correlation-1".to_owned(),
+        attempt_id: "hosted-attempt-1".to_owned(),
+        route_lease_id: "hosted-lease-1".to_owned(),
+        route_fingerprint: "hosted-fp-1".to_owned(),
+        kind: sigil_kernel::WebBudgetReservationKind::HostedProviderRequest,
+    })?;
+    reservation.commit_call()?;
+    drop(reservation);
+
+    let preparer = super::RuntimeHostedTurnPreparer {
+        root_config: root,
+        presenter: Arc::new(AcceptingDisclosurePresenter),
+        recorder,
+        provider_name: "deepseek".to_owned(),
+        safe_provider_destination: "https://api.deepseek.test/".to_owned(),
+        capability: HostedWebSearchCapability::default(),
+        budget,
+    };
+    let turn = preparer.prepare_turn().await?;
+    assert!(
+        turn.is_none(),
+        "an exhausted hosted-request budget must skip the hosted turn"
+    );
     Ok(())
 }

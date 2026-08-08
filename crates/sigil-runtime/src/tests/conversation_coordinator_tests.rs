@@ -410,6 +410,8 @@ fn running_task_recovery_interrupts_stale_steps_and_requires_explicit_continue()
         task_id: action.task_id.clone(),
         parent_session_ref: parent_ref()?,
         objective: "durable objective".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -500,6 +502,8 @@ fn durable_task_cancellation_suppresses_crash_prefix_final_repair() -> Result<()
         task_id: task_id.clone(),
         parent_session_ref: parent_ref()?,
         objective: "cancel before final commit".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -599,6 +603,8 @@ fn synthesis_result_only_crash_prefix_completes_without_provider_replay() -> Res
         task_id: task_id.clone(),
         parent_session_ref: parent_ref()?,
         objective: "recover result-only synthesis".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -750,6 +756,8 @@ fn step_result_only_crash_prefix_blocks_without_replaying_side_effects() -> Resu
         task_id: task_id.clone(),
         parent_session_ref: parent_ref()?,
         objective: "change the workspace once".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -859,6 +867,8 @@ fn legacy_step_result_only_prefix_fails_closed() -> Result<()> {
         task_id: task_id.clone(),
         parent_session_ref: parent_ref()?,
         objective: "recover legacy write result".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -955,6 +965,8 @@ fn handoff_cancellation_interrupts_started_participant_before_resume() -> Result
         task_id: task_id.clone(),
         parent_session_ref: parent_ref()?,
         objective: "cancel this recovered task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;

@@ -960,6 +960,8 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: secret_objective.to_owned(),
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: None,
     }))?;
@@ -994,6 +996,8 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: secret_objective.to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("private pause reason".to_owned()),
     }))?;
@@ -1026,6 +1030,8 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
         task_id,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: secret_objective.to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
@@ -1055,6 +1061,8 @@ fn durable_task_control_truncates_oversized_plan_summary_explicitly() -> Result<
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "bounded projection".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -1118,6 +1126,8 @@ fn durable_task_control_does_not_carry_step_status_across_plan_versions() -> Res
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "replan safely".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;

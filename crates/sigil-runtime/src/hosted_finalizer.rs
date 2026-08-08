@@ -53,10 +53,16 @@ impl HostedEvidenceProcessor for HostedEvidenceFinalizer {
             match evidence {
                 HostedEvidence::Source(candidate) => {
                     if source_ids.contains_key(candidate.provider_source_id()) {
-                        return Err(HostedTurnError::FinalizationFailed);
+                        return Err(HostedTurnError::FinalizationFailed(
+                            "provider repeated a remote source id in one turn".to_owned(),
+                        ));
                     }
                     let projection = canonical_web_url_persistence_projection(candidate.raw_url())
-                        .map_err(|_| HostedTurnError::FinalizationFailed)?;
+                        .map_err(|error| {
+                            HostedTurnError::FinalizationFailed(format!(
+                                "provider source URL projection failed: {error:#}"
+                            ))
+                        })?;
                     let source = ExternalSourceRecord::from_remote_candidate(
                         context.session_scope_id.clone(),
                         Some(candidate.provider_source_id()),
@@ -72,7 +78,11 @@ impl HostedEvidenceProcessor for HostedEvidenceFinalizer {
                         SourceCacheStatus::NotApplicable,
                         projection.restart_policy,
                     )
-                    .map_err(|_| HostedTurnError::FinalizationFailed)?;
+                    .map_err(|error| {
+                        HostedTurnError::FinalizationFailed(format!(
+                            "provider source record projection failed: {error:#}"
+                        ))
+                    })?;
                     source_ids.insert(
                         candidate.provider_source_id().to_owned(),
                         source.source_id.clone(),

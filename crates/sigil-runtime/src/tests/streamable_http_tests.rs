@@ -38,7 +38,7 @@ async fn production_attempt_factory_issues_unique_disclosures_and_shared_budget_
         WebTaskTreeBudgetLimits {
             max_fetch_calls: 2,
             max_client_search_calls: 2,
-            max_hosted_requests: 1,
+            max_hosted_requests: Some(1),
             max_network_attempts: 4,
             max_wire_bytes: 1024,
             max_decoded_bytes: 1024,
@@ -76,7 +76,7 @@ async fn production_attempt_factory_issues_unique_disclosures_and_shared_budget_
         WebTaskTreeBudgetLimits {
             max_fetch_calls: 2,
             max_client_search_calls: 2,
-            max_hosted_requests: 1,
+            max_hosted_requests: Some(1),
             max_network_attempts: 4,
             max_wire_bytes: 1024,
             max_decoded_bytes: 1024,
@@ -158,7 +158,7 @@ fn fixture(
         WebTaskTreeBudgetLimits {
             max_fetch_calls: 8,
             max_client_search_calls: 8,
-            max_hosted_requests: 8,
+            max_hosted_requests: Some(8),
             max_network_attempts: 16,
             max_wire_bytes: 1024 * 1024,
             max_decoded_bytes: 1024 * 1024,

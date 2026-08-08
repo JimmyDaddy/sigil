@@ -787,6 +787,7 @@ fn build_run_options_carries_shared_runtime_defaults() {
         &test_root_config("deepseek"),
         workspace_root.clone(),
         InteractionMode::Interactive,
+        None,
     );
 
     assert_eq!(options.workspace_root, workspace_root);
@@ -808,6 +809,7 @@ fn build_run_options_omits_default_reasoning_for_unsupported_providers() {
         &test_root_config("openai_compat"),
         Path::new("/tmp/sigil-runtime-test").to_path_buf(),
         InteractionMode::Headless,
+        None,
     );
 
     assert_eq!(options.reasoning_effort, None);
@@ -821,6 +823,7 @@ fn build_run_options_uses_supported_openai_responses_reasoning_default() {
         &config,
         Path::new("/tmp/sigil-runtime-test").to_path_buf(),
         InteractionMode::Headless,
+        None,
     );
 
     assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
@@ -832,6 +835,7 @@ fn build_run_options_omits_reasoning_for_unknown_openai_responses_models() {
         &test_root_config("openai_responses"),
         Path::new("/tmp/sigil-runtime-test").to_path_buf(),
         InteractionMode::Headless,
+        None,
     );
 
     assert_eq!(options.reasoning_effort, None);
@@ -844,6 +848,7 @@ fn build_run_options_keeps_uncanonical_workspace_root_observable_but_tolerant() 
         &test_root_config("deepseek"),
         workspace_root.clone(),
         InteractionMode::Headless,
+        None,
     );
 
     assert_eq!(options.workspace_root, workspace_root);

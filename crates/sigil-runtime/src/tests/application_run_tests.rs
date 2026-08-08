@@ -75,6 +75,8 @@ fn append_running_application_task(
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("session.jsonl")?,
             objective: "control an application Task".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         }),
@@ -2134,6 +2136,8 @@ fn public_event_bridge_projects_task_controls_and_preserves_unknown_controls() -
             task_id: TaskId::new("task-1")?,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "private task objective".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         })),
@@ -2478,6 +2482,8 @@ credential = { source = "none" }
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: "inspect the application runtime".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: Some("accepted by the application conversation coordinator".to_owned()),
     }))?;
@@ -2493,6 +2499,7 @@ credential = { source = "none" }
             &root_config,
             temp.path().to_path_buf(),
             InteractionMode::Headless,
+            None,
         ),
         base_registry: ToolRegistry::new(),
         agent_supervisor: crate::AgentSupervisor::new(
@@ -2580,6 +2587,8 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         objective: "continue the application task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("application restart".to_owned()),
     }))?;
@@ -2716,6 +2725,8 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         objective: "reject stale continuation".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
@@ -3519,6 +3530,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
         &root_config,
         temp.path().to_path_buf(),
         sigil_kernel::InteractionMode::Headless,
+        None,
     );
     let runtime = super::ApplicationPlanReviewRuntime {
         options,

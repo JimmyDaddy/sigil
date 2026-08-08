@@ -732,9 +732,10 @@ pub(crate) fn web_budget_limits(root: &RootConfig) -> WebTaskTreeBudgetLimits {
     WebTaskTreeBudgetLimits {
         max_fetch_calls: u64::from(root.web.max_fetches_per_run.max(1)),
         max_client_search_calls: u64::from(root.web.max_client_searches_per_run.max(1)),
-        max_hosted_requests: u64::from(
-            root.web.max_hosted_enabled_provider_requests_per_run.max(1),
-        ),
+        max_hosted_requests: root
+            .web
+            .max_hosted_enabled_provider_requests_per_run
+            .map(u64::from),
         max_network_attempts: u64::from(root.web.max_network_attempts_per_run.max(1)),
         max_wire_bytes: root.web.max_total_wire_bytes_per_run.max(1),
         max_decoded_bytes: root.web.max_total_decoded_bytes_per_run.max(1),

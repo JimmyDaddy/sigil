@@ -759,7 +759,8 @@ fn reconcile_result_backed_participant_attempts(session: &mut Session) -> Result
             session.append_control(ControlEntry::TaskRun(TaskRunEntry {
                 task_id: attempt.task_id.clone(),
                 parent_session_ref,
-                objective,
+                objective: objective.clone(),
+                title: Some(sigil_kernel::task_semantic_title(&objective)),
                 status: TaskRunStatus::Paused,
                 reason: Some(
                     "step result recovery stopped before readiness commit; manual review or replan is required"
@@ -799,6 +800,7 @@ fn interrupt_task_after_durable_cancellation(
         task_id: task.task_id,
         parent_session_ref: task.parent_session_ref,
         objective: task.objective,
+        title: None,
         status: TaskRunStatus::Interrupted,
         reason: Some(
             "durable cancellation won before crash recovery; final answer repair is suppressed"
@@ -859,6 +861,7 @@ fn ensure_task_started(
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: objective.to_owned(),
+        title: None,
         status: TaskRunStatus::Started,
         reason: Some(reason.to_owned()),
     }))?;
@@ -923,6 +926,7 @@ fn pause_uncertain_task(
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: objective.to_owned(),
+        title: Some(sigil_kernel::task_semantic_title(objective)),
         status: TaskRunStatus::Paused,
         reason: Some(
             "recovery found uncertain planner or participant execution; explicit continue required"

@@ -739,6 +739,7 @@ async fn prepare_application_compaction_for_preview(
         &root_config,
         workspace_root.clone(),
         InteractionMode::Interactive,
+        None,
     );
     options.compaction_config = effective_config.clone();
     let mut reasoning_config = root_config.clone();

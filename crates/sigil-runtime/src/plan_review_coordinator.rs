@@ -843,6 +843,7 @@ impl PlanReviewCoordinator {
                 task_id: task_id.clone(),
                 parent_session_ref: existing_task.parent_session_ref,
                 objective: existing_task.objective,
+                title: None,
                 status: TaskRunStatus::Cancelled,
                 reason: Some(
                     "plan creation cancelled because the workspace changed before commit"
@@ -912,6 +913,7 @@ impl PlanReviewCoordinator {
                     task_id: task_id.clone(),
                     parent_session_ref: parent_session_ref.clone(),
                     objective: safe_objective.clone(),
+                    title: Some(sigil_kernel::task_semantic_title(&draft.summary)),
                     status: TaskRunStatus::Started,
                     reason: Some(format!(
                         "resumed crash-interrupted creation from plan {}",
@@ -929,6 +931,7 @@ impl PlanReviewCoordinator {
                 task_id: task_id.clone(),
                 parent_session_ref: parent_session_ref.clone(),
                 objective: safe_objective,
+                title: Some(sigil_kernel::task_semantic_title(&draft.summary)),
                 status: desired_task_status,
                 reason: Some(format!("created from plan {}", plan_id.as_str())),
             }))?,

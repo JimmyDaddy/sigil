@@ -50,7 +50,7 @@ pub async fn stream_deepseek_prefix_debug(
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let traffic_partition_key =
-        build_run_options(root_config, workspace_root, InteractionMode::Headless)
+        build_run_options(root_config, workspace_root, InteractionMode::Headless, None)
             .traffic_partition_key;
     provider
         .stream_prefix_completion(DeepSeekPrefixCompletionRequest {

@@ -1614,6 +1614,7 @@ where
                 permission_context: sigil_kernel::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                permission_mode_override: None,
             },
             &mut handler,
             approval_handler,

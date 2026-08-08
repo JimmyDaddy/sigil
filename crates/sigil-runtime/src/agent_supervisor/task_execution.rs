@@ -365,6 +365,7 @@ pub fn append_task_stop_state(
         task_id: task_id.clone(),
         parent_session_ref,
         objective: safe_persistence_text(&objective),
+        title: Some(sigil_kernel::task_semantic_title(&objective)),
         status,
         reason: Some(safe_reason),
     }));
@@ -684,6 +685,7 @@ pub fn finalize_task_root(
             task_id: task_id.clone(),
             parent_session_ref: parent_session_ref.clone(),
             objective: safe_persistence_text(objective),
+            title: None,
             status: TaskRunStatus::Failed,
             reason: Some(safe_persistence_text(&format!(
                 "task orchestration failed before a terminal state: {error:#}"

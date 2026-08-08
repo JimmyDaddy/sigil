@@ -102,6 +102,33 @@ async fn hosted_finalizer_rewrites_source_id_and_maps_safe_citation_offsets() {
 }
 
 #[tokio::test]
+async fn hosted_finalizer_surfaces_projection_root_cause_for_bad_provider_url() {
+    // A provider search result with a URL that cannot be safely projected must fail closed with
+    // the projection root cause inside the error, so the run failure is diagnosable.
+    let mut buffer = HostedTurnBuffer::new(HostedTurnBufferLimits::default());
+    buffer
+        .push(hosted_start())
+        .expect("hosted start should buffer");
+    buffer
+        .push(hosted_evidence(HostedEvidence::Source(
+            HostedSourceCandidate::new("provider-bad-url", "javascript:alert(1)", None),
+        )))
+        .expect("source should buffer");
+
+    let error = HostedEvidenceFinalizer::new("2026-07-11T00:00:00Z")
+        .finalize(context(), &buffer)
+        .await
+        .expect_err("unsafe provider URL must fail closed");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("finalization failed")
+            && message.contains("URL projection failed")
+            && message.contains("scheme"),
+        "root cause must survive finalization, got: {message}"
+    );
+}
+
+#[tokio::test]
 async fn hosted_finalizer_maps_success_without_search_to_not_used() {
     let buffer = HostedTurnBuffer::new(HostedTurnBufferLimits::default());
     let finalized = HostedEvidenceFinalizer::new("2026-07-11T00:00:00Z")
@@ -212,6 +239,7 @@ async fn gemini_hosted_provider_evidence_finalizes_to_safe_source_and_unicode_ci
                 permission_context: PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig::with_enabled(false),
                 compaction_config: CompactionConfig::default(),
+                permission_mode_override: None,
             },
             &mut handler,
         )

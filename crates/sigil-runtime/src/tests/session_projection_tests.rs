@@ -107,6 +107,8 @@ fn session_projection_safe_projects_and_byte_bounds_title_and_task_objective() -
         task_id: TaskId::new("task-safe")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: unsafe_text.clone(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;

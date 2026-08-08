@@ -2775,7 +2775,10 @@ async fn prepare_application_run_internal(
                 .with_runtime_context(runtime_context)
                 .with_logical_run_id(run_id.clone())
                 .with_cancellation(cancellation_handle.clone())
-                .with_initial_frozen_provider_request(frozen_request.clone());
+                .with_initial_frozen_provider_request(frozen_request.clone())
+                .with_pending_input_provider(Arc::new(
+                    crate::pending_input::DurableQueuePendingInputProvider,
+                ));
             if let Some(max_output_tokens) = target_max_tokens {
                 run_input = run_input.with_max_output_tokens(max_output_tokens);
             }
@@ -4217,7 +4220,11 @@ pub fn default_application_session_path(session_log_dir: &Path) -> PathBuf {
 pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunInput {
     let runtime_context =
         context_candidates_from_safe_sources(workspace_root, &prompt, None).unwrap_or_default();
-    AgentRunInput::user(prompt).with_runtime_context(runtime_context)
+    AgentRunInput::user(prompt)
+        .with_runtime_context(runtime_context)
+        .with_pending_input_provider(Arc::new(
+            crate::pending_input::DurableQueuePendingInputProvider,
+        ))
 }
 
 #[cfg(test)]
@@ -4515,6 +4522,7 @@ fn prepare_application_run_blocking(
         &identity_config,
         workspace_root.clone(),
         request.interaction.kernel_mode(),
+        None,
     );
     if let Some(permission_mode) = request.permission_mode {
         options.permission_config.mode = permission_mode;
@@ -4527,7 +4535,10 @@ fn prepare_application_run_blocking(
     }
     let mut input = AgentRunInput::user(request.prompt.clone())
         .with_logical_run_id(request.run_id.clone())
-        .with_cancellation(cancellation_handle.clone());
+        .with_cancellation(cancellation_handle.clone())
+        .with_pending_input_provider(Arc::new(
+            crate::pending_input::DurableQueuePendingInputProvider,
+        ));
     if let Some(loaded_skill) = loaded_skill.as_ref() {
         input
             .transient_context
@@ -4997,6 +5008,7 @@ where
             root_config,
             workspace_root.to_path_buf(),
             sigil_kernel::InteractionMode::Headless,
+            None,
         );
         let agent = sigil_kernel::Agent::new(provider, base_registry);
         let mut bridge = PublicApplicationEventBridge::new(

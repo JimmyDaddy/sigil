@@ -23,6 +23,7 @@ fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Resu
             task_id: TaskId::new(id)?,
             parent_session_ref: parent_session_ref.clone(),
             objective: format!("objective {id}"),
+            title: None,
             status,
             reason: None,
         }))?;
@@ -85,6 +86,8 @@ fn shared_task_pause_validation_binds_exact_plan_and_active_scope() -> Result<()
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "pause exact task".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         }),
@@ -133,6 +136,8 @@ fn shared_task_stop_transition_closes_steps_before_task_in_one_writer_batch() ->
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "stop exact task".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         }),
@@ -167,6 +172,7 @@ fn shared_task_stop_transition_closes_steps_before_task_in_one_writer_batch() ->
                 ..
             }),
             ControlEntry::TaskRun(TaskRunEntry {
+
                 status: TaskRunStatus::Paused,
                 ..
             }),
@@ -195,6 +201,8 @@ fn failed_shared_task_execution_closes_started_task_once() -> Result<()> {
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
         objective: "ship shared runtime".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: None,
     }))?;

@@ -127,6 +127,8 @@ fn orchestration_observation_uses_typed_durable_facts() {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("parent ref"),
             objective: "Implement the cross-layer change".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Started,
             reason: None,
         }))
