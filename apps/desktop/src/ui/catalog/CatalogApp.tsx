@@ -267,7 +267,6 @@ function FixtureSurface({
             onPermissionModeChange={setPermissionMode}
             onReasoningEffortChange={setReasoningEffort}
             onSubmit={async () => false}
-            onInterruptAndRunNext={async () => false}
             onCancel={() => undefined}
           />
         </div>

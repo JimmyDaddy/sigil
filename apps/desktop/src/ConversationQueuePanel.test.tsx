@@ -78,17 +78,9 @@ describe("conversation queue panel", () => {
     }));
   });
 
-  it("emits explicit durable reorder and remove commands", async () => {
+  it("emits explicit durable remove commands", async () => {
     const user = userEvent.setup();
     const onCommand = renderQueue();
-
-    const moveUpButtons = screen.getAllByRole("button", { name: "Move queued message up" });
-    await user.click(moveUpButtons[1]!);
-    expect(onCommand).toHaveBeenCalledWith({
-      action: "reorder",
-      entryId: "queue-entry-ready",
-      afterEntryId: undefined,
-    });
 
     const removeButtons = screen.getAllByRole("button", { name: "Remove queued message" });
     await user.click(removeButtons[1]!);

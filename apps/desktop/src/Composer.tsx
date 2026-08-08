@@ -67,7 +67,6 @@ export function Composer({
   onOpenIntentStack,
   onNotice,
   onSubmit,
-  onInterruptAndRunNext,
   onCancel,
 }: {
   draftKey: string;
@@ -104,7 +103,6 @@ export function Composer({
   onOpenIntentStack: () => void;
   onNotice: (message: string, error?: boolean) => void;
   onSubmit: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
-  onInterruptAndRunNext: (prompt: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
   const { t } = useLocale();
@@ -113,7 +111,6 @@ export function Composer({
   const [selectedAgent, setSelectedAgent] = useState<AgentCatalogEntry>();
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [suggestionsDismissedFor, setSuggestionsDismissedFor] = useState<string>();
-  const [interruptPrompt, setInterruptPrompt] = useState<string>();
   const suggestionListId = `${useId()}-suggestions`;
   const modelSelectRef = useRef<HTMLSelectElement>(null);
   const effortSelectRef = useRef<HTMLSelectElement>(null);
@@ -193,15 +190,6 @@ export function Composer({
     if (await onSubmit(nextPrompt, skill?.binding, agent?.binding)) {
       clearComposer();
     }
-  };
-  const requestInterruptAndRunNext = () => {
-    const nextPrompt = prompt.trim();
-    if (nextPrompt === "" || !active || submissionBlocked || submitting || queueBusy) return;
-    if (/^[/$@]/u.test(nextPrompt) || selectedSkill !== undefined || selectedAgent !== undefined) {
-      onNotice(t("queueExtensionBindingUnavailable"), true);
-      return;
-    }
-    setInterruptPrompt(nextPrompt);
   };
   const clearComposer = () => {
       setPrompt("");
@@ -602,16 +590,6 @@ export function Composer({
             </Popover>
           {active ? (
             <>
-              <Tooltip label={t("interruptAndRunNextHint")}>
-                <IconButton
-                  className="composer-submit composer-interrupt-next"
-                  type="button"
-                  aria-label={t("interruptAndRunNext")}
-                  icon={<Icon name="interrupt-next" />}
-                  disabled={prompt.trim() === "" || submissionBlocked || submitting || queueBusy}
-                  onClick={requestInterruptAndRunNext}
-                />
-              </Tooltip>
               <Tooltip label={submissionBlocked ? t("liveControlsUnavailable") : t("stopRunHint")}>
                 <IconButton
                   className="composer-submit composer-stop"
@@ -649,37 +627,6 @@ export function Composer({
         </div>
       </div>
     </form>
-    <Dialog
-      open={interruptPrompt !== undefined}
-      title={t("interruptAndRunNextQuestion")}
-      description={t("interruptAndRunNextDetail")}
-      returnFocusRef={composerRef}
-      onOpenChange={(open) => {
-        if (!open && !queueBusy) setInterruptPrompt(undefined);
-      }}
-    >
-      <p className="interrupt-next-preview">{interruptPrompt}</p>
-      <div className="confirmation-actions">
-        <Button type="button" data-initial-focus disabled={queueBusy} onClick={() => setInterruptPrompt(undefined)}>
-          {t("keepCurrentRun")}
-        </Button>
-        <Button
-          type="button"
-          variant="danger"
-          busy={queueBusy}
-          onClick={() => {
-            if (interruptPrompt === undefined) return;
-            void onInterruptAndRunNext(interruptPrompt).then((completed) => {
-              if (!completed) return;
-              setInterruptPrompt(undefined);
-              clearComposer();
-            });
-          }}
-        >
-          {t("interruptAndRunNext")}
-        </Button>
-      </div>
-    </Dialog>
     </>
   );
 }

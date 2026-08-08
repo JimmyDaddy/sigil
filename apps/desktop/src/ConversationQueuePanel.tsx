@@ -109,32 +109,6 @@ export function ConversationQueuePanel({
                         onClick={() => beginEdit(item)}
                       />
                     </Tooltip>
-                    <Tooltip label={t("moveQueuedMessageUp")}>
-                      <IconButton
-                        type="button"
-                        aria-label={t("moveQueuedMessageUp")}
-                        icon={<Icon name="chevron-up" />}
-                        disabled={busy || index === 0 || item.status !== "queued"}
-                        onClick={() => void onCommand({
-                          action: "reorder",
-                          entryId: item.entryId,
-                          afterEntryId: index < 2 ? undefined : queue.items[index - 2]?.entryId,
-                        })}
-                      />
-                    </Tooltip>
-                    <Tooltip label={t("moveQueuedMessageDown")}>
-                      <IconButton
-                        type="button"
-                        aria-label={t("moveQueuedMessageDown")}
-                        icon={<Icon name="chevron-down" />}
-                        disabled={busy || index >= queue.items.length - 1 || item.status !== "queued"}
-                        onClick={() => void onCommand({
-                          action: "reorder",
-                          entryId: item.entryId,
-                          afterEntryId: queue.items[index + 1]?.entryId,
-                        })}
-                      />
-                    </Tooltip>
                     <Tooltip label={t("removeQueuedMessage")}>
                       <IconButton
                         type="button"

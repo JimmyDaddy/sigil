@@ -116,6 +116,8 @@ interface PendingPrompt {
   readonly text: string;
   readonly skill?: MessageView["skill"];
   readonly runId?: string;
+  /** Set when the prompt was queued as a follow-up instead of starting a run. */
+  readonly queued?: boolean;
 }
 
 interface RetryableRunStartRequest {
@@ -769,8 +771,15 @@ export function ConversationPanel({
         // so that fast runs are still projected into the open conversation.
         queuedSuccessorExpected.current = false;
         startedRunProjectionExpected.current = undefined;
-        if (startedProjectionRunId !== undefined) {
-          reportSessionCatalogChange(startedProjectionRunId);
+        if (
+          startedProjectionRunId !== undefined
+          || pendingPromptRef.current?.queued === true
+        ) {
+          if (startedProjectionRunId !== undefined) {
+            reportSessionCatalogChange(startedProjectionRunId);
+          }
+          // Queued follow-ups are surfaced optimistically and cleared when the run
+          // settles; the canonical display reload then shows the durable user message.
           pendingPromptRef.current = undefined;
           setPendingPrompt(undefined);
         }
@@ -1213,7 +1222,7 @@ export function ConversationPanel({
       label: t("you"),
       text: pendingPrompt.text,
       skill: pendingPrompt.skill,
-      status: "sending",
+      status: pendingPrompt.queued ? "queued" : "sending",
     }];
   }, [continuityState, liveEventState, pendingPrompt, t]);
   const approvalPresentation = useMemo(
@@ -1375,64 +1384,10 @@ export function ConversationPanel({
     } catch {
       setConversationQueueError(true);
       refreshConversationQueue();
-      onNotice(t("conversationQueueCommandFailed"), true);
-      return false;
-    } finally {
-      setConversationQueueBusy(false);
-    }
-  };
-
-  const interruptAndRunNext = async (nextPrompt: string): Promise<boolean> => {
-    const owner = continuityState.owner;
-    if (
-      conversationQueue === undefined
-      || conversationQueueBusy
-      || !active
-      || run === undefined
-      || owner.foregroundRunId !== run.id
-      || owner.ownerRevision === undefined
-    ) {
-      onNotice(t("interruptAndRunNextUnavailable"), true);
-      refreshConversationQueue();
-      return false;
-    }
-    conversationQueueEpoch.current += 1;
-    setConversationQueueBusy(true);
-    try {
-      const enqueued = await bridge.commandConversationQueue(workspaceId, {
-        sessionId: session.id,
-        expectedGeneration: conversationQueue.generation,
-        action: {
-          action: "enqueue",
-          prompt: nextPrompt,
-          kind: "chat",
-          reasoningEffort,
-        },
-      });
-      setConversationQueue(enqueued.queue);
-      queuedSuccessorExpected.current = queueHasPendingDelivery(enqueued.queue);
-      try {
-        const interrupted = await bridge.commandConversationQueue(workspaceId, {
-          sessionId: session.id,
-          expectedGeneration: enqueued.queue.generation,
-          action: {
-            action: "interrupt_and_run_next",
-            foregroundRunId: run.id,
-            foregroundOwnerRevision: owner.ownerRevision,
-          },
-        });
-        setConversationQueue(interrupted.queue);
-        queuedSuccessorExpected.current = queueHasPendingDelivery(interrupted.queue);
-        setConversationQueueError(false);
-      } catch {
-        setConversationQueueError(true);
-        refreshConversationQueue();
-        onNotice(t("interruptFailedMessageQueued"), true);
+      if (pendingPromptRef.current?.queued === true) {
+        pendingPromptRef.current = undefined;
+        setPendingPrompt(undefined);
       }
-      return true;
-    } catch {
-      setConversationQueueError(true);
-      refreshConversationQueue();
       onNotice(t("conversationQueueCommandFailed"), true);
       return false;
     } finally {
@@ -1459,6 +1414,13 @@ export function ConversationPanel({
         onNotice(t("queueExtensionBindingUnavailable"), true);
         return false;
       }
+      const queuedPrompt: PendingPrompt = {
+        identity: `optimistic:${session.id}:${pendingPromptCounter.current}`,
+        text: nextPrompt,
+        queued: true,
+      };
+      pendingPromptRef.current = queuedPrompt;
+      setPendingPrompt(queuedPrompt);
       return commandConversationQueue({
         action: "enqueue",
         prompt: nextPrompt,
@@ -2471,7 +2433,6 @@ export function ConversationPanel({
         onOpenIntentStack={openIntentStack}
         onNotice={onNotice}
         onSubmit={submit}
-        onInterruptAndRunNext={interruptAndRunNext}
         onCancel={() => void cancel()}
       />
       </section>

@@ -265,7 +265,6 @@ function renderComposer(overrides: {
   queueBusy?: boolean;
   queuePanel?: ReactNode;
   onSubmit?: (prompt: string, skillBinding?: SkillBinding, agentBinding?: AgentBinding) => Promise<boolean>;
-  onInterruptAndRunNext?: (prompt: string) => Promise<boolean>;
   onOpenQueue?: () => void;
   onReasoningEffortChange?: (effort: ReasoningEffort) => void;
   onOpenAgentWorkbench?: (query: string) => void;
@@ -285,7 +284,6 @@ function renderComposer(overrides: {
     _skillBinding?: SkillBinding,
     _agentBinding?: AgentBinding,
   ) => true);
-  const onInterruptAndRunNext = overrides.onInterruptAndRunNext ?? vi.fn(async (_prompt: string) => true);
   const onOpenQueue = overrides.onOpenQueue ?? vi.fn(() => undefined);
   const onReasoningEffortChange = overrides.onReasoningEffortChange ?? vi.fn((_effort: ReasoningEffort) => undefined);
   const onOpenAgentWorkbench = overrides.onOpenAgentWorkbench ?? vi.fn((_query: string) => undefined);
@@ -341,14 +339,12 @@ function renderComposer(overrides: {
         onOpenIntentStack={onOpenIntentStack}
         onNotice={onNotice}
         onSubmit={onSubmit}
-        onInterruptAndRunNext={onInterruptAndRunNext}
         onCancel={() => undefined}
       />
     </LocaleProvider>,
   );
   return {
     onSubmit,
-    onInterruptAndRunNext,
     onOpenQueue,
     onReasoningEffortChange,
     onOpenAgentWorkbench,
@@ -712,14 +708,13 @@ describe("structured composer", () => {
 
   it("queues Enter submissions by default while a run is active", async () => {
     const user = userEvent.setup();
-    const { onSubmit, onInterruptAndRunNext } = renderComposer({ active: true });
+    const { onSubmit } = renderComposer({ active: true });
     const input = screen.getByRole("combobox", { name: "Message Sigil" });
 
     await user.type(input, "Run this after the current task");
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onSubmit).toHaveBeenCalledWith("Run this after the current task", undefined, undefined);
-    expect(onInterruptAndRunNext).not.toHaveBeenCalled();
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
   });
 
@@ -765,22 +760,6 @@ describe("structured composer", () => {
 
     expect(onSubmit).not.toHaveBeenCalled();
     expect((input as HTMLTextAreaElement).value).toBe("继续执行");
-  });
-
-  it("requires confirmation before interrupting and clears only after durable success", async () => {
-    const user = userEvent.setup();
-    const onInterruptAndRunNext = vi.fn(async (_prompt: string) => false);
-    renderComposer({ active: true, onInterruptAndRunNext });
-    const input = screen.getByRole("combobox", { name: "Message Sigil" });
-
-    await user.type(input, "Urgent follow-up");
-    await user.click(screen.getByRole("button", { name: "Interrupt and run next" }));
-    expect(onInterruptAndRunNext).not.toHaveBeenCalled();
-    expect(screen.getByRole("dialog")).toBeTruthy();
-
-    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Interrupt and run next" }));
-    expect(onInterruptAndRunNext).toHaveBeenCalledWith("Urgent follow-up");
-    expect((input as HTMLTextAreaElement).value).toBe("Urgent follow-up");
   });
 
   it("opens the durable queue without changing the draft", async () => {
