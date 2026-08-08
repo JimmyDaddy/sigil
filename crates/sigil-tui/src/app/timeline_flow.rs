@@ -1,11 +1,11 @@
 use std::{collections::BTreeSet, ops::Range};
 
 use ratatui::{
+    layout::Rect,
     style::Style,
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     AgentView, AppAction, AppState, ApprovalPresentationState, EventEntry, LiveActivitySummary,
@@ -20,23 +20,11 @@ use super::{
 const EVENT_DETAIL_MAX_CHARS: usize = 240;
 
 impl AppState {
-    pub(super) fn live_panel_height(&self) -> u16 {
-        let height = self
-            .terminal_height
-            .saturating_sub(self.footer_strip_height())
-            .saturating_sub(1)
-            .max(1);
-        height.saturating_sub(self.egress_disclosure_reserved_rows(height))
-    }
-
     pub(super) fn timeline_viewport_rows(&self) -> usize {
-        self.live_panel_height()
-            .saturating_sub(self.live_status_band_rows())
-            .max(1) as usize
-    }
-
-    fn live_status_band_rows(&self) -> u16 {
-        crate::ui::live_status_rows_for_app(self, 80)
+        crate::ui::live_transcript_rows_for_app(
+            Rect::new(0, 0, self.terminal_width, self.terminal_height),
+            self,
+        )
     }
 
     pub(super) fn max_timeline_scroll_back(&self) -> usize {
@@ -54,6 +42,10 @@ impl AppState {
                 .map(|index| index + 1)
                 .unwrap_or(0);
         }
+        self.main_timeline_render_len()
+    }
+
+    fn main_timeline_render_len(&self) -> usize {
         let snapshot = self.timeline_state.render_store.snapshot();
         snapshot
             .lines_range(0..snapshot.total_lines())
@@ -64,25 +56,105 @@ impl AppState {
     }
 
     pub(super) fn scrollback_cutoff_line(&self) -> usize {
+        let snapshot = self.timeline_state.render_store.snapshot();
         let durable_cutoff_entry = match self.timeline_state.streaming_assistant_index {
             Some(index) if index + 1 == self.timeline.len() && self.runtime.is_busy => index,
             _ => self.timeline.len(),
         };
-        let durable_cutoff_line = if durable_cutoff_entry == 0 {
-            0
-        } else {
-            let snapshot = self.timeline_state.render_store.snapshot();
-            snapshot
-                .range_for_entry(durable_cutoff_entry - 1)
-                .map(|range| range.end)
-                .unwrap_or(snapshot.total_lines())
-        };
+        // Native terminal scrollback is irreversible, so temporary status, queue, composer,
+        // agent-panel, and egress heights must not move its ownership boundary. Reserve the
+        // transcript rows available under the compact base shell; transient UI can temporarily
+        // cover more of the live tail without permanently emitting it.
+        let stable_live_tail_rows = self
+            .terminal_height
+            .saturating_sub(self.minimum_composer_height())
+            .saturating_sub(1)
+            .saturating_sub(crate::ui::LIVE_PANEL_BOTTOM_PADDING)
+            .max(1) as usize;
         let live_tail_start = self
-            .effective_timeline_render_len()
-            .saturating_sub(self.timeline_viewport_rows().max(1));
-        durable_cutoff_line
-            .min(live_tail_start)
-            .min(self.timeline_state.render_store.snapshot().total_lines())
+            .main_timeline_render_len()
+            .saturating_sub(stable_live_tail_rows);
+        let cutoff_entry_count = durable_cutoff_entry.min(
+            snapshot.entry_count_at_or_before_line(live_tail_start.min(snapshot.total_lines())),
+        );
+        snapshot.line_count_for_entry_count(cutoff_entry_count)
+    }
+
+    pub(crate) fn scrollback_entry_count(&self) -> usize {
+        self.timeline_state
+            .render_store
+            .snapshot()
+            .entry_count_at_or_before_line(self.scrollback_cutoff_line())
+    }
+
+    pub(crate) fn scrollback_line_count_for_entry_count(&self, entry_count: usize) -> usize {
+        self.timeline_state
+            .render_store
+            .snapshot()
+            .line_count_for_entry_count(entry_count)
+    }
+
+    pub(crate) fn timeline_entry_count_at_or_before_line(&self, line_count: usize) -> usize {
+        self.timeline_state
+            .render_store
+            .snapshot()
+            .entry_count_at_or_before_line(line_count)
+    }
+
+    pub(crate) fn timeline_entry_count(&self) -> usize {
+        self.timeline.len()
+    }
+
+    pub(crate) fn timeline_entry_prefix_hash(&self, entry_count: usize) -> u64 {
+        self.timeline_state
+            .render_store
+            .snapshot()
+            .entry_prefix_hash(entry_count)
+    }
+
+    pub(crate) fn set_native_scrollback_frontier(
+        &mut self,
+        session_id: String,
+        entry_count: usize,
+        rebase: bool,
+    ) {
+        if !rebase
+            && self.timeline_state.native_scrollback_session_id.as_deref()
+                == Some(session_id.as_str())
+        {
+            self.timeline_state.native_scrollback_entry_count = self
+                .timeline_state
+                .native_scrollback_entry_count
+                .max(entry_count);
+        } else {
+            self.timeline_state.native_scrollback_session_id = Some(session_id);
+            self.timeline_state.native_scrollback_entry_count = entry_count;
+        }
+    }
+
+    pub(crate) fn native_scrollback_entry_count(&self) -> usize {
+        if self.timeline_state.native_scrollback_session_id.as_deref()
+            == Some(self.session_id.as_str())
+        {
+            self.timeline_state.native_scrollback_entry_count
+        } else {
+            0
+        }
+    }
+
+    fn native_scrollback_frontier_line(&self) -> usize {
+        if self.timeline_state.native_scrollback_session_id.as_deref()
+            != Some(self.session_id.as_str())
+        {
+            return 0;
+        }
+        self.scrollback_line_count_for_entry_count(
+            self.timeline_state.native_scrollback_entry_count,
+        )
+    }
+
+    pub(crate) fn terminal_scrollback_active(&self) -> bool {
+        matches!(self.agent_panel.active_view, AgentView::Main)
     }
 
     pub(super) fn transcript_page_step(&self) -> usize {
@@ -244,7 +316,7 @@ impl AppState {
         };
         self.timeline_state.expanded_thinking_entry_indices.clear();
         self.timeline_state.collapsed_thinking_entry_indices.clear();
-        self.rebuild_timeline_render_store();
+        self.rebuild_timeline_render_surfaces();
         self.last_notice = Some(format!("thinking {}", self.thinking_block_mode.as_str()));
         self.push_event("thinking:view", self.thinking_block_mode.as_str());
     }
@@ -358,6 +430,11 @@ impl AppState {
             .render_store
             .rebuild(&self.timeline, &options);
         self.timeline_state.revision = self.timeline_state.revision.saturating_add(1);
+    }
+
+    pub(super) fn rebuild_timeline_render_surfaces(&mut self) {
+        self.rebuild_timeline_render_store();
+        self.rerender_active_agent_child_transcript();
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
@@ -586,7 +663,10 @@ impl AppState {
             .timeline_scroll_back
             .min(effective_len.saturating_sub(viewport));
         let end = effective_len.saturating_sub(scroll_back);
-        let start = end.saturating_sub(viewport);
+        let mut start = end.saturating_sub(viewport);
+        if scroll_back == 0 && matches!(self.agent_panel.active_view, AgentView::Main) {
+            start = start.max(self.native_scrollback_frontier_line().min(end));
+        }
         start..end
     }
 
@@ -632,6 +712,9 @@ impl AppState {
 
         let visible_range = self.visible_timeline_render_range(max_lines);
         if visible_range.is_empty() {
+            if !self.timeline.is_empty() {
+                return Vec::new();
+            }
             return vec![
                 Line::from("no messages yet"),
                 Line::from("send a prompt to start"),
@@ -755,7 +838,8 @@ impl AppState {
         let mut body = Vec::new();
         let Some(transcript) = self.agent_panel.active_child_transcript.as_ref() else {
             body.push(Line::from("child session not loaded"));
-            return (header, body);
+            self.append_child_queue_overlay(&mut body);
+            return self.wrap_child_agent_transcript_sections(header, body);
         };
         if let Some(error) = transcript.load_error.as_ref() {
             body.push(Line::from(format!(
@@ -766,11 +850,13 @@ impl AppState {
                 "path: {}",
                 truncate_session_view_text(&transcript.path.display().to_string(), 120)
             )));
-            return (header, body);
+            self.append_child_queue_overlay(&mut body);
+            return self.wrap_child_agent_transcript_sections(header, body);
         }
         if transcript.rendered_body_lines.is_empty() {
             body.push(Line::from("child session has no transcript messages yet"));
-            return (header, body);
+            self.append_child_queue_overlay(&mut body);
+            return self.wrap_child_agent_transcript_sections(header, body);
         }
         if transcript.transcript_truncated {
             header.push(Line::from(format!(
@@ -785,7 +871,40 @@ impl AppState {
             )));
         }
         body = transcript.rendered_body_lines.clone();
-        (header, body)
+        self.append_child_queue_overlay(&mut body);
+        self.wrap_child_agent_transcript_sections(header, body)
+    }
+
+    fn wrap_child_agent_transcript_sections(
+        &self,
+        header: Vec<Line<'static>>,
+        body: Vec<Line<'static>>,
+    ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        let width = self.timeline_render_width();
+        (
+            crate::ui::wrap_terminal_lines(header, width),
+            crate::ui::wrap_terminal_lines(body, width),
+        )
+    }
+
+    fn append_child_queue_overlay(&self, body: &mut Vec<Line<'static>>) {
+        let queued_entries = self
+            .conversation_queue_projection()
+            .items
+            .into_iter()
+            .map(|item| TimelineEntry {
+                role: TimelineRole::User,
+                text: item.queued.prompt,
+            })
+            .collect::<Vec<_>>();
+        if queued_entries.is_empty() {
+            return;
+        }
+        let overlay = self.render_child_timeline_body_lines(&queued_entries);
+        if !body.is_empty() && !overlay.is_empty() {
+            body.push(Line::raw(String::new()));
+        }
+        body.extend(overlay);
     }
 
     pub(super) fn render_child_timeline_body_lines(
@@ -804,6 +923,7 @@ impl AppState {
         for (index, entry) in timeline_entries.iter().enumerate() {
             let rendered =
                 crate::ui::render_timeline_entry_lines_with_options(entry, &options, index);
+            let rendered = crate::ui::wrap_terminal_lines(rendered, options.max_render_width);
             if !rendered.is_empty() && !body.is_empty() {
                 body.push(Line::raw(String::new()));
             }
@@ -826,6 +946,9 @@ impl AppState {
     }
 
     pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {
+        if !self.terminal_scrollback_active() {
+            return None;
+        }
         let range = self.timeline_state.text_selection?.normalized_range();
         let end = range
             .end
@@ -912,6 +1035,9 @@ impl AppState {
         line_index: usize,
         column: usize,
     ) -> bool {
+        if !self.terminal_scrollback_active() {
+            return self.clear_timeline_text_selection();
+        }
         if line_index >= self.timeline_state.render_store.snapshot().total_lines() {
             return self.clear_timeline_text_selection();
         }
@@ -921,6 +1047,9 @@ impl AppState {
     }
 
     pub(crate) fn update_timeline_text_selection(&mut self, line_index: usize) -> bool {
+        if !self.terminal_scrollback_active() {
+            return self.clear_timeline_text_selection();
+        }
         let Some(anchor) = self.timeline_state.text_selection_anchor else {
             return false;
         };
@@ -940,6 +1069,9 @@ impl AppState {
         line_index: usize,
         column: usize,
     ) -> bool {
+        if !self.terminal_scrollback_active() {
+            return self.clear_timeline_text_selection();
+        }
         let Some(anchor) = self.timeline_state.text_selection_anchor else {
             return false;
         };
@@ -992,7 +1124,7 @@ impl AppState {
             .render_store
             .snapshot()
             .plain_line(line_index)?;
-        let line_width = UnicodeWidthStr::width(line);
+        let line_width = crate::ui::terminal_cell_width(line);
         let start = if line_index == start_line {
             start_column.min(line_width)
         } else {
@@ -1033,6 +1165,7 @@ impl AppState {
             collapsed_tool_activity_keys: self.timeline_state.collapsed_tool_activity_keys.clone(),
             tool_activity_visible_rows: self.timeline_state.tool_activity_visible_rows.clone(),
             max_content_width: self.timeline_content_width(),
+            max_render_width: self.timeline_render_width(),
             streaming_assistant_index: self.timeline_state.streaming_assistant_index,
             streaming_reasoning_index: self.timeline_state.streaming_reasoning_index,
             intermediate_assistant_indices: self.intermediate_assistant_indices(),
@@ -1100,13 +1233,20 @@ impl AppState {
     }
 
     fn timeline_content_width(&self) -> usize {
-        let total_width = self.terminal_width.max(24) as usize;
-        let sidebar_width = sidebar_width_for_terminal(total_width);
-        let live_panel_width = total_width
+        self.timeline_render_width().saturating_sub(4).max(1)
+    }
+
+    fn timeline_render_width(&self) -> usize {
+        let total_width = self.terminal_width as usize;
+        let sidebar_width = if self.info_rail_visible() {
+            sidebar_width_for_terminal(total_width)
+        } else {
+            0
+        };
+        total_width
             .saturating_sub(sidebar_width)
             .saturating_sub(2)
-            .max(10);
-        live_panel_width.saturating_sub(4).max(20)
+            .max(1)
     }
 
     pub(crate) fn live_activity_summary(&self) -> Option<LiveActivitySummary> {
@@ -1291,7 +1431,9 @@ fn split_span_for_column_selection(
     let mut current_text = String::new();
     let mut current_selected: Option<bool> = None;
     for grapheme in span.content.as_ref().graphemes(true) {
-        let width = UnicodeWidthStr::width(grapheme);
+        let Some(width) = crate::ui::terminal_grapheme_width(grapheme) else {
+            continue;
+        };
         let next_column = display_column.saturating_add(width);
         let selected = if width == 0 {
             *display_column >= columns.start && *display_column < columns.end
@@ -1349,7 +1491,9 @@ pub(super) fn text_by_display_columns(text: &str, start: usize, end: usize) -> S
     let mut output = String::new();
     let mut display_column = 0usize;
     for grapheme in text.graphemes(true) {
-        let width = UnicodeWidthStr::width(grapheme);
+        let Some(width) = crate::ui::terminal_grapheme_width(grapheme) else {
+            continue;
+        };
         let next_column = display_column.saturating_add(width);
         let selected = if width == 0 {
             display_column >= start && display_column < end

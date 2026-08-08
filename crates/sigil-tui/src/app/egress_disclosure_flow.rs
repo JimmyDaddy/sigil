@@ -119,8 +119,14 @@ impl Drop for PendingEgressDisclosure {
 }
 
 impl AppState {
-    pub(crate) fn egress_disclosure_reserved_rows(&self, available_height: u16) -> u16 {
-        if available_height > EGRESS_DISCLOSURE_HEIGHT
+    pub(crate) fn egress_disclosure_reserved_rows(
+        &self,
+        available_width: u16,
+        available_height: u16,
+    ) -> u16 {
+        if available_width >= 24
+            && available_height
+                >= EGRESS_DISCLOSURE_HEIGHT.saturating_add(self.minimum_live_panel_content_height())
             && self.active_egress_disclosure_card().is_some()
         {
             EGRESS_DISCLOSURE_HEIGHT

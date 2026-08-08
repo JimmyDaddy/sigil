@@ -1,13 +1,3 @@
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Wrap},
-};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
-
 use crate::{
     app::AppState,
     timeline::ComposerQueueRow,
@@ -16,24 +6,37 @@ use crate::{
         QueueActionButtonViewModel, TaskStripRowViewModel, TaskStripViewModel,
     },
 };
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Paragraph, Wrap},
+};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     geometry::inset_rect,
     markdown::{MarkdownRenderOptions, render_markdown_timeline_lines_with_palette},
     status_indicator::{StatusIndicator, StatusKind},
-    text::{pad_display_width, truncate_display_width},
+    text::{
+        pad_display_width, sanitize_terminal_text, terminal_cell_width, terminal_grapheme_width,
+        wrap_terminal_lines,
+    },
     theme::Theme,
 };
 
 pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
 pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_BASE_ROWS: u16 = 2;
+const LIVE_PLAN_APPROVAL_ROW_LIMIT: usize = 12;
 const LIVE_PLAN_APPROVAL_STEP_LIMIT: usize = 3;
 const LIVE_PLAN_TEXT_ROW_LIMIT: usize = 12;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROUTE_LIMIT: usize = 3;
 const LIVE_TASK_COMPLETION_LIMIT: usize = 5;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
+const LIVE_STATUS_CONTENT_INSET: usize = 2;
 
 #[cfg(test)]
 pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &LivePanelViewModel) {
@@ -120,38 +123,75 @@ pub(crate) fn render_live_panel_with_theme(
 }
 
 pub(crate) fn live_status_rows_for_app(app: &AppState, width: usize) -> u16 {
-    let progress_rows = if app.live_activity_summary().is_some() {
-        LIVE_PROGRESS_ROWS
+    live_status_rows_with_separator(live_status_row_counts_for_app(app, width).total())
+}
+
+fn live_status_row_counts_for_app(app: &AppState, width: usize) -> LiveStatusRowAllocation {
+    let content_width = live_status_content_width(width);
+    let progress = if app.live_activity_summary().is_some() {
+        usize::from(LIVE_PROGRESS_ROWS)
     } else {
         0
     };
-    let plan_rows = app
+    let plan = app
         .pending_plan_approval()
-        .map(|plan| live_plan_approval_rows(plan, width))
+        .map(|plan| usize::from(live_plan_approval_rows(plan, content_width)))
         .unwrap_or(0);
-    let task_rows = app
-        .task_strip_view()
+    let task_strip = app.task_strip_view();
+    let verification = task_strip
+        .as_ref()
         .map(|view| {
-            live_task_strip_rows(
+            usize::from(verification_card_rows(
+                view.verification.as_ref(),
+                app.verification_inspect_open(),
+            ))
+        })
+        .unwrap_or(0);
+    let task = task_strip
+        .as_ref()
+        .map(|view| {
+            usize::from(live_task_strip_rows(
                 view.rows.len(),
                 app.runtime.task_provider_route_diagnostics.routes.len(),
                 crate::app::task_sidebar::task_completion_progress_live_lines(
                     &app.runtime.task_completion_progress,
                 )
                 .len(),
-                verification_card_rows(view.verification.as_ref(), app.verification_inspect_open()),
-            )
+            ))
         })
         .unwrap_or(0);
-    live_status_rows_with_separator(
-        app.queue_strip_rows()
-            .saturating_add(progress_rows)
-            .saturating_add(plan_rows)
-            .saturating_add(task_rows),
+    LiveStatusRowAllocation {
+        queue: usize::from(app.queue_strip_rows()),
+        progress,
+        plan,
+        verification,
+        task,
+    }
+}
+
+pub(crate) fn live_status_row_allocation_for_app(
+    app: &AppState,
+    width: usize,
+    capacity: usize,
+) -> LiveStatusRowAllocation {
+    let preferred_action = if app.pending_plan_approval().is_some() {
+        Some(StatusBandSectionKind::Plan)
+    } else if app.is_composer_queue_panel_focused() {
+        Some(StatusBandSectionKind::Queue)
+    } else if app.verification_card_focused() {
+        Some(StatusBandSectionKind::Verification)
+    } else {
+        None
+    };
+    allocate_status_band_rows(
+        live_status_row_counts_for_app(app, width),
+        capacity,
+        preferred_action,
     )
 }
 
 pub(crate) fn live_status_rows(view_model: &LivePanelViewModel, width: usize) -> u16 {
+    let content_width = live_status_content_width(width);
     let queue_rows = live_queue_strip_rows(view_model.queue_rows.len());
     let progress_rows = if view_model.progress.is_some() {
         LIVE_PROGRESS_ROWS
@@ -161,7 +201,12 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel, width: usize) ->
     let plan_rows = view_model
         .plan_approval
         .as_ref()
-        .map(|plan| live_plan_approval_view_rows(plan, width))
+        .map(|plan| live_plan_approval_view_rows(plan, content_width))
+        .unwrap_or(0);
+    let verification_rows = view_model
+        .task_strip
+        .as_ref()
+        .map(|view| verification_card_view_rows(view.verification.as_ref()))
         .unwrap_or(0);
     let task_rows = view_model
         .task_strip
@@ -171,15 +216,15 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel, width: usize) ->
                 view.rows.len(),
                 view.route_diagnostics.len(),
                 view.completion_progress.len(),
-                verification_card_view_rows(view.verification.as_ref()),
             )
         })
         .unwrap_or(0);
     live_status_rows_with_separator(
-        queue_rows
-            .saturating_add(progress_rows)
-            .saturating_add(plan_rows)
-            .saturating_add(task_rows),
+        usize::from(queue_rows)
+            .saturating_add(usize::from(progress_rows))
+            .saturating_add(usize::from(plan_rows))
+            .saturating_add(usize::from(verification_rows))
+            .saturating_add(usize::from(task_rows)),
     )
 }
 
@@ -201,54 +246,49 @@ pub(crate) fn verification_card_area_for_app(live_area: Rect, app: &AppState) ->
             .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
             .max(1),
     );
-    let task_rows = live_task_strip_rows(
-        task_strip.rows.len(),
-        app.runtime.task_provider_route_diagnostics.routes.len(),
-        crate::app::task_sidebar::task_completion_progress_live_lines(
-            &app.runtime.task_completion_progress,
-        )
-        .len(),
-        verification_rows,
-    );
     let status_rows = live_status_rows_for_app(app, content_frame.width as usize)
         .min(content_frame.height.saturating_sub(1));
+    let status_content_rows = status_rows.saturating_sub(1) as usize;
+    let allocation =
+        live_status_row_allocation_for_app(app, content_frame.width as usize, status_content_rows);
+    let visible_card_rows = allocation
+        .verification_rows()
+        .min(usize::from(verification_rows));
+    if visible_card_rows == 0 {
+        return None;
+    }
     let status_top = content_frame
         .y
         .saturating_add(content_frame.height.saturating_sub(status_rows));
-    let card_top = content_frame
-        .y
-        .saturating_add(content_frame.height.saturating_sub(task_rows))
-        .saturating_add(1)
-        .max(status_top.saturating_add(1));
-    let available = content_frame.bottom().saturating_sub(card_top);
+    let content_top = status_top.saturating_add(1);
+    let card_top = content_top
+        .saturating_add(u16::try_from(allocation.rows_before_verification()).unwrap_or(u16::MAX));
     Some(Rect::new(
-        inner.x,
+        content_frame.x.saturating_add(2),
         card_top,
-        inner.width,
-        verification_rows.min(available),
+        content_frame.width.saturating_sub(2),
+        u16::try_from(visible_card_rows).unwrap_or(u16::MAX),
     ))
 }
 
-fn live_status_rows_with_separator(content_rows: u16) -> u16 {
+fn live_status_rows_with_separator(content_rows: usize) -> u16 {
     if content_rows == 0 {
         return 0;
     }
-    content_rows.saturating_add(1)
+    u16::try_from(content_rows.saturating_add(1)).unwrap_or(u16::MAX)
 }
 
-fn live_task_strip_rows(
-    row_count: usize,
-    route_count: usize,
-    completion_count: usize,
-    verification_rows: u16,
-) -> u16 {
+fn live_status_content_width(width: usize) -> usize {
+    width.saturating_sub(LIVE_STATUS_CONTENT_INSET).max(1)
+}
+
+fn live_task_strip_rows(row_count: usize, route_count: usize, completion_count: usize) -> u16 {
     if row_count == 0 {
         return 0;
     }
-    1 + route_count.min(LIVE_TASK_ROUTE_LIMIT) as u16
-        + completion_count.min(LIVE_TASK_COMPLETION_LIMIT) as u16
-        + verification_rows
-        + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
+    1u16.saturating_add(route_count.min(LIVE_TASK_ROUTE_LIMIT) as u16)
+        .saturating_add(completion_count.min(LIVE_TASK_COMPLETION_LIMIT) as u16)
+        .saturating_add(row_count.min(LIVE_TASK_ROW_LIMIT) as u16)
 }
 
 fn verification_card_rows(
@@ -258,24 +298,24 @@ fn verification_card_rows(
     let Some(card) = card else {
         return 0;
     };
-    3 + u16::from(card.why.is_some())
-        + if inspect_open {
-            card.inspect_lines.len() as u16
+    3u16.saturating_add(u16::from(card.why.is_some()))
+        .saturating_add(if inspect_open {
+            u16::try_from(card.inspect_lines.len()).unwrap_or(u16::MAX)
         } else {
             0
-        }
+        })
 }
 
 fn verification_card_view_rows(card: Option<&crate::view_model::VerificationCardViewModel>) -> u16 {
     let Some(card) = card else {
         return 0;
     };
-    3 + u16::from(card.why.is_some())
-        + if card.inspect_open {
-            card.inspect_lines.len() as u16
+    3u16.saturating_add(u16::from(card.why.is_some()))
+        .saturating_add(if card.inspect_open {
+            u16::try_from(card.inspect_lines.len()).unwrap_or(u16::MAX)
         } else {
             0
-        }
+        })
 }
 
 fn live_queue_strip_rows(row_count: usize) -> u16 {
@@ -285,15 +325,52 @@ fn live_queue_strip_rows(row_count: usize) -> u16 {
     2 + row_count.min(LIVE_QUEUE_ROW_LIMIT) as u16
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueueItemWindow {
+    pub(crate) show_header: bool,
+    pub(crate) item_indices: Vec<usize>,
+}
+
+pub(crate) fn queue_item_window(
+    item_count: usize,
+    selected_index: usize,
+    row_budget: usize,
+) -> QueueItemWindow {
+    if item_count == 0 || row_budget <= 1 {
+        return QueueItemWindow {
+            show_header: false,
+            item_indices: Vec::new(),
+        };
+    }
+
+    let show_header = row_budget >= 3;
+    let item_capacity = row_budget
+        .saturating_sub(1 + usize::from(show_header))
+        .min(item_count);
+    let selected_index = selected_index.min(item_count - 1);
+    let start = selected_index
+        .saturating_sub(item_capacity / 2)
+        .min(item_count.saturating_sub(item_capacity));
+    QueueItemWindow {
+        show_header,
+        item_indices: (start..start.saturating_add(item_capacity)).collect(),
+    }
+}
+
 fn plan_text_render_width(width: usize) -> usize {
     width.saturating_sub(2).max(1)
 }
 
-fn render_plan_text_lines(
+struct RenderedPlanText {
+    lines: Vec<Line<'static>>,
+    total_rows: usize,
+}
+
+fn render_plan_text(
     plan_text: &str,
     width: usize,
     palette: &crate::ui::theme::ThemePalette,
-) -> Vec<Line<'static>> {
+) -> RenderedPlanText {
     let bg = palette.surface_panel_alt;
     let rendered = render_markdown_timeline_lines_with_palette(
         palette.accent_info,
@@ -302,6 +379,7 @@ fn render_plan_text_lines(
         MarkdownRenderOptions::timeline(plan_text_render_width(width)),
         palette,
     );
+    let total_rows = rendered.len();
     let mut lines = Vec::new();
     for line in rendered.into_iter().take(LIVE_PLAN_TEXT_ROW_LIMIT) {
         let mut spans = Vec::with_capacity(line.spans.len() + 1);
@@ -315,13 +393,20 @@ fn render_plan_text_lines(
         }));
         lines.push(Line::from(spans));
     }
-    lines
+    RenderedPlanText { lines, total_rows }
 }
 
-fn plan_text_rendered_rows(plan_text: &str, width: usize) -> usize {
+fn plan_text_rendered_rows(
+    plan_text: &str,
+    width: usize,
+    row_counts: &crate::app::PlanTextRowCountCache,
+) -> usize {
     let plan_text = plan_text.trim();
     if plan_text.is_empty() {
         return 0;
+    }
+    if let Some(rows) = row_counts.get(width) {
+        return rows;
     }
     let palette = crate::ui::theme::default_palette();
     let total = render_markdown_timeline_lines_with_palette(
@@ -335,7 +420,9 @@ fn plan_text_rendered_rows(plan_text: &str, width: usize) -> usize {
     )
     .len();
     let overflow = usize::from(total > LIVE_PLAN_TEXT_ROW_LIMIT);
-    1 + total.min(LIVE_PLAN_TEXT_ROW_LIMIT) + overflow
+    let rows = 1 + total.min(LIVE_PLAN_TEXT_ROW_LIMIT) + overflow;
+    row_counts.insert(width, rows);
+    rows
 }
 
 fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval, width: usize) -> u16 {
@@ -349,9 +436,10 @@ fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval, width: usize)
             + overflow_rows
             + detail_rows
             + stale_rows
-            + plan_text_rendered_rows(&plan.plan_text, width),
+            + plan_text_rendered_rows(&plan.plan_text, width, &plan.rendered_text_row_counts),
     )
     .unwrap_or(u16::MAX)
+    .min(LIVE_PLAN_APPROVAL_ROW_LIMIT as u16)
 }
 
 fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel, width: usize) -> u16 {
@@ -365,9 +453,241 @@ fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel, width: usize) -> u
             + overflow_rows
             + detail_rows
             + stale_rows
-            + plan_text_rendered_rows(&plan.plan_text, width),
+            + plan_text_rendered_rows(&plan.plan_text, width, &plan.rendered_text_row_counts),
     )
     .unwrap_or(u16::MAX)
+    .min(LIVE_PLAN_APPROVAL_ROW_LIMIT as u16)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusBandSectionKind {
+    Queue,
+    Progress,
+    Plan,
+    Task,
+    Verification,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LiveStatusRowAllocation {
+    queue: usize,
+    progress: usize,
+    plan: usize,
+    task: usize,
+    verification: usize,
+}
+
+impl LiveStatusRowAllocation {
+    fn get(self, kind: StatusBandSectionKind) -> usize {
+        match kind {
+            StatusBandSectionKind::Queue => self.queue,
+            StatusBandSectionKind::Progress => self.progress,
+            StatusBandSectionKind::Plan => self.plan,
+            StatusBandSectionKind::Task => self.task,
+            StatusBandSectionKind::Verification => self.verification,
+        }
+    }
+
+    fn set(&mut self, kind: StatusBandSectionKind, rows: usize) {
+        match kind {
+            StatusBandSectionKind::Queue => self.queue = rows,
+            StatusBandSectionKind::Progress => self.progress = rows,
+            StatusBandSectionKind::Plan => self.plan = rows,
+            StatusBandSectionKind::Task => self.task = rows,
+            StatusBandSectionKind::Verification => self.verification = rows,
+        }
+    }
+
+    fn total(self) -> usize {
+        self.queue
+            .saturating_add(self.progress)
+            .saturating_add(self.plan)
+            .saturating_add(self.verification)
+            .saturating_add(self.task)
+    }
+
+    pub(crate) fn queue_rows(self) -> usize {
+        self.queue
+    }
+
+    pub(crate) fn rows_before_task(self) -> usize {
+        self.queue
+            .saturating_add(self.progress)
+            .saturating_add(self.plan)
+    }
+
+    pub(crate) fn verification_rows(self) -> usize {
+        self.verification
+    }
+
+    pub(crate) fn rows_before_verification(self) -> usize {
+        self.rows_before_task().saturating_add(self.task)
+    }
+}
+
+fn minimum_status_rows(_kind: StatusBandSectionKind, row_count: usize) -> usize {
+    usize::from(row_count > 0)
+}
+
+fn allocate_status_band_rows(
+    row_counts: LiveStatusRowAllocation,
+    capacity: usize,
+    preferred_action: Option<StatusBandSectionKind>,
+) -> LiveStatusRowAllocation {
+    let priority = status_band_priority(preferred_action);
+    let mut allocation = LiveStatusRowAllocation::default();
+    let mut remaining = capacity;
+    for kind in priority.iter().copied() {
+        let reserved = minimum_status_rows(kind, row_counts.get(kind)).min(remaining);
+        allocation.set(kind, reserved);
+        remaining -= reserved;
+    }
+    for kind in [
+        StatusBandSectionKind::Plan,
+        StatusBandSectionKind::Queue,
+        StatusBandSectionKind::Verification,
+    ] {
+        let additional = row_counts
+            .get(kind)
+            .min(2)
+            .saturating_sub(allocation.get(kind))
+            .min(remaining);
+        allocation.set(kind, allocation.get(kind).saturating_add(additional));
+        remaining -= additional;
+    }
+    for kind in priority {
+        let additional = row_counts
+            .get(kind)
+            .saturating_sub(allocation.get(kind))
+            .min(remaining);
+        allocation.set(kind, allocation.get(kind).saturating_add(additional));
+        remaining -= additional;
+    }
+    allocation
+}
+
+fn status_band_priority(
+    preferred_action: Option<StatusBandSectionKind>,
+) -> Vec<StatusBandSectionKind> {
+    let mut priority = vec![StatusBandSectionKind::Plan];
+    if let Some(preferred) = preferred_action
+        && preferred != StatusBandSectionKind::Plan
+    {
+        priority.push(preferred);
+    }
+    for kind in [
+        StatusBandSectionKind::Queue,
+        StatusBandSectionKind::Verification,
+        StatusBandSectionKind::Progress,
+        StatusBandSectionKind::Task,
+    ] {
+        if !priority.contains(&kind) {
+            priority.push(kind);
+        }
+    }
+    priority
+}
+
+struct StatusBandSection {
+    kind: StatusBandSectionKind,
+    lines: Vec<Line<'static>>,
+    selected_queue_item: Option<usize>,
+    compact_action_line: Option<Line<'static>>,
+}
+
+impl StatusBandSection {
+    fn into_fitted_lines(mut self, budget: usize, theme: &Theme) -> Vec<Line<'static>> {
+        if budget >= self.lines.len() {
+            return self.lines;
+        }
+        if budget == 0 {
+            return Vec::new();
+        }
+
+        match self.kind {
+            StatusBandSectionKind::Queue => {
+                let Some(action) = self.lines.pop() else {
+                    return Vec::new();
+                };
+                if budget == 1 {
+                    return vec![self.compact_action_line.take().unwrap_or(action)];
+                }
+                if self.lines.is_empty() {
+                    return vec![action];
+                }
+                let header = self.lines.remove(0);
+                let item_lines = self.lines;
+                let window = queue_item_window(
+                    item_lines.len(),
+                    self.selected_queue_item.unwrap_or(0),
+                    budget,
+                );
+                let mut fitted = Vec::with_capacity(budget);
+                if window.show_header {
+                    fitted.push(header);
+                }
+                fitted.extend(
+                    window
+                        .item_indices
+                        .into_iter()
+                        .filter_map(|index| item_lines.get(index).cloned()),
+                );
+                fitted.push(action);
+                fitted
+            }
+            StatusBandSectionKind::Plan | StatusBandSectionKind::Verification => {
+                let Some(action) = self.lines.pop() else {
+                    return Vec::new();
+                };
+                let action = if self.kind == StatusBandSectionKind::Verification {
+                    self.compact_action_line.take().unwrap_or(action)
+                } else {
+                    action
+                };
+                if budget == 1 {
+                    return if self.kind == StatusBandSectionKind::Plan {
+                        vec![render_hidden_plan_action_line(action, theme)]
+                    } else {
+                        vec![action]
+                    };
+                }
+                if self.kind == StatusBandSectionKind::Plan {
+                    self.lines.truncate(budget.saturating_sub(2));
+                    self.lines.push(render_plan_overflow_line(theme));
+                } else {
+                    self.lines.truncate(budget.saturating_sub(1));
+                }
+                self.lines.push(action);
+                self.lines
+            }
+            StatusBandSectionKind::Progress | StatusBandSectionKind::Task => {
+                self.lines.truncate(budget);
+                self.lines
+            }
+        }
+    }
+}
+
+fn fit_status_band_sections(
+    sections: Vec<StatusBandSection>,
+    capacity: usize,
+    preferred_action: Option<StatusBandSectionKind>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut row_counts = LiveStatusRowAllocation::default();
+    for section in &sections {
+        row_counts.set(section.kind, section.lines.len());
+    }
+    // Decision rows are reserved before optional detail rows so a short viewport never clips the
+    // plan or queue actions merely because an earlier surface has verbose content.
+    let allocation = allocate_status_band_rows(row_counts, capacity, preferred_action);
+    sections
+        .into_iter()
+        .flat_map(|section| {
+            let budget = allocation.get(section.kind);
+            section.into_fitted_lines(budget, theme)
+        })
+        .collect()
 }
 
 fn render_live_status_band(
@@ -395,59 +715,113 @@ fn render_live_status_band(
         return;
     }
 
-    let mut lines = Vec::new();
+    let content_width = content_area.width as usize;
+    let mut sections = Vec::new();
     if !view_model.queue_rows.is_empty() {
-        lines.extend(render_queue_strip_lines(
-            view_model,
-            area.width as usize,
-            theme,
-        ));
+        let selected_queue_item = selected_queue_item_index(view_model);
+        let selected_item_preview = selected_queue_item_preview(view_model);
+        sections.push(StatusBandSection {
+            kind: StatusBandSectionKind::Queue,
+            lines: render_queue_strip_lines(view_model, content_width, theme),
+            selected_queue_item,
+            compact_action_line: Some(render_queue_actions(
+                &view_model.queue_action_buttons,
+                selected_item_preview.as_deref(),
+                selected_queue_item,
+                content_width,
+                view_model.queue_panel_focused,
+                1,
+                theme,
+            )),
+        });
     }
     if let Some(progress) = &view_model.progress {
-        lines.extend(render_live_progress_lines_with_theme(
-            progress, accent, theme,
-        ));
+        sections.push(StatusBandSection {
+            kind: StatusBandSectionKind::Progress,
+            lines: render_live_progress_lines_with_theme(progress, accent, content_width, theme),
+            selected_queue_item: None,
+            compact_action_line: None,
+        });
     }
     if let Some(plan_approval) = &view_model.plan_approval {
-        lines.extend(render_plan_approval_lines(
-            plan_approval,
-            content_area.width as usize,
-            theme,
-        ));
+        sections.push(StatusBandSection {
+            kind: StatusBandSectionKind::Plan,
+            lines: render_plan_approval_lines(plan_approval, content_width, theme),
+            selected_queue_item: None,
+            compact_action_line: None,
+        });
     }
     if let Some(task_strip) = &view_model.task_strip {
-        lines.extend(render_task_strip_lines(
-            task_strip,
-            area.width as usize,
-            theme,
-        ));
+        let lines = render_task_strip_lines(task_strip, content_width, theme);
+        if !lines.is_empty() {
+            sections.push(StatusBandSection {
+                kind: StatusBandSectionKind::Task,
+                lines,
+                selected_queue_item: None,
+                compact_action_line: None,
+            });
+        }
+        if let Some(verification) = &task_strip.verification {
+            sections.push(StatusBandSection {
+                kind: StatusBandSectionKind::Verification,
+                lines: render_verification_card_lines(verification, content_width, theme),
+                selected_queue_item: None,
+                compact_action_line: Some(render_compact_verification_action(
+                    verification,
+                    content_width,
+                    theme,
+                )),
+            });
+        }
     }
-    let lines = lines
-        .into_iter()
-        .take(content_area.height as usize)
-        .map(|line| status_band_line(line, content_area.width as usize, band_bg))
-        .collect::<Vec<_>>();
+    let preferred_action = if view_model.plan_approval.is_some() {
+        Some(StatusBandSectionKind::Plan)
+    } else if view_model.queue_panel_focused {
+        Some(StatusBandSectionKind::Queue)
+    } else if view_model
+        .task_strip
+        .as_ref()
+        .and_then(|task| task.verification.as_ref())
+        .is_some_and(|verification| verification.focused)
+    {
+        Some(StatusBandSectionKind::Verification)
+    } else {
+        None
+    };
+    let lines = fit_status_band_sections(
+        sections,
+        content_area.height as usize,
+        preferred_action,
+        theme,
+    )
+    .into_iter()
+    .map(|line| status_band_line(line, content_width, band_bg))
+    .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(band_bg))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(band_bg)),
         content_area,
     );
 }
 
 fn status_band_line(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
-    let mut spans = line
-        .spans
-        .into_iter()
-        .map(|span| {
-            let mut style = span.style;
-            if style.bg.is_none() {
-                style.bg = Some(bg);
-            }
-            Span::styled(span.content, style)
-        })
-        .collect::<Vec<_>>();
+    let mut remaining = width;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let mut style = span.style;
+        if style.bg.is_none() {
+            style.bg = Some(bg);
+        }
+        let content = truncate_status_text(span.content.as_ref(), remaining);
+        let content_width = terminal_cell_width(&content);
+        if !content.is_empty() {
+            spans.push(Span::styled(content, style));
+        }
+        remaining = remaining.saturating_sub(content_width);
+    }
     let line_width = line_display_width(&spans);
     if width > line_width {
         spans.push(Span::styled(
@@ -462,10 +836,39 @@ fn status_band_line(line: Line<'static>, width: usize, bg: Color) -> Line<'stati
     }
 }
 
+fn truncate_status_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let sanitized = sanitize_terminal_text(text);
+    if terminal_cell_width(&sanitized) <= max_width {
+        return sanitized;
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = terminal_cell_width(ellipsis);
+    if max_width <= ellipsis_width {
+        return ".".repeat(max_width);
+    }
+    let budget = max_width - ellipsis_width;
+    let mut out = String::new();
+    let mut used_width = 0usize;
+    for grapheme in sanitized.graphemes(true) {
+        let grapheme_width = terminal_grapheme_width(grapheme).unwrap_or(0);
+        if used_width + grapheme_width > budget {
+            break;
+        }
+        out.push_str(grapheme);
+        used_width += grapheme_width;
+    }
+    out.push_str(ellipsis);
+    out
+}
+
 fn line_display_width(spans: &[Span<'static>]) -> usize {
     spans
         .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .map(|span| terminal_cell_width(span.content.as_ref()))
         .sum()
 }
 
@@ -519,13 +922,35 @@ fn render_queue_strip_lines(
             theme,
         ));
     }
+    let selected_item_preview = selected_queue_item_preview(view_model);
     lines.push(render_queue_actions(
         &view_model.queue_action_buttons,
+        selected_item_preview.as_deref(),
+        selected_queue_item_index(view_model),
         width,
         view_model.queue_panel_focused,
+        usize::MAX,
         theme,
     ));
     lines
+}
+
+fn selected_queue_item_index(view_model: &LivePanelViewModel) -> Option<usize> {
+    view_model
+        .queue_rows
+        .iter()
+        .take(LIVE_QUEUE_ROW_LIMIT)
+        .position(|row| row.selected)
+}
+
+fn selected_queue_item_preview(view_model: &LivePanelViewModel) -> Option<String> {
+    view_model
+        .queue_rows
+        .iter()
+        .take(LIVE_QUEUE_ROW_LIMIT)
+        .enumerate()
+        .find(|(_, row)| row.selected)
+        .map(|(index, row)| format!("#{} {}", index + 1, row.label))
 }
 
 fn render_queue_header(
@@ -545,6 +970,7 @@ fn render_queue_header(
     } else {
         "Tab focus · /queue advanced"
     };
+    let title_width = terminal_cell_width(title);
     Line::from(vec![
         Span::styled(
             title,
@@ -558,7 +984,7 @@ fn render_queue_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            truncate_display_width(&format!("  {detail}"), width.saturating_sub(title.len())),
+            truncate_status_text(&format!("  {detail}"), width.saturating_sub(title_width)),
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ])
@@ -571,6 +997,7 @@ fn render_queue_row(
     theme: &Theme,
 ) -> Line<'static> {
     const QUEUE_LABEL_WIDTH: usize = 28;
+    const QUEUE_ROW_CHROME_WIDTH: usize = 5;
 
     let palette = &theme.palette;
     let bg = palette.surface_panel_alt;
@@ -583,12 +1010,13 @@ fn render_queue_row(
     };
     let marker = if selected { "▸" } else { " " };
     let status = StatusIndicator::animated(row.status);
-    let label = truncate_display_width(&row.label, QUEUE_LABEL_WIDTH);
-    let label = format!("{label:<QUEUE_LABEL_WIDTH$}");
-    let reserved = 2 + QUEUE_LABEL_WIDTH + 3;
-    let detail = truncate_display_width(&row.detail, width.saturating_sub(reserved));
+    let label_width = QUEUE_LABEL_WIDTH.min(width.saturating_sub(QUEUE_ROW_CHROME_WIDTH));
+    let label = truncate_status_text(&row.label, label_width);
+    let label = pad_display_width(&label, label_width);
+    let reserved = label_width.saturating_add(QUEUE_ROW_CHROME_WIDTH);
+    let detail = truncate_status_text(&row.detail, width.saturating_sub(reserved));
     if selected {
-        let content = truncate_display_width(
+        let content = truncate_status_text(
             &format!("{marker} {label} {} {detail}", status.symbol()),
             width,
         );
@@ -610,21 +1038,55 @@ fn render_queue_row(
 
 fn render_queue_actions(
     buttons: &[QueueActionButtonViewModel],
+    selected_item_preview: Option<&str>,
+    selected_item_index: Option<usize>,
     width: usize,
     panel_focused: bool,
+    queue_row_budget: usize,
     theme: &Theme,
 ) -> Line<'static> {
     let palette = &theme.palette;
     let bg = palette.surface_panel_alt;
-    let mut spans = vec![Span::styled(
-        "Actions ",
-        Style::default()
-            .fg(palette.text_muted)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
-    )];
-    for button in buttons {
-        spans.push(Span::styled(" ", Style::default().bg(bg)));
+    let primary = Style::default().fg(palette.text_muted).bg(bg);
+    let labels = buttons
+        .iter()
+        .map(|button| button.label.as_str())
+        .collect::<Vec<_>>();
+    let selected_index = buttons
+        .iter()
+        .position(|button| button.selected)
+        .unwrap_or(0);
+    let layout = queue_action_button_layout_for_budget(
+        &labels,
+        selected_index,
+        selected_item_index,
+        width,
+        queue_row_budget,
+    );
+    let omit_prefix = layout.first().is_some_and(|placement| placement.x == 0);
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    if !omit_prefix {
+        spans.push(Span::styled(
+            "Actions ",
+            primary.add_modifier(Modifier::BOLD),
+        ));
+        cursor = terminal_cell_width("Actions ").min(width);
+    }
+    for (placement_index, placement) in layout.iter().enumerate() {
+        if placement_index == 0 && placement.button_index > 0 && placement.x > cursor {
+            let gap = placement.x.saturating_sub(cursor);
+            spans.push(Span::styled(
+                pad_display_width("…", gap),
+                Style::default().fg(palette.text_muted).bg(bg),
+            ));
+        } else if placement.x > cursor {
+            spans.push(Span::styled(
+                " ".repeat(placement.x - cursor),
+                Style::default().bg(bg),
+            ));
+        }
+        let button = &buttons[placement.button_index];
         let style = if panel_focused && button.selected {
             Style::default()
                 .fg(palette.selection_fg)
@@ -635,24 +1097,153 @@ fn render_queue_actions(
         } else {
             Style::default().fg(palette.text_primary).bg(bg)
         };
-        spans.push(Span::styled(format!(" {} ", button.label), style));
-    }
-    let selected_detail = buttons
-        .iter()
-        .find(|button| button.selected)
-        .map(|button| button.detail.as_str())
-        .unwrap_or("");
-    if !selected_detail.is_empty() {
+        let display_label = if queue_row_budget == 1 {
+            selected_item_index
+                .map(|index| format!("#{} {}", index + 1, button.label))
+                .unwrap_or_else(|| button.label.clone())
+        } else {
+            button.label.clone()
+        };
+        let padded_button = format!(" {display_label} ");
+        let button_text = if terminal_cell_width(&padded_button) <= placement.width {
+            padded_button
+        } else {
+            truncate_status_text(&display_label, placement.width)
+        };
         spans.push(Span::styled(
-            "  ·  ",
+            pad_display_width(&button_text, placement.width),
+            style,
+        ));
+        cursor = placement.x.saturating_add(placement.width);
+    }
+    if layout
+        .last()
+        .is_some_and(|placement| placement.button_index + 1 < buttons.len())
+        && cursor < width
+    {
+        let suffix = truncate_status_text(" …", width.saturating_sub(cursor));
+        cursor = cursor.saturating_add(terminal_cell_width(&suffix));
+        spans.push(Span::styled(suffix, primary));
+    }
+    let selected_detail = selected_item_preview.unwrap_or_else(|| {
+        buttons
+            .iter()
+            .find(|button| button.selected)
+            .map(|button| button.detail.as_str())
+            .unwrap_or("")
+    });
+    if !selected_detail.is_empty() && width.saturating_sub(cursor) >= 5 {
+        let separator = " · ";
+        spans.push(Span::styled(
+            separator,
             Style::default().fg(palette.text_muted).bg(bg),
         ));
+        cursor = cursor.saturating_add(terminal_cell_width(separator));
         spans.push(Span::styled(
-            truncate_display_width(selected_detail, width.saturating_sub(32)),
+            truncate_status_text(selected_detail, width.saturating_sub(cursor)),
             Style::default().fg(palette.text_secondary).bg(bg),
         ));
     }
-    Line::from(spans)
+    status_band_line(Line::from(spans), width, bg)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QueueActionButtonPlacement {
+    pub(crate) button_index: usize,
+    pub(crate) x: usize,
+    pub(crate) width: usize,
+}
+
+pub(crate) fn queue_action_button_layout(
+    labels: &[&str],
+    selected_index: usize,
+    width: usize,
+) -> Vec<QueueActionButtonPlacement> {
+    if labels.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let selected_index = selected_index.min(labels.len() - 1);
+    let prefix_width = terminal_cell_width("Actions ").min(width);
+    let button_widths = labels
+        .iter()
+        .map(|label| terminal_cell_width(label).saturating_add(2))
+        .collect::<Vec<_>>();
+    let mut best: Option<(usize, usize, usize)> = None;
+    for start in 0..=selected_index {
+        for end in selected_index..labels.len() {
+            let hidden_chrome = usize::from(start > 0).saturating_mul(2)
+                + usize::from(end + 1 < labels.len()).saturating_mul(2);
+            let buttons_width = button_widths[start..=end]
+                .iter()
+                .fold(0usize, |total, button_width| {
+                    total.saturating_add(1).saturating_add(*button_width)
+                });
+            let cost = prefix_width
+                .saturating_add(hidden_chrome)
+                .saturating_add(buttons_width);
+            if cost > width {
+                continue;
+            }
+            let count = end - start + 1;
+            let imbalance = selected_index
+                .saturating_sub(start)
+                .abs_diff(end.saturating_sub(selected_index));
+            if best.is_none_or(|(best_start, best_end, best_imbalance)| {
+                count > best_end - best_start + 1
+                    || (count == best_end - best_start + 1 && imbalance < best_imbalance)
+            }) {
+                best = Some((start, end, imbalance));
+            }
+        }
+    }
+
+    let Some((start, end, _)) = best else {
+        return vec![QueueActionButtonPlacement {
+            button_index: selected_index,
+            x: 0,
+            width: button_widths[selected_index].min(width),
+        }];
+    };
+
+    let mut cursor = prefix_width.saturating_add(usize::from(start > 0).saturating_mul(2));
+    (start..=end)
+        .map(|button_index| {
+            cursor = cursor.saturating_add(1);
+            let placement = QueueActionButtonPlacement {
+                button_index,
+                x: cursor,
+                width: button_widths[button_index],
+            };
+            cursor = cursor.saturating_add(button_widths[button_index]);
+            placement
+        })
+        .collect()
+}
+
+pub(crate) fn queue_action_button_layout_for_budget(
+    labels: &[&str],
+    selected_index: usize,
+    selected_item_index: Option<usize>,
+    width: usize,
+    queue_row_budget: usize,
+) -> Vec<QueueActionButtonPlacement> {
+    if queue_row_budget != 1 {
+        return queue_action_button_layout(labels, selected_index, width);
+    }
+    if labels.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let selected_index = selected_index.min(labels.len() - 1);
+    let display_label = selected_item_index
+        .map(|index| format!("#{} {}", index + 1, labels[selected_index]))
+        .unwrap_or_else(|| labels[selected_index].to_owned());
+    vec![QueueActionButtonPlacement {
+        button_index: selected_index,
+        x: 0,
+        width: terminal_cell_width(&display_label)
+            .saturating_add(2)
+            .min(width),
+    }]
 }
 
 fn render_plan_approval_lines(
@@ -676,10 +1267,11 @@ fn render_plan_approval_lines(
         "structured plan · {} {} · {} {}",
         plan.target_path_count, path_label, plan.suggested_check_count, check_label
     );
-    let reserved_width =
-        UnicodeWidthStr::width("Plan ready") + UnicodeWidthStr::width(counts.as_str()) + 10;
-    let summary_width = width.saturating_sub(reserved_width);
-    let summary = truncate_display_width(&plan.summary, summary_width);
+    let header_detail = format!("  ·  {counts}  ·  {}", plan.summary);
+    let header_detail = truncate_status_text(
+        &header_detail,
+        width.saturating_sub(terminal_cell_width("Plan ready")),
+    );
     let mut lines = vec![Line::from(vec![
         Span::styled(
             "Plan",
@@ -697,7 +1289,7 @@ fn render_plan_approval_lines(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  ·  {counts}  ·  {summary}"),
+            header_detail,
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ])];
@@ -708,11 +1300,11 @@ fn render_plan_approval_lines(
         .enumerate()
     {
         let prefix = format!("{}. ", index + 1);
-        let available = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+        let available = width.saturating_sub(terminal_cell_width(&prefix));
         lines.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(palette.text_secondary).bg(bg)),
             Span::styled(
-                truncate_display_width(step, available),
+                truncate_status_text(step, available),
                 Style::default().fg(palette.text_primary).bg(bg),
             ),
         ]));
@@ -734,22 +1326,17 @@ fn render_plan_approval_lines(
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
         )]));
-        let mut plan_lines = render_plan_text_lines(&plan.plan_text, width, palette);
-        let total = render_markdown_timeline_lines_with_palette(
-            palette.accent_info,
-            Style::default().fg(palette.text_primary).bg(bg),
-            plan.plan_text.trim(),
-            MarkdownRenderOptions::timeline(plan_text_render_width(width)),
-            palette,
-        )
-        .len();
-        if total > LIVE_PLAN_TEXT_ROW_LIMIT {
-            plan_lines.push(Line::from(vec![Span::styled(
-                format!("  ... {} more lines", total - LIVE_PLAN_TEXT_ROW_LIMIT),
+        let mut rendered_plan = render_plan_text(&plan.plan_text, width, palette);
+        if rendered_plan.total_rows > LIVE_PLAN_TEXT_ROW_LIMIT {
+            rendered_plan.lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "  ... {} more lines",
+                    rendered_plan.total_rows - LIVE_PLAN_TEXT_ROW_LIMIT
+                ),
                 Style::default().fg(palette.text_muted).bg(bg),
             )]));
         }
-        lines.extend(plan_lines);
+        lines.extend(rendered_plan.lines);
     }
     let path_summary = if plan.target_paths.is_empty() {
         None
@@ -779,7 +1366,7 @@ fn render_plan_approval_lines(
     };
     for detail in [path_summary, check_summary].into_iter().flatten() {
         lines.push(Line::from(vec![Span::styled(
-            truncate_display_width(&detail, width),
+            truncate_status_text(&detail, width),
             Style::default().fg(palette.text_secondary).bg(bg),
         )]));
     }
@@ -798,32 +1385,120 @@ fn render_plan_approval_lines(
                 Style::default().fg(palette.text_secondary).bg(bg),
             ),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled("r", Style::default().fg(palette.text_primary).bg(bg)),
-            Span::styled(
-                " revise  Esc",
-                Style::default().fg(palette.text_secondary).bg(bg),
-            ),
-            Span::styled(" reject", Style::default().fg(palette.text_primary).bg(bg)),
-        ]));
+        lines.push(render_plan_action_line(true, width, theme));
+        return bound_plan_approval_lines(lines, theme);
+    }
+    lines.push(render_plan_action_line(false, width, theme));
+    bound_plan_approval_lines(lines, theme)
+}
+
+fn render_plan_action_line(stale: bool, width: usize, theme: &Theme) -> Line<'static> {
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
+    let primary = Style::default().fg(palette.text_primary).bg(bg);
+    let secondary = Style::default().fg(palette.text_secondary).bg(bg);
+    let full_text = if stale {
+        "r revise  Esc reject"
+    } else {
+        "Enter run  s save  r revise  Esc reject"
+    };
+    if width < terminal_cell_width(full_text) {
+        let keys = if stale {
+            ["r", "Esc"].as_slice()
+        } else {
+            ["Enter", "s", "r", "Esc"].as_slice()
+        };
+        let mut spans = Vec::with_capacity(keys.len().saturating_mul(2));
+        for (index, key) in keys.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(" ", secondary));
+            }
+            spans.push(Span::styled((*key).to_owned(), primary));
+        }
+        return status_band_line(Line::from(spans), width, bg);
+    }
+
+    if stale {
+        return Line::from(vec![
+            Span::styled("r", primary),
+            Span::styled(" revise  ", secondary),
+            Span::styled("Esc", primary),
+            Span::styled(" reject", secondary),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled("Enter", primary),
+        Span::styled(" run  ", secondary),
+        Span::styled("s", primary),
+        Span::styled(" save  ", secondary),
+        Span::styled("r", primary),
+        Span::styled(" revise  ", secondary),
+        Span::styled("Esc", primary),
+        Span::styled(" reject", secondary),
+    ])
+}
+
+fn render_plan_overflow_line(theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        "... plan details truncated",
+        Style::default()
+            .fg(theme.palette.text_muted)
+            .bg(theme.palette.surface_panel_alt),
+    ))
+}
+
+fn render_hidden_plan_action_line(action: Line<'static>, theme: &Theme) -> Line<'static> {
+    let bg = theme.palette.surface_panel_alt;
+    let supports_run = action
+        .spans
+        .iter()
+        .any(|span| span.content.contains("Enter"));
+    let mut spans = Vec::new();
+    if supports_run {
+        spans.push(Span::styled(
+            "Enter",
+            Style::default()
+                .fg(theme.palette.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " run plan… ",
+            Style::default()
+                .fg(theme.palette.accent_warning)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            "· s/r/Esc",
+            Style::default().fg(theme.palette.text_secondary).bg(bg),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "r revise hidden",
+            Style::default()
+                .fg(theme.palette.accent_warning)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " · Esc reject",
+            Style::default().fg(theme.palette.text_secondary).bg(bg),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn bound_plan_approval_lines(mut lines: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
+    if lines.len() <= LIVE_PLAN_APPROVAL_ROW_LIMIT {
         return lines;
     }
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(palette.text_primary).bg(bg)),
-        Span::styled(" run", Style::default().fg(palette.text_secondary).bg(bg)),
-        Span::styled("  s", Style::default().fg(palette.text_primary).bg(bg)),
-        Span::styled(" save", Style::default().fg(palette.text_secondary).bg(bg)),
-        Span::styled("  r", Style::default().fg(palette.text_primary).bg(bg)),
-        Span::styled(
-            " revise",
-            Style::default().fg(palette.text_secondary).bg(bg),
-        ),
-        Span::styled("  Esc", Style::default().fg(palette.text_primary).bg(bg)),
-        Span::styled(
-            " reject",
-            Style::default().fg(palette.text_secondary).bg(bg),
-        ),
-    ]));
+    let Some(action) = lines.pop() else {
+        return Vec::new();
+    };
+    lines.truncate(LIVE_PLAN_APPROVAL_ROW_LIMIT.saturating_sub(2));
+    lines.push(render_plan_overflow_line(theme));
+    lines.push(action);
     lines
 }
 
@@ -856,7 +1531,7 @@ fn render_task_strip_lines(
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        truncate_display_width(diagnostic, width.saturating_sub(8)),
+                        truncate_status_text(diagnostic, width.saturating_sub(8)),
                         Style::default()
                             .fg(theme.palette.text_secondary)
                             .bg(theme.palette.surface_panel_alt),
@@ -881,7 +1556,7 @@ fn render_task_strip_lines(
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        truncate_display_width(progress, width.saturating_sub(8)),
+                        truncate_status_text(progress, width.saturating_sub(8)),
                         Style::default()
                             .fg(theme.palette.text_secondary)
                             .bg(theme.palette.surface_panel_alt),
@@ -889,9 +1564,6 @@ fn render_task_strip_lines(
                 ])
             }),
     );
-    if let Some(verification) = &task_strip.verification {
-        lines.extend(render_verification_card_lines(verification, width, theme));
-    }
     lines.extend(
         task_strip
             .rows
@@ -923,12 +1595,12 @@ fn render_verification_card_lines(
         ),
         Span::styled("  ·  ", Style::default().fg(palette.text_muted).bg(bg)),
         Span::styled(
-            truncate_display_width(&card.status, width.saturating_sub(16)),
+            truncate_status_text(&card.status, width.saturating_sub(16)),
             Style::default().fg(palette.text_primary).bg(bg),
         ),
     ])];
     lines.push(Line::from(Span::styled(
-        truncate_display_width(
+        truncate_status_text(
             &format!(
                 "  Recommended  {}",
                 card.recommended.as_deref().unwrap_or("none")
@@ -939,42 +1611,99 @@ fn render_verification_card_lines(
     )));
     if let Some(why) = &card.why {
         lines.push(Line::from(Span::styled(
-            truncate_display_width(&format!("  Why         {why}"), width),
+            truncate_status_text(&format!("  Why         {why}"), width),
             Style::default().fg(palette.text_secondary).bg(bg),
-        )));
-    }
-    if let Some(action) = card.action_label {
-        lines.push(Line::from(Span::styled(
-            truncate_display_width(&format!("  Enter {action}  ·  I inspect"), width),
-            Style::default()
-                .fg(if card.focused {
-                    palette.accent_primary
-                } else {
-                    palette.text_muted
-                })
-                .bg(bg),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "  I inspect",
-            Style::default()
-                .fg(if card.focused {
-                    palette.accent_primary
-                } else {
-                    palette.text_muted
-                })
-                .bg(bg),
         )));
     }
     if card.inspect_open {
         lines.extend(card.inspect_lines.iter().map(|line| {
             Line::from(Span::styled(
-                truncate_display_width(&format!("  {line}"), width),
+                truncate_status_text(&format!("  {line}"), width),
                 Style::default().fg(palette.text_secondary).bg(bg),
             ))
         }));
     }
+    let action = card
+        .action_label
+        .map(|action| format!("  Enter {action}  ·  I inspect"))
+        .unwrap_or_else(|| "  I inspect".to_owned());
+    lines.push(Line::from(Span::styled(
+        truncate_status_text(&action, width),
+        Style::default()
+            .fg(if card.focused {
+                palette.accent_primary
+            } else {
+                palette.text_muted
+            })
+            .bg(bg),
+    )));
     lines
+}
+
+fn render_compact_verification_action(
+    card: &crate::view_model::VerificationCardViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let palette = &theme.palette;
+    let bg = if card.focused {
+        palette.surface_input
+    } else {
+        palette.surface_panel_alt
+    };
+    let action = card
+        .action_label
+        .map(|label| {
+            if label == "run check" {
+                "Enter run".to_owned()
+            } else {
+                format!("Enter {label}")
+            }
+        })
+        .unwrap_or_else(|| "I inspect".to_owned());
+    let target = card.recommended.as_deref().unwrap_or("none");
+    let full = format!("{action} · {target}");
+    let text = if terminal_cell_width(&full) <= width {
+        full
+    } else if card.action_label == Some("run check") {
+        let tight = format!("{action} {target}");
+        if terminal_cell_width(&tight) <= width {
+            tight
+        } else {
+            let enter_target = format!("Enter {target}");
+            if terminal_cell_width(&enter_target) <= width {
+                enter_target
+            } else {
+                compact_hidden_verification_action(&action, width)
+            }
+        }
+    } else {
+        compact_hidden_verification_action(&action, width)
+    };
+    status_band_line(
+        Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(if card.focused {
+                    palette.accent_primary
+                } else {
+                    palette.text_muted
+                })
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        )),
+        width,
+        bg,
+    )
+}
+
+fn compact_hidden_verification_action(action: &str, width: usize) -> String {
+    let hidden = format!("{action} · tgt hidden");
+    if terminal_cell_width(&hidden) <= width {
+        hidden
+    } else {
+        truncate_status_text(&format!("{action} · tgt…"), width)
+    }
 }
 
 fn render_task_strip_header(
@@ -988,8 +1717,9 @@ fn render_task_strip_header(
         .title
         .strip_prefix("Task ")
         .unwrap_or(&task_strip.title);
-    let title = truncate_display_width(title, width.saturating_sub(8));
-    let detail_width = width.saturating_sub("Task  ".chars().count() + title.chars().count() + 3);
+    let fixed_width = terminal_cell_width("Task ") + terminal_cell_width("  ·  ");
+    let title = truncate_status_text(title, width.saturating_sub(fixed_width));
+    let detail_width = width.saturating_sub(fixed_width + terminal_cell_width(&title));
     Line::from(vec![
         Span::styled(
             "Task",
@@ -1008,7 +1738,7 @@ fn render_task_strip_header(
         ),
         Span::styled("  ·  ", Style::default().fg(palette.text_muted).bg(bg)),
         Span::styled(
-            truncate_display_width(&task_strip.detail, detail_width),
+            truncate_status_text(&task_strip.detail, detail_width),
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ])
@@ -1027,7 +1757,7 @@ fn render_task_strip_row(
         palette.surface_panel_alt
     };
     let label_width = width.saturating_sub(LIVE_TASK_ROW_RESERVED_WIDTH);
-    let label = truncate_display_width(&row.label, label_width);
+    let label = truncate_status_text(&row.label, label_width);
     let label_style = if row.active {
         Style::default()
             .fg(palette.text_primary)
@@ -1050,82 +1780,23 @@ fn render_task_strip_row(
 const LIVE_TASK_ROW_RESERVED_WIDTH: usize = 2 + 1 + 1;
 
 fn wrap_live_panel_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    for line in lines {
-        rows.extend(wrap_live_panel_line(line, width));
-    }
-    if rows.is_empty() {
-        rows.push(Line::raw(String::new()));
-    }
-    rows
-}
-
-fn wrap_live_panel_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::new();
-    let mut current_spans = Vec::new();
-    let mut current_width = 0usize;
-    let line_style = line.style;
-    let line_alignment = line.alignment;
-
-    for span in line.spans {
-        let mut segment = String::new();
-        for grapheme in span.content.as_ref().graphemes(true) {
-            let grapheme_width = UnicodeWidthStr::width(grapheme).max(1);
-            if current_width > 0 && current_width + grapheme_width > width {
-                push_live_panel_segment(&mut current_spans, &mut segment, span.style);
-                rows.push(live_panel_wrapped_line(
-                    std::mem::take(&mut current_spans),
-                    line_style,
-                    line_alignment,
-                ));
-                current_width = 0;
-            }
-            segment.push_str(grapheme);
-            current_width += grapheme_width;
-        }
-        push_live_panel_segment(&mut current_spans, &mut segment, span.style);
-    }
-
-    rows.push(live_panel_wrapped_line(
-        current_spans,
-        line_style,
-        line_alignment,
-    ));
-    rows
-}
-
-fn push_live_panel_segment(spans: &mut Vec<Span<'static>>, segment: &mut String, style: Style) {
-    if segment.is_empty() {
-        return;
-    }
-    spans.push(Span::styled(std::mem::take(segment), style));
-}
-
-fn live_panel_wrapped_line(
-    spans: Vec<Span<'static>>,
-    style: Style,
-    alignment: Option<ratatui::layout::Alignment>,
-) -> Line<'static> {
-    Line {
-        spans,
-        style,
-        alignment,
-    }
+    wrap_terminal_lines(lines, width)
 }
 
 #[cfg(test)]
 pub(crate) fn render_live_progress_lines(
     progress: &LiveProgressViewModel,
     accent: Color,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let theme = Theme::default();
-    render_live_progress_lines_with_theme(progress, accent, &theme)
+    render_live_progress_lines_with_theme(progress, accent, width, &theme)
 }
 
 fn render_live_progress_lines_with_theme(
     progress: &LiveProgressViewModel,
     accent: Color,
+    width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let palette = &theme.palette;
@@ -1136,7 +1807,7 @@ fn render_live_progress_lines_with_theme(
             indicator.span_with_palette(palette),
             Span::raw(" "),
             Span::styled(
-                format!("{}...", progress.title),
+                truncate_status_text(&format!("{}...", progress.title), width.saturating_sub(2)),
                 Style::default()
                     .fg(accent)
                     .bg(bg)
@@ -1146,7 +1817,7 @@ fn render_live_progress_lines_with_theme(
         Line::from(vec![
             Span::styled("  ↳ ", Style::default().fg(accent).bg(bg)),
             Span::styled(
-                progress.detail.clone(),
+                truncate_status_text(&progress.detail, width.saturating_sub(4)),
                 Style::default().fg(palette.text_primary).bg(bg),
             ),
         ]),

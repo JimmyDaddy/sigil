@@ -1,16 +1,23 @@
 use std::{collections::BTreeMap, path::Path};
 
-use ratatui::layout::Rect;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, ControlEntry, EgressDataCategory, EgressDisclosureKind,
-    EgressNetworkRoute, EventHandler, MemoryConfig, PermissionConfig, PreEgressDisclosure,
-    RootConfig, RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
-    ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, AgentRole, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
+    CheckSpecRecordedEntry, CompactionConfig, ControlEntry, EgressDataCategory,
+    EgressDisclosureKind, EgressNetworkRoute, EventHandler, EvidenceScope, ImageAttachment,
+    ImageMimeType, MemoryConfig, ModelMessage, PermissionConfig, PreEgressDisclosure,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RootConfig, RunEvent, RunStatus,
+    SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+    ToolAccess, ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult,
+    ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationVerdict, VisibleCompletionState,
+    WorkspaceConfig,
 };
 
 use crate::{
-    app::AppState,
+    app::{AppAction, AppState, PendingPlanApproval},
     approval::{
         ApprovalAction, ApprovalChangeSetSummary, ApprovalDiffLine, ApprovalDiffLineKind,
         ApprovalFileRow, ApprovalModalView, PendingApproval,
@@ -18,6 +25,7 @@ use crate::{
     config_panel::ConfigSection,
     mouse::HitTarget,
     runner::WorkerMessage,
+    view_model::LivePanelViewModel,
 };
 
 use super::*;
@@ -71,6 +79,159 @@ fn test_config() -> RootConfig {
     }
 }
 
+fn compact_verification_app() -> AppState {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let task_id = TaskId::new("task_1").expect("task id");
+    let step_id = TaskStepId::new("step_1").expect("step id");
+    let trusted_check = TrustedCheckSpec {
+        check_spec: CheckSpec::new(
+            "cargo-test",
+            CheckCommand {
+                command: "cargo".to_owned(),
+                args: vec!["test".to_owned()],
+                cwd: None,
+            },
+            ToolEffect::ReadOnly,
+            "task_step_default",
+        ),
+        source: CheckDiscoverySource::UserExplicitConfig,
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+        promoted_by: CheckPromotion::ExplicitUserConfig {
+            config_event_id: "config-verification".to_owned(),
+        },
+        approval_event_id: None,
+        sandbox_decision_id: None,
+    };
+    app.session_browser.current_entries = vec![
+        SessionLogEntry::User(ModelMessage::user("/task verify")),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Verify changes".to_owned(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Run checks".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: None,
+                isolation: None,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Blocked,
+            title: Some("Run checks".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(
+            CheckSpecRecordedEntry::new(
+                EvidenceScope::Task(task_id.as_str().to_owned()),
+                trusted_check,
+                "config-verification",
+            ),
+        )),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
+            scope: EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step_id.as_str())),
+            evaluation: ReadinessEvaluation {
+                run_status: RunStatus::Completed,
+                verification_verdict: VerificationVerdict::Missing,
+                visible_state: VisibleCompletionState::NeedsUser,
+                reasons: Vec::new(),
+                required_actions: vec![RequiredAction::RunCheck {
+                    check_spec_id: "cargo-test".to_owned(),
+                }],
+            },
+            policy_hash: Some("policy-hash".to_owned()),
+            workspace_snapshot_id: Some("snapshot-1".to_owned()),
+        })),
+    ];
+    app
+}
+
+fn add_compact_agent_threads(app: &mut AppState) -> anyhow::Result<()> {
+    let profile_id = sigil_kernel::AgentProfileId::new("subagent_read")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_compact_agents")?;
+    app.handle(RunEvent::Control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: sigil_kernel::AgentTrustState::Trusted,
+            },
+        },
+    )))?;
+    for index in 1..=4 {
+        let thread_id = sigil_kernel::AgentThreadId::new(format!("child_{index}"))?;
+        app.handle(RunEvent::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                batch_id: None,
+                batch_member_key: None,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: SessionRef::new_relative(format!(
+                    "children/child-{index}.jsonl"
+                ))?,
+                profile_id: profile_id.clone(),
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id.clone(),
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    model_ref: None,
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
+                    effective_tool_scope_hash: "sha256:tools".to_owned(),
+                    effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                    effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    provider_capability_hash: "sha256:provider".to_owned(),
+                    model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                    budget_policy_hash: "sha256:budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: format!("agent {index}"),
+                prompt_hash: format!("sha256:prompt-{index}"),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+                invocation_source: sigil_kernel::AgentInvocationSource::Task,
+                display_name: Some(format!("child {index}")),
+                created_at_ms: Some(index),
+            },
+        )))?;
+        app.handle(RunEvent::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id,
+                status: sigil_kernel::AgentThreadStatus::Started,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )))?;
+    }
+    Ok(())
+}
+
 fn sample_tool_result(call_id: &str, path: &str) -> ToolResult {
     ToolResult::ok(
         call_id,
@@ -117,6 +278,347 @@ fn layout_snapshot_reserves_disclosure_rows_before_timeline_hit_areas() -> anyho
             .iter()
             .all(|row| row.area.y >= disclosure.y.saturating_add(disclosure.height))
     );
+    Ok(())
+}
+
+#[test]
+fn clipped_queue_hit_areas_only_expose_rows_the_status_allocator_renders() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(40, 8);
+    app.runtime.is_busy = true;
+    app.composer.input = "queued follow-up".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    app.submit_input()?;
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 40, 8), &app);
+    let hit_areas = layout
+        .composer_queue_hit_areas
+        .expect("the visible queue action row should remain interactive");
+
+    assert!(hit_areas.item_rows.is_empty());
+    assert!(!hit_areas.actions.is_empty());
+    assert!(
+        hit_areas
+            .actions
+            .iter()
+            .all(|action| action.area.y < layout.composer.y)
+    );
+    Ok(())
+}
+
+#[test]
+fn narrow_queue_hit_areas_keep_the_selected_delete_action_complete() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(24, 8);
+    app.runtime.is_busy = true;
+    app.composer.input = "queued follow-up".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    app.submit_input()?;
+    app.composer.queue_action_selected = crate::app::ComposerQueueAction::Delete;
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 24, 8), &app);
+    let hit_areas = layout
+        .composer_queue_hit_areas
+        .expect("queue action row should remain visible");
+    let delete = hit_areas
+        .actions
+        .iter()
+        .find(|action| action.action == crate::app::ComposerQueueAction::Delete)
+        .expect("selected delete action should have a hit area");
+
+    assert_eq!(delete.area.width, " #1 Delete ".len() as u16);
+    assert!(delete.area.right() <= layout.live_panel.right());
+    Ok(())
+}
+
+#[test]
+fn short_queue_hit_areas_follow_the_selected_last_item_window() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.runtime.is_busy = true;
+    for prompt in [
+        "first queued prompt",
+        "second queued prompt",
+        "third queued prompt",
+        "fourth queued prompt",
+    ] {
+        app.composer.input = prompt.to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
+        app.submit_input()?;
+    }
+    app.composer.queue_panel_focused = true;
+    app.composer.queue_selected = 3;
+    app.composer.queue_action_selected = crate::app::ComposerQueueAction::Delete;
+    assert!(app.composer_queue_rows()[3].selected);
+
+    for height in 10..=12 {
+        app.set_terminal_size(40, height);
+        let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 40, height), &app);
+        let hit_areas = layout
+            .composer_queue_hit_areas
+            .as_ref()
+            .expect("focused short queue should keep item and action hit areas");
+        let selected = hit_areas
+            .item_rows
+            .iter()
+            .find(|row| row.index == 3)
+            .expect("selected fourth item must remain visible and interactive");
+        assert_eq!(
+            layout.hit_target(selected.area.x, selected.area.y),
+            HitTarget::ComposerQueueItem { index: 3 }
+        );
+
+        let delete = hit_areas
+            .actions
+            .iter()
+            .find(|action| action.action == crate::app::ComposerQueueAction::Delete)
+            .expect("selected Delete action must remain visible and interactive");
+        assert_eq!(
+            layout.hit_target(delete.area.x, delete.area.y),
+            HitTarget::ComposerQueueAction {
+                action: crate::app::ComposerQueueAction::Delete,
+            }
+        );
+        assert!(selected.area.y < delete.area.y);
+        assert!(delete.area.y < layout.composer.y);
+    }
+    Ok(())
+}
+
+#[test]
+fn eight_row_queue_action_names_hidden_selected_target_and_keeps_delete_hit_area()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(40, 8);
+    app.runtime.is_busy = true;
+    for prompt in [
+        "first queued",
+        "second queued",
+        "third queued",
+        "fourth queued",
+    ] {
+        app.composer.input = prompt.to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
+        app.submit_input()?;
+    }
+    app.composer.queue_panel_focused = true;
+    app.composer.queue_selected = 3;
+    app.composer.queue_action_selected = crate::app::ComposerQueueAction::Delete;
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 40, 8), &app);
+    let hit_areas = layout
+        .composer_queue_hit_areas
+        .as_ref()
+        .expect("one-row queue decision should keep action hit areas");
+    assert!(hit_areas.item_rows.is_empty());
+    let delete = hit_areas
+        .actions
+        .iter()
+        .find(|action| action.action == crate::app::ComposerQueueAction::Delete)
+        .expect("selected Delete action should remain interactive");
+    assert_eq!(
+        layout.hit_target(delete.area.x, delete.area.y),
+        HitTarget::ComposerQueueAction {
+            action: crate::app::ComposerQueueAction::Delete,
+        }
+    );
+
+    let view_model = LivePanelViewModel::from_app(&app, 4);
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| {
+        crate::ui::live_panel::render_live_panel(frame, layout.live_panel, &view_model)
+    })?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Delete"));
+    assert!(rendered.contains("#4 Delete"), "rendered: {rendered:?}");
+    assert!(rendered.contains("fourth"), "rendered: {rendered:?}");
+    Ok(())
+}
+
+#[test]
+fn eight_row_plan_action_discloses_hidden_plan_before_enter_run() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(40, 8);
+    app.composer.pending_plan_approval = Some(PendingPlanApproval {
+        plan_id: Some("plan-1".to_owned()),
+        plan_text: "inspect the complete plan before approval".to_owned(),
+        plan_hash: "sha256:plan".to_owned(),
+        summary: "short screen plan".to_owned(),
+        steps: vec!["inspect".to_owned(), "edit".to_owned()],
+        target_paths: vec!["src/lib.rs".to_owned()],
+        suggested_checks: vec!["cargo test".to_owned()],
+        target_path_count: 1,
+        suggested_check_count: 1,
+        workspace_snapshot_id: None,
+        stale: false,
+        stale_reason: None,
+        rendered_text_row_counts: Default::default(),
+    });
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 40, 8), &app);
+    let view_model = LivePanelViewModel::from_app(&app, 4);
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| {
+        crate::ui::live_panel::render_live_panel(frame, layout.live_panel, &view_model)
+    })?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Enter run"));
+    assert!(rendered.contains("plan…"));
+    Ok(())
+}
+
+#[test]
+fn narrow_eight_and_nine_row_verification_keeps_exact_target_hit_area_and_enter_action()
+-> anyhow::Result<()> {
+    let mut app = compact_verification_app();
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT))?;
+    assert!(app.verification_card_focused());
+
+    for width in [24, 40] {
+        for height in 8..=9 {
+            app.set_terminal_size(width, height);
+            let layout = LayoutSnapshot::from_app(Rect::new(0, 0, width, height), &app);
+            let card_area = layout
+                .verification_card
+                .expect("compact verification card should remain interactive");
+            assert_eq!(
+                layout.hit_target(card_area.x, card_area.y),
+                HitTarget::VerificationCard
+            );
+
+            let view_model = LivePanelViewModel::from_app(&app, 4);
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend)?;
+            terminal.draw(|frame| {
+                crate::ui::live_panel::render_live_panel(frame, layout.live_panel, &view_model)
+            })?;
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(rendered.contains("Enter run"), "rendered: {rendered:?}");
+            assert!(rendered.contains("cargo-test"), "rendered: {rendered:?}");
+        }
+    }
+
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        .expect("compact visible action should execute exact verification target");
+    let AppAction::RerunTaskVerification { request } = action else {
+        panic!("expected exact verification rerun action");
+    };
+    assert_eq!(request.check_spec_id, "cargo-test");
+    assert_eq!(request.task_id.as_str(), "task_1");
+    assert_eq!(request.step_id.as_str(), "step_1");
+    Ok(())
+}
+
+#[test]
+fn eight_row_composer_keeps_selected_fourth_attachment_visible_and_input_operable()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(40, 8);
+    app.composer.image_attachments = (0..4)
+        .map(|index| {
+            ImageAttachment::from_bytes(
+                format!("image_{}", index + 1),
+                ImageMimeType::Png,
+                1,
+                1,
+                vec![index as u8 + 1; 4],
+            )
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    app.composer.selected_image_attachment = Some(3);
+    app.composer.input = "editable".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 40, 8), &app);
+    assert!(layout.composer_input.height >= 1);
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| {
+        crate::ui::composer::render_input(frame, layout.composer, &view_model.composer)
+    })?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("… ◆ image 4"), "rendered: {rendered:?}");
+    assert!(rendered.contains("editable"), "rendered: {rendered:?}");
+
+    let selected_id = app.composer.image_attachments[3].attachment_id.clone();
+    app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.image_attachments.len(), 3);
+    assert!(
+        app.composer
+            .image_attachments
+            .iter()
+            .all(|attachment| attachment.attachment_id != selected_id)
+    );
+    Ok(())
+}
+
+#[test]
+fn eight_row_agent_panel_keeps_late_selection_actions_and_enter_target_aligned()
+-> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    add_compact_agent_threads(&mut app)?;
+    app.set_terminal_size(80, 8);
+    for _ in 0..4 {
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    assert!(app.is_composer_agent_panel_focused());
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 8), &app);
+    assert_eq!(layout.agent_panel.height, 3);
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert!(
+        view_model
+            .composer
+            .agent_rows
+            .iter()
+            .any(|row| row.selected && row.label == "child 4")
+    );
+    let backend = TestBackend::new(80, 8);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| {
+        crate::ui::composer::render_agent_panel(frame, layout.agent_panel, &view_model.composer)
+    })?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("child 4"), "rendered: {rendered:?}");
+    assert!(rendered.contains("Enter switch"), "rendered: {rendered:?}");
+    assert!(rendered.contains("+3 hidden"), "rendered: {rendered:?}");
+    assert!(rendered.contains("Alt-C close"), "rendered: {rendered:?}");
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.active_agent_label(), "child 4");
     Ok(())
 }
 

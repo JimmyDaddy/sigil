@@ -604,11 +604,9 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
             .iter()
             .any(|line| line == "agent view: 仓库审查 · child session")
     );
-    assert!(
-        focus_lines
-            .iter()
-            .any(|line| line == "status: running · reviewer · foreground task · deepseek-v4-pro · tools scoped · workspace inherited · result pending")
-    );
+    assert!(focus_lines.concat().contains(
+        "status: running · reviewer · foreground task · deepseek-v4-pro · tools scoped · workspace inherited · result pending"
+    ));
     assert!(
         focus_lines
             .iter()
@@ -813,11 +811,9 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
                 .collect::<String>()
         })
         .collect::<Vec<_>>();
-    assert!(
-        focus_lines
-            .iter()
-            .any(|line| line == "status: running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending")
-    );
+    assert!(focus_lines.concat().contains(
+        "status: running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending"
+    ));
     assert!(
         focus_lines
             .iter()

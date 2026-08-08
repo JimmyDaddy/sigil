@@ -18,7 +18,8 @@ use super::{
     egress_disclosure::egress_disclosure_layout,
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
     live_panel::{
-        LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, verification_card_area_for_app,
+        LIVE_PANEL_BOTTOM_PADDING, live_status_row_allocation_for_app, live_status_rows_for_app,
+        queue_action_button_layout_for_budget, queue_item_window, verification_card_area_for_app,
     },
     setup_config::{
         CONFIG_DETAIL_PANEL_WIDTH, CONFIG_DETAIL_SPLIT_MIN_WIDTH, CONFIG_FOOTER_COMPACT_WIDTH,
@@ -215,6 +216,24 @@ pub(super) struct ShellLayout {
     pub agent_panel: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
+}
+
+pub(crate) fn live_transcript_rows_for_app(screen: Rect, app: &AppState) -> usize {
+    let shell = shell_layout(
+        screen,
+        app.footer_strip_height(),
+        app.composer_height(),
+        app.info_rail_visible(),
+    );
+    let (_, live_panel) = egress_disclosure_layout(shell.live_panel, app);
+    let inner = inset_rect(live_panel, 1, 0);
+    let content_height = inner
+        .height
+        .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
+        .max(1);
+    let status_rows =
+        live_status_rows_for_app(app, inner.width as usize).min(content_height.saturating_sub(1));
+    content_height.saturating_sub(status_rows).max(1) as usize
 }
 
 impl LayoutSnapshot {
@@ -520,7 +539,8 @@ impl LayoutSnapshot {
 }
 
 fn composer_queue_hit_areas(live_area: Rect, app: &AppState) -> Option<ComposerQueueHitAreas> {
-    let item_count = app.composer_queue_rows().len();
+    let queue_items = app.composer_queue_rows();
+    let item_count = queue_items.len();
     if item_count == 0 {
         return None;
     }
@@ -539,7 +559,16 @@ fn composer_queue_hit_areas(live_area: Rect, app: &AppState) -> Option<ComposerQ
     );
     let status_height = live_status_rows_for_app(app, content_frame.width as usize)
         .min(content_frame.height.saturating_sub(1));
-    if status_height < item_count as u16 + 3 {
+    if status_height == 0 {
+        return None;
+    }
+    let allocation = live_status_row_allocation_for_app(
+        app,
+        content_frame.width as usize,
+        status_height.saturating_sub(1) as usize,
+    );
+    let queue_rows = allocation.queue_rows();
+    if queue_rows == 0 {
         return None;
     }
     let status_area = Rect::new(
@@ -556,37 +585,62 @@ fn composer_queue_hit_areas(live_area: Rect, app: &AppState) -> Option<ComposerQ
         status_area.width.saturating_sub(2),
         status_area.height.saturating_sub(1),
     );
-    if content.width == 0 || content.height < item_count as u16 + 2 {
+    if content.width == 0 || content.height < u16::try_from(queue_rows).unwrap_or(u16::MAX) {
         return None;
     }
 
-    let item_rows = (0..item_count)
-        .map(|index| ComposerQueueItemHitArea {
+    let selected_item_index = queue_items.iter().position(|row| row.selected).unwrap_or(0);
+    let window = queue_item_window(item_count, selected_item_index, queue_rows);
+    let item_y_offset = usize::from(window.show_header);
+    let item_rows = window
+        .item_indices
+        .into_iter()
+        .enumerate()
+        .map(|(row_offset, index)| ComposerQueueItemHitArea {
             index,
             area: Rect::new(
                 content.x,
-                content.y.saturating_add(1 + index as u16),
+                content.y.saturating_add(
+                    u16::try_from(item_y_offset.saturating_add(row_offset)).unwrap_or(u16::MAX),
+                ),
                 content.width,
                 1,
             ),
         })
         .collect::<Vec<_>>();
-    let action_y = content.y.saturating_add(1 + item_count as u16);
-    let end = content.x.saturating_add(content.width);
-    let mut cursor = content.x.saturating_add("Actions ".len() as u16);
-    let mut actions = Vec::new();
-    for action in ComposerQueueAction::ORDER {
-        cursor = cursor.saturating_add(1);
-        if cursor >= end {
-            break;
-        }
-        let width = (action.label().len() + 2) as u16;
-        actions.push(ComposerQueueActionHitArea {
+    let action_y = content
+        .y
+        .saturating_add(u16::try_from(queue_rows.saturating_sub(1)).unwrap_or(u16::MAX));
+    let labels = ComposerQueueAction::ORDER.map(ComposerQueueAction::label);
+    let selected_index = ComposerQueueAction::ORDER
+        .iter()
+        .position(|action| *action == app.selected_composer_queue_action())
+        .unwrap_or(0);
+    let actions = queue_action_button_layout_for_budget(
+        &labels,
+        selected_index,
+        Some(selected_item_index),
+        usize::from(content.width),
+        queue_rows,
+    )
+    .into_iter()
+    .filter_map(|placement| {
+        let action = ComposerQueueAction::ORDER
+            .get(placement.button_index)
+            .copied()?;
+        Some(ComposerQueueActionHitArea {
             action,
-            area: Rect::new(cursor, action_y, width.min(end.saturating_sub(cursor)), 1),
-        });
-        cursor = cursor.saturating_add(width);
-    }
+            area: Rect::new(
+                content
+                    .x
+                    .saturating_add(u16::try_from(placement.x).unwrap_or(u16::MAX)),
+                action_y,
+                u16::try_from(placement.width).unwrap_or(u16::MAX),
+                1,
+            ),
+        })
+    })
+    .collect();
     Some(ComposerQueueHitAreas { item_rows, actions })
 }
 
@@ -1077,7 +1131,7 @@ struct VisibleTimelineRows {
 }
 
 fn visible_timeline_rows(live_area: Rect, app: &AppState) -> Option<VisibleTimelineRows> {
-    if live_area.width == 0 || live_area.height == 0 {
+    if !app.terminal_scrollback_active() || live_area.width == 0 || live_area.height == 0 {
         return None;
     }
     let inner = inset_rect(live_area, 1, 0);

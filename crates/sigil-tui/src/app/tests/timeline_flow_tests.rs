@@ -1,7 +1,7 @@
 use super::super::timeline_flow::{selected_timeline_line_columns, text_by_display_columns};
 use super::*;
 use crate::{
-    app::EGRESS_DISCLOSURE_HEIGHT,
+    app::{AgentView, EGRESS_DISCLOSURE_HEIGHT},
     mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
     timeline::TimelineEntry,
     ui::LayoutSnapshot,
@@ -57,10 +57,7 @@ fn follow_up_partition_uses_the_same_status_height_for_viewport_and_rendering() 
         app.submit_input()?,
         Some(AppAction::QueueConversationInput { .. })
     ));
-    let expected = app
-        .live_panel_height()
-        .saturating_sub(crate::ui::live_status_rows_for_app(&app, 80))
-        .max(1) as usize;
+    let expected = crate::ui::live_transcript_rows_for_app(Rect::new(0, 0, 100, 30), &app);
 
     assert_eq!(app.timeline_viewport_rows(), expected);
     assert!(app.queue_strip_rows() > 0);
@@ -291,7 +288,7 @@ fn column_selection_helpers_cover_empty_and_zero_width_edges() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert_eq!(selected_text, "\u{0301}a");
+    assert_eq!(selected_text, "a");
     assert!(
         selected
             .spans
@@ -300,7 +297,7 @@ fn column_selection_helpers_cover_empty_and_zero_width_edges() {
     );
 
     assert_eq!(text_by_display_columns("abc", 2, 2), "");
-    assert_eq!(text_by_display_columns("\u{0301}a", 0, 1), "\u{0301}a");
+    assert_eq!(text_by_display_columns("\u{0301}a", 0, 1), "a");
 }
 
 #[test]
@@ -1215,15 +1212,20 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
 }
 
 #[test]
-fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> Result<()> {
+fn parent_scrollback_cutoff_never_uses_child_transcript_length() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;
+    assert!(!app.terminal_scrollback_active());
     app.set_terminal_size(80, 1);
-    app.timeline = vec![TimelineEntry {
-        role: TimelineRole::User,
-        text: "parent prompt".to_owned(),
-    }];
+    app.timeline = (0..16)
+        .map(|index| TimelineEntry {
+            role: TimelineRole::User,
+            text: format!("parent prompt {index}"),
+        })
+        .collect();
     app.rebuild_timeline_render_store();
+    let parent_cutoff = app.scrollback_cutoff_line();
+    let parent_hash = app.scrollback_prefix_hash(parent_cutoff);
     app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
@@ -1236,16 +1238,107 @@ fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> R
         load_error: None,
     });
 
-    assert_eq!(
-        app.scrollback_cutoff_line(),
-        app.timeline_render_line_count()
-    );
-    assert_eq!(
-        app.scrollback_lines().len(),
-        app.timeline_render_line_count()
+    assert_eq!(app.scrollback_cutoff_line(), parent_cutoff);
+    assert_eq!(app.scrollback_prefix_hash(parent_cutoff), parent_hash);
+    assert!(
+        !transcript_plain(app.scrollback_lines()).contains("child line"),
+        "native scrollback must continue to read the main transcript store"
     );
     assert!(app.visible_timeline_render_range(4).end <= app.timeline_render_line_count());
     assert!(transcript_plain(app.transcript_lines(12)).contains("child line"));
+    assert!(!app.begin_timeline_text_selection_at(0, 0));
+    assert!(app.selected_timeline_text().is_none());
+    Ok(())
+}
+
+#[test]
+fn info_rail_visibility_rebuilds_the_timeline_for_the_actual_content_width() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.timeline = vec![TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "a long response row ".repeat(20),
+    }];
+    app.rebuild_timeline_render_store();
+    let visible_count = app.timeline_render_line_count();
+    let visible_revision = app.timeline_revision();
+
+    app.toggle_info_rail_visibility();
+
+    assert!(!app.info_rail_visible());
+    assert!(app.timeline_revision() > visible_revision);
+    assert!(app.timeline_render_line_count() < visible_count);
+}
+
+#[test]
+fn narrow_terminal_timeline_projection_uses_the_real_content_width() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(12, 20);
+    app.push_timeline(TimelineRole::Assistant, "abcdefghijklmnop".to_owned());
+
+    let lines = app.timeline_plain_lines();
+    assert!(
+        lines.len() > 1,
+        "narrow content should wrap in the render store"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| crate::ui::terminal_cell_width(line) <= 10),
+        "render-store rows must already fit the ten-cell live-panel width: {lines:?}"
+    );
+}
+
+#[test]
+fn live_timeline_never_reclaims_rows_owned_by_native_scrollback_after_growth() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(48, 8);
+    for index in 0..20 {
+        app.push_timeline(TimelineRole::Assistant, format!("owned row {index}"));
+    }
+    let owned_entries = app.scrollback_entry_count();
+    assert!(owned_entries > 0);
+    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
+    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
+
+    app.set_terminal_size(48, 40);
+    let visible = app.visible_timeline_render_range(40);
+
+    assert!(visible.start >= owned_line.min(visible.end));
+}
+
+#[test]
+fn info_rail_visibility_rerenders_the_active_child_transcript() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let timeline_entries = vec![TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "a long child response row ".repeat(20),
+    }];
+    let rendered_body_lines = app.render_child_timeline_body_lines(&timeline_entries);
+    let visible_count = rendered_body_lines.len();
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries,
+        rendered_body_lines,
+        total_timeline_entries: 1,
+        transcript_truncated: false,
+        load_error: None,
+    });
+
+    app.toggle_info_rail_visibility();
+
+    let hidden_count = app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("child transcript")
+        .rendered_body_lines
+        .len();
+    assert!(!app.info_rail_visible());
+    assert!(hidden_count < visible_count);
     Ok(())
 }
 
@@ -1309,6 +1402,53 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
     let restored = transcript_plain(app.transcript_lines(12));
     assert!(restored.contains("child prompt"));
     assert!(restored.contains("child answer"));
+    Ok(())
+}
+
+#[test]
+fn child_header_and_fallback_rows_are_prewrapped_to_the_live_panel_width() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(40, 10);
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let long_ref = sigil_kernel::SessionRef::new_relative(format!(
+        "children/{}/child-session.jsonl",
+        "long-segment".repeat(8)
+    ))?;
+    app.agent_panel.active_view = AgentView::Child {
+        child_task_id: "child_1".to_owned(),
+        child_session_ref: long_ref,
+    };
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from(format!(
+            "children/{}/missing-child.jsonl",
+            "missing-segment".repeat(8)
+        )),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: Vec::new(),
+        total_timeline_entries: 0,
+        transcript_truncated: false,
+        load_error: Some(
+            "permission denied while opening a very long child transcript path".repeat(3),
+        ),
+    });
+
+    let width = 38;
+    let rendered = app.transcript_lines(usize::MAX);
+    assert!(rendered.len() > 5);
+    assert!(rendered.iter().all(|line| {
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        crate::ui::terminal_cell_width(&text) <= width
+    }));
+    assert_eq!(
+        crate::ui::wrap_terminal_lines(rendered.clone(), width).len(),
+        rendered.len()
+    );
+    assert!(app.transcript_lines(8).len() <= 8);
     Ok(())
 }
 
@@ -1467,6 +1607,49 @@ fn missing_child_agent_transcript_load_error_is_cached() -> Result<()> {
     assert!(transcript.rendered_body_lines.is_empty());
 
     assert!(!app.reload_active_agent_child_transcript());
+    Ok(())
+}
+
+#[test]
+fn thinking_mode_change_rerenders_the_active_child_cache() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-thinking.jsonl")?;
+    app.agent_panel.active_view = super::super::AgentView::Child {
+        child_task_id: "thinking-child".to_owned(),
+        child_session_ref,
+    };
+    let timeline_entries = vec![TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: (1..=8)
+            .map(|index| format!("reasoning line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }];
+    let collapsed = app.render_child_timeline_body_lines(&timeline_entries);
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-thinking.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: timeline_entries.clone(),
+        rendered_body_lines: collapsed.clone(),
+        total_timeline_entries: timeline_entries.len(),
+        transcript_truncated: false,
+        load_error: None,
+    });
+
+    app.toggle_thinking_block_mode();
+
+    let expanded = &app
+        .agent_panel
+        .active_child_transcript
+        .as_ref()
+        .expect("active child cache")
+        .rendered_body_lines;
+    assert_ne!(expanded, &collapsed);
+    assert_eq!(
+        expanded,
+        &app.render_child_timeline_body_lines(&timeline_entries)
+    );
     Ok(())
 }
 

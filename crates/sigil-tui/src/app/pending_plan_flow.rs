@@ -169,6 +169,7 @@ impl AppState {
             workspace_snapshot_id: draft.workspace_snapshot_id.clone(),
             stale: stale_reason.is_some(),
             stale_reason,
+            rendered_text_row_counts: Default::default(),
         });
     }
 

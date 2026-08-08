@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
+    rc::Rc,
     time::SystemTime,
 };
 
@@ -282,7 +284,34 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) workspace_snapshot_id: Option<String>,
     pub(crate) stale: bool,
     pub(crate) stale_reason: Option<String>,
+    pub(crate) rendered_text_row_counts: PlanTextRowCountCache,
 }
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlanTextRowCountCache(Rc<RefCell<BTreeMap<usize, usize>>>);
+
+impl PlanTextRowCountCache {
+    pub(crate) fn get(&self, width: usize) -> Option<usize> {
+        self.0.borrow().get(&width).copied()
+    }
+
+    pub(crate) fn insert(&self, width: usize, rows: usize) {
+        self.0.borrow_mut().insert(width, rows);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.borrow().len()
+    }
+}
+
+impl PartialEq for PlanTextRowCountCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for PlanTextRowCountCache {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComposerPasteSpan {
