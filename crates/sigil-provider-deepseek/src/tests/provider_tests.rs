@@ -1833,3 +1833,15 @@ fn multibyte_split_chunks(body: &str) -> Vec<Vec<u8>> {
     }
     chunks
 }
+
+#[test]
+fn default_max_output_tokens_is_the_canonical_v4_cap() -> Result<()> {
+    // The run boundary resolves this cap onto runs without explicit output constraints so every
+    // provider request is deterministic (the Messages wire requires max_tokens).
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig::default())?;
+    assert_eq!(
+        Provider::default_max_output_tokens(&provider, "deepseek-v4-flash"),
+        Some(crate::DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS)
+    );
+    Ok(())
+}

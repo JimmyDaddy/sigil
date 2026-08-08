@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use sigil_kernel::{
@@ -8,6 +8,7 @@ use sigil_kernel::{
     validate_image_input_capability, validate_request_image_attachments,
 };
 
+use crate::compaction_token_profile::DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS;
 use crate::hosted_search::DEEPSEEK_WEB_SEARCH_TOOL_TYPE;
 use crate::messages_continuation::{ContinuationResolution, DeepSeekHostedContinuationStore};
 use crate::messages_models::DeepSeekMessagesRequest;
@@ -33,9 +34,14 @@ pub fn build_messages_request(
 ) -> Result<PreparedMessagesRequest> {
     validate_request_image_attachments(request)?;
     validate_image_input_capability(ImageInputCapability::Unsupported, request)?;
+    // The kernel CompletionRequest contract treats max_tokens as optional and the chat-completions
+    // path omits it (server-side default), but the Messages wire requires an explicit cap. The
+    // agent run boundary normally resolves the canonical DeepSeek V4 output cap via
+    // `Provider::default_max_output_tokens`; this fallback is the last line of defense for
+    // callers that bypass the agent loop.
     let max_tokens = request
         .max_tokens
-        .ok_or_else(|| anyhow!("DeepSeek messages request requires max_tokens"))?;
+        .unwrap_or(DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS);
 
     let mut messages = Vec::new();
     let mut system_blocks = Vec::new();

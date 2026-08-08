@@ -944,3 +944,21 @@ fn multibyte_split_chunks(body: &str) -> Vec<Vec<u8>> {
     }
     chunks
 }
+
+#[test]
+fn default_max_output_tokens_follows_the_configured_messages_cap() -> anyhow::Result<()> {
+    // The Anthropic Messages wire requires max_tokens; the run boundary resolves the configured
+    // default (4096) onto runs without explicit output constraints.
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::clear();
+    let provider = new_anthropic_provider(AnthropicProviderConfig {
+        api_key: None,
+        ..AnthropicProviderConfig::default()
+    })?;
+    assert_eq!(
+        Provider::default_max_output_tokens(&provider, "claude-sonnet-4-6"),
+        Some(4096),
+        "the provider default cap must match the configured Messages max_tokens"
+    );
+    Ok(())
+}

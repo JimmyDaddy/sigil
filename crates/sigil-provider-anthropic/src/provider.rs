@@ -108,6 +108,12 @@ impl Provider for AnthropicProvider {
         )
     }
 
+    fn default_max_output_tokens(&self, _model_name: &str) -> Option<u32> {
+        // The Anthropic Messages wire requires max_tokens; the configured default (4096) is the
+        // canonical cap for runs without an explicit output constraint.
+        Some(self.config.max_tokens)
+    }
+
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
         anthropic_image_input_capability(model_name)
     }

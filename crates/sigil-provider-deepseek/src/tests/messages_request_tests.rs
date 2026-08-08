@@ -169,17 +169,22 @@ fn collects_system_messages_into_system_param() {
 }
 
 #[test]
-fn requires_max_tokens() {
+fn defaults_max_tokens_when_the_run_input_omits_it() {
+    // The kernel CompletionRequest contract treats max_tokens as optional (chat-completions omits
+    // it), and no production entry point sets run output constraints, so the messages path must
+    // fall back to the canonical output cap instead of failing the conversation.
     let mut request = request_with(vec![ModelMessage::user("hi")], hosted_request("auth-1"));
     request.max_tokens = None;
-    let error = build_messages_request(
+    let prepared = build_messages_request(
         &request,
         &request.hosted_tools[0],
         &DeepSeekHostedContinuationStore::default(),
     )
-    .err()
-    .expect("max_tokens is required on the messages path");
-    assert!(error.to_string().contains("max_tokens"));
+    .expect("omitted max_tokens must fall back to the canonical output cap");
+    assert_eq!(
+        prepared.body.max_tokens,
+        crate::compaction_token_profile::DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS
+    );
 }
 
 #[test]

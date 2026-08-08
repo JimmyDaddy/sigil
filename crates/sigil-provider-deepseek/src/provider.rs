@@ -16,6 +16,7 @@ use sigil_kernel::{
 };
 
 use crate::{
+    DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS,
     capabilities::{deepseek_capabilities, deepseek_context_capabilities},
     client::build_http_client,
     config::{DeepSeekProviderConfig, DeepSeekProviderProfile},
@@ -171,6 +172,10 @@ impl Provider for DeepSeekProvider {
         deepseek_context_capabilities(
             self.profile.primary_base_url.trim_end_matches('/') == "https://api.deepseek.com",
         )
+    }
+
+    fn default_max_output_tokens(&self, _model_name: &str) -> Option<u32> {
+        Some(DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS)
     }
 
     fn usage_pricing_snapshot(
