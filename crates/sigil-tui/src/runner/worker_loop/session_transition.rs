@@ -37,16 +37,20 @@ impl SessionTransitionKind {
             });
         }
         if maintenance_task_active {
-            return Some(match self {
-                Self::Switch => "cannot switch sessions while session maintenance is running",
-                Self::StartNew => "cannot start a new session while session maintenance is running",
+            // Switch/StartNew abandon the current session, so the transition itself joins its
+            // in-flight maintenance before installing the target session instead of being
+            // rejected. Forks copy the current session and keep it current, so they still wait.
+            match self {
+                Self::Switch | Self::StartNew => {}
                 Self::LocalFork => {
-                    "cannot fork a local session while session maintenance is running"
+                    return Some(
+                        "cannot fork a local session while session maintenance is running",
+                    );
                 }
                 Self::CheckpointFork => {
-                    "cannot fork conversation while session maintenance is running"
+                    return Some("cannot fork conversation while session maintenance is running");
                 }
-            });
+            }
         }
         terminal_task_active.then_some(match self {
             Self::Switch => "cannot switch sessions while a terminal task is active",

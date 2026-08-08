@@ -336,6 +336,7 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
             task_id,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         },
@@ -1224,6 +1225,7 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
                 task_id: task_id.clone(),
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 objective: "ship task".to_owned(),
+                title: None,
                 status,
                 reason: None,
             },
@@ -1257,6 +1259,7 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "ship task".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Paused,
             reason: None,
         })),
@@ -1317,7 +1320,7 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
 
     let lines = app.task_sidebar_lines();
 
-    assert!(lines.contains(&"task: task_1".to_owned()));
+    assert!(lines.contains(&"task: ship task".to_owned()));
     assert!(lines.contains(&"status: paused".to_owned()));
     assert!(lines.contains(&"plan: v1".to_owned()));
     assert!(lines.contains(&"progress: 0/1 done".to_owned()));
@@ -1339,6 +1342,7 @@ fn task_sidebar_lines_surface_missing_verification_actions() -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "fix typo".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Paused,
             reason: Some("step fix-typo blocked".to_owned()),
         })),
@@ -1421,6 +1425,7 @@ fn task_sidebar_lines_label_failed_verification_as_check_failed() -> Result<()> 
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "fix typo".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Paused,
             reason: Some("step fix-typo blocked".to_owned()),
         })),
@@ -1522,6 +1527,7 @@ fn task_sidebar_lines_show_failed_step_and_remaining_plan() -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Failed,
             reason: Some("step gate_check failed".to_owned()),
         })),
@@ -1590,6 +1596,7 @@ fn task_sidebar_lines_distinguish_cancelled_and_interrupted_steps() -> Result<()
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Cancelled,
             reason: Some("user cancelled task".to_owned()),
         })),
@@ -1677,6 +1684,7 @@ fn task_sidebar_lines_keeps_hidden_current_step_visible() -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -1753,6 +1761,7 @@ fn task_sidebar_lines_completed_long_plan_shows_final_step_and_hidden_summary() 
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -1783,6 +1792,7 @@ fn task_sidebar_lines_completed_long_plan_shows_final_step_and_hidden_summary() 
             task_id,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Completed,
             reason: Some("completed plan v1".to_owned()),
         },
@@ -1823,6 +1833,7 @@ fn task_sidebar_lines_summarizes_hidden_non_pending_statuses() -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -1880,6 +1891,7 @@ fn task_sidebar_lines_focuses_first_pending_without_problem_step() -> Result<()>
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -1957,6 +1969,7 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -1991,7 +2004,7 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
     app.sync_current_session_state(entries);
 
     let strip = app.task_strip_view().expect("task strip should render");
-    assert_eq!(strip.title, "Task task_1");
+    assert_eq!(strip.title, "review workspace");
     assert_eq!(strip.detail, "running · v1 · 2/6 done · 1 active");
     assert_eq!(strip.rows.len(), 5);
     assert_eq!(strip.rows[0].label, "1. step 1");
@@ -2008,6 +2021,7 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
             task_id,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "fallback task".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Paused,
             reason: None,
         },
@@ -2024,6 +2038,7 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
             task_id: sigil_kernel::TaskId::new("task_completed")?,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "completed fallback".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Completed,
             reason: None,
         },
@@ -2039,6 +2054,7 @@ fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()
             task_id: sigil_kernel::TaskId::new("task_failed")?,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "failed fallback".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Failed,
             reason: None,
         },
@@ -2207,11 +2223,15 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
     app.runtime.is_busy = true;
     app.sidebar_selected_card = SidebarCard::Permission;
     let action = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; permission locked"));
-    assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Notice && entry.text == "busy; permission mode stays unchanged"
-    }));
+    assert!(matches!(
+        action,
+        Some(AppAction::UpdateActiveRunPermissionMode { mode }) if mode == sigil_kernel::PermissionMode::DangerFullAccess
+    ));
+    assert_eq!(app.runtime.permission_mode, "danger-full-access");
+    assert_eq!(
+        app.last_notice(),
+        Some("permission mode = danger-full-access")
+    );
     Ok(())
 }
 

@@ -21,6 +21,10 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) approval_command_receipts: BTreeMap<String, WorkerApprovalCommandReceipt>,
     approval_command_receipt_order: VecDeque<String>,
     pub(in crate::runner) last_observed_run_active: bool,
+    /// Startup artifact GC is deferred until the first dispatched command so a user who resumes
+    /// another session immediately after launch is never blocked on maintenance for the session
+    /// they are about to abandon.
+    pub(in crate::runner) defer_startup_artifact_gc: bool,
 }
 
 impl WorkerLoopState {
@@ -141,6 +145,7 @@ impl WorkerLoopState {
             approval_command_receipts: BTreeMap::new(),
             approval_command_receipt_order: VecDeque::new(),
             last_observed_run_active: false,
+            defer_startup_artifact_gc: true,
         }
     }
 

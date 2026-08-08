@@ -14,7 +14,7 @@ use tempfile::tempdir;
 
 use super::{
     super::{
-        McpActivationStatus, QueueMoveDirection, WorkerCommand, WorkerMessage, spawn_agent_worker,
+        McpActivationStatus, WorkerCommand, WorkerMessage, spawn_agent_worker,
         worker_loop::skill_child_agent_role,
     },
     common::{
@@ -1453,7 +1453,7 @@ fn queue_conversation_input_persists_while_agent_is_active() -> Result<()> {
 }
 
 #[test]
-fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()> {
+fn queued_follow_up_is_injected_into_the_active_run_at_its_final_answer_gate() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -1488,11 +1488,11 @@ fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()
         prompt: "second".to_owned(),
         reasoning_effort: ReasoningEffort::High,
     })?;
-    gate.notify_one();
+    // Wait until the follow-up is durably queued BEFORE releasing the first turn, so the
+    // run's final-answer gate deterministically injects it into the same run.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut queue_confirmed = false;
-    let mut first_finished = None;
-    while !queue_confirmed || first_finished.is_none() {
+    while !queue_confirmed {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             anyhow::bail!("queued follow-up was not confirmed before the current run settled");
@@ -1503,189 +1503,31 @@ fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()
         {
             queue_confirmed = true;
         }
-        if matches!(&message, WorkerMessage::RunFinished { result, .. }
-            if result.final_text == "first done")
-        {
-            first_finished = Some(message);
-        }
     }
-    let first_finished = first_finished.context("first queued-follow-up run did not finish")?;
-    assert!(matches!(
-        first_finished,
-        WorkerMessage::RunFinished { ref entries, .. }
-            if entries.iter().any(|entry| matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
-                    if queued.prompt == "second"
-            ))
-    ));
+    gate.notify_one();
 
-    let _ = worker
-        .recv_until_with_timeout(Duration::from_secs(10), |message| {
-            matches!(message, WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
-                if prompt == "second")
-        })
-        .context("queued follow-up did not start dispatch")?;
     let _ = worker
         .recv_until_with_timeout(Duration::from_secs(10), |message| {
             matches!(message, WorkerMessage::RunFinished { result, .. }
-            if result.final_text == "second done")
+                if result.final_text == "second done")
         })
-        .context("queued follow-up run did not finish")?;
+        .context("injected follow-up answer did not finish the run")?;
 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
+            if queued.prompt == "second"
+    )));
     assert!(entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
             if status.queue_id.as_str() == "queue_1"
                 && status.status == ConversationInputStatus::Delivered
     )));
-
-    worker.shutdown()?;
-    Ok(())
-}
-
-#[test]
-fn queue_control_commands_persist_and_update_projection() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace_root = temp.path().to_path_buf();
-    let session_log_path = temp
-        .path()
-        .join(".sigil/sessions/session-queue-controls.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(Vec::new());
-    let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
-
-    worker.send(WorkerCommand::SetConversationQueuePaused { paused: true })?;
-    let _ = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueUpdated { paused: true, .. }
-        )
-    })?;
-
-    worker.send(WorkerCommand::QueueConversationInput {
-        prompt: "first queued".to_owned(),
-        kind: ConversationInputKind::Chat,
-        target: ConversationInputTarget::MainThread,
-        reasoning_effort: ReasoningEffort::High,
-    })?;
-    let _ = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 1)
-    })?;
-    worker.send(WorkerCommand::QueueConversationInput {
-        prompt: "second queued".to_owned(),
-        kind: ConversationInputKind::Chat,
-        target: ConversationInputTarget::MainThread,
-        reasoning_effort: ReasoningEffort::High,
-    })?;
-    let _ = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 2)
-    })?;
-
-    worker.send(WorkerCommand::SetConversationQueuePaused { paused: true })?;
-    let paused_update = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueUpdated { paused: true, .. }
-        )
-    })?;
-    assert!(matches!(
-        paused_update,
-        WorkerMessage::ConversationQueueUpdated { paused: true, .. }
-    ));
-
-    let queue_2 = sigil_kernel::ConversationInputQueueId::new("queue_2")?;
-    worker.send(WorkerCommand::EditQueuedConversationInput {
-        queue_id: queue_2.clone(),
-        prompt: "second edited".to_owned(),
-        reasoning_effort: ReasoningEffort::Low,
-    })?;
-    let edit_update = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueUpdated { items, .. }
-                if items.iter().any(|item| item.queued.prompt == "second edited")
-        )
-    })?;
-    assert!(matches!(
-        edit_update,
-        WorkerMessage::ConversationQueueUpdated { ref items, .. }
-            if items[1].queued.queue_id.as_str() == "queue_2"
-                && items[1].queued.prompt == "second edited"
-    ));
-
-    worker.send(WorkerCommand::MoveQueuedConversationInput {
-        queue_id: queue_2.clone(),
-        direction: QueueMoveDirection::Up,
-    })?;
-    let move_update = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueUpdated { items, .. }
-                if items.first().is_some_and(|item| item.queued.queue_id.as_str() == "queue_2")
-        )
-    })?;
-    assert!(matches!(
-        move_update,
-        WorkerMessage::ConversationQueueUpdated { ref items, .. }
-            if items[0].queued.prompt == "second edited"
-    ));
-
-    let queue_1 = sigil_kernel::ConversationInputQueueId::new("queue_1")?;
-    worker.send(WorkerCommand::PromoteQueuedConversationInput {
-        queue_id: queue_1.clone(),
-    })?;
-    let promote_update = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueUpdated { items, paused: false, .. }
-                if items.first().is_some_and(|item| item.queued.queue_id.as_str() == "queue_1")
-        )
-    })?;
-    assert!(matches!(
-        promote_update,
-        WorkerMessage::ConversationQueueUpdated { ref items, paused: false, .. }
-            if items[0].queued.prompt == "first queued"
-    ));
-
-    worker.send(WorkerCommand::CancelQueuedConversationInput { queue_id: queue_2 })?;
-    let cancel_update = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueUpdated { items, .. }
-                if items.len() == 1
-                    && items[0].queued.queue_id.as_str() == "queue_1"
-        )
-    })?;
-    assert!(matches!(
-        cancel_update,
-        WorkerMessage::ConversationQueueUpdated { ref items, .. }
-            if items.len() == 1 && items[0].queued.prompt == "first queued"
-    ));
-
-    let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputQueueControl(control))
-            if control.action == sigil_kernel::ConversationInputQueueControlAction::Pause
-    )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputEdited(edited))
-            if edited.queue_id.as_str() == "queue_2" && edited.prompt == "second edited"
-    )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputReordered(reordered))
-            if reordered.queue_id.as_str() == "queue_1" && reordered.after_queue_id.is_none()
-    )));
-    assert!(entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
-            if status.queue_id.as_str() == "queue_2"
-                && status.status == sigil_kernel::ConversationInputStatus::Cancelled
+        SessionLogEntry::User(message) if message.content.as_deref() == Some("second")
     )));
 
     worker.shutdown()?;
@@ -1828,15 +1670,19 @@ fn uncertain_failed_queued_run_becomes_stale_without_replay() -> Result<()> {
 }
 
 #[test]
-fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() -> Result<()> {
+fn send_queued_input_now_promotes_follow_up_without_interrupting_the_active_run() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-queue-send-now.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let (provider, first_stream_started) = PlannedProvider::new_with_stream_start_signal(vec![
-        StreamPlan::Pending,
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (provider, stream_started) = PlannedProvider::new_with_stream_start_signal(vec![
+        StreamPlan::GatedChunks {
+            gate: Arc::clone(&gate),
+            chunks: vec![ProviderChunk::TextDelta("first answer".to_owned())],
+        },
         StreamPlan::Chunks(vec![
             ProviderChunk::TextDelta("urgent done".to_owned()),
             ProviderChunk::Done,
@@ -1850,7 +1696,7 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    first_stream_started.recv_timeout(Duration::from_secs(3))?;
+    stream_started.recv_timeout(Duration::from_secs(3))?;
 
     worker.send(WorkerCommand::QueueConversationInput {
         prompt: "urgent queued prompt".to_owned(),
@@ -1866,57 +1712,36 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
         queue_id: ConversationInputQueueId::new("queue_1")?,
     })?;
 
-    let first = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(
+    gate.notify_one();
+
+    let mut messages_until_finish = Vec::new();
+    loop {
+        let message = worker.recv_with_timeout(Duration::from_secs(10))?;
+        let finished = matches!(message, WorkerMessage::RunFinished { .. });
+        messages_until_finish.push(message);
+        if finished {
+            break;
+        }
+    }
+    assert!(
+        !messages_until_finish.iter().any(|message| matches!(
             message,
             WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
-        ) || matches!(
-            message,
-            WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
-                if prompt == "urgent queued prompt"
-        )
-    })?;
-    let saw_cancel_first = matches!(
-        first,
-        WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
-    );
-    let second = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        if saw_cancel_first {
-            matches!(
-                message,
-                WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
-                    if prompt == "urgent queued prompt"
-            )
-        } else {
-            matches!(
-                message,
-                WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
-            )
-        }
-    })?;
-    assert!(
-        (saw_cancel_first
-            && matches!(
-                second,
-                WorkerMessage::ConversationQueueDispatchStarted { .. }
-            ))
-            || (!saw_cancel_first
-                && matches!(
-                    second,
-                    WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
-                ))
+        )),
+        "sending a queued follow-up must never cancel the active run"
     );
 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
-            if promoted.queue_id.as_str() == "queue_1"
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id.as_str() == "queue_1"
+                && status.status == ConversationInputStatus::Delivered
     )));
-
-    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::RunFinished { .. })
-    })?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::User(message) if message.content.as_deref() == Some("urgent queued prompt")
+    )));
 
     worker.shutdown()?;
     Ok(())

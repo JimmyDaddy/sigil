@@ -17,6 +17,7 @@ fn sync_child(
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),

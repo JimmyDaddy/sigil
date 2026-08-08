@@ -227,7 +227,6 @@ impl AppState {
 
     pub(super) fn execute_selected_queue_action(&mut self) -> Option<AppAction> {
         match self.composer.queue_action_selected {
-            ComposerQueueAction::SendNow => self.send_selected_queue_item_now(),
             ComposerQueueAction::KeepNext => self.promote_selected_queue_item(),
             ComposerQueueAction::Edit => {
                 self.begin_edit_selected_queue_item();
@@ -316,12 +315,6 @@ impl AppState {
             );
             self.push_event("follow-up:next", durable.queued.queue_id.as_str());
         }
-    }
-
-    pub(super) fn send_selected_queue_item_now(&mut self) -> Option<AppAction> {
-        let queue_id = self.selected_confirmed_queue_id()?;
-        self.last_notice = Some("interrupting current turn for follow-up".to_owned());
-        Some(AppAction::SendQueuedConversationInputNow { queue_id })
     }
 
     pub(super) fn cancel_selected_queue_item(&mut self) -> Option<AppAction> {
@@ -442,9 +435,6 @@ impl AppState {
             "next" | "send" => Ok(self.queue_action_for_target(target, |queue_id| {
                 AppAction::PromoteQueuedConversationInput { queue_id }
             })),
-            "interrupt" => Ok(self.queue_action_for_target(target, |queue_id| {
-                AppAction::SendQueuedConversationInputNow { queue_id }
-            })),
             "delete" | "cancel" | "remove" => Ok(self
                 .queue_action_for_target(target, |queue_id| {
                     AppAction::CancelQueuedConversationInput { queue_id }
@@ -475,8 +465,7 @@ impl AppState {
                 }
             })),
             _ => {
-                self.last_notice =
-                    Some("usage: /queue <show|next|interrupt|edit|delete>".to_owned());
+                self.last_notice = Some("usage: /queue <show|next|edit|delete>".to_owned());
                 Ok(None)
             }
         }
@@ -644,15 +633,10 @@ fn conversation_prompt_hash(prompt: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn queue_slash_options() -> [(&'static str, &'static str, &'static str); 5] {
+fn queue_slash_options() -> [(&'static str, &'static str, &'static str); 4] {
     [
         ("show", "show", "focus follow-up panel"),
         ("next", "next", "run selected after current turn"),
-        (
-            "interrupt",
-            "interrupt",
-            "stop current turn and run selected",
-        ),
         ("edit", "edit", "edit selected follow-up"),
         ("delete", "delete", "cancel selected follow-up"),
     ]

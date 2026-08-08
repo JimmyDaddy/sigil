@@ -281,6 +281,8 @@ pub(crate) fn integration_review_entries(
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "Integrate verified changes".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Paused,
             reason: None,
         })),
@@ -500,6 +502,7 @@ pub(crate) fn child_agent_entries_with(
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: objective.to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),

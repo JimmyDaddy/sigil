@@ -59,7 +59,7 @@ fn follow_up_partition_uses_the_same_status_height_for_viewport_and_rendering() 
     ));
     let expected = app
         .live_panel_height()
-        .saturating_sub(crate::ui::live_status_rows_for_app(&app))
+        .saturating_sub(crate::ui::live_status_rows_for_app(&app, 80))
         .max(1) as usize;
 
     assert_eq!(app.timeline_viewport_rows(), expected);
@@ -101,6 +101,7 @@ fn long_task_frames_reuse_versioned_view_cache_without_store_scan_or_reducer_rep
             task_id: task_id.clone(),
             parent_session_ref,
             objective: "Inspect a long workspace in parallel".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -166,6 +167,7 @@ fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),

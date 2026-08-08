@@ -146,18 +146,16 @@ enum AgentView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerQueueAction {
     KeepNext,
-    SendNow,
     Edit,
     Delete,
 }
 
 impl ComposerQueueAction {
-    pub(crate) const ORDER: [Self; 4] = [Self::KeepNext, Self::SendNow, Self::Edit, Self::Delete];
+    pub(crate) const ORDER: [Self; 3] = [Self::KeepNext, Self::Edit, Self::Delete];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::KeepNext => "Run next",
-            Self::SendNow => "Interrupt",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
         }
@@ -166,7 +164,6 @@ impl ComposerQueueAction {
     pub(crate) fn detail(self) -> &'static str {
         match self {
             Self::KeepNext => "run after the current turn",
-            Self::SendNow => "stop current turn and run this follow-up",
             Self::Edit => "edit follow-up",
             Self::Delete => "remove follow-up",
         }
@@ -602,6 +599,11 @@ pub enum AppAction {
     RuntimeConfigUpdated {
         root_config: Box<RootConfig>,
     },
+    /// Runtime permission-mode switch for the active run (and persisted default); does not
+    /// restart the worker.
+    UpdateActiveRunPermissionMode {
+        mode: sigil_kernel::PermissionMode,
+    },
     SetDefaultModel {
         root_config: Box<RootConfig>,
         expected_root_config: Box<RootConfig>,
@@ -697,6 +699,7 @@ impl AppState {
             root_config,
             workspace_root.clone(),
             InteractionMode::Interactive,
+            None,
         )
         .reasoning_effort
         .unwrap_or(ReasoningEffort::Max);

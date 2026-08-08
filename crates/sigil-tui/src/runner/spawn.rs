@@ -146,10 +146,13 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                     return;
                 }
             };
+            let permission_mode_override =
+                std::sync::Arc::new(sigil_kernel::PermissionModeOverride::new());
             let options = sigil_runtime::build_run_options(
                 &root_config,
                 workspace_root.clone(),
                 interaction_mode,
+                Some(permission_mode_override.as_ref().clone()),
             );
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
@@ -251,11 +254,18 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             let terminal_control = surface.terminal_control.clone();
             let mut registry = surface.registry;
             let context_resolver = surface.context_resolver;
-            let disclosure_presenter: Arc<dyn EgressDisclosurePresenter> = Arc::new(
-                super::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
-                    message_tx.clone(),
-                ),
-            );
+            let disclosure_presenter: Arc<dyn EgressDisclosurePresenter> =
+                if root_config.web.network_mode == sigil_kernel::NetworkPolicy::Ask {
+                    Arc::new(
+                        super::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
+                            message_tx.clone(),
+                        ),
+                    )
+                } else {
+                    Arc::new(
+                        super::egress_disclosure_bridge::AutoAcceptDisclosurePresenter,
+                    )
+                };
             sigil_runtime::attach_remote_mcp_activation_presenter(
                 &mut registry,
                 &root_config,
@@ -307,6 +317,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 workspace_root,
                 WorkerLoopSessionAttachment::from_shared(session_log_path, attachment_lease),
                 options,
+                permission_mode_override,
                 (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {

@@ -16,6 +16,7 @@ use std::{
 use anyhow::{Context, Result};
 #[cfg(not(test))]
 use crossterm::{
+    cursor::MoveTo,
     cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -24,7 +25,9 @@ use crossterm::{
         PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
+    terminal::{
+        Clear, ClearType, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
+    },
 };
 #[cfg(not(test))]
 use futures::StreamExt;
@@ -157,6 +160,9 @@ fn run_tui_with_initial_session(
     enable_raw_mode()?;
     let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
+    // Start from a clean screen: the inline viewport keeps prior terminal output above
+    // the TUI, which would otherwise mix shell history with the interface.
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
     let mut cleanup = TerminalCleanupGuard::new();
     cleanup.raw_mode_enabled = true;
     let panic_hook = TuiPanicHookGuard::install();
@@ -858,6 +864,13 @@ where
                     app,
                     &format!("configuration saved; agent runtime remains unavailable: {error:#}"),
                 )?,
+            }
+        }
+        AppAction::UpdateActiveRunPermissionMode { mode } => {
+            if let Some(runtime) = worker.as_ref() {
+                let _ = runtime
+                    .worker_tx
+                    .send(super::runner::WorkerCommand::UpdateActiveRunPermissionMode { mode });
             }
         }
         AppAction::SetDefaultModel {

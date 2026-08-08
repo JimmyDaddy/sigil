@@ -324,6 +324,7 @@ impl AppState {
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
+            | AppAction::UpdateActiveRunPermissionMode { .. }
             | AppAction::SetDefaultModel { .. }
             | AppAction::CopyToClipboard { .. }
             | AppAction::CopySecretToClipboard { .. }

@@ -430,6 +430,7 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
+            plan_text: "summary text".to_owned(),
             summary: "inspect and edit with preview".to_owned(),
             steps: vec!["inspect and edit with preview".to_owned()],
             target_paths: vec!["src/lib.rs".to_owned(), "README.md".to_owned()],
@@ -442,7 +443,7 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         task_strip: None,
         transcript_lines: vec![Line::from("plan body")],
     };
-    let backend = TestBackend::new(96, 9);
+    let backend = TestBackend::new(96, 12);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;

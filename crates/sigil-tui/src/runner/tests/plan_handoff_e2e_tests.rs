@@ -390,6 +390,8 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
                 .unwrap_or("session.jsonl"),
         )?,
         objective: "finish the recovered task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("waiting at a scheduler safe point".to_owned()),
     }))?;
@@ -535,6 +537,8 @@ fn run_next_resumes_paused_task_guidance_after_its_initial_wake_was_consumed() -
                 .unwrap_or("session.jsonl"),
         )?,
         objective: "resume task guidance only after Run next".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("waiting for user guidance".to_owned()),
     }))?;

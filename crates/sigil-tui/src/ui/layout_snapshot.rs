@@ -537,7 +537,8 @@ fn composer_queue_hit_areas(live_area: Rect, app: &AppState) -> Option<ComposerQ
             .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
             .max(1),
     );
-    let status_height = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
+    let status_height = live_status_rows_for_app(app, content_frame.width as usize)
+        .min(content_frame.height.saturating_sub(1));
     if status_height < item_count as u16 + 3 {
         return None;
     }
@@ -1093,7 +1094,8 @@ fn visible_timeline_rows(live_area: Rect, app: &AppState) -> Option<VisibleTimel
             .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
             .max(1),
     );
-    let status_rows = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
+    let status_rows = live_status_rows_for_app(app, content_frame.width as usize)
+        .min(content_frame.height.saturating_sub(1));
     let transcript_rows = content_frame.height.saturating_sub(status_rows).max(1) as usize;
     let requested_timeline_range = app.visible_timeline_render_range(transcript_rows);
 

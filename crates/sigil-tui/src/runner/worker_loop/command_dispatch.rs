@@ -23,6 +23,8 @@ pub(in crate::runner) struct WorkerCommandContext<'a, P> {
     pub(in crate::runner) provider_capabilities: &'a ProviderCapabilities,
     pub(in crate::runner) workspace_root: &'a PathBuf,
     pub(in crate::runner) options: &'a AgentRunOptions,
+    pub(in crate::runner) permission_mode_override:
+        &'a std::sync::Arc<sigil_kernel::PermissionModeOverride>,
     pub(in crate::runner) message_tx: &'a mpsc::Sender<WorkerMessage>,
     pub(in crate::runner) elicitation_handler: &'a Arc<ChannelMcpElicitationHandler>,
     pub(in crate::runner) mcp_event_handler: &'a Arc<ChannelMcpRuntimeEventHandler>,
@@ -386,6 +388,10 @@ pub(in crate::runner) fn classify_worker_command(
             ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ApprovalCommand(command))
         }
         WorkerCommand::CancelRun => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::CancelRun),
+        // Handled before classification in dispatch_worker_command; unreachable here.
+        WorkerCommand::UpdateActiveRunPermissionMode { .. } => {
+            unreachable!("permission mode updates are handled before classification")
+        }
         WorkerCommand::RejectPlan {
             plan_id,
             expected_plan_hash,
@@ -754,6 +760,15 @@ pub(in crate::runner) fn dispatch_worker_command<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    context.state.defer_startup_artifact_gc = false;
+    if let WorkerCommand::UpdateActiveRunPermissionMode { mode } = command {
+        context.permission_mode_override.set(mode);
+        let _ = context.message_tx.send(WorkerMessage::Notice(format!(
+            "permission mode -> {} (active run)",
+            mode.as_str()
+        )));
+        return WorkerCommandDispatchControl::Continue;
+    }
     match classify_worker_command(command) {
         ClassifiedWorkerCommand::RunPlan(command) => {
             run_plan::dispatch_run_plan_command(context, command)

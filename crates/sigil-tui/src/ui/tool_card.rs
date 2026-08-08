@@ -199,9 +199,9 @@ fn tool_artifact_status_line(
     let (label, color) = if artifact.availability == "available" {
         let size = format_tool_artifact_bytes(artifact.persisted_bytes);
         let action = if artifact.has_more {
-            " · Alt-N next · Alt-F search"
+            " · Alt-N next · Ctrl-O toggle"
         } else {
-            " · Alt-F search"
+            " · Ctrl-O toggle"
         };
         if artifact.persisted_bytes < artifact.observed_bytes {
             (

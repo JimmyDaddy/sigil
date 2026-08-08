@@ -282,6 +282,8 @@ fn verification_entries() -> Vec<SessionLogEntry> {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
             objective: "Verify changes".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Paused,
             reason: None,
         })),

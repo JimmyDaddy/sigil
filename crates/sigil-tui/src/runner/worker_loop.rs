@@ -149,10 +149,10 @@ pub(in crate::runner) use provider_status::{
     drain_provider_status_results, provider_status_result_sender,
 };
 pub(in crate::runner) use queue_driver::{
-    AdmittedQueuedConversationCandidate, ExactConversationPromptStore,
-    PreparedQueuedConversationCandidate, QueuedConversationPressureAdmission,
-    QueuedConversationTerminalClassification, TaskGuidancePreparation,
-    append_agent_result_continuation_status_and_notify,
+    AdmittedQueuedConversationCandidate, DurableQueuePendingInputProvider,
+    ExactConversationPromptStore, PreparedQueuedConversationCandidate,
+    QueuedConversationPressureAdmission, QueuedConversationTerminalClassification,
+    TaskGuidancePreparation, append_agent_result_continuation_status_and_notify,
     append_agent_result_continuation_status_entries, append_queue_failure_and_pause_and_notify,
     append_queue_status_and_notify, cancel_queued_conversation_input,
     classify_promoted_queued_conversation, commit_prepared_queued_conversation_candidate,

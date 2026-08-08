@@ -1301,6 +1301,7 @@ where
     if state.run.active.is_some()
         || state.artifact_gc.tasks.has_active()
         || !state.session.artifact_gc_dirty
+        || state.defer_startup_artifact_gc
     {
         return WorkerAdvancementControl::PollCommand;
     }

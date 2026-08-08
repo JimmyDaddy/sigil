@@ -19,6 +19,7 @@ use crate::{
 
 use super::{
     geometry::inset_rect,
+    markdown::{MarkdownRenderOptions, render_markdown_timeline_lines_with_palette},
     status_indicator::{StatusIndicator, StatusKind},
     text::{pad_display_width, truncate_display_width},
     theme::Theme,
@@ -28,6 +29,7 @@ pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
 pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_BASE_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_STEP_LIMIT: usize = 3;
+const LIVE_PLAN_TEXT_ROW_LIMIT: usize = 12;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROUTE_LIMIT: usize = 3;
 const LIVE_TASK_COMPLETION_LIMIT: usize = 5;
@@ -68,7 +70,8 @@ pub(crate) fn render_live_panel_with_theme(
             .max(1),
     );
 
-    let status_height = live_status_rows(view_model).min(content_frame.height.saturating_sub(1));
+    let status_height = live_status_rows(view_model, content_frame.width as usize)
+        .min(content_frame.height.saturating_sub(1));
     let transcript_frame = Rect::new(
         content_frame.x,
         content_frame.y,
@@ -116,7 +119,7 @@ pub(crate) fn render_live_panel_with_theme(
     }
 }
 
-pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
+pub(crate) fn live_status_rows_for_app(app: &AppState, width: usize) -> u16 {
     let progress_rows = if app.live_activity_summary().is_some() {
         LIVE_PROGRESS_ROWS
     } else {
@@ -124,7 +127,7 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
     };
     let plan_rows = app
         .pending_plan_approval()
-        .map(live_plan_approval_rows)
+        .map(|plan| live_plan_approval_rows(plan, width))
         .unwrap_or(0);
     let task_rows = app
         .task_strip_view()
@@ -148,7 +151,7 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
     )
 }
 
-pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
+pub(crate) fn live_status_rows(view_model: &LivePanelViewModel, width: usize) -> u16 {
     let queue_rows = live_queue_strip_rows(view_model.queue_rows.len());
     let progress_rows = if view_model.progress.is_some() {
         LIVE_PROGRESS_ROWS
@@ -158,7 +161,7 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
     let plan_rows = view_model
         .plan_approval
         .as_ref()
-        .map(live_plan_approval_view_rows)
+        .map(|plan| live_plan_approval_view_rows(plan, width))
         .unwrap_or(0);
     let task_rows = view_model
         .task_strip
@@ -207,7 +210,8 @@ pub(crate) fn verification_card_area_for_app(live_area: Rect, app: &AppState) ->
         .len(),
         verification_rows,
     );
-    let status_rows = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
+    let status_rows = live_status_rows_for_app(app, content_frame.width as usize)
+        .min(content_frame.height.saturating_sub(1));
     let status_top = content_frame
         .y
         .saturating_add(content_frame.height.saturating_sub(status_rows));
@@ -281,28 +285,89 @@ fn live_queue_strip_rows(row_count: usize) -> u16 {
     2 + row_count.min(LIVE_QUEUE_ROW_LIMIT) as u16
 }
 
-fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval) -> u16 {
-    let detail_rows =
-        usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
-    let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
-    let stale_rows = usize::from(plan.stale);
-    LIVE_PLAN_APPROVAL_BASE_ROWS
-        + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT) as u16
-        + u16::try_from(overflow_rows).unwrap_or(0)
-        + u16::try_from(detail_rows).unwrap_or(0)
-        + u16::try_from(stale_rows).unwrap_or(0)
+fn plan_text_render_width(width: usize) -> usize {
+    width.saturating_sub(2).max(1)
 }
 
-fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel) -> u16 {
+fn render_plan_text_lines(
+    plan_text: &str,
+    width: usize,
+    palette: &crate::ui::theme::ThemePalette,
+) -> Vec<Line<'static>> {
+    let bg = palette.surface_panel_alt;
+    let rendered = render_markdown_timeline_lines_with_palette(
+        palette.accent_info,
+        Style::default().fg(palette.text_primary).bg(bg),
+        plan_text.trim(),
+        MarkdownRenderOptions::timeline(plan_text_render_width(width)),
+        palette,
+    );
+    let mut lines = Vec::new();
+    for line in rendered.into_iter().take(LIVE_PLAN_TEXT_ROW_LIMIT) {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+        spans.extend(line.spans.into_iter().map(|span| {
+            let mut style = span.style;
+            if style.bg.is_none() {
+                style.bg = Some(bg);
+            }
+            Span::styled(span.content, style)
+        }));
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+fn plan_text_rendered_rows(plan_text: &str, width: usize) -> usize {
+    let plan_text = plan_text.trim();
+    if plan_text.is_empty() {
+        return 0;
+    }
+    let palette = crate::ui::theme::default_palette();
+    let total = render_markdown_timeline_lines_with_palette(
+        palette.accent_info,
+        Style::default()
+            .fg(palette.text_primary)
+            .bg(palette.surface_panel_alt),
+        plan_text,
+        MarkdownRenderOptions::timeline(plan_text_render_width(width)),
+        &palette,
+    )
+    .len();
+    let overflow = usize::from(total > LIVE_PLAN_TEXT_ROW_LIMIT);
+    1 + total.min(LIVE_PLAN_TEXT_ROW_LIMIT) + overflow
+}
+
+fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval, width: usize) -> u16 {
     let detail_rows =
         usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
     let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
     let stale_rows = usize::from(plan.stale);
-    LIVE_PLAN_APPROVAL_BASE_ROWS
-        + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT) as u16
-        + u16::try_from(overflow_rows).unwrap_or(0)
-        + u16::try_from(detail_rows).unwrap_or(0)
-        + u16::try_from(stale_rows).unwrap_or(0)
+    u16::try_from(
+        LIVE_PLAN_APPROVAL_BASE_ROWS as usize
+            + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT)
+            + overflow_rows
+            + detail_rows
+            + stale_rows
+            + plan_text_rendered_rows(&plan.plan_text, width),
+    )
+    .unwrap_or(u16::MAX)
+}
+
+fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel, width: usize) -> u16 {
+    let detail_rows =
+        usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
+    let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
+    let stale_rows = usize::from(plan.stale);
+    u16::try_from(
+        LIVE_PLAN_APPROVAL_BASE_ROWS as usize
+            + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT)
+            + overflow_rows
+            + detail_rows
+            + stale_rows
+            + plan_text_rendered_rows(&plan.plan_text, width),
+    )
+    .unwrap_or(u16::MAX)
 }
 
 fn render_live_status_band(
@@ -660,6 +725,31 @@ fn render_plan_approval_lines(
             ),
             Style::default().fg(palette.text_muted).bg(bg),
         )]));
+    }
+    if !plan.plan_text.trim().is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "Plan",
+            Style::default()
+                .fg(palette.text_muted)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        let mut plan_lines = render_plan_text_lines(&plan.plan_text, width, palette);
+        let total = render_markdown_timeline_lines_with_palette(
+            palette.accent_info,
+            Style::default().fg(palette.text_primary).bg(bg),
+            plan.plan_text.trim(),
+            MarkdownRenderOptions::timeline(plan_text_render_width(width)),
+            palette,
+        )
+        .len();
+        if total > LIVE_PLAN_TEXT_ROW_LIMIT {
+            plan_lines.push(Line::from(vec![Span::styled(
+                format!("  ... {} more lines", total - LIVE_PLAN_TEXT_ROW_LIMIT),
+                Style::default().fg(palette.text_muted).bg(bg),
+            )]));
+        }
+        lines.extend(plan_lines);
     }
     let path_summary = if plan.target_paths.is_empty() {
         None

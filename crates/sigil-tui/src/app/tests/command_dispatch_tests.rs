@@ -84,6 +84,7 @@ fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "pause safely".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),

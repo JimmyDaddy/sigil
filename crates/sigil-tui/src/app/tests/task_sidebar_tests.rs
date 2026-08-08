@@ -203,6 +203,8 @@ fn task_sidebar_and_strip_project_all_concurrent_active_steps() {
             parent_session_ref: SessionRef::new_relative("parent.jsonl")
                 .expect("parent session ref"),
             objective: "inspect in parallel".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         })),
@@ -610,6 +612,8 @@ fn task_sidebar_separates_review_advisory_from_system_verify() {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
             objective: "Review then verify".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Completed,
             reason: None,
         })),
@@ -1316,6 +1320,7 @@ fn task_entries_with_custom_readiness_and_reasons(
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
             objective: "Fix typo".to_owned(),
+            title: None,
             status: run_status,
             reason: None,
         })),

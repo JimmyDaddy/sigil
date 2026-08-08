@@ -169,7 +169,7 @@ fn live_tool_artifact_card_shows_truncation_and_bounded_actions() -> Result<()> 
     assert!(rendered.contains("Saved output truncated"));
     assert!(rendered.contains("64.0 KiB of 128.0 KiB"));
     assert!(rendered.contains("Alt-N next"));
-    assert!(rendered.contains("Alt-F search"));
+    assert!(rendered.contains("Ctrl-O toggle"));
     Ok(())
 }
 
@@ -316,7 +316,7 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
         "restored artifact",
     );
     assert!(full_plain_timeline(&available_app).contains("Saved full output"));
-    assert!(full_plain_timeline(&available_app).contains("Alt-F search"));
+    assert!(full_plain_timeline(&available_app).contains("Ctrl-O toggle"));
 
     std::fs::remove_dir_all(artifact_store.root().join("blobs"))?;
     let mut missing_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());

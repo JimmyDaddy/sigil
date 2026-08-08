@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     let live_transcript_rows = live_inner
         .height
         .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
-        .saturating_sub(live_status_rows_for_app(app))
+        .saturating_sub(live_status_rows_for_app(app, live_inner.width as usize))
         .max(1) as usize;
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 

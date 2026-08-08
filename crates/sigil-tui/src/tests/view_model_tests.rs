@@ -617,6 +617,8 @@ fn ui_view_model_hides_compact_task_lines_when_task_strip_is_available() -> anyh
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "ship task".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Started,
             reason: None,
         })),
@@ -651,6 +653,8 @@ fn ui_view_model_hides_compact_task_lines_when_task_strip_is_available() -> anyh
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "ship task".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         })),
@@ -671,7 +675,7 @@ fn ui_view_model_hides_compact_task_lines_when_task_strip_is_available() -> anyh
         detail
             .info_rail
             .task_lines
-            .contains(&"task: task_1".to_owned())
+            .contains(&"task: ship task".to_owned())
     );
     assert!(
         detail
@@ -1102,6 +1106,8 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         })),

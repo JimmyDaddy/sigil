@@ -15,6 +15,7 @@ where
         provider_capabilities,
         workspace_root: _,
         options,
+        permission_mode_override: _,
         message_tx,
         elicitation_handler,
         mcp_event_handler,

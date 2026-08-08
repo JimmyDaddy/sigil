@@ -157,6 +157,7 @@ fn task_guidance_session(
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         objective: "exercise task guidance delivery".to_owned(),
+        title: None,
         status,
         reason: None,
     }))?;
@@ -220,6 +221,8 @@ fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<
                 task_id: TaskId::new(format!("cached_guidance_task_{ordinal}"))?,
                 parent_session_ref: parent_session_ref.clone(),
                 objective: "fill the bounded guidance cache".to_owned(),
+                title: None,
+
                 status: TaskRunStatus::Paused,
                 reason: None,
             }))
@@ -231,6 +234,8 @@ fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<
             task_id: overflow_task_id.clone(),
             parent_session_ref,
             objective: "resolve this task through canonical fallback".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Paused,
             reason: None,
         }),

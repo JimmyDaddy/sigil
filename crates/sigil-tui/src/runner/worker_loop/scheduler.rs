@@ -102,7 +102,7 @@ impl WorkerLoopSessionAttachment {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // Worker-loop entry: one context bundle per surface.
 pub(in crate::runner) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
     mut agent: Arc<Agent<P>>,
@@ -111,6 +111,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     workspace_root: PathBuf,
     session_attachment: WorkerLoopSessionAttachment,
     options: AgentRunOptions,
+    permission_mode_override: std::sync::Arc<sigil_kernel::PermissionModeOverride>,
     event_inbox: WorkerEventInbox,
     message_tx: mpsc::Sender<WorkerMessage>,
     mcp_handlers: WorkerLoopMcpHandlers,
@@ -334,6 +335,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         provider_capabilities: &provider_capabilities,
                         workspace_root: &workspace_root,
                         options: &options,
+                        permission_mode_override: &permission_mode_override,
                         message_tx: &message_tx,
                         elicitation_handler: &elicitation_handler,
                         mcp_event_handler: &mcp_event_handler,
@@ -385,6 +387,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         provider_capabilities: &provider_capabilities,
                         workspace_root: &workspace_root,
                         options: &options,
+                        permission_mode_override: &permission_mode_override,
                         message_tx: &message_tx,
                         elicitation_handler: &elicitation_handler,
                         mcp_event_handler: &mcp_event_handler,

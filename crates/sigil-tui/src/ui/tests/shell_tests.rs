@@ -2191,6 +2191,8 @@ fn docs_planned_task_execution_entries() -> anyhow::Result<Vec<SessionLogEntry>>
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "Prepare the release docs and site, then verify the published surface."
                 .to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: Some("accepted AI-generated plan".to_owned()),
         })),
@@ -2275,6 +2277,8 @@ fn docs_verification_entries() -> anyhow::Result<Vec<SessionLogEntry>> {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "Verify the documentation refresh".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Paused,
             reason: None,
         })),

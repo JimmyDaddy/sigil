@@ -671,6 +671,7 @@ where
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
             let input = AgentRunInput::without_persisted_user_message(Vec::new())
                 .with_initial_frozen_provider_request(frozen_request)
+                .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider))
                 .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
             let input = conversation_coordinator
                 .enforce_orchestration_route_kill_switch(&mut run_session, current_unix_time_ms())
@@ -1024,7 +1025,9 @@ pub(in crate::runner) async fn chat_agent_run_input_with_repo_context(
     } else {
         AgentRunInput::transient(prompt, background_ready_context)
     };
-    input.with_runtime_context(runtime_context)
+    input
+        .with_runtime_context(runtime_context)
+        .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider))
 }
 
 pub(in crate::runner) fn append_mcp_elicitation_audits(

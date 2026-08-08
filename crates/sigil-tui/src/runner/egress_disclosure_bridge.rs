@@ -16,6 +16,24 @@ pub struct ChannelEgressDisclosurePresenter {
     message_tx: mpsc::Sender<WorkerMessage>,
 }
 
+/// Auto-accepts egress disclosures without a modal.
+///
+/// Used when the configured network policy already authorizes the route (Allow/Deny): the
+/// disclosure record is still appended durably by the egress ordering layer, only the interactive
+/// confirmation is skipped. `Ask` keeps the interactive presenter.
+#[derive(Debug, Clone, Copy)]
+pub struct AutoAcceptDisclosurePresenter;
+
+#[async_trait]
+impl EgressDisclosurePresenter for AutoAcceptDisclosurePresenter {
+    async fn present(
+        &self,
+        disclosure: PreEgressDisclosure,
+    ) -> Result<DisclosurePresentationReceipt, DisclosurePresentationError> {
+        disclosure.presentation_receipt("tui-auto-accept-v1")
+    }
+}
+
 impl ChannelEgressDisclosurePresenter {
     /// Creates a presenter that requests a frame-render acknowledgement from the TUI worker UI.
     #[must_use]

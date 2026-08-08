@@ -211,7 +211,13 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     };
     let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
     let mut lines = vec![
-        format!("task: {}", task.task_id.as_str()),
+        format!(
+            "task: {}",
+            task.title
+                .clone()
+                .or_else(|| Some(task.objective.clone()))
+                .unwrap_or_else(|| task.task_id.as_str().to_owned())
+        ),
         format!("status: {}", task_run_status_label(task.status)),
     ];
     let mut step_lines = Vec::new();
@@ -495,7 +501,11 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     }
 
     Some(TaskStripView {
-        title: format!("Task {}", task.task_id.as_str()),
+        title: task
+            .title
+            .clone()
+            .or_else(|| Some(task.objective.clone()))
+            .unwrap_or_else(|| format!("Task {}", task.task_id.as_str())),
         detail,
         verification,
         rows,

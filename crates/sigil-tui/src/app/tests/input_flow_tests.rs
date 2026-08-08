@@ -7,6 +7,7 @@ fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry
             task_id: sigil_kernel::TaskId::new("task_1")?,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status,
             reason: None,
         },
@@ -54,6 +55,7 @@ fn sync_child_agent(app: &mut AppState) -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
@@ -830,8 +832,9 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .all(|entry| !(entry.role == TimelineRole::User
-                && entry.text == "follow up after this finishes"))
+            .any(|entry| entry.role == TimelineRole::User
+                && entry.text == "follow up after this finishes"),
+        "a queued follow-up must be visible in the conversation"
     );
     Ok(())
 }
@@ -909,18 +912,6 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
     ));
     assert_eq!(app.last_notice(), Some("follow-up will run next"));
 
-    let action_cycle = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert!(action_cycle.is_none());
-    let interrupt = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(matches!(
-        interrupt,
-        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
-            if queue_id.as_str() == "queue_2"
-    ));
-    assert_eq!(
-        app.last_notice(),
-        Some("interrupting current turn for follow-up")
-    );
     let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert!(tab.is_none());
     assert!(!app.is_composer_queue_panel_focused());
@@ -1047,7 +1038,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(
         app.selected_composer_queue_action(),
-        ComposerQueueAction::SendNow
+        ComposerQueueAction::Edit
     );
     app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(
@@ -1218,15 +1209,6 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2"
     ));
 
-    app.composer.input = "/queue interrupt 2".to_owned();
-    app.composer.input_cursor = app.composer.input.chars().count();
-    let interrupt = app.submit_input()?;
-    assert!(matches!(
-        interrupt,
-        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
-            if queue_id.as_str() == "queue_2"
-    ));
-
     app.composer.input = "/queue delete second".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
     let delete = app.submit_input()?;
@@ -1254,12 +1236,7 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         queued_conversation_input_entry("queue_1", "first queued prompt")?,
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
     ]);
-    for command in [
-        "/queue resume",
-        "/queue next",
-        "/queue send 1",
-        "/queue interrupt 1",
-    ] {
+    for command in ["/queue resume", "/queue next", "/queue send 1"] {
         app.composer.input = command.to_owned();
         app.composer.input_cursor = app.composer.input.chars().count();
         assert!(app.submit_input()?.is_some());
@@ -1280,7 +1257,7 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         assert!(app.submit_input()?.is_none());
         assert_eq!(
             app.last_notice(),
-            Some("usage: /queue <show|next|interrupt|edit|delete>")
+            Some("usage: /queue <show|next|edit|delete>")
         );
     }
     app.composer.input = "/queue nonsense".to_owned();
@@ -1288,7 +1265,7 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
     assert!(app.submit_input()?.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("usage: /queue <show|next|interrupt|edit|delete>")
+        Some("usage: /queue <show|next|edit|delete>")
     );
     Ok(())
 }
@@ -1388,15 +1365,12 @@ fn queue_slash_selector_exposes_next_turn_language() -> Result<()> {
     let rows = app.slash_selector_rows();
 
     let labels = rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>();
-    assert_eq!(labels, vec!["show", "next", "interrupt", "edit", "delete"]);
+    assert_eq!(labels, vec!["show", "next", "edit", "delete"]);
     assert!(
         rows.iter()
             .any(|row| row.1 == "run selected after current turn")
     );
-    assert!(
-        rows.iter()
-            .any(|row| row.1 == "stop current turn and run selected")
-    );
+
     Ok(())
 }
 
@@ -2065,7 +2039,8 @@ fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .all(|entry| !(entry.role == TimelineRole::User && entry.text == "queued"))
+            .any(|entry| entry.role == TimelineRole::User && entry.text == "queued"),
+        "a queued follow-up must be visible in the conversation"
     );
     assert!(
         app.events.iter().all(

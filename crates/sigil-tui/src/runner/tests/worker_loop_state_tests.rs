@@ -12,6 +12,7 @@ use super::{
     super::{
         WorkerCommand,
         worker_loop::{
+            IdleAutoCompactionPreparation, IdleAutoCompactionState, IdleV2CompactionPreparation,
             SessionTransitionKind, WorkerCommandDomain, WorkerLoopState,
             changed_task_completion_progress, changed_task_provider_route_diagnostics,
             classify_worker_command, task_completion_progress_for_active_task, transition_session,
@@ -20,7 +21,7 @@ use super::{
     },
     super::{
         terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
-        worker_event::WorkerWakeCoalescer,
+        worker_event::{WorkerEventPayloadSender, WorkerWakeCoalescer},
     },
     common::{PlannedProvider, routed_session_identity, routed_test_root_config, test_root_config},
 };
@@ -104,6 +105,10 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     );
     assert!(state.agent.last_task_completion_progress.batch.is_none());
     assert!(state.approval_command_receipts.is_empty());
+    assert!(
+        state.defer_startup_artifact_gc,
+        "startup artifact GC must wait for the first command so a fresh worker never races a resume"
+    );
     Ok(())
 }
 
@@ -115,6 +120,8 @@ fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
             objective: "pause safely".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Running,
             reason: None,
         })),
@@ -389,6 +396,28 @@ fn detached_background_runs_block_session_transitions() {
 }
 
 #[test]
+fn maintenance_tasks_only_block_fork_transitions() {
+    assert_eq!(
+        SessionTransitionKind::Switch.block_reason(false, false, true, false),
+        None,
+        "switching away from a session must join its in-flight maintenance, not reject"
+    );
+    assert_eq!(
+        SessionTransitionKind::StartNew.block_reason(false, false, true, false),
+        None,
+        "starting a new session must join in-flight maintenance, not reject"
+    );
+    assert_eq!(
+        SessionTransitionKind::LocalFork.block_reason(false, false, true, false),
+        Some("cannot fork a local session while session maintenance is running")
+    );
+    assert_eq!(
+        SessionTransitionKind::CheckpointFork.block_reason(false, false, true, false),
+        Some("cannot fork conversation while session maintenance is running")
+    );
+}
+
+#[test]
 fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let temp = tempfile::tempdir()?;
@@ -555,6 +584,114 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     );
     assert_eq!(state.session.log_path, target_path);
     assert_eq!(state.session.last_queued_pre_turn_block, retained_block);
+    Ok(())
+}
+
+#[test]
+fn session_transition_joins_in_flight_maintenance_instead_of_rejecting() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let temp = tempfile::tempdir()?;
+    let current_path = temp.path().join("current.jsonl");
+    let target_path = temp.path().join("target.jsonl");
+    let current_store = JsonlSessionStore::new(&current_path)?;
+    let target_store = JsonlSessionStore::new(&target_path)?;
+    let root_config = routed_test_root_config(temp.path(), "planned-model");
+    target_store.append(&SessionLogEntry::Control(routed_session_identity(
+        &root_config,
+        "planned-model",
+    )?))?;
+    let current_session = Session::new_with_route(
+        "deepseek",
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?
+            .1,
+    )
+    .with_store(current_store);
+    let registry = sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace(
+        &root_config,
+        temp.path(),
+    )?;
+    let supervisor = sigil_runtime::AgentSupervisor::new(
+        registry,
+        sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
+        provider_capabilities(),
+    );
+    let provider_capabilities = provider_capabilities();
+    let agent = Arc::new(Agent::new(
+        PlannedProvider::new(Vec::new()),
+        ToolRegistry::new(),
+    ));
+    let (event_tx, _event_rx) = std::sync::mpsc::channel();
+    let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
+    let mut state = WorkerLoopState::new(
+        current_path.clone(),
+        Some(current_session),
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+            &current_path,
+        )?
+        .into(),
+        supervisor,
+        sigil_runtime::AgentToolBackgroundRuns::default(),
+        event_tx.clone(),
+        WorkerWakeCoalescer::new(event_tx.clone(), None),
+        terminal_lifecycle_router,
+        None,
+        None,
+    );
+    let session_scope_id = state
+        .session
+        .current
+        .as_ref()
+        .expect("current session should be present")
+        .session_scope_id()
+        .to_owned();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = release_tx.send(());
+    });
+    state
+        .compaction
+        .preparation_tasks
+        .start_idle(
+            &runtime,
+            state.compaction.next_request_id,
+            session_scope_id,
+            Arc::clone(&state.session.attachment_lease),
+            WorkerEventPayloadSender::compaction(event_tx),
+            move || {
+                let _ = release_rx.recv();
+                Ok(IdleV2CompactionPreparation {
+                    state: IdleAutoCompactionState::default(),
+                    preparation: Ok(IdleAutoCompactionPreparation::NotRequested),
+                    session: Session::new("idle", "model"),
+                })
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+    assert!(
+        state.compaction.preparation_tasks.has_active(),
+        "maintenance task should be in flight before the transition"
+    );
+    let (message_tx, _message_rx) = std::sync::mpsc::channel();
+    let message = transition_session(
+        SessionTransitionKind::Switch,
+        target_path.clone(),
+        &runtime,
+        &root_config,
+        &provider_capabilities,
+        temp.path(),
+        &agent,
+        &mut state,
+        &message_tx,
+    )?;
+    assert_eq!(message.session_log_path, target_path);
+    assert_eq!(state.session.log_path, target_path);
+    assert!(
+        !state.compaction.preparation_tasks.has_active(),
+        "the transition must join in-flight maintenance"
+    );
+    let _ = releaser.join();
     Ok(())
 }
 

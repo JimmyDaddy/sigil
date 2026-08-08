@@ -16,8 +16,9 @@ where
         provider_capabilities: _,
         workspace_root,
         options,
+        permission_mode_override: _,
         message_tx,
-        elicitation_handler,
+        elicitation_handler: _,
         mcp_event_handler: _,
         role_provider_builder: _,
         context_resolver,
@@ -138,31 +139,16 @@ where
             QueueCompactionCommand::SendQueuedConversationInputNow { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
+                // Non-destructive: the running turn is never cancelled. Promotion makes the
+                // item the queue head so the kernel's safe-point injection (or the next
+                // idle dispatch) delivers it without interrupting the current run.
                 match promote_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
                     queue_id,
                 ) {
-                    Ok(entries) => {
-                        send_conversation_queue_update(message_tx, &entries);
-                        if let Some(run) = state.run.active.take() {
-                            cancel_active_run(
-                                run,
-                                runtime,
-                                root_config,
-                                &state.session.log_path,
-                                &mut state.session.current,
-                                &mut state.session.detached_durable_controls,
-                                message_tx,
-                                elicitation_handler,
-                                &state.agent.supervisor,
-                                &mut state.run.discarded_ids,
-                                ActiveRunStopDisposition::Cancel,
-                                "run interrupted for follow-up",
-                            );
-                        }
-                    }
+                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }

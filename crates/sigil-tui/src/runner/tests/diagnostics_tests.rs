@@ -155,6 +155,7 @@ fn test_options(
         &root_config,
         workspace_root.to_path_buf(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     )
 }
 
@@ -1093,6 +1094,7 @@ fn check_changed_files_diagnostics_returns_unsupported_when_tool_missing() -> Re
         &root_config,
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     );
 
     let result = check_changed_files_diagnostics(
@@ -1150,6 +1152,7 @@ fn check_changed_files_diagnostics_honors_permission_denial() -> Result<()> {
         &root_config,
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     );
 
     let result = check_changed_files_diagnostics(

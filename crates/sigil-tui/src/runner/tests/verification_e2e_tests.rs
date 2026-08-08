@@ -46,6 +46,8 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "verify the workspace".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Paused,
         reason: Some("waiting for verification".to_owned()),
     }))?;

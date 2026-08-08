@@ -36,7 +36,7 @@ impl AppState {
     }
 
     fn live_status_band_rows(&self) -> u16 {
-        crate::ui::live_status_rows_for_app(self)
+        crate::ui::live_status_rows_for_app(self, 80)
     }
 
     pub(super) fn max_timeline_scroll_back(&self) -> usize {

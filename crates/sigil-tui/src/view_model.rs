@@ -1128,6 +1128,7 @@ fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonV
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanApprovalViewModel {
     pub summary: String,
+    pub plan_text: String,
     pub steps: Vec<String>,
     pub target_paths: Vec<String>,
     pub suggested_checks: Vec<String>,
@@ -1141,6 +1142,7 @@ impl PlanApprovalViewModel {
     fn from_pending(pending: &crate::app::PendingPlanApproval) -> Self {
         Self {
             summary: pending.summary.clone(),
+            plan_text: pending.plan_text.clone(),
             steps: pending.steps.clone(),
             target_paths: pending.target_paths.clone(),
             suggested_checks: pending.suggested_checks.clone(),

@@ -819,6 +819,7 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "pause safely".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Paused,
             reason: Some("task paused from TUI".to_owned()),
         },
@@ -1394,6 +1395,7 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
                 task_id: sigil_kernel::TaskId::new("task_1")?,
                 parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
                 objective: "ship task".to_owned(),
+                title: None,
                 status: sigil_kernel::TaskRunStatus::Failed,
                 reason: Some("step gate_check failed".to_owned()),
             }),
@@ -1418,6 +1420,7 @@ fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: Some("continuing plan v1".to_owned()),
         },
@@ -3816,6 +3819,7 @@ fn idle_auto_compaction_rebuilds_the_visible_task_list_from_reloaded_controls() 
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "Preserve the visible task list".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Paused,
             reason: Some("waiting for continue".to_owned()),
         })),
@@ -3882,7 +3886,7 @@ fn idle_auto_compaction_rebuilds_the_visible_task_list_from_reloaded_controls() 
     let strip = app
         .task_strip_view()
         .expect("automatic compaction should retain the task strip");
-    assert_eq!(strip.title, "Task task_compact_survival");
+    assert_eq!(strip.title, "Preserve the visible task list");
     assert!(strip.detail.contains("paused"));
     assert!(strip.detail.contains("1/2 done"));
     assert!(

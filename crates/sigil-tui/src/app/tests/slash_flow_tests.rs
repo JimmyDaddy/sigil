@@ -612,6 +612,7 @@ fn plain_prompt_remains_chat_when_session_has_unfinished_task() -> Result<()> {
             task_id,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: Some("task running".to_owned()),
         },

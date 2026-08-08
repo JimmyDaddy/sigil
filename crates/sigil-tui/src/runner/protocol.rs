@@ -273,6 +273,11 @@ pub enum WorkerCommand {
         prompt: String,
         reasoning_effort: ReasoningEffort,
     },
+    /// Runtime switch of the primary permission mode for the active run (and the persisted
+    /// default). Consulted at decision time via the shared mode override.
+    UpdateActiveRunPermissionMode {
+        mode: sigil_kernel::PermissionMode,
+    },
     CreateTaskFromPlan {
         plan_id: String,
         expected_plan_hash: String,

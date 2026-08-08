@@ -226,6 +226,7 @@ fn active_agent_view_terminal_uses_child_session_status() -> anyhow::Result<()> 
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review".to_owned(),
+            title: None,
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),

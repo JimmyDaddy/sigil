@@ -19,6 +19,7 @@ where
         provider_capabilities,
         workspace_root,
         options,
+        permission_mode_override,
         message_tx,
         elicitation_handler,
         mcp_event_handler: _,
@@ -37,7 +38,11 @@ where
                 attachments,
                 reasoning_effort,
                 plan_mode,
+                ..
             } => {
+                // A new run starts with the persisted permission mode; a runtime switch made
+                // during the previous run must not leak into it.
+                permission_mode_override.clear();
                 if state.run.active.is_some() {
                     if !attachments.is_empty() {
                         let _ = message_tx.send(WorkerMessage::RunFailed(

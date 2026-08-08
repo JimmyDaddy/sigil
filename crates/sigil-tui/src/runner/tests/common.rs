@@ -309,6 +309,7 @@ where
         &root_config,
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     );
     let agent = Arc::new(agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
@@ -338,6 +339,7 @@ where
                 workspace_root,
                 WorkerLoopSessionAttachment::new(session_log_path, attachment_lease),
                 options,
+                std::sync::Arc::new(sigil_kernel::PermissionModeOverride::new()),
                 (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {

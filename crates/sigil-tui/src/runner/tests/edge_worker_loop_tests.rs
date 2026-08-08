@@ -72,6 +72,8 @@ fn next_task_id_uses_session_local_counter() -> Result<()> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "first".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
@@ -79,6 +81,8 @@ fn next_task_id_uses_session_local_counter() -> Result<()> {
         task_id: TaskId::new("task_3")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "third".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
@@ -319,6 +323,8 @@ fn task_from_plan_reconciles_created_anchor_before_acceptance_without_duplicates
         parent_session_ref: session_ref_for_log_path(&session_log_path)
             .map_err(anyhow::Error::msg)?,
         objective,
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
@@ -497,6 +503,8 @@ fn task_from_plan_refuses_stale_retry_after_promoted_plan_crash_prefix() -> Resu
         parent_session_ref: session_ref_for_log_path(&session_log_path)
             .map_err(anyhow::Error::msg)?,
         objective: plan_task_input_from_draft(&draft),
+        title: None,
+
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
@@ -850,6 +858,8 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "resume me".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Failed,
         reason: None,
     }))?;
@@ -874,6 +884,8 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
         task_id: TaskId::new("task_2")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "already done".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
@@ -895,6 +907,8 @@ fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "already done".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
@@ -934,6 +948,8 @@ fn resolve_continue_task_rejects_an_exact_cancelled_task() -> Result<()> {
         task_id: TaskId::new("task_cancelled")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "do not revive".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Cancelled,
         reason: None,
     }))?;
@@ -954,6 +970,8 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "cancel task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -1053,6 +1071,8 @@ fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "pause task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -1098,6 +1118,8 @@ fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
         task_id: unrelated_task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "unrelated running task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -1321,6 +1343,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         &root_config,
         temp.path().to_path_buf(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     );
     let mut current_session = None;
 
@@ -1478,6 +1501,7 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         &root_config,
         temp.path().to_path_buf(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     );
     let mut current_session = None;
 
@@ -1646,6 +1670,8 @@ fn append_mcp_elicitation_audits_routes_after_task_completion() -> Result<()> {
         task_id,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "subagent task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
         reason: None,
     }))?;
@@ -1687,6 +1713,8 @@ fn seed_running_subagent_task(
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
         objective: "subagent task".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Running,
         reason: None,
     }))?;
@@ -1806,6 +1834,7 @@ fn spawn_loop_with_shared_agent(
         &root_config,
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
+        None,
     );
     let agent_for_loop = Arc::clone(&agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
@@ -1836,6 +1865,7 @@ fn spawn_loop_with_shared_agent(
                 workspace_root,
                 WorkerLoopSessionAttachment::new(session_log_path, attachment_lease),
                 options,
+                std::sync::Arc::new(sigil_kernel::PermissionModeOverride::new()),
                 (event_tx, event_rx, urgent_rx),
                 message_tx,
                 WorkerLoopMcpHandlers {

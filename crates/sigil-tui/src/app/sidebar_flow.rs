@@ -40,14 +40,6 @@ impl AppState {
     }
 
     pub(super) fn toggle_runtime_permission_mode(&mut self) -> Result<Option<AppAction>> {
-        if self.runtime.is_busy {
-            self.last_notice = Some("busy; permission locked".to_owned());
-            self.push_timeline(
-                TimelineRole::Notice,
-                "busy; permission mode stays unchanged",
-            );
-            return Ok(None);
-        }
         let Some(root_config) = self.config_snapshot.as_ref() else {
             return Ok(None);
         };
@@ -66,6 +58,13 @@ impl AppState {
             format!("permission mode -> {}", self.runtime.permission_mode),
         );
         self.schedule_balance_refresh();
+        if self.runtime.is_busy {
+            // During an active run the worker must not restart; switch the shared mode override
+            // so the next permission decision uses the new mode immediately.
+            return Ok(Some(AppAction::UpdateActiveRunPermissionMode {
+                mode: next_config.permission.mode,
+            }));
+        }
         Ok(Some(AppAction::RuntimeConfigUpdated {
             root_config: Box::new(next_config),
         }))

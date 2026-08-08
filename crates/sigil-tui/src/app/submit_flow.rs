@@ -77,7 +77,11 @@ impl AppState {
 
         if self.runtime.is_busy {
             let (kind, target) = self.active_conversation_queue_submission();
-            self.push_optimistic_conversation_queue_item(prompt.clone(), kind, target.clone());
+            let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+            // Show the follow-up in the conversation immediately; it is delivered by the
+            // active run's safe-point injection (or the next idle dispatch).
+            self.push_timeline(TimelineRole::User, safe_prompt.clone());
+            self.push_optimistic_conversation_queue_item(safe_prompt, kind, target.clone());
             self.composer.input.clear();
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();
