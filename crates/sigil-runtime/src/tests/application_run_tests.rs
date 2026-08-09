@@ -2,8 +2,8 @@ use std::{
     path::Path,
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -20,14 +20,14 @@ use sigil_kernel::{
     ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
     ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, Session, SessionLogEntry,
-    SessionRef, StartDurableTaskAction, StartPlanReviewAction, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskHandoffId, TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry,
-    TaskPlanStatus, TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool,
-    ToolAccess, ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats,
-    conversation_run_lifecycle_record_from_stream,
+    SessionRef, StartDurableTaskAction, StartPlanReviewAction, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId, TaskIntegrationReviewRequest,
+    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess, ToolApproval,
+    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
+    ToolResultRecordedV3, ToolSpec, UsageStats, conversation_run_lifecycle_record_from_stream,
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
@@ -227,6 +227,32 @@ impl Provider for ApplicationTaskRoleProvider {
             && request
                 .tools
                 .iter()
+                .any(|tool| tool.name == TASK_GUIDANCE_APPLY_TOOL_NAME)
+        {
+            let args = r#"{
+                "reason": "prioritizes_pending_step",
+                "target_step_ids": ["inspect_application"]
+            }"#;
+            vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "application-task-guidance".to_owned(),
+                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "application-task-guidance".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "application-task-guidance".to_owned(),
+                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ]
+        } else if self.role == AgentRole::Planner
+            && request
+                .tools
+                .iter()
                 .any(|tool| tool.name == TASK_PLAN_UPDATE_TOOL_NAME)
         {
             let args = r#"{
@@ -272,6 +298,96 @@ impl Provider for ApplicationTaskRoleProvider {
             ]
         };
         Ok(Box::pin(stream::iter(chunks)))
+    }
+}
+
+struct CapturingApplicationTaskRoleProviderBuilder {
+    executor_requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    guidance_review_requests: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TaskRoleProviderBuilder for CapturingApplicationTaskRoleProviderBuilder {
+    async fn build(&self, _root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(CapturingApplicationTaskRoleProvider {
+            role,
+            executor_requests: Arc::clone(&self.executor_requests),
+            guidance_review_requests: Arc::clone(&self.guidance_review_requests),
+        }))
+    }
+}
+
+struct CapturingApplicationTaskRoleProvider {
+    role: AgentRole,
+    executor_requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    guidance_review_requests: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for CapturingApplicationTaskRoleProvider {
+    fn name(&self) -> &str {
+        "capturing-application-task-test"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        application_task_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if self.role == AgentRole::Planner
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == TASK_GUIDANCE_APPLY_TOOL_NAME)
+        {
+            self.guidance_review_requests.fetch_add(1, Ordering::SeqCst);
+            let args = r#"{
+                "reason": "prioritizes_pending_step",
+                "target_step_ids": ["step_2"]
+            }"#;
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "application-guidance-recovery".to_owned(),
+                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "application-guidance-recovery".to_owned(),
+                    delta: args.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "application-guidance-recovery".to_owned(),
+                    name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                    args_json: args.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        let text = if self.role == AgentRole::Executor {
+            self.executor_requests
+                .lock()
+                .expect("executor request lock should not be poisoned")
+                .push(request);
+            "recovered application task step completed"
+        } else {
+            "recovered application task synthesis completed"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(text.to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[derive(Default)]
+struct RecordingApplicationRunEvents(Vec<PublicRunEvent>);
+
+impl ApplicationRunEventHandler for RecordingApplicationRunEvents {
+    fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+        self.0.push(event);
+        Ok(())
     }
 }
 
@@ -2566,6 +2682,208 @@ credential = { source = "none" }
 }
 
 #[tokio::test]
+async fn application_typed_task_continuation_executes_exact_selected_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "application-task-test"
+model = "application-task-model"
+
+[connections.application-task-test]
+label = "Application task test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+credential = { source = "none" }
+"#,
+    )?;
+    let mut root_config = RootConfig::load(&config_path)?;
+    root_config.task.enabled = true;
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        Session::load_from_store("application-task-test", "application-task-model", store)?;
+    let task_id = TaskId::new("task-application-selected-continuation")?;
+    let decoy_task_id = TaskId::new("task-application-newer-decoy")?;
+    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+    for (id, objective) in [
+        (task_id.clone(), "finish the selected application task"),
+        (decoy_task_id.clone(), "leave this newer task paused"),
+    ] {
+        session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: id.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: Some("waiting for a follow-up".to_owned()),
+        }))?;
+        session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: id,
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: TaskStepId::new("inspect_application")?,
+                title: "Inspect application runtime".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            }],
+            reason: None,
+        }))?;
+    }
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        "message-application-selected-continuation",
+        "run-application-selected-continuation",
+    )?;
+    let exact_guidance = "finish the task we were already working on";
+    let mut message = ModelMessage::user(exact_guidance);
+    message.id = source_turn.message_id.clone();
+    session.append_user_message(message)?;
+    let route_contract_fingerprint = "route-selected-application-task".to_owned();
+    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
+        sigil_kernel::ConversationRouteDecisionRecordedEntry {
+            decision_id: sigil_kernel::conversation_route_decision_id_for_source(&source_turn),
+            source_turn: source_turn.clone(),
+            route: sigil_kernel::ConversationRoute::Task,
+            reason_codes: Vec::new(),
+            configured_policy: TaskRoutingPolicy::Auto,
+            effective_capability: sigil_kernel::AutomaticRouteCapability::DirectTask,
+            policy_snapshot_hash: "task-routing-policy".to_owned(),
+            route_contract_fingerprint: route_contract_fingerprint.clone(),
+            decided_at_ms: 1,
+        },
+    ))?;
+    let guidance_projection =
+        sigil_kernel::project_conversation_prompt_for_persistence(exact_guidance);
+    let guidance_receipt = sigil_kernel::TaskContinuationSelectedEntry {
+        task_id: task_id.clone(),
+        source_turn: source_turn.clone(),
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        route_contract_fingerprint: route_contract_fingerprint.clone(),
+        prompt_hash: guidance_projection.prompt_hash,
+        exact_prompt_required: guidance_projection.exact_prompt_required,
+        guidance: guidance_projection.safe_prompt,
+        selected_at_ms: 1,
+    };
+    session.append_control(ControlEntry::TaskContinuationSelected(
+        guidance_receipt.clone(),
+    ))?;
+    let profile_registry =
+        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            temp.path(),
+            session.entries(),
+        )?;
+    let task_execution = ApplicationTaskExecutionRuntime {
+        root_config: root_config.clone(),
+        options: crate::build_run_options(
+            &root_config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+            None,
+        ),
+        base_registry: ToolRegistry::new(),
+        agent_supervisor: crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            application_task_provider_capabilities(),
+        ),
+        role_provider_builder: Arc::new(ApplicationTaskRoleProviderBuilder),
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_handle = cancellation_owner.handle();
+    let root_output = AgentRunOutput {
+        disposition: AgentRunDisposition::ContinueDurableTask(Box::new(
+            sigil_kernel::ContinueDurableTaskAction {
+                task_id: task_id.clone(),
+                source_turn,
+                plan_version: Some(1),
+                task_status: TaskRunStatus::Paused,
+                plan_status: Some(TaskPlanStatus::Accepted),
+                route_contract_fingerprint,
+                guidance: sigil_kernel::SecretString::new(exact_guidance),
+                guidance_receipt,
+            },
+        )),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            tool_calls: 1,
+            ..AgentRunOutcome::default()
+        },
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = continue_application_task_handoff(
+        &mut session,
+        root_output,
+        Some(task_execution),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_handle,
+    )
+    .await?;
+
+    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+    assert_eq!(
+        output.result.final_text,
+        "application durable task completed"
+    );
+    assert!(cancellation_handle.is_naturally_finalized());
+    let projection = session.task_state_projection();
+    assert_eq!(
+        projection.tasks.get(&task_id).map(|task| task.status),
+        Some(TaskRunStatus::Completed)
+    );
+    assert_eq!(
+        projection.tasks.get(&decoy_task_id).map(|task| task.status),
+        Some(TaskRunStatus::Paused),
+        "typed continuation must never fall back to a newer resumable Task"
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+            if applied.task_id == task_id
+                && applied.target_step_ids
+                    == vec![TaskStepId::new("inspect_application").expect("valid step id")]
+    )));
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(bound))
+                    if bound.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn application_task_continuation_reopens_exact_task_and_returns_synthesis() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -2588,10 +2906,16 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         parent_session_ref: SessionRef::new_relative("session.jsonl")?,
         objective: "continue the application task".to_owned(),
         title: None,
-
         status: TaskRunStatus::Paused,
         reason: Some("application restart".to_owned()),
     }))?;
+    let unrelated_user = ModelMessage::user("explain an unrelated module first");
+    let unrelated_user_id = unrelated_user.id.clone();
+    session.append_user_message(unrelated_user)?;
+    assert!(
+        session.task_state_projection().current_task().is_none(),
+        "an ordinary User turn must clear the previous Task focus before explicit continuation"
+    );
     let session_scope_id = session.session_scope_id().to_owned();
     drop(session);
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
@@ -2681,12 +3005,1117 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         "deepseek-v4-flash",
         JsonlSessionStore::new(&session_path)?,
     )?;
-    assert!(
+    assert_eq!(
         reopened
             .entries()
             .iter()
-            .all(|entry| !matches!(entry, SessionLogEntry::User(_))),
-        "Task continuation must not synthesize a user conversation prompt"
+            .filter(|entry| matches!(entry, SessionLogEntry::User(_)))
+            .count(),
+        1,
+        "Task continuation must not synthesize another user conversation prompt"
+    );
+    assert!(reopened.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::User(message) if message.id == unrelated_user_id
+    )));
+    assert_eq!(
+        reopened
+            .task_state_projection()
+            .current_task()
+            .map(|task| &task.task_id),
+        Some(&task_id)
+    );
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(selected))
+                    if selected.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+struct ApplicationGuidanceRecoveryFixture {
+    config_path: std::path::PathBuf,
+    session_path: std::path::PathBuf,
+    session_scope_id: String,
+    task_id: TaskId,
+    exact_guidance: String,
+    safe_guidance: String,
+}
+
+#[derive(Clone, Copy)]
+enum ApplicationGuidanceRecoveryBoundary {
+    Materialized,
+    SelectionOnly,
+    SelectionWithStartedPlanner,
+}
+
+fn application_guidance_recovery_fixture(
+    root: &Path,
+    exact_prompt_required: bool,
+    boundary: ApplicationGuidanceRecoveryBoundary,
+) -> Result<ApplicationGuidanceRecoveryFixture> {
+    let config_path = root.join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let session_path = root.join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let (provider_name, route) =
+        crate::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    let mut session = Session::load_from_store_with_route(
+        provider_name,
+        route.model_ref.model_id.clone(),
+        Some(route),
+        store,
+    )?;
+    let task_id = TaskId::new(match (exact_prompt_required, boundary) {
+        (true, ApplicationGuidanceRecoveryBoundary::Materialized) => {
+            "task-application-guidance-exact-recovery"
+        }
+        (false, ApplicationGuidanceRecoveryBoundary::Materialized) => {
+            "task-application-guidance-safe-recovery"
+        }
+        (true, ApplicationGuidanceRecoveryBoundary::SelectionOnly) => {
+            "task-application-guidance-exact-selection-recovery"
+        }
+        (false, ApplicationGuidanceRecoveryBoundary::SelectionOnly) => {
+            "task-application-guidance-safe-selection-recovery"
+        }
+        (true, ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner) => {
+            "task-application-guidance-exact-started-recovery"
+        }
+        (false, ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner) => {
+            "task-application-guidance-safe-started-recovery"
+        }
+    })?;
+    let initial_task_status = if matches!(
+        boundary,
+        ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner
+    ) {
+        TaskRunStatus::Started
+    } else {
+        TaskRunStatus::Paused
+    };
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "recover materialized application guidance".to_owned(),
+        title: None,
+        status: initial_task_status,
+        reason: Some("crashed after guidance review".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            sigil_kernel::TaskStepSpec {
+                step_id: TaskStepId::new("step_1")?,
+                title: "Inspect the baseline".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            },
+            sigil_kernel::TaskStepSpec {
+                step_id: TaskStepId::new("step_2")?,
+                title: "Inspect the exact recovery target".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: vec![TaskStepId::new("step_1")?],
+                intent_refs: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Read),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+            },
+        ],
+        reason: None,
+    }))?;
+    session.append_user_message(ModelMessage::user("explain an unrelated module first"))?;
+
+    let exact_guidance = if exact_prompt_required {
+        "inspect step 2 with authorization=super-secret-value"
+    } else {
+        "prioritize the compatibility check in step 2"
+    }
+    .to_owned();
+    let projected = sigil_kernel::project_conversation_prompt_for_persistence(&exact_guidance);
+    assert_eq!(projected.exact_prompt_required, exact_prompt_required);
+    match boundary {
+        ApplicationGuidanceRecoveryBoundary::Materialized => {
+            let applied = sigil_kernel::TaskGuidanceAppliedEntry {
+                queue_id: sigil_kernel::ConversationInputQueueId::new(if exact_prompt_required {
+                    "queue-application-guidance-exact-recovery"
+                } else {
+                    "queue-application-guidance-safe-recovery"
+                })?,
+                task_id: task_id.clone(),
+                plan_version: 1,
+                dispatch_run_id: if exact_prompt_required {
+                    "dispatch-application-guidance-exact-recovery"
+                } else {
+                    "dispatch-application-guidance-safe-recovery"
+                }
+                .to_owned(),
+                reason: sigil_kernel::TaskGuidanceApplyReason::PrioritizesPendingStep,
+                target_step_ids: vec![TaskStepId::new("step_2")?],
+            };
+            let materialized = sigil_kernel::TaskGuidanceMaterializedEntry::new(
+                &applied,
+                projected.prompt_hash.clone(),
+                projected.exact_prompt_required,
+                projected.safe_prompt.clone(),
+            )?;
+            session.append_controls(vec![
+                ControlEntry::TaskGuidanceApplied(applied),
+                ControlEntry::TaskGuidanceMaterialized(materialized),
+            ])?;
+            assert!(session.task_state_projection().current_task().is_none());
+        }
+        ApplicationGuidanceRecoveryBoundary::SelectionOnly
+        | ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner => {
+            let source_turn = sigil_kernel::ConversationTurnRef::new(
+                session.session_scope_id(),
+                "message-application-guidance-selection-recovery",
+                "run-application-guidance-selection-recovery",
+            )?;
+            let mut source_message = ModelMessage::user(projected.safe_prompt.clone());
+            source_message.id = source_turn.message_id.clone();
+            session.append_user_message(source_message)?;
+            session.append_control(ControlEntry::TaskContinuationSelected(
+                sigil_kernel::TaskContinuationSelectedEntry {
+                    task_id: task_id.clone(),
+                    plan_version: Some(1),
+                    task_status: initial_task_status,
+                    plan_status: Some(TaskPlanStatus::Accepted),
+                    source_turn,
+                    route_contract_fingerprint: "sha256:application-guidance-selection-recovery"
+                        .to_owned(),
+                    prompt_hash: projected.prompt_hash.clone(),
+                    exact_prompt_required: projected.exact_prompt_required,
+                    guidance: projected.safe_prompt.clone(),
+                    selected_at_ms: 1,
+                },
+            ))?;
+            if matches!(
+                boundary,
+                ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner
+            ) {
+                let attempt_id = sigil_kernel::task_participant_attempt_id(
+                    &task_id,
+                    sigil_kernel::TaskParticipantPurpose::Planner,
+                    None,
+                    None,
+                    1,
+                )?;
+                session.append_control(ControlEntry::TaskParticipantAttempt(
+                    sigil_kernel::TaskParticipantAttemptEntry {
+                        child_session_ref: sigil_kernel::task_participant_session_ref(
+                            &task_id,
+                            &attempt_id,
+                        )?,
+                        attempt_id,
+                        task_id: task_id.clone(),
+                        purpose: sigil_kernel::TaskParticipantPurpose::Planner,
+                        ordinal: 1,
+                        plan_version: None,
+                        step_id: None,
+                        role: AgentRole::Planner,
+                        status: sigil_kernel::TaskParticipantAttemptStatus::Started,
+                        reason: None,
+                    },
+                ))?;
+            }
+            assert_eq!(
+                session
+                    .task_state_projection()
+                    .current_task()
+                    .map(|task| &task.task_id),
+                Some(&task_id)
+            );
+        }
+    }
+
+    Ok(ApplicationGuidanceRecoveryFixture {
+        config_path,
+        session_path,
+        session_scope_id: session.session_scope_id().to_owned(),
+        task_id,
+        exact_guidance,
+        safe_guidance: projected.safe_prompt,
+    })
+}
+
+#[tokio::test]
+async fn application_continuation_recovers_safe_materialized_guidance_after_reload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        false,
+        ApplicationGuidanceRecoveryBoundary::Materialized,
+    )?;
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-safe-recovery".to_owned(),
+            task_id: fixture.task_id,
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await?;
+
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    let prompts = executor_requests
+        .lock()
+        .expect("executor request lock should not be poisoned")
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    let first = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_1"))
+        .expect("first executor step request");
+    let second = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_2"))
+        .expect("second executor step request");
+    assert!(!first.contains(&fixture.safe_guidance));
+    assert!(second.contains(&fixture.safe_guidance));
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_continuation_rejects_exact_required_materialized_guidance_after_reload()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        true,
+        ApplicationGuidanceRecoveryBoundary::Materialized,
+    )?;
+    let session_path = fixture.session_path.clone();
+    let exact_guidance = fixture.exact_guidance.clone();
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-exact-recovery".to_owned(),
+            task_id: fixture.task_id,
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await
+        .expect_err("exact-required materialization must require guidance re-entry after reload");
+
+    assert!(
+        format!("{error:#}")
+            .contains("requires exact prompt material after recovery; re-enter the guidance")
+    );
+    assert!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .is_empty()
+    );
+    assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_continuation_recovers_safe_selection_only_guidance_after_reload() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        false,
+        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
+    )?;
+    let session_path = fixture.session_path.clone();
+    let task_id = fixture.task_id.clone();
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-safe-selection-recovery".to_owned(),
+            task_id: fixture.task_id,
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await?;
+
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
+    let prompts = executor_requests
+        .lock()
+        .expect("executor request lock should not be poisoned")
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    let first = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_1"))
+        .expect("first executor step request");
+    let second = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_2"))
+        .expect("second executor step request");
+    assert!(!first.contains(&fixture.safe_guidance));
+    assert!(second.contains(&fixture.safe_guidance));
+
+    let reopened = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
+                    if selected.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                    if applied.task_id == task_id
+            ))
+            .count(),
+        1,
+        "selection-only recovery must consume the existing authority exactly once"
+    );
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceMaterialized(materialized))
+                    if materialized.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_continuation_explicitly_retries_selection_owned_uncertain_planner_after_reload()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        false,
+        ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner,
+    )?;
+    let session_path = fixture.session_path.clone();
+    let task_id = fixture.task_id.clone();
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-started-selection-recovery".to_owned(),
+            task_id: fixture.task_id,
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await?;
+
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .len(),
+        2
+    );
+    let reopened = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    let task = reopened
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("recovered task remains projected");
+    let first = task
+        .participant_attempts
+        .values()
+        .find(|attempt| {
+            attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner && attempt.ordinal == 1
+        })
+        .expect("crashed planner attempt remains auditable");
+    assert_eq!(
+        first.status,
+        sigil_kernel::TaskParticipantAttemptStatus::Interrupted
+    );
+    assert!(
+        first
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("interrupted by explicit continuation"))
+    );
+    let second = task
+        .participant_attempts
+        .values()
+        .find(|attempt| {
+            attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner && attempt.ordinal == 2
+        })
+        .expect("explicit retry uses a fresh planner attempt ordinal");
+    assert_eq!(
+        second.status,
+        sigil_kernel::TaskParticipantAttemptStatus::Completed
+    );
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                    if applied.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_continuation_rejects_exact_selection_only_guidance_after_reload() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        true,
+        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
+    )?;
+    let session_path = fixture.session_path.clone();
+    let exact_guidance = fixture.exact_guidance.clone();
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-exact-selection-recovery".to_owned(),
+            task_id: fixture.task_id,
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await
+        .expect_err("selection-only exact guidance must require re-entry after reload");
+
+    assert!(
+        format!("{error:#}")
+            .contains("pending task guidance requires exact prompt material after recovery")
+    );
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+    assert!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .is_empty()
+    );
+    let durable_log = std::fs::read_to_string(session_path)?;
+    assert!(!durable_log.contains(&exact_guidance));
+    assert!(!durable_log.contains("task_guidance_applied"));
+    Ok(())
+}
+
+#[test]
+fn application_exact_reentry_preserves_active_task_then_recovers_started_planner() -> Result<()> {
+    std::thread::Builder::new()
+        .name("application-exact-reentry-recovery".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let temp = tempfile::tempdir()?;
+                    let fixture = application_guidance_recovery_fixture(
+                        temp.path(),
+                        true,
+                        ApplicationGuidanceRecoveryBoundary::SelectionWithStartedPlanner,
+                    )?;
+                    let config_path = fixture.config_path.clone();
+                    let session_path = fixture.session_path.clone();
+                    let session_scope_id = fixture.session_scope_id.clone();
+                    let task_id = fixture.task_id.clone();
+                    let exact_guidance = fixture.exact_guidance.clone();
+                    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+                    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+                    let services =
+                        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+                            .with_task_role_provider_builder(Arc::new(
+                                CapturingApplicationTaskRoleProviderBuilder {
+                                    executor_requests: Arc::clone(&executor_requests),
+                                    guidance_review_requests: Arc::clone(&guidance_review_requests),
+                                },
+                            ));
+
+                    let prepared = prepare_application_task_continuation(
+                        ApplicationTaskContinuationRequest {
+                            config_path: config_path.clone(),
+                            launch_cwd: temp.path().to_path_buf(),
+                            session_path: session_path.clone(),
+                            session_attachment: None,
+                            expected_session_scope_id: session_scope_id.clone(),
+                            run_id: "run-application-guidance-started-missing-exact".to_owned(),
+                            task_id: task_id.clone(),
+                            guidance: None,
+                            interaction: ApplicationRunInteraction::NonInteractive,
+                            permission_mode: None,
+                        },
+                        &services,
+                    )
+                    .await?;
+                    let (execution, first_control) = prepared.into_parts();
+                    let mut handler = RecordingApplicationRunEvents::default();
+                    let mut approval_handler = AutoApproveHandler;
+                    let error = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await
+        .expect_err("missing exact recovery material must stop before a fresh provider attempt");
+                    assert!(format!("{error:#}").contains(
+                        "pending task guidance requires exact prompt material after recovery"
+                    ));
+
+                    let reopened = Session::load_from_store(
+                        "deepseek",
+                        "deepseek-v4-flash",
+                        JsonlSessionStore::new(&session_path)?,
+                    )?;
+                    let task = reopened
+                        .task_state_projection()
+                        .tasks
+                        .get(&task_id)
+                        .cloned()
+                        .expect("active Task remains projected after admission failure");
+                    assert_eq!(
+                        task.status,
+                        TaskRunStatus::Started,
+                        "missing exact material must not finalize the durable Task as failed"
+                    );
+                    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+                    assert!(
+                        executor_requests
+                            .lock()
+                            .expect("executor request lock should not be poisoned")
+                            .is_empty()
+                    );
+                    drop(first_control);
+                    drop(reopened);
+
+                    let prepared = prepare_application_task_continuation(
+                        ApplicationTaskContinuationRequest {
+                            config_path,
+                            launch_cwd: temp.path().to_path_buf(),
+                            session_path: session_path.clone(),
+                            session_attachment: None,
+                            expected_session_scope_id: session_scope_id,
+                            run_id: "run-application-guidance-started-exact-reentry".to_owned(),
+                            task_id: task_id.clone(),
+                            guidance: Some(exact_guidance.clone()),
+                            interaction: ApplicationRunInteraction::NonInteractive,
+                            permission_mode: None,
+                        },
+                        &services,
+                    )
+                    .await?;
+                    let (execution, _control) = prepared.into_parts();
+                    let output = execution
+                        .execute(&mut handler, &mut approval_handler)
+                        .await?;
+                    assert_eq!(output.task_status, TaskRunStatus::Completed);
+                    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
+
+                    let reopened = Session::load_from_store(
+                        "deepseek",
+                        "deepseek-v4-flash",
+                        JsonlSessionStore::new(&session_path)?,
+                    )?;
+                    let task = reopened
+                        .task_state_projection()
+                        .tasks
+                        .get(&task_id)
+                        .cloned()
+                        .expect("recovered Task remains projected");
+                    assert_eq!(task.status, TaskRunStatus::Completed);
+                    assert_eq!(
+                        task.participant_attempts
+                            .values()
+                            .find(|attempt| {
+                                attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner
+                                    && attempt.ordinal == 1
+                            })
+                            .map(|attempt| attempt.status),
+                        Some(sigil_kernel::TaskParticipantAttemptStatus::Interrupted)
+                    );
+                    assert_eq!(
+                        task.participant_attempts
+                            .values()
+                            .find(|attempt| {
+                                attempt.purpose == sigil_kernel::TaskParticipantPurpose::Planner
+                                    && attempt.ordinal == 2
+                            })
+                            .map(|attempt| attempt.status),
+                        Some(sigil_kernel::TaskParticipantAttemptStatus::Completed)
+                    );
+                    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
+                    if selected.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+                    assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
+                    Ok(())
+                })
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("application exact re-entry recovery thread panicked"))?
+}
+
+#[tokio::test]
+async fn application_continuation_reenters_exact_selection_only_guidance_with_original_scope()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        true,
+        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
+    )?;
+    let session_path = fixture.session_path.clone();
+    let task_id = fixture.task_id.clone();
+    let exact_guidance = fixture.exact_guidance.clone();
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-exact-selection-reentry".to_owned(),
+            task_id: fixture.task_id,
+            guidance: Some(exact_guidance.clone()),
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await?;
+
+    assert_eq!(output.task_status, TaskRunStatus::Completed);
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 1);
+    let prompts = executor_requests
+        .lock()
+        .expect("executor request lock should not be poisoned")
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2);
+    let first = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_1"))
+        .expect("first executor step request");
+    let second = prompts
+        .iter()
+        .find(|prompt| prompt.contains("Step: step_2"))
+        .expect("second executor step request");
+    assert!(!first.contains(&exact_guidance));
+    assert!(second.contains(&exact_guidance));
+
+    let reopened = Session::load_from_store(
+        "deepseek",
+        "deepseek-v4-flash",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                    if applied.task_id == task_id
+                        && applied.target_step_ids == vec![TaskStepId::new("step_2")
+                            .expect("valid recovery target")]
+            ))
+            .count(),
+        1
+    );
+    assert!(!std::fs::read_to_string(session_path)?.contains(&exact_guidance));
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_continuation_rejects_mismatched_exact_selection_before_provider_io()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        true,
+        ApplicationGuidanceRecoveryBoundary::SelectionOnly,
+    )?;
+    let session_path = fixture.session_path.clone();
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path: fixture.config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: fixture.session_path,
+            session_attachment: None,
+            expected_session_scope_id: fixture.session_scope_id,
+            run_id: "run-application-guidance-mismatched-selection-reentry".to_owned(),
+            task_id: fixture.task_id,
+            guidance: Some(
+                "replace step 1 entirely with authorization=a-different-secret-value".to_owned(),
+            ),
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = RecordingApplicationRunEvents::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await
+        .expect_err("mismatched exact guidance must fail before provider I/O");
+
+    assert!(
+        format!("{error:#}")
+            .contains("explicit guidance conflicts with pending durable task guidance")
+    );
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+    assert!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .is_empty()
+    );
+    assert!(!std::fs::read_to_string(session_path)?.contains("task_guidance_applied"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = application_guidance_recovery_fixture(
+        temp.path(),
+        false,
+        ApplicationGuidanceRecoveryBoundary::Materialized,
+    )?;
+    let root_config = RootConfig::load(&fixture.config_path)?;
+    let (provider_name, route) =
+        crate::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    let mut session = Session::load_from_store_with_route(
+        provider_name,
+        route.model_ref.model_id.clone(),
+        Some(route),
+        JsonlSessionStore::new(&fixture.session_path)?,
+    )?;
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        "message-materialized-guidance-new-selection",
+        "run-materialized-guidance-new-selection",
+    )?;
+    let mut source_message = ModelMessage::user(fixture.safe_guidance.clone());
+    source_message.id = source_turn.message_id.clone();
+    session.append_user_message(source_message)?;
+    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
+        sigil_kernel::ConversationRouteDecisionRecordedEntry {
+            decision_id: sigil_kernel::conversation_route_decision_id_for_source(&source_turn),
+            source_turn: source_turn.clone(),
+            route: sigil_kernel::ConversationRoute::Task,
+            reason_codes: Vec::new(),
+            configured_policy: TaskRoutingPolicy::Auto,
+            effective_capability: sigil_kernel::AutomaticRouteCapability::DirectTask,
+            policy_snapshot_hash: "task-routing-policy".to_owned(),
+            route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
+            decided_at_ms: 2,
+        },
+    ))?;
+    let prompt = sigil_kernel::project_conversation_prompt_for_persistence(&fixture.exact_guidance);
+    let selection = sigil_kernel::TaskContinuationSelectedEntry {
+        task_id: fixture.task_id.clone(),
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        source_turn: source_turn.clone(),
+        route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: prompt.exact_prompt_required,
+        guidance: prompt.safe_prompt,
+        selected_at_ms: 2,
+    };
+    session.append_control(ControlEntry::TaskContinuationSelected(selection.clone()))?;
+    let profile_registry =
+        crate::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            temp.path(),
+            session.entries(),
+        )?;
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let guidance_review_requests = Arc::new(AtomicUsize::new(0));
+    let task_execution = ApplicationTaskExecutionRuntime {
+        root_config: root_config.clone(),
+        options: crate::build_run_options(
+            &root_config,
+            temp.path().to_path_buf(),
+            InteractionMode::Headless,
+            None,
+        ),
+        base_registry: ToolRegistry::new(),
+        agent_supervisor: crate::AgentSupervisor::new(
+            profile_registry,
+            crate::AgentBudgetPolicy::from_root_config(&root_config),
+            application_task_provider_capabilities(),
+        ),
+        role_provider_builder: Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }),
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let cancellation_handle = cancellation_owner.handle();
+    let root_output = AgentRunOutput {
+        disposition: AgentRunDisposition::ContinueDurableTask(Box::new(
+            sigil_kernel::ContinueDurableTaskAction {
+                task_id: fixture.task_id.clone(),
+                source_turn,
+                plan_version: Some(1),
+                task_status: TaskRunStatus::Paused,
+                plan_status: Some(TaskPlanStatus::Accepted),
+                route_contract_fingerprint: "sha256:new-selection-after-materialization".to_owned(),
+                guidance: sigil_kernel::SecretString::new(fixture.exact_guidance),
+                guidance_receipt: selection,
+            },
+        )),
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome {
+            terminal_reason: AgentRunTerminalReason::TaskHandoff,
+            tool_calls: 1,
+            ..AgentRunOutcome::default()
+        },
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = continue_application_task_handoff(
+        &mut session,
+        root_output,
+        Some(task_execution),
+        &mut handler,
+        &mut approval_handler,
+        &cancellation_handle,
+    )
+    .await
+    .expect_err("a new typed authority must not fork unfinished materialized guidance");
+
+    assert!(
+        format!("{error:#}").contains("conflicts with unfinished durable materialization"),
+        "unexpected conflict error: {error:#}"
+    );
+    assert_eq!(guidance_review_requests.load(Ordering::SeqCst), 0);
+    assert!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .is_empty()
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+                    if applied.task_id == fixture.task_id
+            ))
+            .count(),
+        1,
+        "the original materialization remains the only planner-owned decision"
     );
     Ok(())
 }

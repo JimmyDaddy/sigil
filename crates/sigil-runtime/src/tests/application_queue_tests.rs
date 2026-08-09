@@ -637,6 +637,14 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
     .await?;
 
     let request = assembly.frozen_request.request();
+    let system_prompt = request
+        .messages
+        .iter()
+        .find(|message| message.id == "system:base")
+        .and_then(|message| message.content.as_deref())
+        .expect("frozen request contains the effective base system prompt");
+    assert!(system_prompt.contains("Writable memory is available"));
+    assert!(!system_prompt.contains("Writable memory tools are unavailable"));
     assert_eq!(
         request
             .tools
@@ -646,7 +654,9 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
         vec![
             sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
             sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
-            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+            sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
+            sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
         ]
     );
     let routing_index = request

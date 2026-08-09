@@ -4,13 +4,17 @@ use anyhow::{Result, anyhow};
 use sigil_kernel::{
     AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DiscoveredCheck, EventHandler, EvidenceScope, RootConfig, RunCancellationHandle,
-    RunCancellationOwner, RunCancellationRecorder, RunCancellationTarget, RunEvent, RunTaskGuard,
-    SandboxProfileRequirement, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    TaskChildSessionStatus, TaskGuidancePromotedEntry, TaskId, TaskPauseRequest,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus,
-    ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
-    discover_candidate_checks_with_user_config, safe_persistence_text, stable_workspace_id,
+    DiscoveredCheck, EventHandler, EvidenceScope, RecoverableTaskGuidanceReviewAuthority,
+    RootConfig, RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
+    RunCancellationTarget, RunEvent, RunTaskGuard, SandboxProfileRequirement,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus,
+    TaskContinuationSelectedEntry, TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptStatus,
+    TaskPauseRequest, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus, ToolRegistry, VerificationPolicy,
+    VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
+    discover_candidate_checks_with_user_config, recoverable_task_guidance,
+    recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
+    safe_persistence_text, stable_workspace_id,
 };
 use thiserror::Error;
 
@@ -48,6 +52,7 @@ pub struct ContinuedTaskExecution<'a, H> {
     pub requested_task_id: Option<TaskId>,
     pub guidance: Option<String>,
     pub guidance_promotion: Option<TaskGuidancePromotedEntry>,
+    pub continuation_guidance_receipt: Option<TaskContinuationSelectedEntry>,
     pub root_config: RootConfig,
     pub options: AgentRunOptions,
     pub base_registry: ToolRegistry,
@@ -518,6 +523,7 @@ where
         requested_task_id,
         guidance,
         guidance_promotion,
+        continuation_guidance_receipt,
         root_config,
         options,
         base_registry,
@@ -528,10 +534,108 @@ where
         tool_artifact_read_budget,
     } = request;
     let task = resolve_task_continuation(session, requested_task_id.as_ref().map(TaskId::as_str))?;
-    if task.needs_planning && guidance.is_some() {
-        return Err(anyhow!(
-            "recovered task has no accepted plan; continue it without guidance to rerun the planner"
-        ));
+    let mut explicit_focus_required = validate_continuation_guidance_authority(
+        task.needs_planning,
+        guidance.as_deref(),
+        guidance_promotion.as_ref(),
+        continuation_guidance_receipt.as_ref(),
+    )?;
+    if continuation_guidance_receipt.is_some()
+        && session.task_state_projection().current_task_id.as_ref() != Some(&task.task_id)
+    {
+        // A recovered typed selection may belong to an earlier user turn. The new source turn
+        // deliberately clears conversation focus, so dispatch must durably reselect the exact
+        // already-validated Task before any provider executes.
+        explicit_focus_required = true;
+    }
+    let recoverable_materialization = if !task.needs_planning {
+        // Every continuation entry point resolves unfinished durable guidance before it creates a
+        // new authority or performs provider I/O. This pure admission check prevents direct,
+        // typed, queued, and slash continuations from forking an already-accepted review after a
+        // crash. Sensitive, incomplete, or conflicting materializations fail before focus moves.
+        recoverable_task_guidance(session, &task.task_id, guidance.as_deref())?
+    } else {
+        None
+    };
+    let recoverable_review = if !task.needs_planning && recoverable_materialization.is_none() {
+        recoverable_task_guidance_review(session, &task.task_id, guidance.as_deref())?
+    } else {
+        None
+    };
+    if let Some(recovered) = recoverable_materialization.as_ref() {
+        let incoming_matches = match (
+            guidance_promotion.as_ref(),
+            continuation_guidance_receipt.as_ref(),
+        ) {
+            (Some(incoming), None) => {
+                recovered.matches_promotion(incoming)
+                    && session.entries().iter().any(|entry| {
+                        matches!(
+                            entry,
+                            SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(recorded))
+                                if recorded == incoming
+                        )
+                    })
+            }
+            (None, Some(incoming)) => {
+                recovered.matches_continuation_selection(incoming)?
+                    && session.entries().iter().any(|entry| {
+                        matches!(
+                            entry,
+                            SessionLogEntry::Control(
+                                ControlEntry::TaskContinuationSelected(recorded)
+                            ) if recorded == incoming
+                        )
+                    })
+            }
+            (None, None) => true,
+            (Some(_), Some(_)) => false,
+        };
+        if !incoming_matches {
+            return Err(anyhow!(
+                "incoming task guidance authority conflicts with unfinished durable materialization"
+            ));
+        }
+    }
+    if let Some(recovered) = recoverable_review.as_ref() {
+        let incoming_matches = match (
+            &recovered.authority,
+            guidance_promotion.as_ref(),
+            continuation_guidance_receipt.as_ref(),
+        ) {
+            (RecoverableTaskGuidanceReviewAuthority::Promoted(recorded), Some(incoming), None) => {
+                recorded.as_ref() == incoming
+            }
+            (
+                RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(recorded),
+                None,
+                Some(incoming),
+            ) => recorded.as_ref() == incoming,
+            (_, None, None) => true,
+            _ => false,
+        };
+        if !incoming_matches {
+            return Err(anyhow!(
+                "incoming task guidance authority conflicts with an unfinished durable review"
+            ));
+        }
+    }
+    if let Some(recovered) = recoverable_review.as_ref() {
+        let retry_controls = recoverable_task_guidance_review_retry_controls(session, recovered)?;
+        if !retry_controls.is_empty() {
+            session.append_controls(retry_controls.clone())?;
+            for control in retry_controls {
+                handler.handle(RunEvent::Control(control))?;
+            }
+        }
+    }
+    if explicit_focus_required {
+        append_explicit_task_run_target(
+            session,
+            handler,
+            &task.task_id,
+            cancellation_handle.scope_id(),
+        )?;
     }
     materialize_task_verification_config(
         session,
@@ -565,9 +669,9 @@ where
         None => orchestrator,
     };
     let output = if task.needs_planning {
-        if guidance_promotion.is_some() {
+        if guidance_promotion.is_some() || continuation_guidance_receipt.is_some() {
             return Err(anyhow!(
-                "recovered task has no accepted plan; guidance promotion is not applicable"
+                "recovered task has no accepted plan; guidance receipt is not applicable"
             ));
         }
         orchestrator
@@ -583,9 +687,59 @@ where
                 approval_handler,
             )
             .await
+    } else if let Some(recovered) = recoverable_materialization {
+        orchestrator
+            .continue_run(
+                session,
+                task_request,
+                executor_options,
+                subagent_read_options,
+                subagent_write_options,
+                Some(recovered.guidance),
+                handler,
+                approval_handler,
+            )
+            .await
+    } else if let Some(recovered) = recoverable_review {
+        match recovered.authority {
+            RecoverableTaskGuidanceReviewAuthority::Promoted(promotion) => {
+                orchestrator
+                    .continue_run_with_guidance_review(
+                        session,
+                        task_request,
+                        planner_options,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        root_config.task.max_plan_steps,
+                        recovered.guidance,
+                        *promotion,
+                        handler,
+                        approval_handler,
+                    )
+                    .await
+            }
+            RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selection) => {
+                orchestrator
+                    .continue_run_with_conversation_guidance_review(
+                        session,
+                        task_request,
+                        planner_options,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        root_config.task.max_plan_steps,
+                        recovered.guidance,
+                        *selection,
+                        handler,
+                        approval_handler,
+                    )
+                    .await
+            }
+        }
     } else {
-        match (guidance, guidance_promotion) {
-            (Some(guidance), Some(promotion)) => {
+        match (guidance, guidance_promotion, continuation_guidance_receipt) {
+            (Some(guidance), Some(promotion), None) => {
                 orchestrator
                     .continue_run_with_guidance_review(
                         session,
@@ -602,7 +756,24 @@ where
                     )
                     .await
             }
-            (guidance, None) => {
+            (Some(guidance), None, Some(selection)) => {
+                orchestrator
+                    .continue_run_with_conversation_guidance_review(
+                        session,
+                        task_request,
+                        planner_options,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        root_config.task.max_plan_steps,
+                        guidance,
+                        selection,
+                        handler,
+                        approval_handler,
+                    )
+                    .await
+            }
+            (guidance, None, None) => {
                 orchestrator
                     .continue_run(
                         session,
@@ -616,12 +787,108 @@ where
                     )
                     .await
             }
-            (None, Some(_)) => Err(anyhow!(
-                "task guidance promotion is missing exact prompt material"
+            (None, Some(_), None) | (None, None, Some(_)) => Err(anyhow!(
+                "task guidance receipt is missing exact prompt material"
+            )),
+            (_, Some(_), Some(_)) => Err(anyhow!(
+                "task continuation supplied conflicting guidance authorities"
             )),
         }
     }?;
     Ok(output.status)
+}
+
+fn validate_continuation_guidance_authority(
+    needs_planning: bool,
+    guidance: Option<&str>,
+    guidance_promotion: Option<&TaskGuidancePromotedEntry>,
+    continuation_guidance_receipt: Option<&TaskContinuationSelectedEntry>,
+) -> Result<bool> {
+    if needs_planning {
+        if guidance.is_some() {
+            return Err(anyhow!(
+                "recovered task has no accepted plan; continue it without guidance to rerun the planner"
+            ));
+        }
+        if guidance_promotion.is_some() || continuation_guidance_receipt.is_some() {
+            return Err(anyhow!(
+                "recovered task has no accepted plan; guidance receipt is not applicable"
+            ));
+        }
+        return Ok(true);
+    }
+    match (guidance, guidance_promotion, continuation_guidance_receipt) {
+        (Some(_), Some(_), None) | (Some(_), None, Some(_)) => Ok(false),
+        (_, None, None) => Ok(true),
+        (None, Some(_), None) | (None, None, Some(_)) => Err(anyhow!(
+            "task guidance receipt is missing exact prompt material"
+        )),
+        (_, Some(_), Some(_)) => Err(anyhow!(
+            "task continuation supplied conflicting guidance authorities"
+        )),
+    }
+}
+
+fn append_explicit_task_run_target<H>(
+    session: &mut Session,
+    handler: &mut H,
+    task_id: &TaskId,
+    run_scope_id: &str,
+) -> Result<()>
+where
+    H: EventHandler,
+{
+    let latest_bound_scope = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
+                if &binding.task_id == task_id =>
+            {
+                Some(binding.run_scope_id.as_str())
+            }
+            _ => None,
+        });
+    if latest_bound_scope != Some(run_scope_id) {
+        return Err(anyhow!(
+            "explicit task continuation cancellation scope is not durably bound to the selected task"
+        ));
+    }
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("explicit task continuation target is no longer present"))?;
+    let plan_status = task
+        .latest_plan_version
+        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
+    let selected = TaskRunTargetSelectedEntry::new(
+        task_id.clone(),
+        run_scope_id,
+        task.status,
+        task.latest_plan_version,
+        plan_status,
+    );
+    if let Some(existing) = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(existing))
+            if existing.selection_id == selected.selection_id =>
+        {
+            Some(existing)
+        }
+        _ => None,
+    }) {
+        if existing != &selected {
+            return Err(anyhow!(
+                "explicit task continuation selection has conflicting durable facts"
+            ));
+        }
+        return Ok(());
+    }
+    session.append_control(ControlEntry::TaskRunTargetSelected(selected.clone()))?;
+    handler.handle(RunEvent::Control(ControlEntry::TaskRunTargetSelected(
+        selected,
+    )))
 }
 
 /// Runs an admitted handoff task and atomically claims the shared root terminal.
@@ -691,6 +958,51 @@ pub fn finalize_task_root(
                 "task orchestration failed before a terminal state: {error:#}"
             ))),
         }))?;
+    }
+    result
+}
+
+/// Finalizes one continuation without turning admission/re-entry failures into Task failure.
+///
+/// A continuation can fail before it starts a new role attempt (for example because sensitive
+/// guidance must be re-entered after restart). Such an error belongs to the conversation attempt,
+/// not to the durable Task. Once a new participant attempt has started, the ordinary root
+/// finalizer retains its fail-safe terminal behavior.
+pub fn finalize_task_continuation_root(
+    session: &mut Session,
+    task_id: &TaskId,
+    parent_session_ref: &SessionRef,
+    objective: &str,
+    terminal_cancellation: &RunCancellationHandle,
+    continuation_entry_frontier: usize,
+    result: Result<TaskRunStatus>,
+) -> Result<TaskRunStatus> {
+    let participant_started = session
+        .entries()
+        .iter()
+        .skip(continuation_entry_frontier)
+        .any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(attempt))
+                    if &attempt.task_id == task_id
+                        && attempt.status == TaskParticipantAttemptStatus::Started
+            )
+        });
+    if result.is_ok() || participant_started {
+        return finalize_task_root(
+            session,
+            task_id,
+            parent_session_ref,
+            objective,
+            terminal_cancellation,
+            result,
+        );
+    }
+    if !terminal_cancellation.is_naturally_finalized()
+        && !terminal_cancellation.try_finalize_naturally()
+    {
+        return Err(anyhow!("run cancellation won the task terminal-state race"));
     }
     result
 }

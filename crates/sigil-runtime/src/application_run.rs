@@ -23,8 +23,8 @@ use sigil_kernel::{
     RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest,
     TaskRunStatus, TaskVerificationRerunRequest, ToolRegistryScope, VerificationProductView,
     WorkspaceTrust, conversation_route_routing_contract_material, rerun_task_verification_check,
-    resolve_workspace_root, route_surface_tool_specs, safe_persistence_text,
-    verification_product_view, workspace_trust_from_entries,
+    resolve_workspace_root, safe_persistence_text, verification_product_view,
+    workspace_trust_from_entries,
 };
 
 use crate::{
@@ -2038,6 +2038,18 @@ where
     H: EventHandler + Send,
     A: ApprovalHandler + Send,
 {
+    if let AgentRunDisposition::ContinueDurableTask(action) = output.disposition.clone() {
+        return continue_application_existing_task(
+            session,
+            output,
+            *action,
+            task_execution,
+            handler,
+            approval_handler,
+            cancellation_handle,
+        )
+        .await;
+    }
     let AgentRunDisposition::StartDurableTask(action) = output.disposition.clone() else {
         return Ok(output);
     };
@@ -2085,6 +2097,82 @@ where
         approval_handler,
     )
     .await?;
+    application_task_terminal_output(session, &action.task_id, status, output)
+}
+
+async fn continue_application_existing_task<H, A>(
+    session: &mut Session,
+    output: AgentRunOutput,
+    action: sigil_kernel::ContinueDurableTaskAction,
+    task_execution: Option<ApplicationTaskExecutionRuntime>,
+    handler: &mut H,
+    approval_handler: &mut A,
+    cancellation_handle: &RunCancellationHandle,
+) -> Result<AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let Some(task_execution) = task_execution else {
+        return Ok(output);
+    };
+    let task = match crate::validate_task_continuation_action(session, &action) {
+        Ok(task) => task,
+        Err(error) => {
+            if !cancellation_handle.is_naturally_finalized()
+                && !cancellation_handle.try_finalize_naturally()
+            {
+                bail!("run cancellation won the stale-task terminal-state race");
+            }
+            return Err(error).context("typed task continuation is stale");
+        }
+    };
+    let ApplicationTaskExecutionRuntime {
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+    } = task_execution;
+    let result = crate::agent_supervisor::task_execution::bind_task_run_cancellation_scope(
+        session,
+        &action.task_id,
+        cancellation_handle,
+    );
+    let continuation_entry_frontier = session.entries().len();
+    let result = match result {
+        Ok(()) => {
+            crate::agent_supervisor::task_execution::continue_task_execution(
+                session,
+                crate::agent_supervisor::task_execution::ContinuedTaskExecution {
+                    requested_task_id: Some(action.task_id.clone()),
+                    guidance: Some(action.guidance.expose_secret().to_owned()),
+                    guidance_promotion: None,
+                    continuation_guidance_receipt: Some(action.guidance_receipt),
+                    root_config,
+                    options,
+                    base_registry,
+                    agent_supervisor,
+                    role_provider_builder: role_provider_builder.as_ref(),
+                    handler,
+                    cancellation_handle: cancellation_handle.clone(),
+                    tool_artifact_read_budget: None,
+                },
+                approval_handler,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    let status = crate::agent_supervisor::task_execution::finalize_task_continuation_root(
+        session,
+        &action.task_id,
+        &task.parent_session_ref,
+        &task.objective,
+        cancellation_handle,
+        continuation_entry_frontier,
+        result,
+    )?;
     application_task_terminal_output(session, &action.task_id, status, output)
 }
 
@@ -2617,7 +2705,7 @@ async fn prepare_application_run_internal(
         cancellation_handle,
         root_task_guard,
         model_ref,
-        options,
+        mut options,
         target_max_tokens,
         mut input,
         run_id,
@@ -2686,6 +2774,17 @@ async fn prepare_application_run_internal(
     )
     .map_err(ApplicationRunPrepareError::execution)?;
     let registry = surface.registry;
+    let writable_memory_available = options.memory_config.writable
+        && registry
+            .spec_for(sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME)
+            .is_some()
+        && registry
+            .spec_for(sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME)
+            .is_some();
+    // Tool scoping may remove one or both durable-memory tools after configuration was loaded.
+    // Every frozen/live request must consume the same effective capability as the final registry
+    // so the system prompt never advertises an unavailable write path.
+    options.memory_config.writable = writable_memory_available;
     let parent_session_ref = SessionRef::new_relative(
         session_path
             .file_name()
@@ -2713,6 +2812,7 @@ async fn prepare_application_run_internal(
         root_config.task.enabled,
         root_config.task.routing_policy,
     )
+    .with_writable_memory_routing(writable_memory_available)
     .with_orchestration_route_guard(orchestration_route_guard)
     .with_route_capability_evidence(crate::RouteCapabilityEvidence {
         provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
@@ -2743,7 +2843,7 @@ async fn prepare_application_run_internal(
             let route_capability = conversation_coordinator.resolve_route_capability(&session);
             let automatic_routing = route_capability.routes_automatically();
             let tool_specs = if automatic_routing {
-                route_surface_tool_specs(route_capability)
+                conversation_coordinator.route_tool_specs_for_session(&session, route_capability)
             } else {
                 registry.specs()
             };
@@ -5191,6 +5291,13 @@ fn application_terminal_projection(
             ApplicationRunTerminalStatus::Blocked,
             PublicRunEventKind::RunFailed {
                 error: "run requested a durable task handoff, but this application surface has not attached the task executor"
+                    .to_owned(),
+            },
+        ),
+        AgentRunDisposition::ContinueDurableTask(_) => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunFailed {
+                error: "run requested a durable task continuation, but this application surface has not attached the task executor"
                     .to_owned(),
             },
         ),

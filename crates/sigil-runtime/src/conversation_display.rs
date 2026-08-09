@@ -397,28 +397,124 @@ struct ToolProjection {
 struct ConversationTaskControlProjection {
     events: PublicTaskEventProjector,
     tasks: BTreeMap<String, ConversationTaskControlV1>,
-    last_seen_order: BTreeMap<String, u64>,
-    next_order: u64,
+    current_task_id: Option<String>,
+    focus_explicitly_selected: bool,
+    task_run_scopes: BTreeMap<String, String>,
 }
 
 impl ConversationTaskControlProjection {
+    fn apply_entry(&mut self, entry: &SessionLogEntry) {
+        match entry {
+            SessionLogEntry::User(_) => self.clear_current(),
+            SessionLogEntry::Control(control) => self.apply_control(control),
+            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResultV3(_) => {}
+        }
+    }
+
     fn apply_control(&mut self, control: &ControlEntry) {
+        match control {
+            ControlEntry::ConversationInputPromoted(_) => self.clear_current(),
+            ControlEntry::PlanDraftCreated(_) => self.clear_current(),
+            ControlEntry::ConversationRouteDecisionRecorded(entry)
+                if matches!(
+                    entry.route,
+                    sigil_kernel::ConversationRoute::Chat
+                        | sigil_kernel::ConversationRoute::PlanReview
+                ) =>
+            {
+                self.clear_current();
+            }
+            ControlEntry::PlanReviewAttempt(entry)
+                if entry.status == sigil_kernel::PlanReviewAttemptStatus::Started =>
+            {
+                self.clear_current();
+            }
+            ControlEntry::TaskHandoffResolved(entry)
+                if entry.decision == sigil_kernel::TaskHandoffDecision::Accepted =>
+            {
+                if let Some(task_id) = entry.task_id.as_ref() {
+                    self.select_current(task_id.as_str());
+                }
+            }
+            ControlEntry::TaskCreatedFromPlan(entry) if entry.stale_reason.is_none() => {
+                self.select_current(entry.task_id.as_str());
+            }
+            ControlEntry::TaskContinuationSelected(entry) => {
+                let matches_frozen_task =
+                    self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
+                        task.status == task_run_status_label(entry.task_status)
+                            && task.plan_version == entry.plan_version
+                            && task.plan_status.as_deref()
+                                == entry.plan_status.map(task_plan_status_label)
+                    });
+                if matches_frozen_task {
+                    self.select_current(entry.task_id.as_str());
+                } else {
+                    self.clear_current();
+                }
+            }
+            ControlEntry::TaskGuidancePromoted(entry) => {
+                let matches_accepted_plan =
+                    self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
+                        !matches!(task.status.as_str(), "completed" | "cancelled")
+                            && task.plan_version == Some(entry.plan_version)
+                            && task.plan_status.as_deref() == Some("accepted")
+                    });
+                if matches_accepted_plan {
+                    self.select_current(entry.task_id.as_str());
+                } else {
+                    self.clear_current();
+                }
+            }
+            ControlEntry::TaskRunCancellationScopeBound(entry) => {
+                self.task_run_scopes.insert(
+                    entry.task_id.as_str().to_owned(),
+                    entry.run_scope_id.clone(),
+                );
+            }
+            ControlEntry::TaskRunTargetSelected(entry) => {
+                let matches_scope =
+                    self.task_run_scopes.get(entry.task_id.as_str()) == Some(&entry.run_scope_id);
+                let matches_frozen_task =
+                    self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
+                        task.status == task_run_status_label(entry.task_status)
+                            && task.plan_version == entry.plan_version
+                            && task.plan_status.as_deref()
+                                == entry.plan_status.map(task_plan_status_label)
+                    });
+                if entry.validate_shape().is_ok() && matches_scope && matches_frozen_task {
+                    self.select_current(entry.task_id.as_str());
+                }
+            }
+            ControlEntry::TaskRun(entry)
+                if entry.status == sigil_kernel::TaskRunStatus::Started
+                    && !self.tasks.contains_key(entry.task_id.as_str()) =>
+            {
+                self.select_current(entry.task_id.as_str());
+            }
+            _ => {}
+        }
         for event in self.events.project_control(control) {
             self.apply_event(event);
         }
     }
 
-    fn latest_unfinished(&self) -> Option<ConversationTaskControlV1> {
-        self.last_seen_order
-            .iter()
-            .filter_map(|(task_id, order)| {
-                self.tasks.get(task_id).and_then(|task| {
-                    (!matches!(task.status.as_str(), "completed" | "cancelled"))
-                        .then_some((order, task))
-                })
-            })
-            .max_by_key(|(order, _)| *order)
-            .map(|(_, task)| task.clone())
+    fn current(&self) -> Option<ConversationTaskControlV1> {
+        self.current_task_id
+            .as_ref()
+            .and_then(|task_id| self.tasks.get(task_id))
+            .filter(|task| !matches!(task.status.as_str(), "completed" | "cancelled"))
+            .cloned()
+    }
+
+    fn clear_current(&mut self) {
+        self.current_task_id = None;
+        self.focus_explicitly_selected = true;
+    }
+
+    fn select_current(&mut self, task_id: &str) {
+        self.current_task_id = Some(task_id.to_owned());
+        self.focus_explicitly_selected = true;
     }
 
     fn apply_event(&mut self, event: PublicRunEventKind) {
@@ -603,9 +699,9 @@ impl ConversationTaskControlProjection {
     }
 
     fn task(&mut self, task_id: &str) -> &mut ConversationTaskControlV1 {
-        self.next_order = self.next_order.saturating_add(1);
-        self.last_seen_order
-            .insert(task_id.to_owned(), self.next_order);
+        if !self.focus_explicitly_selected {
+            self.current_task_id = Some(task_id.to_owned());
+        }
         self.tasks
             .entry(task_id.to_owned())
             .or_insert_with(|| ConversationTaskControlV1 {
@@ -624,6 +720,27 @@ impl ConversationTaskControlProjection {
                 lanes_truncated: false,
                 can_continue: true,
             })
+    }
+}
+
+fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskRunStatus::Started => "started",
+        sigil_kernel::TaskRunStatus::Running => "running",
+        sigil_kernel::TaskRunStatus::Paused => "paused",
+        sigil_kernel::TaskRunStatus::Completed => "completed",
+        sigil_kernel::TaskRunStatus::Failed => "failed",
+        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_plan_status_label(status: sigil_kernel::TaskPlanStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskPlanStatus::Proposed => "proposed",
+        sigil_kernel::TaskPlanStatus::Accepted => "accepted",
+        sigil_kernel::TaskPlanStatus::Superseded => "superseded",
+        sigil_kernel::TaskPlanStatus::Rejected => "rejected",
     }
 }
 
@@ -862,7 +979,7 @@ pub fn conversation_display_page_from_records(
         items,
         next_cursor,
         has_more,
-        task_control: task_control.latest_unfinished(),
+        task_control: task_control.current(),
         plan_review: plan_review.into_public(current_workspace_snapshot_id),
     })
 }
@@ -979,9 +1096,7 @@ fn project_record(
     }
 
     if let Some(entry) = record.session_log_entry()? {
-        if let SessionLogEntry::Control(control) = &entry {
-            task_control.apply_control(control);
-        }
+        task_control.apply_entry(&entry);
         return project_session_entry(
             record,
             expected_scope,

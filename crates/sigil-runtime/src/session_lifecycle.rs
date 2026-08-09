@@ -893,8 +893,9 @@ impl LocalSessionLifecycleService {
     /// Runs manifest-only artifact GC for one exact session identity.
     ///
     /// `roots` must come from the active incremental descriptor/context/read projections. The
-    /// lifecycle service adds a whole-session hold when the session is pinned, then delegates to
-    /// the store without reading or locking the session JSONL.
+    /// lifecycle service adds a whole-session hold when the session is pinned, reads the current
+    /// canonical session through its shared coordinator to append durable availability changes,
+    /// then performs manifest-only physical collection.
     ///
     /// # Errors
     ///

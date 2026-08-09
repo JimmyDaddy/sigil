@@ -2,21 +2,25 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentFinalAnswerRef, AgentRole, AgentRunInput, AgentRunPurpose, AssistantMessageKind,
-    ControlEntry, ConversationTurnRef, ImageAttachment, ImageMimeType, JsonlSessionStore,
-    ModelMessage, RunCancellationRequestedEntry, RunCancellationTarget, Session, SessionLogEntry,
-    SessionRef, TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffDecision,
-    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskParticipantResultEntry,
-    TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+    ContinueDurableTaskAction, ControlEntry, ConversationRoute,
+    ConversationRouteDecisionRecordedEntry, ConversationTurnRef, ImageAttachment, ImageMimeType,
+    JsonlSessionStore, ModelMessage, RunCancellationRequestedEntry, RunCancellationTarget,
+    SecretString, Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
+    TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffRequestedEntry,
+    TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
+    TaskParticipantPurpose, TaskParticipantResultEntry, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
     WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseScope,
-    durable_task_cancellation_requested, task_participant_attempt_id, task_participant_session_ref,
+    conversation_route_decision_id_for_source, durable_task_cancellation_requested,
+    project_conversation_prompt_for_persistence, task_participant_attempt_id,
+    task_participant_session_ref,
 };
 use tempfile::tempdir;
 
 use super::{
     ConversationCoordinator, automatic_policy_snapshot_hash, handoff_id_for_source,
-    task_id_for_handoff,
+    task_id_for_handoff, validate_task_continuation_action,
 };
 
 fn parent_ref() -> Result<SessionRef> {
@@ -1209,6 +1213,292 @@ fn capability_resolution_is_host_owned_and_fail_closed() -> Result<()> {
     assert_eq!(
         qualified.resolve_route_capability(&session),
         sigil_kernel::AutomaticRouteCapability::DirectTask
+    );
+    Ok(())
+}
+
+#[test]
+fn writable_memory_is_part_of_the_frozen_route_surface_and_fingerprint() -> Result<()> {
+    let without_memory = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let with_memory = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_writable_memory_routing(true);
+    let capability = sigil_kernel::AutomaticRouteCapability::ReviewFirst;
+    assert_eq!(without_memory.route_tool_specs(capability).len(), 2);
+    let with_memory_specs = with_memory.route_tool_specs(capability);
+    assert_eq!(with_memory_specs.len(), 4);
+    assert_eq!(
+        with_memory_specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
+            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+            sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
+            sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
+        ]
+    );
+    for spec in &with_memory_specs[2..] {
+        assert_eq!(spec.access, sigil_kernel::ToolAccess::Write);
+        assert_eq!(spec.preview, sigil_kernel::ToolPreviewCapability::Required);
+        assert_eq!(spec.network_effect, None);
+    }
+
+    let session_without = Session::new("route-fingerprint", "model");
+    let bound_without = without_memory.bind_conversation_input(
+        &session_without,
+        AgentRunInput::user("review this design"),
+        parent_ref()?,
+        "route-without-memory",
+        None,
+        42,
+    )?;
+    let session_with = Session::new("route-fingerprint", "model");
+    let bound_with = with_memory.bind_conversation_input(
+        &session_with,
+        AgentRunInput::user("review this design"),
+        parent_ref()?,
+        "route-with-memory",
+        None,
+        42,
+    )?;
+    let route_binding = |input: AgentRunInput| {
+        let AgentRunPurpose::Conversation(context) = input.purpose.expect("conversation purpose")
+        else {
+            panic!("expected conversation purpose")
+        };
+        (
+            context.writable_memory_routing,
+            context
+                .plan_review
+                .expect("review-first route has a plan review binding")
+                .route_contract_fingerprint,
+        )
+    };
+    let (without_memory_bound, without_memory_fingerprint) = route_binding(bound_without);
+    let (with_memory_bound, with_memory_fingerprint) = route_binding(bound_with);
+    assert!(!without_memory_bound);
+    assert!(with_memory_bound);
+    assert_ne!(without_memory_fingerprint, with_memory_fingerprint);
+    Ok(())
+}
+
+fn seed_current_resumable_task(session: &mut Session) -> Result<TaskId> {
+    let task_id = TaskId::new("task-current")?;
+    let run = |status| {
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("session.jsonl")
+                .expect("valid parent session ref"),
+            objective: "implement the original plan".to_owned(),
+            title: None,
+            status,
+            reason: None,
+        })
+    };
+    session.append_control(run(TaskRunStatus::Started))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("step-current")?,
+            title: "implement original scope".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        }],
+        reason: Some("accepted v1".to_owned()),
+    }))?;
+    session.append_control(run(TaskRunStatus::Paused))?;
+    Ok(task_id)
+}
+
+#[test]
+fn coordinator_exposes_continuation_only_for_the_exact_current_resumable_task() -> Result<()> {
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
+    let mut session = Session::new("continuation-route", "model");
+    let task_id = seed_current_resumable_task(&mut session)?;
+    let capability = coordinator.resolve_route_capability(&session);
+    assert!(
+        coordinator
+            .route_tool_specs_for_session(&session, capability)
+            .iter()
+            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME)
+    );
+
+    let bound = coordinator.bind_conversation_input(
+        &session,
+        AgentRunInput::user("also add the requested compatibility check"),
+        parent_ref()?,
+        "continue-current-run",
+        None,
+        42,
+    )?;
+    let AgentRunPurpose::Conversation(context) = bound.purpose.expect("conversation purpose")
+    else {
+        panic!("expected conversation purpose")
+    };
+    let continuation = context
+        .task_continuation
+        .expect("current resumable Task should be host-bound");
+    assert_eq!(continuation.task_id, task_id);
+    assert_eq!(continuation.plan_version, Some(1));
+    assert_eq!(continuation.task_status, TaskRunStatus::Paused);
+    assert_eq!(continuation.plan_status, Some(TaskPlanStatus::Accepted));
+
+    session.append_user_message(ModelMessage::user("unrelated explanation request"))?;
+    assert!(
+        coordinator
+            .route_tool_specs_for_session(&session, capability)
+            .iter()
+            .all(|spec| spec.name != sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME)
+    );
+    Ok(())
+}
+
+fn continuation_action_fixture() -> Result<(Session, ContinueDurableTaskAction)> {
+    let mut session = Session::new("continuation-validation", "model");
+    let task_id = seed_current_resumable_task(&mut session)?;
+    let guidance = "also add the requested compatibility check";
+    let prompt = project_conversation_prompt_for_persistence(guidance);
+    let mut source = ModelMessage::user(guidance);
+    source.id = "continuation-source-message".to_owned();
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        source.id.clone(),
+        "continuation-source-run",
+    )?;
+    session.append_user_message(source)?;
+    let route_contract_fingerprint = "sha256:continuation-contract".to_owned();
+    session.append_control(ControlEntry::ConversationRouteDecisionRecorded(
+        ConversationRouteDecisionRecordedEntry {
+            decision_id: conversation_route_decision_id_for_source(&source_turn),
+            source_turn: source_turn.clone(),
+            route: ConversationRoute::Task,
+            reason_codes: Vec::new(),
+            configured_policy: TaskRoutingPolicy::Auto,
+            effective_capability: sigil_kernel::AutomaticRouteCapability::DirectTask,
+            policy_snapshot_hash: "sha256:continuation-policy".to_owned(),
+            route_contract_fingerprint: route_contract_fingerprint.clone(),
+            decided_at_ms: 42,
+        },
+    ))?;
+    let receipt = TaskContinuationSelectedEntry {
+        task_id: task_id.clone(),
+        source_turn: source_turn.clone(),
+        plan_version: Some(1),
+        task_status: TaskRunStatus::Paused,
+        plan_status: Some(TaskPlanStatus::Accepted),
+        route_contract_fingerprint: route_contract_fingerprint.clone(),
+        prompt_hash: prompt.prompt_hash,
+        exact_prompt_required: prompt.exact_prompt_required,
+        guidance: prompt.safe_prompt,
+        selected_at_ms: 42,
+    };
+    session.append_control(ControlEntry::TaskContinuationSelected(receipt.clone()))?;
+    Ok((
+        session,
+        ContinueDurableTaskAction {
+            task_id,
+            source_turn,
+            plan_version: Some(1),
+            task_status: TaskRunStatus::Paused,
+            plan_status: Some(TaskPlanStatus::Accepted),
+            route_contract_fingerprint,
+            guidance: SecretString::new(guidance),
+            guidance_receipt: receipt,
+        },
+    ))
+}
+
+#[test]
+fn continuation_dispatch_rejects_stale_plan_and_status_bindings() -> Result<()> {
+    let (mut stale_plan_session, stale_plan_action) = continuation_action_fixture()?;
+    validate_task_continuation_action(&stale_plan_session, &stale_plan_action)?;
+    stale_plan_session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: stale_plan_action.task_id.clone(),
+        plan_version: 2,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("step-v2")?,
+            title: "revised scope".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        }],
+        reason: Some("accepted v2 before dispatch".to_owned()),
+    }))?;
+    assert!(validate_task_continuation_action(&stale_plan_session, &stale_plan_action).is_err());
+
+    let (mut stale_status_session, stale_status_action) = continuation_action_fixture()?;
+    stale_status_session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: stale_status_action.task_id.clone(),
+        parent_session_ref: parent_ref()?,
+        objective: "implement the original plan".to_owned(),
+        title: None,
+        status: TaskRunStatus::Failed,
+        reason: Some("status changed before dispatch".to_owned()),
+    }))?;
+    assert!(
+        validate_task_continuation_action(&stale_status_session, &stale_status_action).is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn continuation_dispatch_accepts_reused_pending_selection_after_new_user_clears_focus() -> Result<()>
+{
+    let (mut session, action) = continuation_action_fixture()?;
+    session.append_user_message(ModelMessage::user(
+        "also add the requested compatibility check",
+    ))?;
+    assert!(session.task_state_projection().current_task().is_none());
+
+    let resolved = validate_task_continuation_action(&session, &action)?;
+
+    assert_eq!(resolved.task_id, action.task_id);
+    assert!(!resolved.needs_planning);
+    let run_scope_id = "scope-reused-pending-selection";
+    session.append_controls(vec![
+        ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
+            task_id: action.task_id.clone(),
+            run_scope_id: run_scope_id.to_owned(),
+        }),
+        ControlEntry::TaskRunTargetSelected(TaskRunTargetSelectedEntry::new(
+            action.task_id.clone(),
+            run_scope_id,
+            action.task_status,
+            action.plan_version,
+            action.plan_status,
+        )),
+    ])?;
+    let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: true,
+            route_qualified: true,
+        });
+    assert!(
+        coordinator
+            .route_tool_specs_for_session(
+                &session,
+                sigil_kernel::AutomaticRouteCapability::DirectTask,
+            )
+            .iter()
+            .any(|spec| spec.name == sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME),
+        "handler-boundary recovery focus must keep exact continuation available after restart"
     );
     Ok(())
 }

@@ -7,8 +7,9 @@ use sigil_kernel::{
 };
 
 use super::{
-    TaskPauseValidationError, TaskStopDisposition, append_task_stop_state, finalize_task_root,
-    prepare_task_run_cancellation, resolve_task_continuation, validate_task_pause_request,
+    TaskPauseValidationError, TaskStopDisposition, append_explicit_task_run_target,
+    append_task_stop_state, finalize_task_root, prepare_task_run_cancellation,
+    resolve_task_continuation, validate_task_pause_request,
 };
 
 #[test]
@@ -72,6 +73,86 @@ fn shared_task_cancellation_scope_is_bound_before_dispatch() -> Result<()> {
         prepared.handle.scope_id()
     );
     let _durable_recorder = prepared.recorder;
+    drop(prepared.task_guard);
+    Ok(())
+}
+
+#[test]
+fn explicit_task_run_target_restores_focus_once_for_the_exact_bound_scope() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = sigil_kernel::JsonlSessionStore::new(directory.path().join("session.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store);
+    let task_id = TaskId::new("task-explicit-focus")?;
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "continue exact task".to_owned(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }),
+        ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        }),
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "continue exact task".to_owned(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: None,
+        }),
+    ])?;
+    session.append_user_message(sigil_kernel::ModelMessage::user("unrelated chat"))?;
+    assert!(session.task_state_projection().current_task().is_none());
+    let prepared = prepare_task_run_cancellation(&mut session, &task_id)?;
+    let mut handler = sigil_kernel::NoopEventHandler;
+
+    append_explicit_task_run_target(
+        &mut session,
+        &mut handler,
+        &task_id,
+        prepared.handle.scope_id(),
+    )?;
+    append_explicit_task_run_target(
+        &mut session,
+        &mut handler,
+        &task_id,
+        prepared.handle.scope_id(),
+    )?;
+
+    assert_eq!(
+        session
+            .task_state_projection()
+            .current_task()
+            .map(|task| &task.task_id),
+        Some(&task_id)
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(_))
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        append_explicit_task_run_target(
+            &mut session,
+            &mut handler,
+            &task_id,
+            "another-unbound-scope",
+        )
+        .is_err()
+    );
     drop(prepared.task_guard);
     Ok(())
 }

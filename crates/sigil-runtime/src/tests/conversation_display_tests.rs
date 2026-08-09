@@ -11,11 +11,12 @@ use sigil_kernel::{
     ConversationRunTerminalStatusV1, DurableEventType, EventClass, JsonlSessionStore, MessageRole,
     ModelMessage, PermissionRisk, SecretRedactor, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalDecisionReceiptV2, ToolApprovalEntry, ToolApprovalTerminalStatusV2,
-    ToolApprovalUserDecision, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolOperation,
-    ToolResult, ToolResultMeta, ToolResultRecordedV3, conversation_promotion_capability_digest,
+    TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskStepStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalDecisionReceiptV2,
+    ToolApprovalEntry, ToolApprovalTerminalStatusV2, ToolApprovalUserDecision,
+    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolOperation, ToolResult,
+    ToolResultMeta, ToolResultRecordedV3, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
 };
 
@@ -1049,6 +1050,158 @@ fn durable_task_control_restores_paused_task_without_private_objective() -> Resu
     }))?;
     let late_step = conversation_display_page(store.path(), &scope, None, 20, None)?;
     assert!(late_step.task_control.is_none());
+    Ok(())
+}
+
+#[test]
+fn unrelated_chat_makes_paused_task_historical_despite_late_task_events() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let task_id = TaskId::new("task-historical-after-chat")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "old durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "old durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for follow-up".to_owned()),
+    }))?;
+    assert_eq!(
+        conversation_display_page(store.path(), &scope, None, 20, None)?
+            .task_control
+            .as_ref()
+            .map(|task| task.task_id.as_str()),
+        Some(task_id.as_str())
+    );
+
+    session.append_user_message(ModelMessage::user("explain an unrelated module"))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: TaskStepId::new("late-step")?,
+        role: AgentRole::SubagentRead,
+        status: TaskStepStatus::Interrupted,
+        title: None,
+        summary: None,
+        reason: Some("late background event".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "old durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("late background status".to_owned()),
+    }))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
+    assert!(page.task_control.is_none());
+    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
+        TaskRunCancellationScopeBoundEntry {
+            task_id: task_id.clone(),
+            run_scope_id: "display-explicit-focus-scope".to_owned(),
+        },
+    ))?;
+    session.append_control(ControlEntry::TaskRunTargetSelected(
+        TaskRunTargetSelectedEntry::new(
+            task_id.clone(),
+            "display-explicit-focus-scope",
+            TaskRunStatus::Paused,
+            Some(1),
+            Some(TaskPlanStatus::Accepted),
+        ),
+    ))?;
+    assert_eq!(
+        conversation_display_page(store.path(), &scope, None, 20, None)?
+            .task_control
+            .as_ref()
+            .map(|task| task.task_id.as_str()),
+        Some(task_id.as_str())
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_plan_draft_makes_paused_task_historical_after_reload() -> Result<()> {
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let task_id = TaskId::new("task-historical-after-explicit-plan")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "old durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: Vec::new(),
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "old durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for follow-up".to_owned()),
+    }))?;
+    assert!(
+        conversation_display_page(store.path(), &scope, None, 20, None)?
+            .task_control
+            .is_some()
+    );
+
+    session.append_control(ControlEntry::PlanDraftCreated(
+        sigil_kernel::PlanDraftCreatedEntry {
+            plan_id: sigil_kernel::PlanId::new("plan-explicit-after-task")?,
+            schema_version: 2,
+            source: sigil_kernel::PlanSourceRef::default(),
+            plan_hash: "sha256:explicit-plan-after-task".to_owned(),
+            summary: "Review an unrelated implementation plan".to_owned(),
+            inline_text: None,
+            steps: Vec::new(),
+            intent_proposal: None,
+            target_paths: Vec::new(),
+            suggested_checks: Vec::new(),
+            risk: None,
+            notes: Vec::new(),
+            workspace_snapshot_id: None,
+            created_at_ms: 42,
+        },
+    ))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "old durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("late background status".to_owned()),
+    }))?;
+
+    let page = conversation_display_page(store.path(), &scope, None, 20, None)?;
+    assert!(
+        page.task_control.is_none(),
+        "a durable explicit plan draft must replace the old paused Task as conversation focus"
+    );
     Ok(())
 }
 

@@ -2574,6 +2574,12 @@ fn task_child_status_and_terminal_status_cover_edges() {
         TaskChildSessionStatus::Interrupted
     );
 
+    max_turns.terminal_reason = AgentRunTerminalReason::FinalAnswerBlocked;
+    assert_eq!(
+        task_child_status_from_outcome("", &max_turns),
+        TaskChildSessionStatus::Failed
+    );
+
     max_turns.terminal_reason = AgentRunTerminalReason::FinalAnswer;
     max_turns.approval_denials = 1;
     assert_eq!(

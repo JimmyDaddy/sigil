@@ -346,6 +346,7 @@ impl PlanReviewCoordinator {
                     ));
                 }
                 AgentRunDisposition::StartDurableTask(_)
+                | AgentRunDisposition::ContinueDurableTask(_)
                 | AgentRunDisposition::TaskPlanAccepted => {
                     return Ok(PlanReviewRunOutcome::Failed(
                         "plan review run attempted an out-of-scope handoff".to_owned(),

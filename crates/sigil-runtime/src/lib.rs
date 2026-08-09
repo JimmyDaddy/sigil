@@ -187,6 +187,7 @@ pub use context_window::{
 };
 pub use conversation_coordinator::{
     ConversationCoordinator, ConversationSourceTurn, RouteCapabilityEvidence,
+    validate_task_continuation_action,
 };
 pub use egress_ordering::{
     ActiveHostedEgress, ActiveQueryEgress, AuthorizedHostedEgress, AuthorizedQueryEgress,

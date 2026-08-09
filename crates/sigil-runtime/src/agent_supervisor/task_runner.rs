@@ -3724,7 +3724,8 @@ pub(crate) fn task_child_status_from_outcome(
         || !outcome.interrupted_tool_calls.is_empty()
     {
         TaskChildSessionStatus::Interrupted
-    } else if outcome.approval_denials > 0
+    } else if outcome.terminal_reason.blocks_successful_completion()
+        || outcome.approval_denials > 0
         || outcome.tool_errors.iter().any(|error| {
             matches!(
                 error.kind,

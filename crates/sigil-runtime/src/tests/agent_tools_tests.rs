@@ -43,10 +43,24 @@ use super::{
     BackgroundChatAgentTask, BackgroundChatAgentThreadRecord, CANCEL_AGENT_TOOL_NAME,
     CLOSE_AGENT_TOOL_NAME, LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
     READ_AGENT_RESULT_TOOL_NAME, REQUEST_AGENT_DELEGATION_TOOL_NAME, SPAWN_AGENT_TOOL_NAME,
-    SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call, hash_text,
-    register_agent_tools, register_agent_tools_with_registry_and_mode,
-    register_agent_tools_with_workspace_and_entries, tool_batch_allows_host_join,
+    SPAWN_AGENTS_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call,
+    child_status_from_outcome, hash_text, register_agent_tools,
+    register_agent_tools_with_registry_and_mode, register_agent_tools_with_workspace_and_entries,
+    tool_batch_allows_host_join,
 };
+
+#[test]
+fn final_answer_blocked_child_is_not_reported_as_completed() {
+    let outcome = AgentRunOutcome {
+        terminal_reason: sigil_kernel::AgentRunTerminalReason::FinalAnswerBlocked,
+        ..AgentRunOutcome::default()
+    };
+
+    assert_eq!(
+        child_status_from_outcome("", &outcome),
+        sigil_kernel::TaskChildSessionStatus::Failed
+    );
+}
 
 struct CompletionReadySink {
     sender: tokio::sync::mpsc::UnboundedSender<(AgentThreadId, bool)>,
@@ -1786,7 +1800,9 @@ fn ordinary_conversation_input(
                 source_turn,
                 routing_policy: TaskRoutingPolicy::Manual,
                 task_handoff: None,
+                task_continuation: None,
                 route_capability: sigil_kernel::AutomaticRouteCapability::Unsupported,
+                writable_memory_routing: false,
                 plan_review: None,
             },
         )))
@@ -5118,6 +5134,7 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
         sigil_kernel::AgentThreadStatus::Running,
         None,
     )?;
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
 
     let blocker = runtime
         .final_answer_blocker(&mut session)?
@@ -5125,6 +5142,7 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
     let payload: serde_json::Value = serde_json::from_str(&blocker)?;
 
     assert_eq!(payload["error"], "join_before_final_agent_pending");
+    assert!(payload.get("session_facts").is_none());
     assert_eq!(
         payload["pending_threads"][0]["thread_id"],
         thread_id.as_str()
@@ -5137,6 +5155,41 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
         payload["pending_threads"][0]["required_action"]["args"]["thread_id"],
         thread_id.as_str()
     );
+    Ok(())
+}
+
+#[test]
+fn final_answer_blocker_ignores_pending_threads_from_an_earlier_root_run() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let earlier = append_projected_agent_thread(
+        &mut session,
+        "agent_pending_earlier_root",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &earlier, "root-run-earlier")?;
+    AgentToolDelegate::set_root_logical_run_id(&mut runtime, Some("root-run-current"));
+
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+
+    let current = append_projected_agent_thread(
+        &mut session,
+        "agent_pending_current_root",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &current, "root-run-current")?;
+    let blocker = runtime
+        .final_answer_blocker(&mut session)?
+        .expect("current-root join dependency should still block final answer");
+
+    assert!(blocker.contains(current.as_str()));
+    assert!(!blocker.contains(earlier.as_str()));
     Ok(())
 }
 
@@ -5155,6 +5208,7 @@ async fn wait_agent_unavailable_join_before_final_thread_unblocks_final_answer()
         sigil_kernel::AgentThreadStatus::Running,
         None,
     )?;
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
 
     assert!(
         runtime.final_answer_blocker(&mut session)?.is_some(),
@@ -5198,6 +5252,7 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
         sigil_kernel::AgentThreadStatus::Running,
         None,
     )?;
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
     session.append_control(ControlEntry::AgentThreadResultRecorded(
         sigil_kernel::AgentThreadResultRecordedEntry {
             result: sigil_kernel::AgentThreadResult {
@@ -5226,6 +5281,7 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
     let payload: serde_json::Value = serde_json::from_str(&blocker)?;
 
     assert_eq!(payload["error"], "join_before_final_agent_result_unread");
+    assert!(payload.get("session_facts").is_none());
     assert_eq!(
         payload["unread_threads"][0]["thread_id"],
         thread_id.as_str()
@@ -5288,18 +5344,56 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
 }
 
 #[test]
+fn final_answer_blocker_ignores_unread_results_from_an_earlier_root_run() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let earlier = append_projected_agent_thread(
+        &mut session,
+        "agent_unread_earlier_root",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &earlier, "root-run-earlier")?;
+    append_test_agent_result(&mut session, &earlier)?;
+    AgentToolDelegate::set_root_logical_run_id(&mut runtime, Some("root-run-current"));
+
+    assert!(runtime.final_answer_blocker(&mut session)?.is_none());
+
+    let current = append_projected_agent_thread(
+        &mut session,
+        "agent_unread_current_root",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &current, "root-run-current")?;
+    append_test_agent_result(&mut session, &current)?;
+    let blocker = runtime
+        .final_answer_blocker(&mut session)?
+        .expect("current-root unread result should still block final answer");
+
+    assert!(blocker.contains(current.as_str()));
+    assert!(!blocker.contains(earlier.as_str()));
+    Ok(())
+}
+
+#[test]
 fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
     let mut session = Session::new("parent", "model");
-    append_projected_agent_thread(
+    let thread_id = append_projected_agent_thread(
         &mut session,
         "agent_backgrounded",
         sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
         sigil_kernel::AgentThreadStatus::Running,
         Some("agent moved to background"),
     )?;
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
 
     assert!(
         runtime.final_answer_blocker(&mut session)?.is_none(),
@@ -5319,6 +5413,61 @@ fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Resu
             .is_some_and(|message| message.contains("not a finalization request"))
     );
     assert_eq!(payload["session_facts"]["subagents"]["running"], 1);
+    Ok(())
+}
+
+#[test]
+fn final_answer_context_only_reports_unsettled_agents_from_the_active_root_run() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let earlier = append_projected_agent_thread(
+        &mut session,
+        "agent_earlier_run",
+        sigil_kernel::AgentInvocationMode::Background,
+        AgentThreadStatus::Running,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &earlier, "root-run-earlier")?;
+    let current = append_projected_agent_thread(
+        &mut session,
+        "agent_current_run",
+        sigil_kernel::AgentInvocationMode::Background,
+        AgentThreadStatus::Running,
+        None,
+    )?;
+    append_agent_admission_for_root(&mut session, &current, "root-run-current")?;
+    AgentToolDelegate::set_root_logical_run_id(&mut runtime, Some("root-run-current"));
+
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome::default();
+    let context = runtime
+        .final_answer_context(&session, &options, &outcome)?
+        .expect("current running child should produce active-run facts");
+    let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
+    assert_eq!(payload["session_facts"]["subagents"]["total"], 1);
+    assert_eq!(
+        payload["session_facts"]["subagents"]["threads"][0]["thread_id"],
+        current.as_str()
+    );
+    assert!(!context.prompt.contains(earlier.as_str()));
+
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: current,
+            status: AgentThreadStatus::Closed,
+            reason: Some("result delivered and thread closed".to_owned()),
+            updated_at_ms: Some(2),
+        },
+    ))?;
+    assert!(
+        runtime
+            .final_answer_context(&session, &options, &outcome)?
+            .is_none(),
+        "closed current-run and unrelated earlier-run children must not keep reinjecting facts"
+    );
     Ok(())
 }
 
@@ -6972,6 +7121,7 @@ async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read()
         AgentThreadStatus::Completed,
         None,
     )?;
+    append_agent_admission_for_root(&mut session, &thread_id, "test-root-logical-run")?;
     let child_session_ref =
         sigil_kernel::SessionRef::new_relative(format!("children/{}.jsonl", thread_id.as_str()))?;
     let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
@@ -7897,6 +8047,80 @@ fn append_projected_agent_thread(
         },
     ))?;
     Ok(thread_id)
+}
+
+fn append_agent_admission_for_root(
+    session: &mut Session,
+    thread_id: &AgentThreadId,
+    root_logical_run_id: &str,
+) -> Result<()> {
+    let source = AgentInvocationGrantSource::Conversation {
+        source_turn: ConversationTurnRef::new(
+            session.session_scope_id(),
+            format!("message-{root_logical_run_id}"),
+            root_logical_run_id,
+        )?,
+    };
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source,
+            authority: DelegationAuthority::ModelProactive,
+            root_logical_run_id: root_logical_run_id.to_owned(),
+            profile_id: AgentProfileId::new("explore")?,
+            role: sigil_kernel::AgentRole::SubagentRead,
+            isolation: TaskIsolationMode::SharedReadOnly,
+            permission_upper_bound: PermissionConfig::default(),
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: "sha256:tools".to_owned(),
+            workspace_snapshot_id: "sha256:workspace".to_owned(),
+            root_cancellation_scope_id: format!("scope-{root_logical_run_id}"),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
+    session.append_control(ControlEntry::AgentDelegationAdmitted(
+        sigil_kernel::AgentDelegationAdmissionEntry {
+            thread_id: thread_id.clone(),
+            profile_id: AgentProfileId::new("explore")?,
+            invocation_mode: sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+            invocation_source: AgentInvocationSource::Chat,
+            authority: sigil_kernel::DelegationAuthorityRecord::ModelProactive,
+            objective_hash: "sha256:objective".to_owned(),
+            tool_contract_fingerprint: "sha256:tools".to_owned(),
+            invocation_grant: Some(grant.durable_record()?),
+            admitted_at_ms: Some(1),
+        },
+    ))?;
+    Ok(())
+}
+
+fn append_test_agent_result(session: &mut Session, thread_id: &AgentThreadId) -> Result<()> {
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: sigil_kernel::SessionRef::new_relative(format!(
+                    "children/{}.jsonl",
+                    thread_id.as_str()
+                ))?,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: "child result summary".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: sigil_kernel::stable_event_hash(format!(
+                    "child-result:{}",
+                    thread_id.as_str()
+                )),
+                final_answer_ref: None,
+            },
+        },
+    ))?;
+    Ok(())
 }
 
 async fn spawned_runtime_session() -> Result<(

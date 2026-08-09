@@ -563,11 +563,16 @@ impl AgentToolDelegate for AgentToolRuntime {
     fn final_answer_blocker(&mut self, session: &mut Session) -> Result<Option<String>> {
         let projection = session.agent_thread_state_projection();
         let continuations = session.agent_result_continuation_projection();
+        let current_run_thread_ids =
+            current_run_agent_thread_ids(session, self.root_logical_run_id.as_deref());
         let pending = projection
             .threads
             .values()
             .filter(|thread| {
-                thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
+                current_run_thread_ids
+                    .as_ref()
+                    .is_none_or(|thread_ids| thread_ids.contains(&thread.thread_id))
+                    && thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
                     && !thread.status.is_terminal()
                     && !agent_thread_is_backgrounded(thread)
             })
@@ -589,8 +594,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                 json!({
                     "error": "join_before_final_agent_pending",
                     "message": "A join-before-final child agent is still running. Do not give the final answer yet; wait for the agent result or read the result if it is ready.",
-                    "pending_threads": pending,
-                    "session_facts": session_facts_summary(session)
+                    "pending_threads": pending
                 })
                 .to_string(),
             ));
@@ -599,7 +603,10 @@ impl AgentToolDelegate for AgentToolRuntime {
             .threads
             .values()
             .filter(|thread| {
-                thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
+                current_run_thread_ids
+                    .as_ref()
+                    .is_none_or(|thread_ids| thread_ids.contains(&thread.thread_id))
+                    && thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
                     && thread.status.is_terminal()
                     && thread.result.is_some()
                     && !thread.result_fully_delivered
@@ -632,8 +639,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                 json!({
                     "error": "join_before_final_agent_result_unread",
                     "message": "A join-before-final child agent finished, but its result has not been read yet. Do not give the final answer until read_agent_result has delivered the child result.",
-                    "unread_threads": unread_results,
-                    "session_facts": session_facts_summary(session)
+                    "unread_threads": unread_results
                 })
                 .to_string(),
             ));
@@ -647,7 +653,8 @@ impl AgentToolDelegate for AgentToolRuntime {
         _options: &AgentRunOptions,
         outcome: &AgentRunOutcome,
     ) -> Result<Option<FinalAnswerContext>> {
-        let facts = collect_session_facts(session, Some(outcome))?;
+        let facts =
+            collect_session_facts(session, Some(outcome), self.root_logical_run_id.as_deref())?;
         if !facts.has_recorded_facts {
             return Ok(None);
         }
@@ -668,25 +675,37 @@ fn agent_thread_is_backgrounded(thread: &sigil_kernel::AgentThreadProjection) ->
         || thread.attempts.values().any(|attempt| attempt.background)
 }
 
+fn current_run_agent_thread_ids(
+    session: &Session,
+    root_logical_run_id: Option<&str>,
+) -> Option<BTreeSet<AgentThreadId>> {
+    root_logical_run_id.map(|root_logical_run_id| {
+        session
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(admission))
+                    if admission.invocation_grant.as_ref().is_some_and(|grant| {
+                        grant.matches_root_logical_run_id(root_logical_run_id)
+                    }) =>
+                {
+                    Some(admission.thread_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 struct SessionFactsSummary {
     value: Value,
     has_recorded_facts: bool,
 }
 
-fn session_facts_summary(session: &Session) -> Value {
-    collect_session_facts(session, None)
-        .map(|facts| facts.value)
-        .unwrap_or_else(|error| {
-            json!({
-                "error": "session_facts_unavailable",
-                "message": error.to_string(),
-            })
-        })
-}
-
 fn collect_session_facts(
     session: &Session,
     run_outcome: Option<&AgentRunOutcome>,
+    root_logical_run_id: Option<&str>,
 ) -> Result<SessionFactsSummary> {
     let call_belongs_to_current_run = |call_id: &str| match run_outcome {
         Some(outcome) => outcome
@@ -877,6 +896,7 @@ fn collect_session_facts(
         .values()
         .map(|count| count.saturating_sub(1))
         .sum::<u64>();
+    let current_run_thread_ids = current_run_agent_thread_ids(session, root_logical_run_id);
     let projection = session.agent_thread_state_projection();
     let mut subagents_total = 0_u64;
     let mut subagents_running = 0_u64;
@@ -884,6 +904,19 @@ fn collect_session_facts(
     let mut subagent_threads = Vec::new();
     for thread in projection.threads.values() {
         if thread.thread_id.as_str() == MAIN_THREAD_ID {
+            continue;
+        }
+        if current_run_thread_ids
+            .as_ref()
+            .is_some_and(|thread_ids| !thread_ids.contains(&thread.thread_id))
+        {
+            continue;
+        }
+        if thread.status == sigil_kernel::AgentThreadStatus::Closed
+            || (thread.status.is_terminal()
+                && thread.result.is_some()
+                && thread.result_fully_delivered)
+        {
             continue;
         }
         subagents_total += 1;

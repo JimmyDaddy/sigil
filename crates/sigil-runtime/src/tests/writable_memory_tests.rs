@@ -343,6 +343,15 @@ fn registration_exposes_explicit_memory_lifecycle_tools() {
         assert!(spec.description.contains("not keyword matching"));
         assert!(spec.description.contains("durable receipt"));
     }
+    for expected in sigil_kernel::writable_memory_route_tool_specs() {
+        let actual = registry
+            .spec_for(&expected.name)
+            .expect("canonical remember tool should be registered");
+        assert_eq!(
+            serde_json::to_value(actual).expect("serialize actual spec"),
+            serde_json::to_value(expected).expect("serialize canonical spec")
+        );
+    }
 }
 
 #[test]

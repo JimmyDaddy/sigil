@@ -413,12 +413,14 @@ impl ApplicationTaskContinuationExecution {
             agent_supervisor,
             role_provider_builder,
         } = self.task_execution;
+        let continuation_entry_frontier = self.session.entries().len();
         let result = crate::agent_supervisor::task_execution::continue_task_execution(
             &mut self.session,
             crate::agent_supervisor::task_execution::ContinuedTaskExecution {
                 requested_task_id: Some(self.task.task_id.clone()),
                 guidance: self.guidance,
                 guidance_promotion: None,
+                continuation_guidance_receipt: None,
                 root_config,
                 options,
                 base_registry,
@@ -431,12 +433,13 @@ impl ApplicationTaskContinuationExecution {
             approval_handler,
         )
         .await;
-        let result = crate::agent_supervisor::task_execution::finalize_task_root(
+        let result = crate::agent_supervisor::task_execution::finalize_task_continuation_root(
             &mut self.session,
             &self.task.task_id,
             &self.task.parent_session_ref,
             &self.task.objective,
             &self.cancellation_handle,
+            continuation_entry_frontier,
             result,
         );
         let task_status = match result {

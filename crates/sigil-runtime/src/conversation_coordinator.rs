@@ -3,24 +3,35 @@ use std::collections::BTreeSet;
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ControlEntry,
-    ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
-    PlanReviewHandoffBinding, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
-    TaskAdmissionTrigger, TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskPlanStatus, TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepStatus, WriteLeaseReleaseStatus, WriteLeaseReleased,
+    AgentRunInput, AgentRunPurpose, AutomaticRouteCapability, ContinueDurableTaskAction,
+    ControlEntry, ConversationPurposeContext, ConversationTurnRef, MessageRole, ModelMessage,
+    PlanReviewHandoffBinding, RecoverableTaskGuidanceReviewAuthority, Session, SessionLogEntry,
+    SessionRef, StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
+    TaskHandoffDecision, TaskHandoffId, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskId, TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanStatus,
+    TaskPlanningHandoffBinding, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepStatus, WriteLeaseReleaseStatus, WriteLeaseReleased,
     conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
     conversation_route_routing_contract_material, durable_task_cancellation_requested,
     plan_review_attempt_id_for_review, plan_review_id_for_source, plan_review_plan_id_for_attempt,
-    plan_review_policy_snapshot_hash, reconcile_task_final_answer_prefix, route_surface_tool_specs,
-    safe_persistence_text, task_planner_logical_run_id,
+    plan_review_policy_snapshot_hash, reconcile_task_final_answer_prefix,
+    recoverable_task_guidance_review, route_surface_tool_specs_for_context,
+    route_surface_tool_specs_with_memory, safe_persistence_text, task_planner_logical_run_id,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
 const TASK_ID_DOMAIN: &str = "sigil-task-v1";
 const TASK_ROUTING_POLICY_DOMAIN: &str = "sigil-task-routing-policy-v1";
 const EXPLICIT_TASK_POLICY_DOMAIN: &str = "sigil-explicit-task-policy-v1";
+const TASK_CONTINUATION_POLICY_DOMAIN: &str = "sigil-task-continuation-policy-v1";
+
+#[derive(Debug, Clone)]
+struct TaskContinuationCandidate {
+    task_id: TaskId,
+    plan_version: Option<u32>,
+    task_status: TaskRunStatus,
+    plan_status: Option<TaskPlanStatus>,
+}
 
 /// Host-owned evidence used to derive the automatic route capability tier.
 ///
@@ -57,6 +68,7 @@ pub struct ConversationCoordinator {
     routing_policy: TaskRoutingPolicy,
     orchestration_route_guard: Option<crate::OrchestrationRouteGuard>,
     route_capability_evidence: RouteCapabilityEvidence,
+    writable_memory_routing: bool,
 }
 
 impl ConversationCoordinator {
@@ -67,6 +79,7 @@ impl ConversationCoordinator {
             routing_policy,
             orchestration_route_guard: None,
             route_capability_evidence: RouteCapabilityEvidence::default(),
+            writable_memory_routing: false,
         }
     }
 
@@ -85,6 +98,36 @@ impl ConversationCoordinator {
     pub fn with_route_capability_evidence(mut self, evidence: RouteCapabilityEvidence) -> Self {
         self.route_capability_evidence = evidence;
         self
+    }
+
+    /// Allows previewed writable-memory calls to accompany an automatic route decision.
+    #[must_use]
+    pub fn with_writable_memory_routing(mut self, enabled: bool) -> Self {
+        self.writable_memory_routing = enabled;
+        self
+    }
+
+    /// Returns the exact model-visible tool contracts for one routing microturn.
+    #[must_use]
+    pub fn route_tool_specs(
+        &self,
+        capability: AutomaticRouteCapability,
+    ) -> Vec<sigil_kernel::ToolSpec> {
+        route_surface_tool_specs_with_memory(capability, self.writable_memory_routing)
+    }
+
+    /// Returns the exact routing surface for the current durable session focus.
+    #[must_use]
+    pub fn route_tool_specs_for_session(
+        &self,
+        session: &Session,
+        capability: AutomaticRouteCapability,
+    ) -> Vec<sigil_kernel::ToolSpec> {
+        route_surface_tool_specs_for_context(
+            capability,
+            self.writable_memory_routing,
+            task_continuation_candidate(session, None).is_some(),
+        )
     }
 
     /// Persists a route-local kill switch when durable facts expose a hard invariant.
@@ -153,8 +196,9 @@ impl ConversationCoordinator {
         &self,
         session: &Session,
         capability: AutomaticRouteCapability,
+        continuation: Option<&TaskContinuationCandidate>,
     ) -> String {
-        let host_facts = self
+        let mut host_facts = self
             .orchestration_route_guard
             .as_ref()
             .map(|guard| {
@@ -171,9 +215,39 @@ impl ConversationCoordinator {
                     ("model", session.model_name()),
                 ]
             });
+        let continuation_plan_version = continuation.map(|continuation| {
+            continuation
+                .plan_version
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "none".to_owned())
+        });
+        if let Some(continuation) = continuation {
+            host_facts.extend([
+                ("continuation_task", continuation.task_id.as_str()),
+                (
+                    "continuation_plan_version",
+                    continuation_plan_version.as_deref().unwrap_or("none"),
+                ),
+                (
+                    "continuation_status",
+                    task_run_status_name(continuation.task_status),
+                ),
+                (
+                    "continuation_plan_status",
+                    continuation
+                        .plan_status
+                        .map(task_plan_status_name)
+                        .unwrap_or("none"),
+                ),
+            ]);
+        }
         conversation_route_contract_fingerprint(
             conversation_route_routing_contract_material(),
-            &route_surface_tool_specs(capability),
+            &route_surface_tool_specs_for_context(
+                capability,
+                self.writable_memory_routing,
+                continuation.is_some(),
+            ),
             capability,
             &host_facts,
         )
@@ -215,6 +289,9 @@ impl ConversationCoordinator {
             source.message_id,
             root_logical_run_id.clone(),
         )?;
+        let exact_source_prompt = input
+            .exact_user_prompt_for_source(&source_turn.message_id)
+            .map(ToOwned::to_owned);
         let capability = self.resolve_route_capability(session);
         let routes_automatically = capability.routes_automatically();
         let effective_policy = if routes_automatically {
@@ -222,11 +299,47 @@ impl ConversationCoordinator {
         } else {
             TaskRoutingPolicy::Manual
         };
+        let task_continuation_candidate = routes_automatically
+            .then(|| task_continuation_candidate(session, Some(&source_turn.message_id)))
+            .flatten();
         let route_contract_fingerprint = if routes_automatically {
-            Some(self.route_contract_fingerprint(session, capability))
+            Some(self.route_contract_fingerprint(
+                session,
+                capability,
+                task_continuation_candidate.as_ref(),
+            ))
         } else {
             None
         };
+        let task_continuation = task_continuation_candidate
+            .map(|candidate| {
+                let exact_guidance = exact_source_prompt.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "current Task continuation requires exact process-local source prompt material"
+                    )
+                })?;
+                let prompt = sigil_kernel::project_conversation_prompt_for_persistence(exact_guidance);
+                Ok::<TaskContinuationHandoffBinding, anyhow::Error>(
+                    TaskContinuationHandoffBinding {
+                        task_id: candidate.task_id,
+                        source_turn: source_turn.clone(),
+                        plan_version: candidate.plan_version,
+                        task_status: candidate.task_status,
+                        plan_status: candidate.plan_status,
+                        effective_capability: capability,
+                        policy_snapshot_hash: task_continuation_policy_snapshot_hash(),
+                        route_contract_fingerprint: route_contract_fingerprint
+                            .clone()
+                            .unwrap_or_default(),
+                        decided_at_ms: now_ms,
+                        exact_guidance: sigil_kernel::SecretString::new(exact_guidance),
+                        prompt_hash: prompt.prompt_hash,
+                        exact_prompt_required: prompt.exact_prompt_required,
+                        safe_guidance: prompt.safe_prompt,
+                    },
+                )
+            })
+            .transpose()?;
         let task_handoff = if capability.allows_direct_task() {
             Some(self.binding_for_source(
                 session,
@@ -258,8 +371,10 @@ impl ConversationCoordinator {
                     source_turn,
                     routing_policy: effective_policy,
                     route_capability: capability,
+                    writable_memory_routing: routes_automatically && self.writable_memory_routing,
                     task_handoff,
                     plan_review,
+                    task_continuation,
                 },
             ))))
     }
@@ -648,6 +763,100 @@ impl ConversationCoordinator {
     }
 }
 
+/// Revalidates a semantic Task continuation at the adapter dispatch boundary.
+///
+/// This is deliberately stricter than resolving a Task by id: the exact source turn, route
+/// fingerprint, Task status, plan version, and plan status must still match the frozen route.
+pub fn validate_task_continuation_action(
+    session: &Session,
+    action: &ContinueDurableTaskAction,
+) -> Result<crate::agent_supervisor::task_execution::ResolvedTaskContinuation> {
+    if action.source_turn.session_scope_id != session.session_scope_id() {
+        bail!("Task continuation action belongs to another session");
+    }
+    let selected = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
+                if selected.source_turn == action.source_turn =>
+            {
+                Some(selected)
+            }
+            _ => None,
+        });
+    let selected = selected.ok_or_else(|| {
+        anyhow!("Task continuation action is missing its durable selection receipt")
+    })?;
+    if selected != &action.guidance_receipt
+        || selected.task_id != action.task_id
+        || selected.plan_version != action.plan_version
+        || selected.task_status != action.task_status
+        || selected.plan_status != action.plan_status
+        || selected.route_contract_fingerprint != action.route_contract_fingerprint
+    {
+        bail!("Task continuation action conflicts with its durable selection receipt");
+    }
+    let prompt =
+        sigil_kernel::project_conversation_prompt_for_persistence(action.guidance.expose_secret());
+    if prompt.prompt_hash != selected.prompt_hash
+        || prompt.safe_prompt != selected.guidance
+        || prompt.exact_prompt_required != selected.exact_prompt_required
+    {
+        bail!("Task continuation exact guidance no longer matches its durable receipt");
+    }
+    let route = sigil_kernel::ConversationRouteDecisionProjection::from_entries(session.entries());
+    if route.has_conflicts() {
+        bail!("Task continuation route projection contains conflicting durable facts");
+    }
+    let decision = route
+        .decision_for_source(&action.source_turn)
+        .ok_or_else(|| anyhow!("Task continuation action is missing its durable route decision"))?;
+    if decision.route != sigil_kernel::ConversationRoute::Task
+        || decision.route_contract_fingerprint != action.route_contract_fingerprint
+    {
+        bail!("Task continuation route changed after the model decision");
+    }
+    let projection = session.task_state_projection();
+    let pending_selection_matches = recoverable_task_guidance_review(
+        session,
+        &action.task_id,
+        Some(action.guidance.expose_secret()),
+    )?
+    .is_some_and(|review| {
+        matches!(
+            review.authority,
+            RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(recorded)
+                if recorded.as_ref() == selected
+        )
+    });
+    let focus_matches = match projection.current_task_id.as_ref() {
+        Some(current_task_id) => current_task_id == &action.task_id,
+        None => pending_selection_matches,
+    };
+    if projection.focus_conflicts != 0 || !focus_matches {
+        bail!("Task continuation is no longer the current durable run target");
+    }
+    let task = projection
+        .tasks
+        .get(&action.task_id)
+        .ok_or_else(|| anyhow!("Task continuation target is no longer present"))?;
+    let plan_status = action
+        .plan_version
+        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
+    if (task.status != action.task_status && !pending_selection_matches)
+        || task.latest_plan_version != action.plan_version
+        || plan_status != action.plan_status
+    {
+        bail!("Task continuation target changed before adapter dispatch");
+    }
+    crate::agent_supervisor::task_execution::resolve_task_continuation(
+        session,
+        Some(action.task_id.as_str()),
+    )
+}
+
 fn interrupt_durably_cancelled_active_tasks(session: &mut Session) -> Result<()> {
     let active_task_ids = session
         .task_state_projection()
@@ -819,6 +1028,71 @@ fn source_from_direct_input(input: &AgentRunInput) -> Result<ConversationSourceT
         message_id: durable_message.id,
         objective,
     })
+}
+
+fn task_continuation_candidate(
+    session: &Session,
+    source_message_id: Option<&str>,
+) -> Option<TaskContinuationCandidate> {
+    let entries = session.entries();
+    let prefix = source_message_id
+        .and_then(|message_id| {
+            entries.iter().position(|entry| match entry {
+                SessionLogEntry::User(message) => message.id == message_id,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted)) => {
+                    promoted.durable_user_message.id == message_id
+                }
+                _ => false,
+            })
+        })
+        .map_or(entries, |index| &entries[..index]);
+    let projection = sigil_kernel::TaskStateProjection::from_entries(prefix);
+    if projection.focus_conflicts != 0 {
+        return None;
+    }
+    let task = projection.current_task()?;
+    if !matches!(
+        task.status,
+        TaskRunStatus::Started
+            | TaskRunStatus::Paused
+            | TaskRunStatus::Failed
+            | TaskRunStatus::Interrupted
+    ) {
+        return None;
+    }
+    let plan_status = task
+        .latest_plan_version
+        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
+    if plan_status != Some(TaskPlanStatus::Accepted) {
+        return None;
+    }
+    Some(TaskContinuationCandidate {
+        task_id: task.task_id.clone(),
+        plan_version: task.latest_plan_version,
+        task_status: task.status,
+        plan_status,
+    })
+}
+
+fn task_run_status_name(status: TaskRunStatus) -> &'static str {
+    match status {
+        TaskRunStatus::Started => "started",
+        TaskRunStatus::Running => "running",
+        TaskRunStatus::Paused => "paused",
+        TaskRunStatus::Completed => "completed",
+        TaskRunStatus::Failed => "failed",
+        TaskRunStatus::Cancelled => "cancelled",
+        TaskRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_plan_status_name(status: TaskPlanStatus) -> &'static str {
+    match status {
+        TaskPlanStatus::Proposed => "proposed",
+        TaskPlanStatus::Accepted => "accepted",
+        TaskPlanStatus::Superseded => "superseded",
+        TaskPlanStatus::Rejected => "rejected",
+    }
 }
 
 fn validate_existing_source_turn(session: &Session, source: &ConversationSourceTurn) -> Result<()> {
@@ -1031,6 +1305,16 @@ fn automatic_policy_snapshot_hash() -> String {
         domain_hash(
             TASK_ROUTING_POLICY_DOMAIN,
             &["enabled=true", "routing=auto"]
+        )
+    )
+}
+
+fn task_continuation_policy_snapshot_hash() -> String {
+    format!(
+        "sha256:{}",
+        domain_hash(
+            TASK_CONTINUATION_POLICY_DOMAIN,
+            &["enabled=true", "routing=auto", "target=current_resumable"]
         )
     )
 }

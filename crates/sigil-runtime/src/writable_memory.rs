@@ -15,23 +15,22 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ApprovalMode, ContextBodyRef, ContextInclusionReason, ContextItem, ContextScoreComponent,
-    ContextScoreComponentKind, ContextSensitivity, ContextSource, ContextTrustLevel, Tool,
-    ToolAccess, ToolAnalysisStatus, ToolCategory, ToolContext, ToolMutationTracking, ToolOperation,
-    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreview,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec,
-    ToolSubject, ToolSubjectKind, ToolSubjectScope, atomic_publish_private_file,
-    estimate_context_token_cost, safe_persistence_text, secure_private_path_permissions,
+    ContextScoreComponentKind, ContextSensitivity, ContextSource, ContextTrustLevel,
+    MEMORY_STATEMENT_MAX_BYTES, Tool, ToolAccess, ToolAnalysisStatus, ToolCategory, ToolContext,
+    ToolMutationTracking, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    atomic_publish_private_file, estimate_context_token_cost, remember_memory_tool_spec,
+    safe_persistence_text, secure_private_path_permissions,
 };
+
+pub use sigil_kernel::{REMEMBER_PROJECT_FACT_TOOL_NAME, REMEMBER_USER_PREFERENCE_TOOL_NAME};
 
 use crate::paths::SigilPaths;
 
 pub const INSPECT_MEMORY_TOOL_NAME: &str = "inspect_memory";
 pub const FORGET_MEMORY_TOOL_NAME: &str = "forget_memory";
-pub const REMEMBER_USER_PREFERENCE_TOOL_NAME: &str = "remember_user_preference";
-pub const REMEMBER_PROJECT_FACT_TOOL_NAME: &str = "remember_project_fact";
-
 const MEMORY_SCHEMA_VERSION: u32 = 1;
-const MEMORY_STATEMENT_MAX_BYTES: usize = 2 * 1024;
 const MEMORY_STATEMENT_MAX_LINES: usize = 12;
 const MEMORY_SIDECAR_MAX_BYTES: u64 = 8 * 1024;
 const MEMORY_JOURNAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -994,37 +993,7 @@ struct RememberMemoryTool {
 #[async_trait]
 impl Tool for RememberMemoryTool {
     fn spec(&self) -> ToolSpec {
-        let (name, description) = match self.scope {
-            WritableMemoryScope::UserPreference => (
-                REMEMBER_USER_PREFERENCE_TOOL_NAME,
-                "Durably remember one stable user preference across Sigil workspaces and sessions. Infer durable intent from the user's meaning, not keyword matching; use this for interaction style or workflow preferences, and ask for clarification when scope is ambiguous. The call opens an approval preview. Never store credentials, secrets, or project-specific facts. Only a successful call returns a durable receipt.",
-            ),
-            WritableMemoryScope::ProjectFact => (
-                REMEMBER_PROJECT_FACT_TOOL_NAME,
-                "Durably remember one user-asserted fact, convention, or validated workflow for the current project across sessions. Infer durable intent from the user's meaning, not keyword matching, and ask for clarification when scope is ambiguous. The call opens an approval preview. Never store credentials, secrets, guesses, or facts for another workspace. Only a successful call returns a durable receipt.",
-            ),
-        };
-        ToolSpec {
-            name: name.to_owned(),
-            description: description.to_owned(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "statement": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": MEMORY_STATEMENT_MAX_BYTES,
-                        "description": "A concise standalone statement to retain durably."
-                    }
-                },
-                "required": ["statement"],
-                "additionalProperties": false
-            }),
-            category: ToolCategory::Custom,
-            access: ToolAccess::Write,
-            network_effect: None,
-            preview: ToolPreviewCapability::Required,
-        }
+        remember_memory_tool_spec(matches!(self.scope, WritableMemoryScope::ProjectFact))
     }
 
     fn mutation_tracking(&self) -> ToolMutationTracking {

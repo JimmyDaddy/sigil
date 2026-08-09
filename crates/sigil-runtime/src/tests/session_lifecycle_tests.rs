@@ -1,6 +1,9 @@
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -13,6 +16,20 @@ use sigil_kernel::{
 };
 
 use super::*;
+
+#[derive(Default)]
+struct ProjectionNoticeRecorder {
+    notices: Mutex<Vec<sigil_kernel::session::ActiveProjectionNotice>>,
+}
+
+impl sigil_kernel::session::ActiveProjectionObserver for ProjectionNoticeRecorder {
+    fn active_projection_changed(&self, notice: sigil_kernel::session::ActiveProjectionNotice) {
+        self.notices
+            .lock()
+            .expect("projection notice recorder lock is available")
+            .push(notice);
+    }
+}
 
 fn finalized_session(path: &Path, prompt: &str) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
@@ -1558,6 +1575,94 @@ fn artifact_gc_appends_durable_disable_before_delete_and_expired_after() -> Resu
         sigil_kernel::ToolArtifactAvailabilityStateV1::Expired
     );
     assert!(store.resolve(&orphan.artifact_ref).is_err());
+    Ok(())
+}
+
+#[test]
+fn noop_artifact_gc_does_not_publish_a_projection_change() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-noop-gc.jsonl");
+    finalized_session(&source, "noop-gc")?;
+    let source_ref = sigil_kernel::SessionRef::new_relative("session-noop-gc.jsonl")?;
+    let source_store = JsonlSessionStore::new(&source)?;
+    let source_session_id = source_store
+        .active_projection_snapshot()?
+        .frontier()
+        .session_id()
+        .to_owned();
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_store(&source_store);
+    let retained = artifact_store.capture_text(
+        "call-retained",
+        "shell",
+        "still reachable",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let recorder = Arc::new(ProjectionNoticeRecorder::default());
+    let _subscription = source_store.register_active_projection_observer(recorder.clone());
+    let publications_before = source_store.active_projection_metrics().publication_total;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1 {
+            active_result_refs: [retained.artifact_ref].into_iter().collect(),
+            ..sigil_kernel::ToolArtifactGcRootsV1::default()
+        },
+        u64::MAX,
+    )?;
+
+    assert_eq!(report.tombstoned_manifests, 0);
+    assert!(
+        recorder
+            .notices
+            .lock()
+            .expect("projection notice recorder lock is available")
+            .is_empty(),
+        "maintenance loading an unchanged canonical session must not re-arm GC"
+    );
+    assert_eq!(
+        source_store.active_projection_metrics().publication_total,
+        publications_before
+    );
+    Ok(())
+}
+
+#[test]
+fn artifact_gc_accepts_and_retires_a_complete_zero_byte_manifest() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-empty-artifact.jsonl");
+    finalized_session(&source, "empty-artifact")?;
+    let source_ref = sigil_kernel::SessionRef::new_relative("session-empty-artifact.jsonl")?;
+    let source_session_id = JsonlSessionStore::read_event_records(&source)?
+        .first()
+        .context("session identity")?
+        .session_id()
+        .to_owned();
+    let artifact_store = sigil_kernel::ToolArtifactStore::for_session_path(&source);
+    let empty = artifact_store.capture_text(
+        "call-empty-gc",
+        "shell",
+        "",
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    let report = service.garbage_collect_session_artifacts(
+        &source_ref,
+        &source_session_id,
+        sigil_kernel::ToolArtifactGcRootsV1::default(),
+        u64::MAX,
+    )?;
+
+    assert_eq!(report.tombstoned_manifests, 1);
+    assert_eq!(report.tombstoned_refs, vec![empty.artifact_ref]);
     Ok(())
 }
 
