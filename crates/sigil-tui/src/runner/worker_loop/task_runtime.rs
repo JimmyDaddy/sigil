@@ -164,6 +164,7 @@ pub(in crate::runner) fn spawn_task_continue(
         let terminal_task_id = task_id.clone();
         let terminal_parent_session_ref = parent_session_ref.clone();
         let terminal_objective = objective.clone();
+        let continuation_entry_frontier = session.entries().len();
         let result = continue_task_orchestration(
             &mut session,
             TaskContinueOrchestration {
@@ -182,12 +183,13 @@ pub(in crate::runner) fn spawn_task_continue(
             },
         )
         .await;
-        let result = finalize_task_root(
+        let result = finalize_task_continuation_root(
             &mut session,
             &terminal_task_id,
             &terminal_parent_session_ref,
             &terminal_objective,
             &terminal_cancellation,
+            continuation_entry_frontier,
             result,
         );
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
@@ -283,6 +285,26 @@ pub(in crate::runner) struct AdmittedTaskRunOrchestration<'a> {
     pub(in crate::runner) task_id: TaskId,
     pub(in crate::runner) parent_session_ref: SessionRef,
     pub(in crate::runner) objective: String,
+    pub(in crate::runner) root_config: RootConfig,
+    pub(in crate::runner) options: AgentRunOptions,
+    pub(in crate::runner) base_registry: ToolRegistry,
+    pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
+    pub(in crate::runner) role_provider_builder: &'a dyn TaskRoleProviderBuilder,
+    pub(in crate::runner) handler: &'a mut ChannelEventHandler,
+    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
+    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
+}
+
+/// Runtime material for a conversation route that selected one exact existing durable Task.
+///
+/// This deliberately mirrors `AdmittedTaskRunOrchestration` while requiring the exact guidance
+/// and durable receipt frozen by the typed route action.
+pub(in crate::runner) struct RoutedTaskContinuationOrchestration<'a> {
+    pub(in crate::runner) task_id: TaskId,
+    pub(in crate::runner) parent_session_ref: SessionRef,
+    pub(in crate::runner) objective: String,
+    pub(in crate::runner) guidance: SecretString,
+    pub(in crate::runner) guidance_receipt: sigil_kernel::TaskContinuationSelectedEntry,
     pub(in crate::runner) root_config: RootConfig,
     pub(in crate::runner) options: AgentRunOptions,
     pub(in crate::runner) base_registry: ToolRegistry,
@@ -435,6 +457,90 @@ where
     )
 }
 
+/// Continues the exact Task selected by a typed conversation route and closes the shared root.
+///
+/// The adapter must validate the action against the current session before calling this helper.
+/// Cancellation ownership is then durably rebound to the exact Task before any role executes.
+pub(in crate::runner) async fn continue_routed_task_to_root_terminal<A>(
+    session: &mut Session,
+    request: RoutedTaskContinuationOrchestration<'_>,
+    approval_handler: &mut A,
+) -> std::result::Result<TaskRunStatus, String>
+where
+    A: ApprovalHandler + Send,
+{
+    let RoutedTaskContinuationOrchestration {
+        task_id,
+        parent_session_ref,
+        objective,
+        guidance,
+        guidance_receipt,
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+        handler,
+        cancellation_handle,
+        tool_artifact_read_budget,
+    } = request;
+    let result = bind_task_run_cancellation_scope(session, &task_id, &cancellation_handle);
+    let continuation_entry_frontier = session.entries().len();
+    let result = match result {
+        Ok(()) => sigil_runtime::agent_supervisor::task_execution::continue_task_execution(
+            session,
+            sigil_runtime::agent_supervisor::task_execution::ContinuedTaskExecution {
+                requested_task_id: Some(task_id.clone()),
+                guidance: Some(guidance.expose_secret().to_owned()),
+                guidance_promotion: None,
+                continuation_guidance_receipt: Some(guidance_receipt),
+                root_config,
+                options,
+                base_registry,
+                agent_supervisor,
+                role_provider_builder,
+                handler,
+                cancellation_handle: cancellation_handle.clone(),
+                tool_artifact_read_budget: Some(tool_artifact_read_budget),
+            },
+            approval_handler,
+        )
+        .await
+        .map_err(|error| format!("{error:#}")),
+        Err(error) => Err(error),
+    };
+    finalize_task_continuation_root(
+        session,
+        &task_id,
+        &parent_session_ref,
+        &objective,
+        &cancellation_handle,
+        continuation_entry_frontier,
+        result,
+    )
+}
+
+fn finalize_task_continuation_root(
+    session: &mut Session,
+    task_id: &TaskId,
+    parent_session_ref: &SessionRef,
+    objective: &str,
+    terminal_cancellation: &RunCancellationHandle,
+    continuation_entry_frontier: usize,
+    result: std::result::Result<TaskRunStatus, String>,
+) -> std::result::Result<TaskRunStatus, String> {
+    sigil_runtime::agent_supervisor::task_execution::finalize_task_continuation_root(
+        session,
+        task_id,
+        parent_session_ref,
+        objective,
+        terminal_cancellation,
+        continuation_entry_frontier,
+        result.map_err(anyhow::Error::msg),
+    )
+    .map_err(|error| format!("{error:#}"))
+}
+
 fn finalize_task_root(
     session: &mut Session,
     task_id: &TaskId,
@@ -479,6 +585,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
             requested_task_id: Some(task_id),
             guidance,
             guidance_promotion,
+            continuation_guidance_receipt: None,
             root_config,
             options,
             base_registry,

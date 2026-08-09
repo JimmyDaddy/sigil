@@ -214,7 +214,7 @@ impl AppState {
         }
         self.active_pane = PaneFocus::Composer;
         self.push_timeline(TimelineRole::Tool, checkpoint_restored_payload(preview));
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.last_notice = Some(format!(
             "restored {} controlled file(s); verification is stale",
             preview.files.len()

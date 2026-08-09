@@ -118,7 +118,7 @@ impl AppState {
         if !matches!(target, ConversationInputTarget::AgentThread { .. }) {
             self.push_timeline(TimelineRole::User, prompt);
         };
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
     }
 
     pub(super) fn reconcile_optimistic_conversation_queue_items(&mut self) {

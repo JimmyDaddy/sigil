@@ -187,10 +187,11 @@ pub(in crate::runner) use session_transition::{
 };
 pub(in crate::runner) use state::{WorkerLoopState, register_worker_active_projection_observer};
 pub(in crate::runner) use task_runtime::{
-    AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, RejectPlanRequest, SkillChildRunSpawn,
-    TaskContinueSpawn, TaskRunSpawn, VerificationCheckPromotionKind,
-    VerificationCheckPromotionOutcome, append_plan_draft, clean_mutation_artifacts,
-    create_task_from_plan, delete_mutation_artifact, ensure_session_workspace_trust,
+    AdmittedTaskRunOrchestration, CreateTaskFromPlanRequest, RejectPlanRequest,
+    RoutedTaskContinuationOrchestration, SkillChildRunSpawn, TaskContinueSpawn, TaskRunSpawn,
+    VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, append_plan_draft,
+    clean_mutation_artifacts, continue_routed_task_to_root_terminal, create_task_from_plan,
+    delete_mutation_artifact, ensure_session_workspace_trust,
     format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
     load_worker_skill, next_task_id, plan_mode_transient_context,
     promote_workspace_verification_check, reject_plan, resolve_continue_task, revise_plan,

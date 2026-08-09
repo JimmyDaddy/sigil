@@ -206,7 +206,7 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let verification_projection = VerificationStateProjection::from_entries(entries);
     let write_projection = WriteIsolationProjection::from_entries(entries);
     let integration_review = task_integration_review_product(entries);
-    let Some(task) = projection.latest_task() else {
+    let Some(task) = projection.current_task() else {
         return terminal_lines;
     };
     let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
@@ -412,7 +412,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     let verification_projection = VerificationStateProjection::from_entries(entries);
     let write_projection = WriteIsolationProjection::from_entries(entries);
     let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
-    let task = projection.latest_task()?;
+    let task = projection.current_task()?;
     let verification = verification_card_view(entries);
     let mut rows = Vec::new();
     let mut detail = task_run_status_label(task.status).to_owned();

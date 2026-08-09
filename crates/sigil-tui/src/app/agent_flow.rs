@@ -350,6 +350,7 @@ impl AppState {
         if closing_active {
             self.agent_panel.active_view = AgentView::Main;
             self.agent_panel.active_child_transcript = None;
+            self.return_timeline_to_live_tail();
         }
         self.last_notice = Some(format!("agent closed: {}", thread_id.as_str()));
         self.push_event("agent:close", thread_id.as_str());
@@ -490,6 +491,7 @@ impl AppState {
         } else {
             self.agent_panel.active_view = AgentView::Main;
             self.agent_panel.active_child_transcript = None;
+            self.return_timeline_to_live_tail();
         }
     }
 
@@ -563,7 +565,7 @@ impl AppState {
             self.composer.agent_panel_focused = true;
         }
         self.reload_active_agent_child_transcript();
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.last_notice = Some(format!("agent focus: {display_label} · {}", item.detail));
         self.push_event("agent:focus", format!("{display_label} · {}", item.detail));
         true
@@ -698,12 +700,14 @@ impl AppState {
     }
 
     pub(super) fn reload_active_agent_child_transcript(&mut self) -> bool {
+        let history_anchor = self.capture_timeline_history_anchor();
         let AgentView::Child {
             child_session_ref, ..
         } = &self.agent_panel.active_view
         else {
             let changed = self.agent_panel.active_child_transcript.is_some();
             self.agent_panel.active_child_transcript = None;
+            self.restore_timeline_history_anchor(history_anchor);
             return changed;
         };
         let parent_dir = self
@@ -735,6 +739,7 @@ impl AppState {
                     transcript_truncated: false,
                     load_error: Some(error),
                 });
+                self.restore_timeline_history_anchor(history_anchor);
                 return changed;
             }
         };
@@ -778,10 +783,12 @@ impl AppState {
                 load_error: Some(error.to_string()),
             },
         });
+        self.restore_timeline_history_anchor(history_anchor);
         true
     }
 
     pub(super) fn rerender_active_agent_child_transcript(&mut self) {
+        let history_anchor = self.capture_timeline_history_anchor();
         let Some(timeline_entries) = self
             .agent_panel
             .active_child_transcript
@@ -794,6 +801,7 @@ impl AppState {
         if let Some(transcript) = self.agent_panel.active_child_transcript.as_mut() {
             transcript.rendered_body_lines = rendered_body_lines;
         }
+        self.restore_timeline_history_anchor(history_anchor);
     }
 
     fn bounded_child_timeline_entries(

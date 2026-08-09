@@ -30,6 +30,7 @@ pub(super) fn notice_rejects_current_final_candidate(note: &str) -> bool {
         "agent delegation required before final answer; retrying with explicit agent-tool instruction"
             | "agent delegation requirement was not satisfied; no final answer was recorded"
             | "pending agent state blocks final answer; continuing"
+            | "pending agent state still blocks final answer; ending this run without another provider retry"
             | "recorded run facts added before final answer; continuing"
     )
 }

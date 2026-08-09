@@ -6,9 +6,9 @@ use sigil_kernel::{
     AgentRole, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ControlEntry, EvidenceScope, ModelMessage, ReadinessEvaluatedEntry,
     ReadinessEvaluation, RequiredAction, RunStatus, SessionLogEntry, SessionRef, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepSpec, TaskStepStatus, ToolEffect, TrustedCheckSpec, VerificationVerdict,
-    VisibleCompletionState,
+    TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+    ToolEffect, TrustedCheckSpec, VerificationVerdict, VisibleCompletionState,
 };
 
 use super::*;
@@ -304,6 +304,21 @@ fn verification_entries() -> Vec<SessionLogEntry> {
             }],
             reason: None,
         })),
+        SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(
+            TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: "scope-verification".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(
+            TaskRunTargetSelectedEntry::new(
+                task_id.clone(),
+                "scope-verification",
+                TaskRunStatus::Paused,
+                Some(1),
+                Some(TaskPlanStatus::Accepted),
+            ),
+        )),
         SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
             task_id: task_id.clone(),
             plan_version: 1,

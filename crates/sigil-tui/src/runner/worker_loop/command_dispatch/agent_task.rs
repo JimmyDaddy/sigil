@@ -548,57 +548,31 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
-                let handle = if needs_planning {
-                    spawn_task_run(
-                        runtime,
-                        TaskRunSpawn {
-                            run_id,
-                            session: run_session,
-                            task_id,
-                            task_id_value,
-                            parent_session_ref,
-                            objective,
-                            root_config: effective_root_config.clone(),
-                            options: options.clone(),
-                            base_registry: agent.tool_registry().clone(),
-                            agent_supervisor: state.agent.supervisor.clone(),
-                            role_provider_builder: Arc::clone(role_provider_builder),
-                            task_result_tx: state.run.result_tx.clone(),
-                            approval_rx,
-                            handler,
-                            elicitation_audit_buffer: run_elicitation_audit_buffer,
-                            cancellation_handle,
-                            cancellation_task_guard,
-                            tool_artifact_read_budget: tool_artifact_read_budget.clone(),
-                        },
-                    )
-                } else {
-                    spawn_task_continue(
-                        runtime,
-                        TaskContinueSpawn {
-                            run_id,
-                            session: run_session,
-                            task_id,
-                            task_id_value,
-                            parent_session_ref,
-                            objective,
-                            guidance,
-                            guidance_promotion: None,
-                            root_config: effective_root_config,
-                            options: options.clone(),
-                            base_registry: agent.tool_registry().clone(),
-                            agent_supervisor: state.agent.supervisor.clone(),
-                            role_provider_builder: Arc::clone(role_provider_builder),
-                            task_result_tx: state.run.result_tx.clone(),
-                            approval_rx,
-                            handler,
-                            elicitation_audit_buffer: run_elicitation_audit_buffer,
-                            cancellation_handle,
-                            cancellation_task_guard,
-                            tool_artifact_read_budget,
-                        },
-                    )
-                };
+                let handle = spawn_task_continue(
+                    runtime,
+                    TaskContinueSpawn {
+                        run_id,
+                        session: run_session,
+                        task_id,
+                        task_id_value,
+                        parent_session_ref,
+                        objective,
+                        guidance,
+                        guidance_promotion: None,
+                        root_config: effective_root_config,
+                        options: options.clone(),
+                        base_registry: agent.tool_registry().clone(),
+                        agent_supervisor: state.agent.supervisor.clone(),
+                        role_provider_builder: Arc::clone(role_provider_builder),
+                        task_result_tx: state.run.result_tx.clone(),
+                        approval_rx,
+                        handler,
+                        elicitation_audit_buffer: run_elicitation_audit_buffer,
+                        cancellation_handle,
+                        cancellation_task_guard,
+                        tool_artifact_read_budget,
+                    },
+                );
 
                 state.run.active = Some(ActiveRun {
                     run_id,

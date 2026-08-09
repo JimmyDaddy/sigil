@@ -66,7 +66,7 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     let (event_tx, _event_rx) = std::sync::mpsc::channel();
     let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
 
-    let state = WorkerLoopState::new(
+    let mut state = WorkerLoopState::new(
         session_log_path.clone(),
         Some(session),
         sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
@@ -108,6 +108,32 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     assert!(
         state.defer_startup_artifact_gc,
         "startup artifact GC must wait for the first command so a fresh worker never races a resume"
+    );
+    let notice = "artifact maintenance deferred: fixture".to_owned();
+    assert_eq!(
+        state.artifact_gc.changed_deferred_notice(notice.clone()),
+        Some(notice.clone())
+    );
+    assert_eq!(
+        state.artifact_gc.changed_deferred_notice(notice.clone()),
+        None
+    );
+    let other_notice = "artifact maintenance deferred: another fixture".to_owned();
+    assert_eq!(
+        state
+            .artifact_gc
+            .changed_deferred_notice(other_notice.clone()),
+        Some(other_notice)
+    );
+    assert_eq!(
+        state.artifact_gc.changed_deferred_notice(notice.clone()),
+        None,
+        "a different intervening failure must not re-enable an already shown notice"
+    );
+    state.artifact_gc.clear_deferred_notice();
+    assert_eq!(
+        state.artifact_gc.changed_deferred_notice(notice.clone()),
+        Some(notice)
     );
     Ok(())
 }

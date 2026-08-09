@@ -479,9 +479,11 @@ fn agent_flow_selection_refresh_and_rename_edges_cover_private_guards() -> Resul
         child_task_id: "missing_child".to_owned(),
         child_session_ref: child_ref,
     };
+    app.timeline_scroll_back = 7;
     app.sync_current_session_state(Vec::new());
     app.refresh_active_agent_view_after_parent_sync();
     assert_eq!(app.active_agent_label(), "main");
+    assert!(app.timeline_at_live_tail());
     Ok(())
 }
 
@@ -949,11 +951,13 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
             reason: Some("closed from TUI /agent".to_owned()),
         },
     )));
+    app.timeline_scroll_back = 7;
     app.handle_worker_message(WorkerMessage::AgentThreadClosed {
         thread_id: thread_id.clone(),
         entries: closed_entries,
     })?;
     assert_eq!(app.active_agent_label(), "main");
+    assert!(app.timeline_at_live_tail());
     assert!(
         !app.agent_sidebar_rows()
             .iter()

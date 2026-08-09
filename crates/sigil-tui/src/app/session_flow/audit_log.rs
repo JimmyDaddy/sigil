@@ -411,6 +411,20 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
         ControlEntry::TaskHandoffResolved(entry) => {
             format!("[ctl] task handoff resolved decision={:?}", entry.decision)
         }
+        ControlEntry::TaskContinuationSelected(entry) => format!(
+            "[ctl] task continuation selected task={} plan={}",
+            entry.task_id.as_str(),
+            entry
+                .plan_version
+                .map_or_else(|| "none".to_owned(), |version| format!("v{version}"))
+        ),
+        ControlEntry::TaskRunTargetSelected(entry) => format!(
+            "[ctl] task run target selected task={} plan={}",
+            entry.task_id.as_str(),
+            entry
+                .plan_version
+                .map_or_else(|| "none".to_owned(), |version| format!("v{version}"))
+        ),
         ControlEntry::TaskPlan(plan) => format!(
             "[ctl] plan {} v{} status={} steps={}",
             plan.task_id.as_str(),
@@ -424,6 +438,13 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             applied.plan_version,
             applied.target_step_ids.len(),
             applied.reason
+        ),
+        ControlEntry::TaskGuidanceMaterialized(entry) => format!(
+            "[ctl] task guidance materialized task={} plan=v{} targets={} exact_required={}",
+            entry.task_id.as_str(),
+            entry.plan_version,
+            entry.target_step_ids.len(),
+            entry.exact_prompt_required
         ),
         ControlEntry::TaskStep(step) => format!(
             "[ctl] step {} v{}:{} status={}",

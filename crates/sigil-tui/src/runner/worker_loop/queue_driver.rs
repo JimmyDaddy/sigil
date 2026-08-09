@@ -528,7 +528,19 @@ where
     let mut exact_user_message = ModelMessage::user(exact_prompt.clone());
     exact_user_message.id = durable_message_id;
     let background_ready_context = queued_background_ready_transient_context(Some(session));
+    let automatic_routing = tools
+        .iter()
+        .any(|tool| tool.name == sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME)
+        && tools
+            .iter()
+            .any(|tool| tool.name == sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME);
     let mut transient_messages = vec![exact_user_message];
+    if automatic_routing {
+        transient_messages.insert(
+            0,
+            ModelMessage::system(sigil_kernel::conversation_route_routing_contract_material()),
+        );
+    }
     transient_messages.extend(background_ready_context.clone());
     let runtime_context = resolve_runtime_context(&exact_prompt);
     let reasoning_effort = sigil_runtime::admitted_reasoning_effort(

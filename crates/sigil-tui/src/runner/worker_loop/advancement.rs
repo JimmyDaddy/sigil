@@ -1331,9 +1331,10 @@ where
         Ok(session_ref) => session_ref,
         Err(error) => {
             state.session.artifact_gc_dirty = false;
-            let _ = message_tx.send(WorkerMessage::Notice(format!(
-                "artifact maintenance deferred: {error}"
-            )));
+            let notice = format!("artifact maintenance deferred: {error}");
+            if let Some(notice) = state.artifact_gc.changed_deferred_notice(notice) {
+                let _ = message_tx.send(WorkerMessage::Notice(notice));
+            }
             return WorkerAdvancementControl::SkipCommandPoll;
         }
     };
@@ -1391,6 +1392,7 @@ where
         }
         match result.result {
             Ok(_) => {
+                state.artifact_gc.clear_deferred_notice();
                 let current_cursor = match state
                     .session
                     .current
@@ -1410,9 +1412,11 @@ where
                 }
             }
             Err(error) => {
-                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                    "artifact maintenance deferred until the next session change: {error}"
-                )));
+                let notice =
+                    format!("artifact maintenance deferred until the next session change: {error}");
+                if let Some(notice) = state.artifact_gc.changed_deferred_notice(notice) {
+                    let _ = message_tx.send(WorkerMessage::Notice(notice));
+                }
             }
         }
     }
@@ -2701,13 +2705,26 @@ where
             let session_log_path = state.session.log_path.clone();
             let exact_prompts = state.session.exact_prompts.clone();
             let options = options.clone();
-            let mut tools = agent.tool_registry().specs();
-            if root_config.task.enabled
-                && root_config.task.routing_policy == sigil_kernel::TaskRoutingPolicy::Auto
-            {
-                tools.push(sigil_kernel::request_task_planning_tool_spec());
-                tools.push(sigil_kernel::continue_without_task_planning_tool_spec());
-            }
+            let conversation_coordinator = ConversationCoordinator::new(
+                root_config.task.enabled,
+                root_config.task.routing_policy,
+            )
+            .with_writable_memory_routing(root_config.memory.writable)
+            .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
+                &root_config.agent.runtime_provider,
+                &root_config.agent.model,
+                sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+            ))
+            .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
+                provider_supports_routing_tools: agent.provider_capabilities().supports_tool_stream,
+                route_qualified: sigil_runtime::route_qualification_evidence(&root_config),
+            });
+            let route_capability = conversation_coordinator.resolve_route_capability(session);
+            let tools = if route_capability.routes_automatically() {
+                conversation_coordinator.route_tool_specs_for_session(session, route_capability)
+            } else {
+                agent.tool_registry().specs()
+            };
             let runtime_handle = runtime.handle().clone();
             let queue_context_resolver = context_resolver.clone();
             let preparation_agent = Arc::clone(agent);

@@ -215,6 +215,7 @@ impl AppState {
     }
 
     pub fn set_terminal_size(&mut self, width: u16, height: u16) -> bool {
+        let history_anchor = self.capture_timeline_history_anchor();
         let next_width = width.max(3);
         let next_height = height.max(8);
         let height_changed = self.terminal_height != next_height;
@@ -225,9 +226,10 @@ impl AppState {
         if width_changed {
             self.rebuild_timeline_render_surfaces();
         }
-        self.timeline_scroll_back = self
-            .timeline_scroll_back
-            .min(self.max_timeline_scroll_back());
+        self.restore_timeline_history_anchor(history_anchor);
+        if self.timeline_at_live_tail() {
+            self.timeline_scroll_back = 0;
+        }
         width_changed || height_changed
     }
 
@@ -282,11 +284,10 @@ impl AppState {
     }
 
     pub(crate) fn toggle_info_rail_visibility(&mut self) {
+        let history_anchor = self.capture_timeline_history_anchor();
         self.info_rail_visible = !self.info_rail_visible;
         self.rebuild_timeline_render_surfaces();
-        self.timeline_scroll_back = self
-            .timeline_scroll_back
-            .min(self.max_timeline_scroll_back());
+        self.restore_timeline_history_anchor(history_anchor);
         self.clamp_input_cursor();
         let (mode, notice) = if !self.info_rail_visible {
             ("hidden", "info rail: hidden")

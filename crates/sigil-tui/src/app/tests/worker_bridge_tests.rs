@@ -2636,6 +2636,93 @@ fn repeated_pending_wait_agent_results_replace_previous_tool_card() -> Result<()
 }
 
 #[test]
+fn duplicate_tool_card_replacement_preserves_the_main_history_anchor() -> Result<()> {
+    fn pending_wait(call_id: &str, retry_after_ms: u64) -> ToolResult {
+        ToolResult::ok(
+            call_id.to_owned(),
+            "wait_agent".to_owned(),
+            serde_json::json!({
+                "thread_id": "agent_anchor",
+                "status": "running",
+                "terminal": false,
+                "result_available": false,
+                "retry_after_ms": retry_after_ms,
+                "coalescing_key": "wait_agent:agent_anchor"
+            })
+            .to_string(),
+            sigil_kernel::ToolResultMeta {
+                details: serde_json::json!({
+                    "thread_id": "agent_anchor",
+                    "status": "running",
+                    "retry_after_ms": retry_after_ms,
+                    "coalescing_key": "wait_agent:agent_anchor"
+                }),
+                ..sigil_kernel::ToolResultMeta::default()
+            },
+        )
+    }
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 18);
+    for index in 0..24 {
+        app.push_timeline(TimelineRole::Notice, format!("history-anchor-{index:02}"));
+    }
+    app.handle(RunEvent::ToolResult(pending_wait("call-anchor-1", 5_000)))?;
+    let duplicate_card = app
+        .timeline
+        .iter()
+        .rev()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("pending wait card")
+        .text
+        .clone();
+    for index in 24..36 {
+        app.push_timeline(TimelineRole::Notice, format!("history-anchor-{index:02}"));
+    }
+    app.push_timeline(TimelineRole::Tool, duplicate_card);
+    let duplicate_index = app.timeline.len().saturating_sub(1);
+    for index in 36..72 {
+        app.push_timeline(TimelineRole::Notice, format!("history-anchor-{index:02}"));
+    }
+
+    let mut before = None;
+    for scroll_back in 1..=app.max_timeline_scroll_back() {
+        app.timeline_scroll_back = scroll_back;
+        let anchor_is_after_duplicate = matches!(
+            app.capture_timeline_history_anchor(),
+            Some(super::super::timeline_flow::TimelineHistoryAnchor::Main {
+                entry_index,
+                ..
+            }) if entry_index > duplicate_index
+        );
+        if !anchor_is_after_duplicate {
+            continue;
+        }
+        before = app
+            .transcript_lines(app.timeline_viewport_rows())
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .find(|text| text.contains("history-anchor-"));
+        if before.is_some() {
+            break;
+        }
+    }
+    let before = before.expect("a post-duplicate history anchor should be visible");
+
+    app.handle(RunEvent::ToolResult(pending_wait("call-anchor-2", 4_000)))?;
+    let after = app
+        .transcript_lines(app.timeline_viewport_rows())
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter())
+        .map(|span| span.content.into_owned())
+        .find(|text| text.contains("history-anchor-"))
+        .expect("the anchored history row should remain visible");
+    assert_eq!(after, before);
+    Ok(())
+}
+
+#[test]
 fn interleaved_pending_wait_agent_results_replace_matching_thread_card() -> Result<()> {
     fn pending_wait(call_id: &str, thread_id: &str, retry_after_ms: u64) -> ToolResult {
         let key = format!("wait_agent:{thread_id}");
@@ -3815,6 +3902,14 @@ fn idle_auto_compaction_rebuilds_the_visible_task_list_from_reloaded_controls() 
     let implement_step_id = sigil_kernel::TaskStepId::new("implement")?;
     let entries = vec![
         SessionLogEntry::User(ModelMessage::user("continue after automatic compaction")),
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "Preserve the visible task list".to_owned(),
+            title: None,
+            status: sigil_kernel::TaskRunStatus::Started,
+            reason: None,
+        })),
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
             task_id: task_id.clone(),
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,

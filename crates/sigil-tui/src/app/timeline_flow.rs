@@ -10,14 +10,62 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::{
     AgentView, AppAction, AppState, ApprovalPresentationState, EventEntry, LiveActivitySummary,
     PaneFocus, RunPhase, ThinkingBlockMode, TimelineEntry, TimelineRole, TimelineTextSelection,
+    TimelineViewportMode,
     agent_flow::agent_thread_sidebar_detail,
     formatting::{
-        line_has_visible_content, sidebar_width_for_terminal, truncate_session_view_text,
+        line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
+        truncate_session_view_text,
     },
     task_sidebar::task_child_session_status_label,
 };
 
 const EVENT_DETAIL_MAX_CHARS: usize = 240;
+
+#[derive(Debug, Clone)]
+pub(super) enum TimelineHistoryAnchor {
+    Main {
+        entry_index: usize,
+        line_offset: usize,
+        entry_content_offset: usize,
+        absolute_start: usize,
+    },
+    Child {
+        session_ref: String,
+        entry_identity: Option<(TimelineRole, String)>,
+        previous_entry_identity: Option<(TimelineRole, String)>,
+        next_entry_identity: Option<(TimelineRole, String)>,
+        retained_entry_index: Option<usize>,
+        entry_line_offset: usize,
+        entry_content_offset: usize,
+        body_line_offset: usize,
+        body_content_offset: usize,
+    },
+}
+
+impl TimelineHistoryAnchor {
+    fn after_removing_timeline_entries(mut self, removed_indices: &[usize]) -> Self {
+        if let Self::Main {
+            entry_index,
+            line_offset,
+            entry_content_offset,
+            ..
+        } = &mut self
+        {
+            let anchored_entry_was_removed = removed_indices.contains(entry_index);
+            *entry_index = entry_index.saturating_sub(
+                removed_indices
+                    .iter()
+                    .filter(|removed| **removed < *entry_index)
+                    .count(),
+            );
+            if anchored_entry_was_removed {
+                *line_offset = 0;
+                *entry_content_offset = 0;
+            }
+        }
+        self
+    }
+}
 
 impl AppState {
     pub(super) fn timeline_viewport_rows(&self) -> usize {
@@ -285,11 +333,18 @@ impl AppState {
         {
             return;
         }
+        let history_anchor = self.capture_timeline_history_anchor();
         self.timeline.remove(index);
-        self.rebuild_timeline_projection_after_entry_removal();
+        self.rebuild_timeline_projection_after_entry_removal(history_anchor, &[index]);
     }
 
-    pub(super) fn rebuild_timeline_projection_after_entry_removal(&mut self) {
+    pub(super) fn rebuild_timeline_projection_after_entry_removal(
+        &mut self,
+        history_anchor: Option<TimelineHistoryAnchor>,
+        removed_indices: &[usize],
+    ) {
+        let history_anchor =
+            history_anchor.map(|anchor| anchor.after_removing_timeline_entries(removed_indices));
         self.timeline_state.streaming_assistant_index = None;
         self.timeline_state.streaming_reasoning_index = None;
         self.timeline_state.expanded_thinking_entry_indices.clear();
@@ -297,7 +352,13 @@ impl AppState {
         self.timeline_state.expanded_diagram_entry_indices.clear();
         self.timeline_state.deferred_render_indexes.clear();
         self.rebuild_tool_activity_cache();
-        self.rebuild_timeline_render_store();
+        self.clear_timeline_text_selection_state();
+        let options = self.timeline_render_options();
+        self.timeline_state
+            .render_store
+            .rebuild(&self.timeline, &options);
+        self.timeline_state.revision = self.timeline_state.revision.saturating_add(1);
+        self.restore_timeline_history_anchor(history_anchor);
     }
 
     pub(super) fn push_phase_marker(&mut self, text: impl Into<String>) {
@@ -423,6 +484,7 @@ impl AppState {
     }
 
     pub(super) fn rebuild_timeline_render_store(&mut self) {
+        let history_anchor = self.capture_timeline_history_anchor();
         self.clear_timeline_text_selection_state();
         self.timeline_state.deferred_render_indexes.clear();
         let options = self.timeline_render_options();
@@ -430,6 +492,7 @@ impl AppState {
             .render_store
             .rebuild(&self.timeline, &options);
         self.timeline_state.revision = self.timeline_state.revision.saturating_add(1);
+        self.restore_timeline_history_anchor(history_anchor);
     }
 
     pub(super) fn rebuild_timeline_render_surfaces(&mut self) {
@@ -438,6 +501,7 @@ impl AppState {
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
+        let history_anchor = self.capture_timeline_history_anchor();
         self.clear_timeline_text_selection_state();
         self.timeline_state.deferred_render_indexes.remove(&index);
         let options = self.timeline_render_options();
@@ -445,6 +509,7 @@ impl AppState {
             .render_store
             .rerender_entry(&self.timeline, index, &options);
         self.timeline_state.revision = self.timeline_state.revision.saturating_add(1);
+        self.restore_timeline_history_anchor(history_anchor);
     }
 
     fn rerender_timeline_entry_deferred(&mut self, index: usize) {
@@ -473,8 +538,9 @@ impl AppState {
             return;
         };
         if entry.text.trim().is_empty() {
+            let history_anchor = self.capture_timeline_history_anchor();
             self.timeline.remove(index);
-            self.rebuild_timeline_projection_after_entry_removal();
+            self.rebuild_timeline_projection_after_entry_removal(history_anchor, &[index]);
             return;
         }
         self.rerender_timeline_entry(index);
@@ -492,8 +558,9 @@ impl AppState {
         {
             return;
         }
+        let history_anchor = self.capture_timeline_history_anchor();
         self.timeline.remove(index);
-        self.rebuild_timeline_projection_after_entry_removal();
+        self.rebuild_timeline_projection_after_entry_removal(history_anchor, &[index]);
     }
 
     pub(super) fn downgrade_streaming_assistant_entry_to_thinking(&mut self) {
@@ -507,9 +574,10 @@ impl AppState {
             return;
         }
         if entry.text.trim().is_empty() {
+            let history_anchor = self.capture_timeline_history_anchor();
             self.timeline_state.streaming_assistant_index = None;
             self.timeline.remove(index);
-            self.rebuild_timeline_projection_after_entry_removal();
+            self.rebuild_timeline_projection_after_entry_removal(history_anchor, &[index]);
             return;
         }
         if let Some(entry) = self.timeline.get_mut(index) {
@@ -531,21 +599,27 @@ impl AppState {
     }
 
     pub(super) fn append_timeline_render_store_entry(&mut self, index: usize) {
+        let history_anchor = self.capture_timeline_history_anchor();
         self.clear_timeline_text_selection_state();
         let options = self.timeline_render_options();
         self.timeline_state
             .render_store
             .append_entry(&self.timeline, index, &options);
         self.timeline_state.revision = self.timeline_state.revision.saturating_add(1);
+        self.restore_timeline_history_anchor(history_anchor);
     }
 
     pub(super) fn reset_scroll(&mut self) {
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.approval.scroll_back = 0;
         self.activity_scroll_back = 0;
     }
 
     pub(super) fn scroll_timeline(&mut self, delta: usize) {
+        if delta == 0 {
+            return;
+        }
+        self.enter_timeline_history_inspection();
         self.timeline_scroll_back = self
             .timeline_scroll_back
             .saturating_add(delta)
@@ -554,10 +628,309 @@ impl AppState {
 
     pub(super) fn unscroll_timeline(&mut self, delta: usize) {
         self.timeline_scroll_back = self.timeline_scroll_back.saturating_sub(delta);
+        if self.timeline_scroll_back == 0 {
+            self.timeline_state.viewport_mode = TimelineViewportMode::LiveTail;
+        }
     }
 
     pub(super) fn scroll_timeline_to_top(&mut self) {
+        self.enter_timeline_history_inspection();
         self.timeline_scroll_back = self.max_timeline_scroll_back();
+    }
+
+    pub(super) fn return_timeline_to_live_tail(&mut self) {
+        self.timeline_scroll_back = 0;
+        self.timeline_state.viewport_mode = TimelineViewportMode::LiveTail;
+    }
+
+    pub(super) fn timeline_at_live_tail(&self) -> bool {
+        self.timeline_scroll_back == 0 && !self.timeline_history_inspection_active()
+    }
+
+    pub(super) fn capture_timeline_history_anchor(&self) -> Option<TimelineHistoryAnchor> {
+        if self.timeline_at_live_tail() {
+            return None;
+        }
+        match &self.agent_panel.active_view {
+            AgentView::Main => {
+                let snapshot = self.timeline_state.render_store.snapshot();
+                let start = self
+                    .visible_timeline_render_range(self.timeline_viewport_rows())
+                    .start;
+                let entry_index = snapshot.entry_at_line(start)?;
+                let entry_range = snapshot.range_for_entry(entry_index)?;
+                let line_offset = start.saturating_sub(entry_range.start);
+                let entry_content_offset = snapshot
+                    .plain_lines_range(entry_range.clone())
+                    .iter()
+                    .take(line_offset)
+                    .map(|line| timeline_history_line_weight(line))
+                    .sum();
+                Some(TimelineHistoryAnchor::Main {
+                    entry_index,
+                    line_offset,
+                    entry_content_offset,
+                    absolute_start: start,
+                })
+            }
+            AgentView::Child {
+                child_session_ref, ..
+            } => {
+                let (header, body) = self.render_child_agent_transcript_sections();
+                let max_lines = self.timeline_viewport_rows();
+                if max_lines <= header.len() {
+                    return None;
+                }
+                let effective_len = child_transcript_effective_len(&body);
+                let viewport = max_lines.saturating_sub(header.len()).max(1);
+                let scroll_back = self
+                    .timeline_scroll_back
+                    .min(effective_len.saturating_sub(viewport));
+                let end = effective_len.saturating_sub(scroll_back);
+                let start = end.saturating_sub(viewport);
+                let body_content_offset = body
+                    .iter()
+                    .take(start)
+                    .map(|line| timeline_history_line_weight(&plain_line_text(line)))
+                    .sum();
+                let (
+                    entry_identity,
+                    previous_entry_identity,
+                    next_entry_identity,
+                    retained_entry_index,
+                    entry_line_offset,
+                    entry_content_offset,
+                ) = self
+                    .agent_panel
+                    .active_child_transcript
+                    .as_ref()
+                    .and_then(|transcript| {
+                        let (projected_lines, entry_ranges) = self
+                            .render_child_timeline_body_projection(&transcript.timeline_entries);
+                        let (local_index, range) = entry_ranges
+                            .iter()
+                            .enumerate()
+                            .find(|(_, range)| !range.is_empty() && range.end > start)?;
+                        let anchored_line = start.max(range.start).min(range.end);
+                        let entry_line_offset = anchored_line.saturating_sub(range.start);
+                        let entry_content_offset = projected_lines
+                            .get(range.start..anchored_line)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|line| timeline_history_line_weight(&plain_line_text(line)))
+                            .sum();
+                        Some((
+                            transcript
+                                .timeline_entries
+                                .get(local_index)
+                                .map(|entry| (entry.role, entry.text.clone())),
+                            local_index.checked_sub(1).and_then(|index| {
+                                transcript
+                                    .timeline_entries
+                                    .get(index)
+                                    .map(|entry| (entry.role, entry.text.clone()))
+                            }),
+                            transcript
+                                .timeline_entries
+                                .get(local_index.saturating_add(1))
+                                .map(|entry| (entry.role, entry.text.clone())),
+                            Some(local_index),
+                            entry_line_offset,
+                            entry_content_offset,
+                        ))
+                    })
+                    .unwrap_or((None, None, None, None, 0, 0));
+                Some(TimelineHistoryAnchor::Child {
+                    session_ref: child_session_ref.as_path().display().to_string(),
+                    entry_identity,
+                    previous_entry_identity,
+                    next_entry_identity,
+                    retained_entry_index,
+                    entry_line_offset,
+                    entry_content_offset,
+                    body_line_offset: start,
+                    body_content_offset,
+                })
+            }
+        }
+    }
+
+    pub(super) fn restore_timeline_history_anchor(
+        &mut self,
+        anchor: Option<TimelineHistoryAnchor>,
+    ) {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        match anchor {
+            TimelineHistoryAnchor::Main {
+                entry_index,
+                line_offset,
+                entry_content_offset,
+                absolute_start,
+            } => {
+                if !matches!(self.agent_panel.active_view, AgentView::Main) {
+                    return;
+                }
+                let snapshot = self.timeline_state.render_store.snapshot();
+                let effective_len = self.main_timeline_render_len().min(snapshot.total_lines());
+                let desired_start = snapshot
+                    .range_for_entry(entry_index)
+                    .map(|range| {
+                        let available = range.end.saturating_sub(range.start);
+                        let lines = snapshot.plain_lines_range(range.clone());
+                        let mut remaining = entry_content_offset;
+                        let logical_line_offset = lines
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, line)| {
+                                let weight = timeline_history_line_weight(line);
+                                if remaining < weight {
+                                    Some(index)
+                                } else {
+                                    remaining = remaining.saturating_sub(weight);
+                                    None
+                                }
+                            })
+                            .unwrap_or(line_offset);
+                        range
+                            .start
+                            .saturating_add(logical_line_offset.min(available.saturating_sub(1)))
+                    })
+                    .unwrap_or(absolute_start)
+                    .min(effective_len);
+                let viewport = self.timeline_viewport_rows().max(1);
+                let desired_end = desired_start.saturating_add(viewport).min(effective_len);
+                self.timeline_scroll_back = effective_len.saturating_sub(desired_end);
+            }
+            TimelineHistoryAnchor::Child {
+                session_ref,
+                entry_identity,
+                previous_entry_identity,
+                next_entry_identity,
+                retained_entry_index,
+                entry_line_offset,
+                entry_content_offset,
+                body_line_offset,
+                body_content_offset,
+            } => {
+                let AgentView::Child {
+                    child_session_ref, ..
+                } = &self.agent_panel.active_view
+                else {
+                    return;
+                };
+                if child_session_ref.as_path().display().to_string() != session_ref {
+                    return;
+                }
+                let (header, body) = self.render_child_agent_transcript_sections();
+                let max_lines = self.timeline_viewport_rows();
+                if max_lines <= header.len() {
+                    self.timeline_scroll_back = 0;
+                    return;
+                }
+                let effective_len = child_transcript_effective_len(&body);
+                let entry_start =
+                    self.agent_panel
+                        .active_child_transcript
+                        .as_ref()
+                        .and_then(|transcript| {
+                            let local_index = entry_identity
+                                .as_ref()
+                                .and_then(|identity| {
+                                    transcript
+                                        .timeline_entries
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, entry)| {
+                                            child_timeline_entry_matches(entry, identity)
+                                        })
+                                        .min_by_key(|(index, _)| {
+                                            let context_score = child_anchor_context_score(
+                                                &transcript.timeline_entries,
+                                                *index,
+                                                previous_entry_identity.as_ref(),
+                                                next_entry_identity.as_ref(),
+                                            );
+                                            (
+                                                2_usize.saturating_sub(context_score),
+                                                retained_entry_index.map_or(0, |retained| {
+                                                    retained.abs_diff(*index)
+                                                }),
+                                            )
+                                        })
+                                        .map(|(index, _)| index)
+                                })
+                                .or(retained_entry_index)?
+                                .min(transcript.timeline_entries.len().saturating_sub(1));
+                            let (projected_lines, entry_ranges) = self
+                                .render_child_timeline_body_projection(
+                                    &transcript.timeline_entries,
+                                );
+                            let range = entry_ranges.get(local_index)?.clone();
+                            if range.is_empty() {
+                                return Some(range.start);
+                            }
+                            let mut remaining = entry_content_offset;
+                            let logical_line_offset = projected_lines
+                                .get(range.clone())?
+                                .iter()
+                                .enumerate()
+                                .find_map(|(index, line)| {
+                                    let weight =
+                                        timeline_history_line_weight(&plain_line_text(line));
+                                    if remaining < weight {
+                                        Some(index)
+                                    } else {
+                                        remaining = remaining.saturating_sub(weight);
+                                        None
+                                    }
+                                })
+                                .unwrap_or(entry_line_offset);
+                            Some(
+                                range
+                                    .start
+                                    .saturating_add(
+                                        logical_line_offset.min(range.len().saturating_sub(1)),
+                                    )
+                                    .min(effective_len),
+                            )
+                        });
+                let desired_start = entry_start.unwrap_or_else(|| {
+                    let mut remaining = body_content_offset;
+                    body.iter()
+                        .take(effective_len)
+                        .enumerate()
+                        .find_map(|(index, line)| {
+                            let weight = timeline_history_line_weight(&plain_line_text(line));
+                            if remaining < weight {
+                                Some(index)
+                            } else {
+                                remaining = remaining.saturating_sub(weight);
+                                None
+                            }
+                        })
+                        .unwrap_or(body_line_offset)
+                        .min(effective_len)
+                });
+                let viewport = max_lines.saturating_sub(header.len()).max(1);
+                let desired_end = desired_start.saturating_add(viewport).min(effective_len);
+                self.timeline_scroll_back = effective_len.saturating_sub(desired_end);
+            }
+        }
+    }
+
+    fn enter_timeline_history_inspection(&mut self) {
+        if matches!(self.agent_panel.active_view, AgentView::Main)
+            && self.native_scrollback_frontier_line() > 0
+        {
+            self.timeline_state.viewport_mode = TimelineViewportMode::HistoryInspect;
+        }
+    }
+
+    pub(crate) fn timeline_history_inspection_active(&self) -> bool {
+        matches!(self.agent_panel.active_view, AgentView::Main)
+            && self.timeline_state.viewport_mode == TimelineViewportMode::HistoryInspect
     }
 
     pub fn handle_mouse_scroll(&mut self, upward: bool) {
@@ -664,7 +1037,10 @@ impl AppState {
             .min(effective_len.saturating_sub(viewport));
         let end = effective_len.saturating_sub(scroll_back);
         let mut start = end.saturating_sub(viewport);
-        if scroll_back == 0 && matches!(self.agent_panel.active_view, AgentView::Main) {
+        if scroll_back == 0
+            && matches!(self.agent_panel.active_view, AgentView::Main)
+            && !self.timeline_history_inspection_active()
+        {
             start = start.max(self.native_scrollback_frontier_line().min(end));
         }
         start..end
@@ -757,11 +1133,7 @@ impl AppState {
             return header.into_iter().take(max_lines).collect();
         }
         let body_budget = max_lines.saturating_sub(header.len());
-        let effective_len = body
-            .iter()
-            .rposition(line_has_visible_content)
-            .map(|index| index + 1)
-            .unwrap_or(0);
+        let effective_len = child_transcript_effective_len(&body);
         if effective_len == 0 {
             return header;
         }
@@ -911,7 +1283,16 @@ impl AppState {
         &self,
         timeline_entries: &[TimelineEntry],
     ) -> Vec<Line<'static>> {
+        self.render_child_timeline_body_projection(timeline_entries)
+            .0
+    }
+
+    fn render_child_timeline_body_projection(
+        &self,
+        timeline_entries: &[TimelineEntry],
+    ) -> (Vec<Line<'static>>, Vec<Range<usize>>) {
         let mut body = Vec::new();
+        let mut entry_ranges = Vec::with_capacity(timeline_entries.len());
         let mut options = self.timeline_render_options();
         options.selected_tool_activity_key = None;
         options.hovered_tool_activity_key = None;
@@ -927,7 +1308,9 @@ impl AppState {
             if !rendered.is_empty() && !body.is_empty() {
                 body.push(Line::raw(String::new()));
             }
+            let start = body.len();
             body.extend(rendered);
+            entry_ranges.push(start..body.len());
         }
         while body
             .last()
@@ -935,7 +1318,11 @@ impl AppState {
         {
             let _ = body.pop();
         }
-        body
+        for range in &mut entry_ranges {
+            range.end = range.end.min(body.len());
+            range.start = range.start.min(range.end);
+        }
+        (body, entry_ranges)
     }
 
     fn active_child_is_running(&self) -> bool {
@@ -1352,6 +1739,46 @@ impl AppState {
             ),
         })
     }
+}
+
+fn timeline_history_line_weight(line: &str) -> usize {
+    line.chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+        .max(1)
+}
+
+fn child_transcript_effective_len(body: &[Line<'_>]) -> usize {
+    body.iter()
+        .rposition(line_has_visible_content)
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn child_timeline_entry_matches(entry: &TimelineEntry, identity: &(TimelineRole, String)) -> bool {
+    entry.role == identity.0 && entry.text == identity.1
+}
+
+fn child_anchor_context_score(
+    entries: &[TimelineEntry],
+    index: usize,
+    previous: Option<&(TimelineRole, String)>,
+    next: Option<&(TimelineRole, String)>,
+) -> usize {
+    let previous_matches = match previous {
+        Some(identity) => index
+            .checked_sub(1)
+            .and_then(|previous_index| entries.get(previous_index))
+            .is_some_and(|entry| child_timeline_entry_matches(entry, identity)),
+        None => index == 0,
+    };
+    let next_matches = match next {
+        Some(identity) => entries
+            .get(index.saturating_add(1))
+            .is_some_and(|entry| child_timeline_entry_matches(entry, identity)),
+        None => index.saturating_add(1) >= entries.len(),
+    };
+    usize::from(previous_matches) + usize::from(next_matches)
 }
 
 fn bounded_event_detail(detail: String) -> String {

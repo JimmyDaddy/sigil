@@ -432,6 +432,7 @@ where
 
     state.compaction.preparation_tasks.cancel_and_join(runtime);
     state.artifact_gc.tasks.cancel_and_join(runtime);
+    state.artifact_gc.clear_deferred_notice();
     state.compaction.local_preview = None;
     state.compaction.pending = None;
     state.compaction.idle_auto = IdleAutoCompactionState::default();

@@ -3,16 +3,17 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunInput, AgentRunPurpose, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
-    ControlEntry, ConversationInputKind, ConversationInputQueueId, ConversationInputQueuedEntry,
-    ConversationInputStatus, ConversationInputTarget, JsonlSessionStore, ModelMessage,
-    MultiAgentMode, PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk,
-    ReasoningEffort, Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME,
-    TaskAdmissionReason, TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId,
-    TaskIsolationMode, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
-    TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, Tool,
-    ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, project_conversation_prompt_for_persistence,
+    Agent, AgentRole, AgentRunInput, AgentRunPurpose, CONTINUE_EXISTING_TASK_TOOL_NAME,
+    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationInputKind,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
+    ConversationInputTarget, JsonlSessionStore, ModelMessage, MultiAgentMode,
+    PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk, ReasoningEffort,
+    Session, SessionLogEntry, SessionRef, TASK_GUIDANCE_APPLY_TOOL_NAME, TaskAdmissionReason,
+    TaskAdmissionTrigger, TaskHandoffRequestedEntry, TaskId, TaskIsolationMode, TaskPauseRequest,
+    TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    project_conversation_prompt_for_persistence,
 };
 use tempfile::tempdir;
 
@@ -518,6 +519,442 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum TypedTaskContinuationDispatch {
+    Direct,
+    QueuedRunNext,
+}
+
+fn run_typed_task_continuation_from_conversation(
+    dispatch: TypedTaskContinuationDispatch,
+) -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-typed-task-continuation-e2e.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    let task_id = TaskId::new("typed_task_continuation_e2e")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative(
+            session_log_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("session.jsonl"),
+        )?,
+        objective: "finish the current durable task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for a semantic follow-up".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("finish")?,
+            title: "Finish the pending work".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: Some(TaskStepMode::Read),
+            isolation: Some(TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: None,
+    }))?;
+    drop(session);
+
+    let exact_guidance = "finish the task we were already working on";
+    let continue_args = r#"{"reason":"continue_current_task"}"#;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::ToolCallStart {
+            id: "continue-existing-task".to_owned(),
+            name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
+        },
+        ProviderChunk::ToolCallArgsDelta {
+            id: "continue-existing-task".to_owned(),
+            delta: continue_args.to_owned(),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: "continue-existing-task".to_owned(),
+            name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
+            args_json: continue_args.to_owned(),
+        }),
+        ProviderChunk::Done,
+    ])]);
+    let guidance_args = r#"{"reason":"prioritizes_pending_step","target_step_ids":["finish"]}"#;
+    let role_provider_builder = planned_role_provider_builder(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "apply-conversation-guidance".to_owned(),
+                name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "apply-conversation-guidance".to_owned(),
+                delta: guidance_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "apply-conversation-guidance".to_owned(),
+                name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
+                args_json: guidance_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("continued task step completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("continued task synthesis completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    let worker = spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+        role_provider_builder,
+    )?;
+
+    match dispatch {
+        TypedTaskContinuationDispatch::Direct => {
+            worker.send(WorkerCommand::SubmitPrompt {
+                prompt: exact_guidance.to_owned(),
+                reasoning_effort: ReasoningEffort::High,
+            })?;
+            let _ = worker
+                .recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))
+                .context("direct conversation did not start")?;
+        }
+        TypedTaskContinuationDispatch::QueuedRunNext => {
+            worker.send(WorkerCommand::SetConversationQueuePaused { paused: true })?;
+            let _ = worker
+                .recv_until(|message| {
+                    matches!(
+                        message,
+                        WorkerMessage::ConversationQueueUpdated { paused: true, .. }
+                    )
+                })
+                .context("conversation queue did not pause")?;
+            worker.send(WorkerCommand::QueueConversationInput {
+                prompt: exact_guidance.to_owned(),
+                kind: ConversationInputKind::Chat,
+                target: ConversationInputTarget::MainThread,
+                reasoning_effort: ReasoningEffort::High,
+            })?;
+            let queued = worker
+                .recv_until(|message| {
+                    matches!(
+                        message,
+                        WorkerMessage::ConversationQueueUpdated {
+                            items,
+                            paused: true,
+                            ..
+                        } if items.len() == 1 && items[0].queued.prompt == exact_guidance
+                    )
+                })
+                .context("conversation follow-up was not durably queued")?;
+            let queue_id = match queued {
+                WorkerMessage::ConversationQueueUpdated { items, .. } => {
+                    items[0].queued.queue_id.clone()
+                }
+                _ => unreachable!("queue predicate guarantees an update"),
+            };
+            worker.send(WorkerCommand::PromoteQueuedConversationInput { queue_id })?;
+            let _ = worker
+                .recv_until_with_timeout(Duration::from_secs(10), |message| {
+                    matches!(
+                        message,
+                        WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                            if prompt == exact_guidance
+                    )
+                })
+                .context("Run next did not dispatch the typed Task continuation")?;
+        }
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let started = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("typed Task continuation did not start");
+        }
+        let message = worker.recv_with_timeout(remaining)?;
+        match message {
+            WorkerMessage::TaskRunStarted {
+                task_id: ref started_task_id,
+                ..
+            } if started_task_id == task_id.as_str() => break message,
+            WorkerMessage::RunFailed(error) => {
+                let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+                anyhow::bail!(
+                    "typed Task continuation failed before start: {error}; durable entries: {}",
+                    control_entry_debug(&entries)
+                );
+            }
+            _ => {}
+        }
+    };
+    assert!(matches!(started, WorkerMessage::TaskRunStarted { .. }));
+    let finished = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::TaskRunFinished { task_id: finished, .. }
+                    if finished == task_id.as_str()
+            )
+        })
+        .context("typed Task continuation did not reach a terminal state")?;
+    let WorkerMessage::TaskRunFinished {
+        status, entries, ..
+    } = finished
+    else {
+        unreachable!("recv_until only returns TaskRunFinished");
+    };
+    assert_eq!(status, TaskRunStatus::Completed);
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
+            if selected.task_id == task_id && selected.guidance == exact_guidance
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
+            if applied.task_id == task_id
+                && applied.target_step_ids
+                    == vec![TaskStepId::new("finish").expect("valid step id")]
+    )));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(bound))
+                    if bound.task_id == task_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::User(message)
+                    if message.content.as_deref() == Some(exact_guidance)
+            ))
+            .count(),
+        1,
+        "conversation continuation guidance must enter parent history exactly once"
+    );
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn direct_conversation_continues_exact_current_task_with_guidance_review() -> Result<()> {
+    run_typed_task_continuation_from_conversation(TypedTaskContinuationDispatch::Direct)
+}
+
+#[test]
+fn queued_run_next_continues_exact_current_task_with_guidance_review() -> Result<()> {
+    run_typed_task_continuation_from_conversation(TypedTaskContinuationDispatch::QueuedRunNext)
+}
+
+#[derive(Clone, Copy)]
+enum ExplicitTaskContinuationPlan {
+    Accepted,
+    Missing,
+}
+
+fn run_explicit_task_continuation_after_user_clear(
+    plan: ExplicitTaskContinuationPlan,
+) -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let suffix = match plan {
+        ExplicitTaskContinuationPlan::Accepted => "accepted-plan",
+        ExplicitTaskContinuationPlan::Missing => "missing-plan",
+    };
+    let session_log_path = temp.path().join(format!(
+        ".sigil/sessions/session-explicit-continue-{suffix}.jsonl"
+    ));
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    let task_id = TaskId::new(format!("explicit_continue_{suffix}"))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative(
+            session_log_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("session.jsonl"),
+        )?,
+        objective: "resume the exact recovered task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("waiting for an explicit continuation".to_owned()),
+    }))?;
+    if matches!(plan, ExplicitTaskContinuationPlan::Accepted) {
+        session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: TaskStepId::new("finish")?,
+                title: "Finish the recovered work".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                intent_refs: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            }],
+            reason: None,
+        }))?;
+    }
+    session.append_user_message(ModelMessage::user("explain an unrelated module first"))?;
+    assert!(
+        session.task_state_projection().current_task().is_none(),
+        "the ordinary User turn must clear Task focus before /task continue"
+    );
+    drop(session);
+
+    let mut role_plans = Vec::new();
+    if matches!(plan, ExplicitTaskContinuationPlan::Missing) {
+        let task_plan_args = r#"{
+            "plan_version": 1,
+            "status": "accepted",
+            "steps": [{
+                "step_id": "finish",
+                "title": "Finish the recovered work",
+                "role": "executor",
+                "mode": "read",
+                "isolation": "shared_read_only"
+            }]
+        }"#;
+        role_plans.push(StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "recover-task-plan".to_owned(),
+                name: "task_plan_update".to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "recover-task-plan".to_owned(),
+                delta: task_plan_args.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "recover-task-plan".to_owned(),
+                name: "task_plan_update".to_owned(),
+                args_json: task_plan_args.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]));
+    }
+    role_plans.extend([
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("explicit continuation step completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("explicit continuation synthesis completed".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let worker = spawn_test_worker_with_role_provider_builder(
+        test_root_config(&workspace_root, "planned", "planned-model"),
+        session_log_path,
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace_root,
+        planned_role_provider_builder(role_plans),
+    )?;
+
+    worker.send(WorkerCommand::ContinueTask {
+        task_id: None,
+        guidance: None,
+    })?;
+    let _ = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::TaskRunStarted { task_id: started, .. }
+                    if started == task_id.as_str()
+            )
+        })
+        .context("explicit Task continuation did not start")?;
+    let finished = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::TaskRunFinished { task_id: finished, .. }
+                    if finished == task_id.as_str()
+            )
+        })
+        .context("explicit Task continuation did not finish")?;
+    let WorkerMessage::TaskRunFinished {
+        status, entries, ..
+    } = finished
+    else {
+        unreachable!("recv_until only returns TaskRunFinished");
+    };
+    assert_eq!(status, TaskRunStatus::Completed);
+    assert_eq!(
+        sigil_kernel::TaskStateProjection::from_entries(&entries)
+            .current_task()
+            .map(|task| &task.task_id),
+        Some(&task_id)
+    );
+    let selections = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(selected))
+                if selected.task_id == task_id =>
+            {
+                Some(selected)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selections.len(), 1);
+    assert_eq!(selections[0].task_status, TaskRunStatus::Paused);
+    assert_eq!(
+        selections[0].plan_version,
+        match plan {
+            ExplicitTaskContinuationPlan::Accepted => Some(1),
+            ExplicitTaskContinuationPlan::Missing => None,
+        }
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::User(_)))
+            .count(),
+        1,
+        "/task continue must not synthesize another parent User turn"
+    );
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn explicit_continue_refocuses_paused_task_after_an_ordinary_user_turn() -> Result<()> {
+    run_explicit_task_continuation_after_user_clear(ExplicitTaskContinuationPlan::Accepted)
+}
+
+#[test]
+fn explicit_continue_replans_no_plan_task_through_the_shared_continuation_runtime() -> Result<()> {
+    run_explicit_task_continuation_after_user_clear(ExplicitTaskContinuationPlan::Missing)
+}
+
 #[test]
 fn run_next_resumes_paused_task_guidance_after_its_initial_wake_was_consumed() -> Result<()> {
     let temp = tempdir()?;
@@ -834,32 +1271,57 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
             ProviderChunk::Done,
         ]),
     ]);
+    let direct_args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
         Agent::new(
-            PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-                ProviderChunk::TextDelta("follow-up handled first".to_owned()),
-                ProviderChunk::Done,
-            ])]),
+            PlannedProvider::new(vec![
+                StreamPlan::Chunks(vec![
+                    ProviderChunk::ToolCallStart {
+                        id: "recovered-follow-up-route".to_owned(),
+                        name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                    },
+                    ProviderChunk::ToolCallArgsDelta {
+                        id: "recovered-follow-up-route".to_owned(),
+                        delta: direct_args.to_owned(),
+                    },
+                    ProviderChunk::ToolCallComplete(ToolCall {
+                        id: "recovered-follow-up-route".to_owned(),
+                        name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
+                        args_json: direct_args.to_owned(),
+                    }),
+                    ProviderChunk::Done,
+                ]),
+                StreamPlan::Chunks(vec![
+                    ProviderChunk::TextDelta("follow-up handled first".to_owned()),
+                    ProviderChunk::Done,
+                ]),
+            ]),
             ToolRegistry::new(),
         ),
         workspace_root,
         role_provider_builder,
     )?;
 
-    let dispatched = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::ConversationQueueDispatchStarted { .. }
-        )
-    })?;
+    let dispatched = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(
+                message,
+                WorkerMessage::ConversationQueueDispatchStarted { .. }
+            )
+        })
+        .context("waiting for queued follow-up dispatch during startup recovery")?;
     assert!(matches!(
         dispatched,
         WorkerMessage::ConversationQueueDispatchStarted { queue_id: dispatched, .. }
             if dispatched == queue_id
     ));
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    let _ = worker
+        .recv_until_with_timeout(Duration::from_secs(10), |message| {
+            matches!(message, WorkerMessage::TaskRunStarted { .. })
+        })
+        .context("waiting for recovered task to start after queued follow-up")?;
     let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::TaskRunFinished { .. })
     })?;

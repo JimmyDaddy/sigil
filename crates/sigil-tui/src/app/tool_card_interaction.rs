@@ -451,7 +451,7 @@ impl AppState {
             return false;
         };
         let (selected_index, selected_key) = self.ensure_selected_tool_entry(&entries);
-        let was_at_tail = self.timeline_scroll_back == 0;
+        let was_at_tail = self.timeline_at_live_tail();
         self.active_pane = PaneFocus::Activity;
         if self.tool_entry_is_open_by_key(selected_index, &selected_key) {
             if let Some(visible_rows) = self
@@ -684,7 +684,7 @@ impl AppState {
             ToolCardRevealPolicy::PreserveTail => {
                 self.reveal_timeline_entry(entry_index);
                 if was_at_tail {
-                    self.timeline_scroll_back = 0;
+                    self.return_timeline_to_live_tail();
                 }
             }
         }

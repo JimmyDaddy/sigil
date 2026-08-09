@@ -603,6 +603,46 @@ fn task_sidebar_keeps_plain_completed_label_without_verification_action() {
 }
 
 #[test]
+fn task_strip_hides_historical_paused_task_after_unrelated_chat() {
+    let mut entries =
+        task_entries_without_readiness(TaskRunStatus::Paused, TaskStepStatus::Interrupted);
+    assert!(task_strip_view(&entries).is_some());
+
+    entries.push(SessionLogEntry::User(ModelMessage::user(
+        "explain an unrelated module",
+    )));
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+        TaskStepEntry {
+            task_id: TaskId::new("task_1").expect("task id"),
+            plan_version: 1,
+            step_id: TaskStepId::new("fix_typo").expect("step id"),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Interrupted,
+            title: None,
+            summary: None,
+            reason: Some("late task update".to_owned()),
+        },
+    )));
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskRun(
+        TaskRunEntry {
+            task_id: TaskId::new("task_1").expect("task id"),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Fix typo".to_owned(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: Some("late task status".to_owned()),
+        },
+    )));
+
+    assert!(task_strip_view(&entries).is_none());
+    assert!(
+        task_sidebar_lines(&entries)
+            .iter()
+            .all(|line| !line.starts_with("task:"))
+    );
+}
+
+#[test]
 fn task_sidebar_separates_review_advisory_from_system_verify() {
     let task_id = TaskId::new("task_1").expect("task id");
     let review_step_id = TaskStepId::new("review").expect("step id");
@@ -1316,6 +1356,14 @@ fn task_entries_with_custom_readiness_and_reasons(
     let step_id = TaskStepId::new("fix_typo").expect("step id");
     let mut entries = vec![
         SessionLogEntry::User(ModelMessage::user("/task fix typo")),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Fix typo".to_owned(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        })),
         SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),

@@ -29,6 +29,15 @@ use super::{
     session_lifecycle_flow::SessionRetentionMaintenancePreview,
 };
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimelineViewportMode {
+    /// The native terminal owns the emitted prefix; the live panel only renders its tail.
+    #[default]
+    LiveTail,
+    /// The live panel intentionally reprojects native-owned rows for in-app history navigation.
+    HistoryInspect,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TimelineState {
     pub(in crate::app) expanded_thinking_entry_indices: BTreeSet<usize>,
@@ -50,6 +59,7 @@ pub(crate) struct TimelineState {
     pub(in crate::app) tool_activity_cache: Vec<ToolActivityCacheEntry>,
     pub(in crate::app) native_scrollback_session_id: Option<String>,
     pub(in crate::app) native_scrollback_entry_count: usize,
+    pub(in crate::app) viewport_mode: TimelineViewportMode,
 }
 
 #[derive(Debug, Default)]

@@ -10,10 +10,10 @@ use sigil_kernel::{
     ImageMimeType, MemoryConfig, ModelMessage, PermissionConfig, PreEgressDisclosure,
     ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RootConfig, RunEvent, RunStatus,
     SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-    ToolAccess, ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationVerdict, VisibleCompletionState,
-    WorkspaceConfig,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
+    TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall, ToolCategory,
+    ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationVerdict, VisibleCompletionState, WorkspaceConfig,
 };
 
 use crate::{
@@ -129,6 +129,21 @@ fn compact_verification_app() -> AppState {
             }],
             reason: None,
         })),
+        SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(
+            TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: "scope-verification".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(
+            TaskRunTargetSelectedEntry::new(
+                task_id.clone(),
+                "scope-verification",
+                TaskRunStatus::Paused,
+                Some(1),
+                Some(TaskPlanStatus::Accepted),
+            ),
+        )),
         SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
             task_id: task_id.clone(),
             plan_version: 1,

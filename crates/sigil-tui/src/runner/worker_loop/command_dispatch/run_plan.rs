@@ -171,6 +171,7 @@ where
                     root_config.task.enabled && !plan_mode,
                     root_config.task.routing_policy,
                 )
+                .with_writable_memory_routing(root_config.memory.writable)
                 .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
                     &root_config.agent.runtime_provider,
                     &root_config.agent.model,
@@ -337,6 +338,73 @@ where
                                                     .to_owned()
                                             } else {
                                                 "run cancellation won the missing-task terminal-state race"
+                                                    .to_owned()
+                                            };
+                                            RunTaskPayload::Chat {
+                                                result: Err(error),
+                                                plan_mode,
+                                                plan_review: false,
+                                                queue_id: None,
+                                                provider_logical_run_id: None,
+                                                agent_result_continuation_thread_ids: Vec::new(),
+                                            }
+                                        }
+                                    }
+                                }
+                                AgentRunDisposition::ContinueDurableTask(action) => {
+                                    let task_id = action.task_id.as_str().to_owned();
+                                    let task = sigil_runtime::validate_task_continuation_action(
+                                        &run_session,
+                                        &action,
+                                    )
+                                    .map_err(|error| {
+                                        format!("typed task continuation is stale: {error}")
+                                    });
+                                    match task {
+                                        Ok(task) => {
+                                            let _ = run_message_tx.send(
+                                                WorkerMessage::TaskRunStarted {
+                                                    task_id: task_id.clone(),
+                                                    objective: task.objective.clone(),
+                                                },
+                                            );
+                                            let result =
+                                                continue_routed_task_to_root_terminal(
+                                                    &mut run_session,
+                                                    RoutedTaskContinuationOrchestration {
+                                                        task_id: action.task_id,
+                                                        parent_session_ref:
+                                                            task.parent_session_ref,
+                                                        objective: task.objective,
+                                                        guidance: action.guidance,
+                                                        guidance_receipt:
+                                                            action.guidance_receipt,
+                                                        root_config: task_root_config,
+                                                        options,
+                                                        base_registry: task_base_registry,
+                                                        agent_supervisor: task_agent_supervisor,
+                                                        role_provider_builder:
+                                                            task_role_provider_builder.as_ref(),
+                                                        handler: &mut handler,
+                                                        cancellation_handle,
+                                                        tool_artifact_read_budget,
+                                                    },
+                                                    &mut approval_handler,
+                                                )
+                                                .await;
+                                            RunTaskPayload::Task {
+                                                task_id,
+                                                queue_id: None,
+                                                result,
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let error = if cancellation_handle
+                                                .try_finalize_naturally()
+                                            {
+                                                error
+                                            } else {
+                                                "run cancellation won the stale-task terminal-state race"
                                                     .to_owned()
                                             };
                                             RunTaskPayload::Chat {

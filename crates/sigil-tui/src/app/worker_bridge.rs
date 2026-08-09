@@ -63,6 +63,7 @@ impl AppState {
         let Some((&keep_index, duplicate_indices)) = indices.split_first() else {
             return;
         };
+        let history_anchor = self.capture_timeline_history_anchor();
         let Some(entry) = self.timeline.get_mut(keep_index) else {
             return;
         };
@@ -75,7 +76,7 @@ impl AppState {
             }
         }
         if removed_duplicate {
-            self.rebuild_timeline_projection_after_entry_removal();
+            self.rebuild_timeline_projection_after_entry_removal(history_anchor, duplicate_indices);
         } else {
             self.refresh_replaced_tool_timeline_entry(keep_index);
         }

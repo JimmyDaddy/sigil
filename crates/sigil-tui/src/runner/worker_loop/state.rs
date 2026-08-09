@@ -1,6 +1,7 @@
 use super::*;
 
 const MAX_APPROVAL_COMMAND_RECEIPTS: usize = 256;
+const MAX_ARTIFACT_GC_DEFERRED_NOTICES: usize = 32;
 
 pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) event_tx: mpsc::Sender<WorkerEvent>,
@@ -124,6 +125,7 @@ impl WorkerLoopState {
                 result_tx: WorkerEventPayloadSender::artifact_gc(event_tx.clone()),
                 tasks: ArtifactGcTaskManager::new(),
                 next_request_id: 1,
+                seen_deferred_notices: BTreeSet::new(),
             },
             refresh: RefreshWorkerState {
                 provider_status_tasks: ProviderStatusTaskManager::new(),
@@ -349,6 +351,23 @@ pub(in crate::runner) struct ArtifactGcWorkerState {
     pub(in crate::runner) result_tx: WorkerEventPayloadSender<ArtifactGcTaskResult>,
     pub(in crate::runner) tasks: ArtifactGcTaskManager,
     pub(in crate::runner) next_request_id: u64,
+    seen_deferred_notices: BTreeSet<String>,
+}
+
+impl ArtifactGcWorkerState {
+    pub(in crate::runner) fn changed_deferred_notice(&mut self, notice: String) -> Option<String> {
+        if self.seen_deferred_notices.contains(&notice)
+            || self.seen_deferred_notices.len() >= MAX_ARTIFACT_GC_DEFERRED_NOTICES
+        {
+            return None;
+        }
+        self.seen_deferred_notices.insert(notice.clone());
+        Some(notice)
+    }
+
+    pub(in crate::runner) fn clear_deferred_notice(&mut self) {
+        self.seen_deferred_notices.clear();
+    }
 }
 
 pub(in crate::runner) struct RefreshWorkerState {

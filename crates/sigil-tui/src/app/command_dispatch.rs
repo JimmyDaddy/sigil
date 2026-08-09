@@ -10,7 +10,7 @@ impl AppState {
         }
         let projection =
             sigil_kernel::TaskStateProjection::from_entries(&self.session_browser.current_entries);
-        let Some(task) = projection.latest_task() else {
+        let Some(task) = projection.current_task() else {
             self.last_notice = Some("the active run is not a durable task".to_owned());
             return None;
         };

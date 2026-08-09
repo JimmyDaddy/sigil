@@ -112,7 +112,7 @@ impl AppState {
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
-            self.timeline_scroll_back = 0;
+            self.return_timeline_to_live_tail();
             let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
             self.push_timeline(TimelineRole::User, safe_prompt.clone());
             self.push_event("input", format!("submitted plan prompt {safe_prompt}"));
@@ -140,7 +140,7 @@ impl AppState {
         let attachments = std::mem::take(&mut self.composer.image_attachments);
         self.composer.selected_image_attachment = None;
         self.reset_slash_selector();
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         let safe_prompt = image_submission_timeline_text(&prompt, &attachments);
         self.push_timeline(TimelineRole::User, safe_prompt.clone());
         if attachments.is_empty() {
@@ -273,7 +273,7 @@ impl AppState {
         self.composer.input_cursor = 0;
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.push_timeline(TimelineRole::User, format!("/plan {safe_plan_prompt}"));
         self.push_event("input", format!("submitted plan prompt {safe_plan_prompt}"));
         self.active_pane = PaneFocus::Composer;
@@ -326,7 +326,7 @@ impl AppState {
         let objective = arg.to_owned();
         let safe_objective = sigil_kernel::safe_persistence_text(&objective);
         self.clear_pending_plan_approval();
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.push_timeline(TimelineRole::User, format!("/task {safe_objective}"));
         self.push_event("input", format!("submitted task {safe_objective}"));
         self.active_pane = PaneFocus::Composer;
@@ -401,7 +401,7 @@ impl AppState {
         self.composer.input_cursor = 0;
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.push_timeline(
             TimelineRole::User,
             sigil_kernel::safe_persistence_text(&prompt),
@@ -467,7 +467,7 @@ impl AppState {
             return Ok(None);
         }
 
-        self.timeline_scroll_back = 0;
+        self.return_timeline_to_live_tail();
         self.push_timeline(
             TimelineRole::User,
             sigil_kernel::safe_persistence_text(prompt),

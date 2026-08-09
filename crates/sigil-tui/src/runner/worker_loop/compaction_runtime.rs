@@ -1929,6 +1929,18 @@ async fn prepare_queued_portable_preflight(
     let runtime_context = candidate.runtime_context.clone();
     let direct_request = candidate.frozen_request.request();
     let mut transient_messages = vec![exact_user_message];
+    if direct_request.messages.iter().any(|message| {
+        message.role == sigil_kernel::MessageRole::System
+            && message.content.as_deref()
+                == Some(sigil_kernel::conversation_route_routing_contract_material())
+    }) {
+        transient_messages.insert(
+            0,
+            sigil_kernel::ModelMessage::system(
+                sigil_kernel::conversation_route_routing_contract_material(),
+            ),
+        );
+    }
     transient_messages.extend(candidate.background_ready_context.clone());
     let target_input = PortableV2TargetRequestInput {
         tools: direct_request.tools.clone(),

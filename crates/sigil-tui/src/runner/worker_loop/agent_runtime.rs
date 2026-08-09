@@ -520,6 +520,9 @@ pub(in crate::runner) fn agent_result_continuation_run_result(
         AgentRunDisposition::StartDurableTask(_) => {
             Err("agent result continuation cannot hand off to a durable task".to_owned())
         }
+        AgentRunDisposition::ContinueDurableTask(_) => {
+            Err("agent result continuation cannot continue a durable task".to_owned())
+        }
         AgentRunDisposition::StartPlanReview(_) => {
             Err("agent result continuation cannot start a plan review".to_owned())
         }
@@ -570,16 +573,21 @@ pub(in crate::runner) fn start_queued_conversation_run<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
-    let queue_id = queued.promotion.queue_id.clone();
-    let safe_prompt = queued
-        .promotion
+    let PreparedQueuedConversationCandidate {
+        promotion,
+        frozen_request,
+        reasoning_effort,
+        background_ready_context,
+        runtime_context,
+        ..
+    } = queued;
+    let queue_id = promotion.queue_id.clone();
+    let safe_prompt = promotion
         .durable_user_message
         .content
         .clone()
         .unwrap_or_default();
-    let reasoning_effort = queued.reasoning_effort.clone();
-    let dispatch_run_id = queued.promotion.dispatch_run_id.clone();
-    let frozen_request = queued.frozen_request;
+    let dispatch_run_id = promotion.dispatch_run_id.clone();
     let Some(session) = current_session.as_ref() else {
         let _ = message_tx.send(WorkerMessage::RunFailed(
             "session state is unavailable for follow-up".to_owned(),
@@ -647,6 +655,7 @@ where
     let task_result_tx = task_result_tx.clone();
     let conversation_coordinator =
         ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
+            .with_writable_memory_routing(root_config.memory.writable)
             .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
                 &root_config.agent.runtime_provider,
                 &root_config.agent.model,
@@ -669,7 +678,8 @@ where
         let mut run_session = run_session;
         let mut payload = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-            let input = AgentRunInput::without_persisted_user_message(Vec::new())
+            let input = AgentRunInput::without_persisted_user_message(background_ready_context)
+                .with_runtime_context(runtime_context)
                 .with_initial_frozen_provider_request(frozen_request)
                 .with_pending_input_provider(Arc::new(DurableQueuePendingInputProvider))
                 .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
@@ -682,7 +692,7 @@ where
                         parent_session_ref.clone(),
                         dispatch_run_id.clone(),
                         Some(ConversationSourceTurn {
-                            message_id: queued.promotion.durable_user_message.id.clone(),
+                            message_id: promotion.durable_user_message.id.clone(),
                             objective: safe_prompt.clone(),
                         }),
                         current_unix_time_ms(),
@@ -753,6 +763,63 @@ where
                                     "accepted task handoff is missing its durable task".to_owned()
                                 } else {
                                     "run cancellation won the missing-task terminal-state race"
+                                        .to_owned()
+                                };
+                                RunTaskPayload::Chat {
+                                    result: Err(error),
+                                    plan_mode: false,
+                                    plan_review: false,
+                                    queue_id: Some(queue_id.clone()),
+                                    provider_logical_run_id: None,
+                                    agent_result_continuation_thread_ids: Vec::new(),
+                                }
+                            }
+                        }
+                    }
+                    AgentRunDisposition::ContinueDurableTask(action) => {
+                        let task_id = action.task_id.as_str().to_owned();
+                        let task =
+                            sigil_runtime::validate_task_continuation_action(&run_session, &action)
+                                .map_err(|error| {
+                                    format!("typed task continuation is stale: {error}")
+                                });
+                        match task {
+                            Ok(task) => {
+                                let _ = run_message_tx.send(WorkerMessage::TaskRunStarted {
+                                    task_id: task_id.clone(),
+                                    objective: task.objective.clone(),
+                                });
+                                let result = continue_routed_task_to_root_terminal(
+                                    &mut run_session,
+                                    RoutedTaskContinuationOrchestration {
+                                        task_id: action.task_id,
+                                        parent_session_ref: task.parent_session_ref,
+                                        objective: task.objective,
+                                        guidance: action.guidance,
+                                        guidance_receipt: action.guidance_receipt,
+                                        root_config: task_root_config,
+                                        options,
+                                        base_registry: task_base_registry,
+                                        agent_supervisor: task_agent_supervisor,
+                                        role_provider_builder: role_provider_builder.as_ref(),
+                                        handler: &mut handler,
+                                        cancellation_handle,
+                                        tool_artifact_read_budget,
+                                    },
+                                    &mut approval_handler,
+                                )
+                                .await;
+                                RunTaskPayload::Task {
+                                    task_id,
+                                    queue_id: Some(queue_id.clone()),
+                                    result,
+                                }
+                            }
+                            Err(error) => {
+                                let error = if cancellation_handle.try_finalize_naturally() {
+                                    error
+                                } else {
+                                    "run cancellation won the stale-task terminal-state race"
                                         .to_owned()
                                 };
                                 RunTaskPayload::Chat {

@@ -401,7 +401,7 @@ fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
 }
 
 #[test]
-fn queued_candidate_freezes_the_internal_auto_handoff_tool() -> Result<()> {
+fn queued_candidate_freezes_the_exact_routing_and_memory_surface() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
@@ -420,11 +420,14 @@ fn queued_candidate_freezes_the_internal_auto_handoff_tool() -> Result<()> {
         session.as_ref().expect("queued session"),
         &exact_prompts,
         temp.path(),
-        &MemoryConfig::with_enabled(false),
-        vec![
-            sigil_kernel::request_task_planning_tool_spec(),
-            sigil_kernel::continue_without_task_planning_tool_spec(),
-        ],
+        &MemoryConfig {
+            enabled: false,
+            writable: true,
+        },
+        sigil_kernel::route_surface_tool_specs_with_memory(
+            sigil_kernel::AutomaticRouteCapability::DirectTask,
+            true,
+        ),
         None,
         None,
     )
@@ -433,14 +436,35 @@ fn queued_candidate_freezes_the_internal_auto_handoff_tool() -> Result<()> {
         panic!("queued chat should materialize a candidate");
     };
 
-    assert!(
-        candidate
-            .frozen_request
-            .request()
+    let request = candidate.frozen_request.request();
+    assert_eq!(
+        request
             .tools
             .iter()
-            .any(|tool| { tool.name == sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME })
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
+            sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
+            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
+            sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
+            sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
+        ]
     );
+    let routing_index = request
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.as_deref()
+                == Some(sigil_kernel::conversation_route_routing_contract_material())
+        })
+        .expect("queued request contains the routing-only system contract");
+    let exact_user_index = request
+        .messages
+        .iter()
+        .position(|message| message.id == candidate.promotion.durable_user_message.id)
+        .expect("queued request contains the exact promoted user turn");
+    assert!(routing_index < exact_user_index);
     Ok(())
 }
 

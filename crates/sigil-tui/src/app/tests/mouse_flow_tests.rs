@@ -1588,6 +1588,40 @@ fn mouse_scroll_live_panel_moves_timeline_even_when_activity_focused() -> Result
 }
 
 #[test]
+fn mouse_scroll_live_panel_inspects_native_history_that_fits_the_viewport() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(48, 8);
+    for index in 0..10 {
+        app.push_timeline(TimelineRole::Assistant, format!("owned row {index}"));
+    }
+    let owned_entries = app.scrollback_entry_count();
+    assert!(owned_entries > 0);
+    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
+
+    app.set_terminal_size(48, 80);
+    let viewport = app.timeline_viewport_rows();
+    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
+    assert_eq!(app.max_timeline_scroll_back(), 0);
+    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 48, 80), &app);
+    let (column, row) = point_in(layout.live_panel);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(app.timeline_history_inspection_active());
+    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
+
+    let outcome =
+        app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(!app.timeline_history_inspection_active());
+    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
+    Ok(())
+}
+
+#[test]
 fn mouse_scroll_slash_overlay_moves_candidate_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);

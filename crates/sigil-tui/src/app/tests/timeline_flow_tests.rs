@@ -1,4 +1,6 @@
-use super::super::timeline_flow::{selected_timeline_line_columns, text_by_display_columns};
+use super::super::timeline_flow::{
+    TimelineHistoryAnchor, selected_timeline_line_columns, text_by_display_columns,
+};
 use super::*;
 use crate::{
     app::{AgentView, EGRESS_DISCLOSURE_HEIGHT},
@@ -1008,6 +1010,31 @@ fn live_rejected_final_candidate_is_removed_before_continuation() -> Result<()> 
 }
 
 #[test]
+fn terminal_final_blocker_notice_removes_the_rejected_candidate() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::TextDelta(
+        "candidate summary while a joined agent is still pending".to_owned(),
+    ))?;
+    app.handle(RunEvent::Notice(
+        "pending agent state still blocks final answer; ending this run without another provider retry"
+            .to_owned(),
+    ))?;
+
+    let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(!rendered.contains("candidate summary while a joined agent is still pending"));
+    assert!(rendered.contains("pending agent state still blocks final answer"));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn rejected_final_candidate_notice_keeps_finished_thinking_visible() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -1304,7 +1331,180 @@ fn live_timeline_never_reclaims_rows_owned_by_native_scrollback_after_growth() {
     app.set_terminal_size(48, 40);
     let visible = app.visible_timeline_render_range(40);
 
+    assert!(!app.timeline_history_inspection_active());
     assert!(visible.start >= owned_line.min(visible.end));
+}
+
+#[test]
+fn page_up_enters_native_history_inspection_after_viewport_growth() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(48, 8);
+    for index in 0..10 {
+        app.push_timeline(TimelineRole::Assistant, format!("owned row {index}"));
+    }
+    let owned_entries = app.scrollback_entry_count();
+    assert!(owned_entries > 0);
+    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
+    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
+
+    app.set_terminal_size(48, 80);
+    let viewport = app.timeline_viewport_rows();
+    assert_eq!(app.max_timeline_scroll_back(), 0);
+    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+
+    assert!(app.timeline_history_inspection_active());
+    assert_eq!(app.timeline_scroll_back, 0);
+    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
+    assert!(app.transcript_lines(viewport).iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("owned row 0"))
+    }));
+
+    for index in 10..80 {
+        app.push_timeline(TimelineRole::Assistant, format!("later row {index}"));
+    }
+    assert!(app.timeline_scroll_back > 0);
+    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))?;
+
+    assert!(!app.timeline_history_inspection_active());
+    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
+    Ok(())
+}
+
+#[test]
+fn history_inspection_keeps_its_top_anchor_during_streaming_and_reflow() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    for index in 0..24 {
+        app.push_timeline(TimelineRole::Assistant, format!("history row {index}"));
+    }
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL))?;
+    let initial_scroll_back = app.timeline_scroll_back;
+    assert_eq!(
+        app.visible_timeline_render_range(app.timeline_viewport_rows())
+            .start,
+        0
+    );
+
+    app.append_assistant_delta("streaming tail ");
+    app.append_assistant_delta(&"more output ".repeat(80));
+    assert!(app.timeline_scroll_back > initial_scroll_back);
+    assert_eq!(
+        app.visible_timeline_render_range(app.timeline_viewport_rows())
+            .start,
+        0
+    );
+
+    app.set_terminal_size(32, 12);
+    assert_eq!(
+        app.visible_timeline_render_range(app.timeline_viewport_rows())
+            .start,
+        0
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))?;
+    assert!(app.timeline_at_live_tail());
+    Ok(())
+}
+
+#[test]
+fn history_anchor_survives_height_only_resize() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    for index in 0..60 {
+        app.push_timeline(TimelineRole::Assistant, format!("height row {index}"));
+    }
+    let target_start: usize = 12;
+    let viewport = app.timeline_viewport_rows();
+    app.timeline_scroll_back = app
+        .effective_timeline_render_len()
+        .saturating_sub(target_start.saturating_add(viewport));
+    assert_eq!(
+        app.visible_timeline_render_range(viewport).start,
+        target_start
+    );
+    let top_before = app.timeline_plain_line(target_start).map(str::to_owned);
+
+    app.set_terminal_size(80, 18);
+    let visible = app.visible_timeline_render_range(app.timeline_viewport_rows());
+
+    assert_eq!(visible.start, target_start);
+    assert_eq!(
+        app.timeline_plain_line(visible.start),
+        top_before.as_deref()
+    );
+}
+
+#[test]
+fn history_anchor_maps_a_long_entry_by_logical_content_across_width_reflow() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(30, 12);
+    let text = (0..240)
+        .map(|index| format!("token{index:03}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    app.push_timeline(TimelineRole::Assistant, text);
+    let target_line = app
+        .timeline_plain_lines()
+        .iter()
+        .position(|line| line.contains("token120"))
+        .expect("narrow render should contain the marker");
+    let viewport = app.timeline_viewport_rows();
+    app.timeline_scroll_back = app
+        .effective_timeline_render_len()
+        .saturating_sub(target_line.saturating_add(viewport));
+    assert_eq!(
+        app.visible_timeline_render_range(viewport).start,
+        target_line
+    );
+
+    app.set_terminal_size(120, 12);
+    let visible = app.visible_timeline_render_range(app.timeline_viewport_rows());
+    let top_after = app
+        .timeline_plain_line(visible.start)
+        .expect("reflowed top line");
+
+    assert!(
+        top_after.contains("token120"),
+        "logical marker should remain on the anchored top row: {top_after:?}"
+    );
+}
+
+#[test]
+fn ctrl_home_enters_native_history_inspection_after_width_reflow() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(24, 8);
+    for index in 0..6 {
+        app.push_timeline(
+            TimelineRole::Assistant,
+            format!("width reflow history {index} ").repeat(3),
+        );
+    }
+    let owned_entries = app.scrollback_entry_count();
+    assert!(owned_entries > 0);
+    app.set_native_scrollback_frontier(app.session_id.clone(), owned_entries, false);
+
+    app.set_terminal_size(120, 80);
+    let viewport = app.timeline_viewport_rows();
+    let owned_line = app.scrollback_line_count_for_entry_count(owned_entries);
+    assert_eq!(app.max_timeline_scroll_back(), 0);
+    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL))?;
+
+    assert!(app.timeline_history_inspection_active());
+    assert_eq!(app.visible_timeline_render_range(viewport).start, 0);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))?;
+    assert!(!app.timeline_history_inspection_active());
+    assert!(app.visible_timeline_render_range(viewport).start >= owned_line);
+    Ok(())
 }
 
 #[test]
@@ -1339,6 +1539,173 @@ fn info_rail_visibility_rerenders_the_active_child_transcript() -> Result<()> {
         .len();
     assert!(!app.info_rail_visible());
     assert!(hidden_count < visible_count);
+    Ok(())
+}
+
+#[test]
+fn child_history_anchor_survives_live_append_and_width_reflow() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(64, 24);
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let timeline_entries = (0..30)
+        .map(|index| TimelineEntry {
+            role: TimelineRole::Assistant,
+            text: format!("child-anchor-{index:02} {}", "payload ".repeat(10)),
+        })
+        .collect::<Vec<_>>();
+    let rendered_body_lines = app.render_child_timeline_body_lines(&timeline_entries);
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries,
+        rendered_body_lines,
+        total_timeline_entries: 30,
+        transcript_truncated: false,
+        load_error: None,
+    });
+    app.timeline_scroll_back = app.max_timeline_scroll_back() / 2;
+    assert!(app.timeline_scroll_back > 0);
+    let first_visible_anchor = |app: &AppState| {
+        let lines = transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()));
+        lines
+            .iter()
+            .find_map(|line| {
+                let start = line.find("child-anchor-")?;
+                Some(line[start..].chars().take(15).collect::<String>())
+            })
+            .unwrap_or_else(|| panic!("a child anchor should be visible in {lines:?}"))
+    };
+    let before = first_visible_anchor(&app);
+
+    let transcript = app
+        .agent_panel
+        .active_child_transcript
+        .as_mut()
+        .expect("child transcript");
+    transcript.timeline_entries.push(TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "child-anchor-30 appended tail".to_owned(),
+    });
+    transcript.total_timeline_entries = 31;
+    app.rerender_active_agent_child_transcript();
+    assert_eq!(first_visible_anchor(&app), before);
+
+    app.set_terminal_size(38, 40);
+    assert_eq!(first_visible_anchor(&app), before);
+    Ok(())
+}
+
+#[test]
+fn child_history_anchor_survives_file_reload_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(60, 24);
+    app.session_log_path = temp.path().join("parent.jsonl");
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let child_path = temp.path().join("children/task_1/step_1-child_1.jsonl");
+    let child_store = JsonlSessionStore::new(&child_path)?;
+    for index in 0..96 {
+        child_store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!("reload-anchor-{index:02}")),
+            Vec::new(),
+        )))?;
+    }
+    assert!(app.reload_active_agent_child_transcript());
+    app.timeline_scroll_back = app.max_timeline_scroll_back() / 2;
+    assert!(app.timeline_scroll_back > 0);
+    let visible_anchor = |app: &AppState| {
+        transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()))
+            .into_iter()
+            .find(|line| line.contains("reload-anchor-"))
+            .expect("a reload anchor should be visible")
+    };
+    let before = visible_anchor(&app);
+    let captured_identity = match app.capture_timeline_history_anchor() {
+        Some(TimelineHistoryAnchor::Child { entry_identity, .. }) => entry_identity,
+        other => panic!("expected child history anchor, got {other:?}"),
+    };
+    assert!(captured_identity.is_some());
+
+    for index in 96..106 {
+        child_store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!("reload-anchor-{index:02}")),
+            Vec::new(),
+        )))?;
+    }
+    assert!(app.reload_active_agent_child_transcript());
+    assert_eq!(
+        visible_anchor(&app),
+        before,
+        "captured identity: {captured_identity:?}, scroll_back: {}",
+        app.timeline_scroll_back
+    );
+    Ok(())
+}
+
+#[test]
+fn child_history_anchor_disambiguates_repeated_entries_by_context() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(64, 40);
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let timeline_entries = (0..24)
+        .flat_map(|index| {
+            [
+                TimelineEntry {
+                    role: TimelineRole::Notice,
+                    text: "Started shell".to_owned(),
+                },
+                TimelineEntry {
+                    role: TimelineRole::Notice,
+                    text: format!("result-anchor-{index:02} {}", "detail ".repeat(8)),
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    let rendered_body_lines = app.render_child_timeline_body_lines(&timeline_entries);
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries,
+        rendered_body_lines,
+        total_timeline_entries: 48,
+        transcript_truncated: false,
+        load_error: None,
+    });
+    let mut expected_result = None;
+    for scroll_back in 1..=app.max_timeline_scroll_back() {
+        app.timeline_scroll_back = scroll_back;
+        let repeated_entry_is_anchored = matches!(
+            app.capture_timeline_history_anchor(),
+            Some(TimelineHistoryAnchor::Child {
+                entry_identity: Some((TimelineRole::Notice, ref text)),
+                ..
+            }) if text == "Started shell"
+        );
+        if !repeated_entry_is_anchored {
+            continue;
+        }
+        expected_result =
+            transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()))
+                .into_iter()
+                .find_map(|line| {
+                    let start = line.find("result-anchor-")?;
+                    Some(line[start..].chars().take(16).collect::<String>())
+                });
+        if expected_result.is_some() {
+            break;
+        }
+    }
+    let expected_result = expected_result.expect("a repeated entry anchor should be selectable");
+
+    app.set_terminal_size(48, 40);
+    let actual_result = transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()))
+        .into_iter()
+        .find_map(|line| {
+            let start = line.find("result-anchor-")?;
+            Some(line[start..].chars().take(16).collect::<String>())
+        })
+        .expect("the anchored repeated entry should keep its following result visible");
+    assert_eq!(actual_result, expected_result);
     Ok(())
 }
 
