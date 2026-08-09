@@ -8,7 +8,19 @@
 
 ## 尚未发布 - main
 
-- 自 v0.0.1-beta.3 起暂无面向用户的新变更。
+- 修复 final answer 后 TUI transcript 错乱，并恢复终端 resize/reflow 后查看更早历史的能力。
+  历史浏览会在新输出到达时保持稳定内容锚点；同一 session 的重复 artifact 维护失败只提示一次。
+- 继续 paused Task 时会选择精确的 durable Task，把用户本次续接指导带入经审阅的替代计划，并且
+  TUI 只展示当前 Task，不再重新显示已经过时的初始计划；显式开始 plan review 也会把旧 Task
+  从当前工作区移入历史，而不是继续与 plan preview 并列展示。
+- 自动路由回合现在可以同时处理用户明确提出的持久记忆意图。审批通过的记忆写入会先 durable
+  落盘，再执行所选 Chat / PlanReview / Task handoff；工具结果仍保持 provider 声明顺序。
+- 自动路由的内部 reasoning 不再于正式工作回合之前显示成一段重复 Thinking。Final answer 协调
+  现在只使用当前 logical run 的子代理 facts，facts 收敛后移除旧快照，并对连续 blocked-final
+  尝试设置独立上限；被阻塞的 child 或 Task participant 不再被误报为 completed，最终被 blocker
+  拒绝的 final candidate 也不会继续留在 TUI 中伪装成已接受回答。
+- 完整的 0-byte 工具 artifact 现在是合法且可读取的 artifact，避免健康 session 的后台维护被
+  反复延迟并持续刷提示。
 
 ## v0.0.1-beta.3 - 2026-08-06
 

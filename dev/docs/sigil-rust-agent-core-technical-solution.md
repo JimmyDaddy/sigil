@@ -308,6 +308,10 @@ sigil/
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke，并为可独立替换的官方归档写入 `github-release` 分发 marker；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs，npm launcher 再覆盖 install-source marker 以保留包管理器 ownership；`scripts/release-doctor.mjs` 绑定 tag、Cargo/Desktop/Tauri/Cargo.lock/changelog、remote main/tag 与 exact-SHA CI；`scripts/release-candidate.mjs` 冻结 tag commit、候选 asset inventory/size/SHA-256；macOS Desktop 使用 append-only 公证账本把 build+submit、单次 status、offline finalize 与 upload 分离，每个 attempt 绑定 tag/commit/Team/profile label/目标架构/不可变 submission SHA-256，Apple 原始响应原子落盘，缺失 ID 只能唯一 history reconciliation 或显式 orphan 后重提；`scripts/upload-desktop-macos-release.sh` 是签名双架构 Desktop 进入 draft 的唯一 maintainer 入口，并复验 finalized ledger，默认拒绝替换不同字节。`.github/workflows/release.yml` 只在 tag push 时构建一次多平台 TUI archive、生成 provenance、准备 npm tarball 和 draft Release；显式 publish 不再重编，而是按 candidate manifest 复用原 tarball，先验证双架构 macOS Desktop DMG、updater archive、checksum 与 signature，冻结 `latest.json`，再公开 immutable Release、通过 npm Trusted Publisher 按 platform-first/root-last 发布、部署 Pages updater endpoint，并由独立 job 使用仅限 `JimmyDaddy/homebrew-sigil` 的 SSH deploy key同步 tap。主 workflow 在 npm 发布后通过 `repository_dispatch` 启动有界等待的公开 npm/GitHub/Desktop/Pages/Homebrew smoke；`release.published` 另行覆盖非 `GITHUB_TOKEN` 触发的人工发布。crates.io package name 决策仍是 release-management 工作。
 - `sigil-tui`：并列一等产品表面中的终端实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 runtime、composer、approval、session browser 以及 timeline presentation、review/checkpoint、agent panel、egress disclosure 等私有领域 bundle，根 `AppState` 只为兼容保留公开 timeline/event/scroll 字段和顶层编排状态；`runner/worker_loop.rs` 只保留 worker façade，私有 `WorkerLoopState` 统一持有 session/run/compaction/refresh/agent 状态，scheduler 通过统一 `WorkerEvent` inbox 阻塞等待 command、typed completion、durable projection 与 supervisor wake，只在存在 MCP/terminal 等真实 deadline 时使用 nearest-deadline timeout；七个 advancement function 与穷尽 public-command 到 domain-typed-command classifier/handler 分别承担确定性 safe-point 推进和路由。session scheduler 的 queue、TaskGuidance、continuation、terminal 与 usage/readiness 热查询读取 kernel active-session 增量 projection，并以 durable frontier/CAS 保持最终写入权威；switch/new-session/local-session fork/checkpoint fork 复用一个 session transition，替换 projection observer generation，并在 foreground 或 detached background run 存在时 fail-closed，同时按目标 session 重建 agent supervisor 与模型可见 agent-tool surface。终端输入必须保持 single-owner：所有需要终端应答的 capability 查询和一次真实 cursor capture 在创建异步 `EventStream` 前完成；之后 ratatui inline resize 只读取 backend 内随输出更新的 cursor cache，transcript 写入只使用不读取 stdin 的 scrolling-region 路径，禁止同步 cursor query 与事件读取并行。native scrollback 还是不可逆输出域：只有 main transcript 可以推进其 cursor，临时 queue/progress/plan/task/verification、composer、info rail、egress 和 child transcript 不能移动物理 ownership boundary；高度变化只允许单调追加或保持，宽度 reflow 只能无重放地 rebase；同 session 的已写前缀发生内容替换时必须启动有界、separator-delimited 的新 projection seed，不能越过未成功写出的 durable entry，也不能回退既有物理 frontier；CPR 不可用而进入 fullscreen fallback 时不得调用 `insert_before` 或虚假推进 native ownership。写入 backend 的每个 scrollback row 必须恰好占一个终端显示宽度，cursor cache 在宽字符、LF、scrolling-region reset 与 resize 后都要和真实终端位置显式一致；inline viewport 使用当前物理高度的 high-water mark，增长时重建，收缩时由 cached resize 路径归一化。所有 transcript、status、composer 与 scrollback 宽度统一采用 Ratatui terminal-cell 模型，并先清理控制字符和非 emoji 序列中的 default-ignorable 字符；timeline render store 在缓存和命中区计算前就把每行约束到真实 live-panel 宽度，不把 renderer 的二次 wrap 当作布局事实。interactive TUI 独占 stdout/stderr 所指向的终端字节流，进程级 tracing 不能在运行期写入 stderr 绕过 Ratatui；非交互 CLI 仍保留标准 tracing 输出。TUI `/doctor` 复用 runtime 诊断事实；`/update [check|refresh|apply]` 复用 updater policy，网络和替换在独立后台任务执行，启动自动检查只在 release packaged build 且非 CI/source 时调度，并且永不自动 apply；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
 
+主 transcript 与 child-agent transcript 的历史浏览都保存内容锚点；新输出、文件 reload、
+高度变化或宽度 reflow 只能重投影同一锚点。child tail window 滚动时还必须用稳定的 logical
+entry identity 跨越 bounded cache 的前缀裁剪，不能把相对尾部偏移误当作用户正在阅读的位置。
+
 Provider connection 配置采用 V2 复合身份。kernel 只定义中立的 `ConnectionId`、
 `ModelRef` 与 durable `ResolvedModelRoute`；runtime 拥有
 `ProviderConnectionConfig`、V1 -> V2 投影、credential reference、connection inventory、
@@ -498,7 +502,11 @@ active projection 增量维护 body-free tool-output pressure item：opaque ref/
 excerpt、pair 状态、retention class、token upper bound、active epoch 和 GC reachability。append 后只发送
 `ToolOutputPressure` changed-family wake；TUI worker coalesce 后做纯内存 preflight，fit-required aging
 先于 semantic compaction，artifact GC 作为最低优先级单飞 blocking task。steady state 不固定轮询，
-不完整重放 JSONL，也不持有 data-file lock 等待 I/O。
+不完整重放 JSONL，也不持有 data-file lock 等待 I/O。session reload 若 canonical frontier 与当前
+Ready projection 完全一致，seed 必须是 no-op，不能伪造 all-family wake 再次触发 GC。artifact manifest
+的 identity/session 完整性与 retrieval policy 分层校验：合法 complete 的零字节 artifact 仍是可 inventory、
+可回收且读取结果为 EOF 的标准空文件；policy-unavailable artifact 继续禁止 resolve/read。相同 maintenance
+失败在一个 session 内只显示一次，成功或 session transition 才重置该 notice latch。
 
 首次 model view 同时受 tool-specific 与 root-run 两级预算：`read_file`、list/glob/grep/search 类
 高流量工具最多 8 KiB，普通工具最多 16 KiB，一个 root agent run 的 preview 正文总计最多 64 KiB。
@@ -540,7 +548,12 @@ Anthropic stream mapper把`server_tool_use`和`web_search_tool_result`按`tool_u
 
 WebFetch transport 禁用自动 redirect、自动 retry、Referer 和 reqwest 自动解压，显式流式处理 gzip/br/zstd/deflate，并分别执行 wire/decoded/model hard cap。Same-origin redirect 每跳重新经过 durable barrier、budget attempt 与 destination guard；cross-origin或 HTTPS downgrade只返回并持久化新的 session capability，不在原调用内继续。HTML/charset 正文经过 bounded decode、active-content剔除、terminal-control清理与 kernel persistence sanitizer，最终输出 `FetchedPage` provenance、安全 URL registration、transport security、network guard与 truncation metadata。Tool result 与 hosted/search source 的 exact capability 在 agent pre-persistence boundary stage/commit，raw URL 在 RunEvent 前被消费；同一 tool result 的 provider-visible message、`WebUrlCapabilityDescriptor` 和 `ExternalProvenance` 必须在一次有序 writer batch 中完成持久化，随后才向 TUI 发布 control 事件，避免 UI 的 session reader 在条目之间抢占 JSONL 锁。运行中的 TUI control 更新只重算内存投影并保留最近一次 durable review cache，完整 durable review 在 session 同步/run 边界刷新。main、provider turns 与 agent child 共享 root-owned `WebTaskTreeBudget` handle。
 
-Active-run facts 是下一次 provider request 的 advisory context，不是 finalization request，也不是对已经完成的 assistant stream 做事后否决：agent loop 必须在构建 post-tool request 前以 `active_run_facts` 注入当前 run 的实质性 facts，只按本轮 `tool_call_ids` 投影 command、approval 与 changed-file evidence，并明确要求模型从当前状态继续。该 transient context 禁止预投影 `RunStatus::Completed`、`pending_final_answer` 或 final readiness；真正的 readiness 只在 final answer 已产生后计算。runtime 必须先用内存投影确认存在 material facts，普通 policy-allowed 网络只读记录仍保留审计，但单独存在时不能触发额外生成或 JSONL 读取。final answer 写入后，`RunStatusChanged`、`RunFinalized` 与 `ReadinessEvaluated` 必须在同一个 ordered writer batch 中完成一次 durable sync；worker 直接接纳 run task 返回的 authoritative in-memory session，并把 Session detached 期间由 worker 已成功持久化的 control delta 合并回内存投影，不在 `RunFinished` 前重读完整 JSONL。TUI 在 run 边界只读取一次 durable records，并用一次 checkpoint/readiness reducer 从同一 snapshot 同时更新顺序状态与 review sidebar。完全相同的 `PrefixSnapshot` 复用最近一次 durable snapshot，不重复把同一 materialized prefix 写入 session。
+Active-run facts 是下一次 provider request 的 advisory context，不是 finalization request，也不是对已经完成的 assistant stream 做事后否决：agent loop 必须在构建 post-tool request 前以 `active_run_facts` 注入当前 run 的实质性 facts，只按本轮 `tool_call_ids` 投影 command、approval 与 changed-file evidence，并明确要求模型从当前状态继续。该 context 在一个 root run 内是单一、可替换的 transient snapshot；facts 变化时原位替换，不能把 v1、v2、v3 的完整累计快照连续追加到后续 request。agent facts 只纳入 durable invocation grant 绑定到当前 root logical run 且仍 running/unread/unsettled 的 child；历史 root、closed 或已完整交付的 child 不得持续触发新一轮生成。该 transient context 禁止预投影 `RunStatus::Completed`、`pending_final_answer` 或 final readiness；真正的 readiness 只在 final answer 已产生后计算。runtime 必须先用内存投影确认存在 material facts，普通 policy-allowed 网络只读记录仍保留审计，但单独存在时不能触发额外生成或 JSONL 读取。final answer 写入后，`RunStatusChanged`、`RunFinalized` 与 `ReadinessEvaluated` 必须在同一个 ordered writer batch 中完成一次 durable sync；worker 直接接纳 run task 返回的 authoritative in-memory session，并把 Session detached 期间由 worker 已成功持久化的 control delta 合并回内存投影，不在 `RunFinished` 前重读完整 JSONL。TUI 在 run 边界只读取一次 durable records，并用一次 checkpoint/readiness reducer 从同一 snapshot 同时更新顺序状态与 review sidebar。完全相同的 `PrefixSnapshot` 复用最近一次 durable snapshot，不重复把同一 materialized prefix 写入 session。
+
+上述 facts 从 Some 收敛到 None 时必须移除旧 transient snapshot；final-answer blocker 只读取同一
+current-root child 集合，不再嵌入全 session command/file facts。Blocker prompt 也只有一个可替换实例，
+并有独立于 `max_turns` 的有限 retry budget；稳定 blocker 不能在默认无 turn 上限时形成 provider 热循环，
+超限必须以 blocked terminal 收口，且 child/Task 映射不得把该 terminal 误记为 completed。
 
 ### 6.5 Cache-First 上下文分区
 
@@ -1008,9 +1021,34 @@ Desktop、TUI、CLI 与 HTTP streaming 都消费同一套事件语义，而不�
 
 Planner / executor / subagent 协作已经作为跨表面的共享 task flow 落地。Durable task 在 TUI 中的显式入口是 `/task <任务>`；`/plan` 只表示一次性 Plan mode / read-only planning prompt，不创建 durable task state。TUI 中 `task.routing_policy = "auto"` 时，普通 chat 先进入独立 routing-only microturn；模型只能在 `request_task_planning` 与 `continue_without_task_planning` 之间给出一个 typed semantic decision，host 不扫描 prompt 关键词。正向 decision 进入同一 durable task flow；负向 decision 后才在下一 turn 恢复普通工具面。free text 或无效 decision 只重试一次，仍无效则 blocked，不能把 routing 文本当作用户回答。默认 `auto` 时普通输入走三路自动路由（Chat / PlanReview / Task），显式 `manual` 保持 chat-first。Production HTTP driver 与 Desktop-owned `sigil serve` child 已附加共享 foreground task executor，并完成 Task control/recovery parity：typed continuation 可携带 task-targeted guidance；integration review/accept 绑定 exact task/plan/preview digest、promotion authority 与 parent verification；Pause 复用 TUI 的 exact `TaskPauseRequest`、root cancellation scope 和 Task stop transition。请求前绑定 task/plan/scope，只有 root execution、child/effect permit 全部 quiescent 后才通过单一有序 writer batch 追加 active step/child terminal，并最后追加 Task `Paused` / `Cancelled`；cleanup、join 或最终 binding 不确定时只能追加 `Interrupted`。普通 run cancel 只有在 durable cancellation scope 真实绑定 Task 时才修改该 Task，不能误伤旧任务。autonomous planner 的 typed participant schema 只接受 read/write/review；可信 verification policy/check 由 host 绑定到 mutation step，并在 participant 结束后执行，不创建缺少 verification tool 的模型 `verify` participant。Task participant 在 mutation 后只有有界 read-only 收敛尾部；超过额度或即将耗尽轮次时，host 注入 route-fingerprinted finalization contract，并移除 client/hosted tools，只允许一次 bounded result 收口，且不影响普通 chat。HTTP schema v9 的 authenticated typed routes、幂等 command receipt 与 production supervisor 复用相同 authority；Desktop schema v9 handshake、native typed client、Tauri allowlist commands、Task card 与 integration inspector 消费相同 contract。canonical conversation display 还在固定 durable frontier 投影最多 128 个 step/lane 的 `task_control` 和显式 truncation，应用重启后即使没有 process-local live event 也能恢复 Continue/guidance/integration controls，同时不暴露 objective、prompt/transcript、private workspace/ref 或 mutation authority。release 默认值为 `auto`（review-first 基线），只有 qualified real-model evidence 与 rollout manifest 精确匹配才允许 `DirectTask`。恢复只补本地 handoff/TaskRun admission crash gap，不重放原 conversation provider request；只有能证明尚未发生 planner/participant dispatch 的 task 才自动接管，stale Running step/lease 会先记为 Interrupted/Paused，再由 `/task continue` 显式继续。`/plan continue` 不再作为 alias。普通 chat 明确要求 subagent / 子 agent delegation 时，可通过 agent-thread tools 直接创建 child agent，不需要进入 durable task。
 
+当 durable focus 中只有一个 exact current、resumable、accepted-plan Task 时，routing surface
+才额外曝光 `continue_existing_task`；task id、task status、plan version/status、source turn 与
+route fingerprint 都由 host 冻结，模型参数不能选择身份。selection receipt 以 append-only
+control entry 落盘，adapter 在 dispatch 前再次执行 exact CAS；source turn 的 exact prompt
+只保留在进程内并作为 guidance 进入 planner review，由 planner 决定补充未开始步骤或接受
+下一 plan version。planner 的 result/terminal 与 apply materialization，或新 plan、carried
+completed steps 与 result/terminal，分别以单个 crash-safe writer batch 落盘；安全 guidance
+可在 reload 后由所有 continuation 入口恢复到原 target steps，敏感 guidance 只保留 safe
+projection，必须重新输入匹配原 hash 的 exact 文本，且不得扩大到其他 pending steps。
+所有 continuation 入口在创建新 authority 前，必须先解析同一 Task 的 unfinished
+selection/promotion 或 materialization：同一 receipt 复用，不同 receipt fail closed，不能再次
+启动 planner。若崩溃发生在 guidance planner 的 durable Started 与 settlement 之间，startup
+不自动重放不确定的 provider generation；下一次显式 continue 先把 selection-owned 旧 attempt
+标为 Interrupted（active Task 同批转 Paused），再以新 ordinal 重试。Completed 但未 settlement
+的旧 attempt 仍 fail closed。
+普通 Chat / PlanReview 会清除 current Task focus，迟到的旧 Task progress 只能更新历史投影，
+不能重新抢占 TUI 或共享 conversation display。显式 `/task continue` 与 application Continue
+在 provider I/O 前写入绑定 exact cancellation scope、task status 与 plan version/status 的
+`TaskRunTargetSelected`；无 accepted plan 的恢复也走同一 shared continuation runtime。
+显式 `/plan` 即使没有 `PlanReviewAttempt::Started`，其 durable `PlanDraftCreated` 也会清除旧
+current Task focus；旧 paused Task 仅保留为 resumable history，不能与新 plan preview 同时作为
+当前控制面展示。
+
 自动 routing 的 negative decision 还必须通过 route-fingerprinted direct-execution
 continuation contract 进入 ordinary turn：恢复 ordinary tools 后执行原始请求，不能只复述
-routing decision 或宣布将要行动。该过渡由 typed decision 驱动，不扫描用户 prompt 关键词。
+routing decision 或宣布将要行动。routing-only microturn 的 text/reasoning/assistant narrative
+不进入 live UI，也不持久化为 transcript；同批经过 preview/approval 的 memory 工具 lifecycle
+仍必须可见。该过渡由 typed decision 驱动，不扫描用户 prompt 关键词。
 
 RFC-0063 把 conversation 语义路由扩展为 Chat / PlanReview / Task 三路。每次 durable route
 decision 都绑定 route contract fingerprint（routing contract、exact tool surface、capability
@@ -1281,6 +1319,12 @@ memory vertical slice，由 `[memory].writable` 控制：
 - `remember_user_preference` 保存跨 workspace 的稳定交互或工作流偏好；
 - `remember_project_fact` 保存 canonical current workspace 范围内的 user-asserted 项目事实或约定；
 - 模型根据用户语义和工具描述自行判断是否需要写入，kernel/runtime 不以关键词匹配 prompt；
+- automatic routing microturn 在 writable memory 可用时冻结同一份 canonical route + remember tool
+  surface；一个 response 必须恰好有一个 route decision，但可以额外携带语义明确的 remember call。
+  Remember 仍走普通 permission plan、preview、approval、execution audit 与 durable receipt 管线，并在
+  plan/task handoff 发生前 settle；即使 provider 先声明 route call，host 也必须先执行并持久化所有合法
+  remember call，再记录 route decision，同时仍按 provider 原始 declaration order 写回 tool result batch；
+  dynamic、frozen、queued 与 route fingerprint 必须消费同一 surface；
 - 两类写入都需要 preview/approval，只有 sidecar 原子发布且 ref-only journal durable sync 完成后才返回
   包含 scope、memory id 和 version 的 durable receipt；没有成功回执就不能声称已经长期记住；
 - `[memory].writable = false` 时 system contract 明确要求模型只能承诺当前会话保留；
@@ -1747,7 +1791,12 @@ pub struct ProviderCapabilities {
 
 第一代 `sigil-tui` 不需要一开始就做得像 IDE，但必须先把用户真正需要的几个面做好：
 
-- 主消息历史：优先直接写入 terminal 原生 scrollback，避免把长对话性能和滚动体验绑死在内部 widget 上
+- 主消息历史：优先直接写入 terminal 原生 scrollback，避免把长对话性能和滚动体验绑死在内部 widget 上；
+  live tail 与显式 history-inspect 是两个状态，PageUp/Ctrl-Home/滚轮向上可以暂时重投影已经移交给
+  native scrollback 的前缀，即使 resize/reflow 后数值 `max_scroll_back` 为零；End/下滚回尾后再恢复
+  frontier 隐藏，不能通过永久回退物理 ownership 来实现浏览。History-inspect 以 entry 内 logical
+  content offset 锚定可见顶行；stream delta、timeline append、height resize 与 width reflow 不得把用户
+  正在阅读的历史位置拖向 live tail
 - 底部 live strip：只保留当前流式尾部、composer 与紧凑状态，不要求用户在 chat 区和 composer 之间切焦点
 - 底部输入区：支持多行输入、发送、取消、清空
 - 右侧信息区 + composer 下状态行：展示写权限、subagent 状态、cache 命中、上下文压力、花费与余额；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Shift-F2` 切换精简/详情，窄终端仍按布局能力自动收起

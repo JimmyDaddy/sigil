@@ -8,7 +8,23 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-- No user-facing changes since v0.0.1-beta.3.
+- Fixed TUI transcript corruption after a final answer and restored access to older history after
+  terminal resize or reflow. History inspection now keeps a stable content anchor while new output
+  arrives, and repeated artifact-maintenance failures are shown once per session.
+- Continuing a paused Task now selects the exact durable Task, carries the user's continuation
+  guidance through a reviewed replacement plan, and shows only the current Task in the TUI instead
+  of reviving an obsolete initial plan. Starting an explicit plan review also clears the prior Task
+  from the current-work surface while preserving it as history.
+- Explicit durable-memory intent can now be handled in the automatic routing turn. Approved memory
+  writes settle durably before the selected Chat / PlanReview / Task handoff, while tool results keep
+  the provider's declaration order.
+- Automatic-routing reasoning no longer appears as a duplicate Thinking block before the real work
+  turn. Final-answer coordination now scopes child-agent facts to the active logical run, removes
+  stale snapshots when those facts settle, and bounds repeated blocked-final attempts. A blocked
+  child or Task participant can no longer be reported as completed, and a final candidate rejected
+  by the terminal blocker is no longer left visible as an accepted answer.
+- Complete zero-byte tool artifacts are now valid retrievable artifacts, preventing maintenance from
+  repeatedly deferring otherwise healthy session state.
 
 ## v0.0.1-beta.3 - 2026-08-06
 
