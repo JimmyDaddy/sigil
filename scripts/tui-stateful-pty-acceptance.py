@@ -45,6 +45,7 @@ PLAN_SUMMARY_CANARY = "STATEFUL-PLAN-PREVIEW-CANARY-5821"
 PLAN_MODE_MARKER = "Plan mode is active for this turn."
 QUEUED_FOLLOW_UP_PROMPT = "STATEFUL-QUEUED-FOLLOW-UP-PROMPT-7346"
 QUEUED_FOLLOW_UP_REPLY = "STATEFUL-QUEUED-FOLLOW-UP-REPLY-8462"
+HISTORY_HEAD_CANARY_PREFIX = "STATEFUL-HISTORY-HEAD-"
 PLAN_DRAFT_ARGUMENTS = json.dumps(
     {
         "schema_version": 2,
@@ -67,6 +68,21 @@ PLAN_DRAFT_ARGUMENTS = json.dumps(
     separators=(",", ":"),
 )
 PLAN_DRAFT_TEXT = f"```sigil-plan-v2\n{PLAN_DRAFT_ARGUMENTS}\n```"
+
+
+def history_head_canary(request_index: int) -> str:
+    return f"{HISTORY_HEAD_CANARY_PREFIX}{request_index}"
+
+
+def stateful_history_response_body(request_index: int) -> str:
+    suffix = f"STATEFUL-HISTORY-{request_index}"
+    if request_index == 2:
+        suffix = f"{suffix} {QUEUED_FOLLOW_UP_REPLY}"
+    # Ctrl-Home renders the beginning of the oldest long response. Keep a dedicated marker at
+    # that boundary; the suffix remains useful for native-scrollback and de-duplication checks.
+    return f"{history_head_canary(request_index)} " + ("verified-history " * 4000) + suffix
+
+
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{12,40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 CURSOR_POSITION_QUERY = b"\x1b[6n"
@@ -74,6 +90,9 @@ CURSOR_POSITION_RESPONSE = b"\x1b[1;1R"
 # Use Crossterm's complete CSI-u encoding for Escape. Unlike a lone ESC byte, it cannot remain
 # buffered as the prefix of a later key while the PTY is being resized or redrawn.
 ESCAPE_KEY_SEQUENCE = b"\x1b[27u"
+# XTerm-compatible modified Home/End sequences decoded by Crossterm as Ctrl-Home/Ctrl-End.
+CTRL_HOME_KEY_SEQUENCE = b"\x1b[1;5H"
+CTRL_END_KEY_SEQUENCE = b"\x1b[1;5F"
 SCROLL_REGION_UP_PATTERN = re.compile(rb"\x1b\[\d+;\d+r\x1b\[\d+S\x1b\[r")
 DEFAULT_PTY_ROWS = 42
 DEFAULT_PTY_COLS = 140
@@ -593,10 +612,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 self.fixture.wait_for_response_release(request_index)
                 # Keep the campaign above the real RFC-0057 economics floor even after the
                 # provider/tool schema prefix and the billed semantic-summary usage are counted.
-                suffix = f"STATEFUL-HISTORY-{request_index}"
-                if request_index == 2:
-                    suffix = f"{suffix} {QUEUED_FOLLOW_UP_REPLY}"
-                body = ("verified-history " * 4000) + suffix
+                body = stateful_history_response_body(request_index)
                 self._send_sse({"delta": {"content": body}, "finish_reason": "stop"})
             elif request_index == 4:
                 self._send_sse(
@@ -1928,6 +1944,26 @@ def main() -> int:
         )
         if count_on_screen(live_screen, FINAL_CANARY) != 1:
             raise AcceptanceError("live completion screen rendered the final reply more than once")
+        first_runner.send(CTRL_HOME_KEY_SEQUENCE)
+        oldest_history_head = history_head_canary(1)
+        history_inspection_screen = first_runner.wait_until(
+            lambda text: count_on_screen(text, oldest_history_head) > 0
+            and FINAL_CANARY not in text,
+            deadline.remaining(),
+            "in-app history inspection after final-answer viewport growth",
+            final_screen=True,
+        )
+        if count_on_screen(history_inspection_screen, oldest_history_head) != 1:
+            raise AcceptanceError(
+                "in-app history inspection rendered the oldest completed turn more than once"
+            )
+        first_runner.send(CTRL_END_KEY_SEQUENCE)
+        first_runner.wait_until(
+            lambda text: FINAL_CANARY in text and oldest_history_head not in text,
+            deadline.remaining(),
+            "return from in-app history inspection to the live tail",
+            final_screen=True,
+        )
         if not first_runner.observed_native_inline_scrollback():
             raise AcceptanceError(
                 "stateful flow did not exercise the native inline scrollback region"

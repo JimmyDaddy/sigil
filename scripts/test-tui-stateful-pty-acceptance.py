@@ -375,6 +375,16 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
             )
         )
 
+    def test_history_fixture_exposes_a_head_canary_before_the_long_response(self) -> None:
+        body = MODULE.stateful_history_response_body(1)
+
+        self.assertTrue(body.startswith(f"{MODULE.history_head_canary(1)} "))
+        self.assertTrue(body.endswith("STATEFUL-HISTORY-1"))
+        self.assertLess(
+            body.index(MODULE.history_head_canary(1)),
+            body.index("verified-history"),
+        )
+
     def test_plan_preview_waits_for_the_run_to_be_idle_before_escape(self) -> None:
         preview = f"Plan ready · {MODULE.PLAN_SUMMARY_CANARY}"
         self.assertFalse(MODULE.looks_like_ready_plan_preview(f"{preview}\nReplying..."))
